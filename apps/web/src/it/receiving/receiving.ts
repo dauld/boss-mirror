@@ -123,7 +123,7 @@ const PROTOCOL_KINDS: ReadonlySet<string> = new Set([
   'approval',
   'join-a-node',
 ]);
-const MONITORING_KINDS: ReadonlySet<string> = new Set(['incident', 'incident-post-mortem']);
+const MONITORING_KINDS: ReadonlySet<string> = new Set(['incident']);
 
 export type ChannelReading = Readonly<{ channel: Channel; basis: 'recorded' | 'derived' }>;
 

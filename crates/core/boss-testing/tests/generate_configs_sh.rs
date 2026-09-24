@@ -13,6 +13,7 @@
 //! nothing reads is a fact an operator will one day believe.
 
 use boss_testing::{repo_root, scratch_dir, write_exec};
+use std::collections::BTreeSet;
 use std::process::Command;
 
 const GENERATOR: &str = "infra/oss-quickstart/generate-configs.sh";
@@ -216,31 +217,88 @@ fn the_jobs_api_validates_subject_kinds_on_the_port_boss_ports_gives_it() {
     );
 }
 
-/// The packet that filed this asked for four more URLs — people,
-/// assets, locations, inventory — for "the subject-existence checker".
-/// JobsApiConfig still declares them, but boss-jobs-api reads none of
-/// them: since subject-model design R1 (2026-07-15) the existence gate
-/// is the Postgres adapter in boss-jobs `subject_existence.rs`, one
-/// lookup against the `subjects` table for every kind, wired whenever
-/// `postgres_url` is set — so it is already on wherever the jobs API
-/// runs on Postgres. (It is described, not named: the pg-feature lint
-/// reads any Pg-prefixed identifier here as this test reaching
-/// Postgres.) Writing the four would put
-/// keys under /etc that nothing reads and that name a checker the
-/// binary never builds, which is how this packet came to be filed.
+// ---------------------------------------------------------------------
+// Which URLs the jobs API is told (backlog 839ba062, CLAUDE.md §9a). The
+// set of `*_api_url` fields JobsApiConfig declares and the set this
+// generator writes into boss-jobs-api.toml are one fact in two files, and
+// they drifted both ways in one day: calendar_api_url (aa6b4b5c) and
+// subject_kinds_api_url (b224ab3c) were declared and never written, so
+// what each switches on was off on every instance with one log line to
+// say so; and four more (people, assets, locations, inventory) were
+// declared and read by NOTHING, under a comment claiming a checker needed
+// them — which is how b224ab3c was asked to write them. Held equal here,
+// in both directions. No boot refusal: a boot guard that refuses to start
+// takes the system of record down; this is caught at the gate instead.
+
+/// Fields JobsApiConfig declares that the generator deliberately does
+/// not write, each with its reason. Empty: every URL the jobs API can be
+/// told is one a container pod tells it.
+const JOBS_URLS_NOT_WRITTEN: &[(&str, &str)] = &[];
+
+/// The `*_api_url` fields of `JobsApiConfig`, read off the struct with
+/// `syn` — the declaration itself, not a grep of its text.
+fn jobs_api_config_urls() -> BTreeSet<String> {
+    let path = repo_root().join("crates/core/boss-jobs/src/jobs_config.rs");
+    let src =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let file = syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let config = file
+        .items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Struct(s) if s.ident == "JobsApiConfig" => Some(s),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no struct JobsApiConfig in {}", path.display()));
+    config
+        .fields
+        .iter()
+        .filter_map(|f| f.ident.as_ref().map(ToString::to_string))
+        .filter(|name| name.ends_with("_api_url"))
+        .collect()
+}
+
 #[test]
-fn the_jobs_api_gets_no_url_for_the_retired_http_existence_prober() {
-    let cfg = jobs_config("jobs-no-existence-urls");
-    for key in [
-        "people_api_url",
-        "assets_api_url",
-        "locations_api_url",
-        "inventory_api_url",
-    ] {
+fn the_jobs_api_is_told_exactly_the_urls_its_config_declares() {
+    let declared = jobs_api_config_urls();
+    // Control: a parser that found no struct would make both checks
+    // below vacuous.
+    assert!(
+        declared.contains("classes_api_url"),
+        "the struct parse found no known field: {declared:?}"
+    );
+    for (field, reason) in JOBS_URLS_NOT_WRITTEN {
         assert!(
-            cfg.get(key).is_none(),
-            "{key} in boss-jobs-api.toml configures nothing — the existence gate is the \
-             subjects table, not an HTTP prober: {cfg:?}"
+            declared.contains(*field),
+            "{field} is excused ({reason}) but JobsApiConfig no longer declares it"
         );
     }
+    let expected: BTreeSet<String> = declared
+        .iter()
+        .filter(|f| !JOBS_URLS_NOT_WRITTEN.iter().any(|(n, _)| n == f))
+        .cloned()
+        .collect();
+    let cfg = jobs_config("jobs-url-equality");
+    let written: BTreeSet<String> = cfg
+        .as_table()
+        .unwrap_or_else(|| panic!("boss-jobs-api.toml is not a table: {cfg:?}"))
+        .keys()
+        .filter(|k| k.ends_with("_api_url"))
+        .cloned()
+        .collect();
+    let unwritten: Vec<&String> = expected.difference(&written).collect();
+    assert!(
+        unwritten.is_empty(),
+        "JobsApiConfig declares {unwritten:?} and generate-configs.sh does not write them, so \
+         whatever each one switches on is off on every container pod (aa6b4b5c, b224ab3c). \
+         Write each in the jobs block, delete the field, or excuse it in \
+         JOBS_URLS_NOT_WRITTEN with the reason"
+    );
+    let unread: Vec<&String> = written.difference(&expected).collect();
+    assert!(
+        unread.is_empty(),
+        "generate-configs.sh writes {unread:?} into boss-jobs-api.toml, which JobsApiConfig \
+         does not declare (or excuses): the loader ignores unknown keys, so each is a line \
+         under /etc that configures nothing"
+    );
 }

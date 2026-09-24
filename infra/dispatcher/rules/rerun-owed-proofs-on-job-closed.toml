@@ -1,0 +1,59 @@
+# An owed proof is an obligation keyed to its event (backlog b9005734,
+# approved by David 2026-09-24).
+#
+# THE MEASUREMENT. The packet counted 21 ship-a-change cars standing at
+# `proven` on 2026-09-24, several five to seven days old, and the yard's
+# shed reading TROUBLED all the time. Re-read at 04:00Z the same day:
+# 10 awaiting proof, 7 past 24h, the oldest 155h, and five of those
+# seven honestly waiting on their declared owner — a new Stripe charge,
+# a cut-a-release tag David opens, his destructive prune, a red nightly
+# crawl, a failed publish. Each held its backlog item open, and a
+# permanently red surface is read like a silent one (CLAUDE.md
+# §Diagnosis). The hourly recheck asked every one of them every hour,
+# and the answer was `not yet` until the world moved.
+#
+# THE DECISION. Such a car closes LANDED with its proof owed
+# (`metadata.proof_owed = "true"`, `boss_jobs::car::PROOF_OWED`), and
+# the proof becomes an obligation keyed to the event the car declared
+# it waits on: `waits_on.event = {"closes": <kind>, "title": <prefix>}`
+# (`boss_jobs::car::wait_event`), the close of a packet of that kind.
+# When such a packet closes, this rule hands its close marker to
+# `jobs.run-car-probes` under `scope = "owed"`; the handler reads the
+# cars carrying the marker, whatever their status, keeps those whose
+# declared event this close IS, and files the same forge ops-request
+# the arrival rule files. The forge runs the recorded probe.
+#
+# NO `when`, DELIBERATELY. Which close fires which car is per-car data,
+# so no static predicate can say it; the match is `WaitEvent::fired_by`
+# in the handler, over the marker's always-present `kind` and `title`.
+# The price is one indexed, usually-empty read per close
+# (`kind=ship-a-change&metadata_has=proof_owed`) — `GET /api/jobs?
+# status=closed&closed_within=1` answered 3582 at 2026-09-24T04:00Z,
+# dominated by the maintenance cadences, so about 2.5 reads a minute —
+# the same shape `jobs-clear-waiting-on`
+# already runs on this topic. The close of a request this handler filed
+# is dropped before any read, so an owed car keyed to `ops-request`
+# closes cannot re-run on its own probe's answer (the loop the handler's
+# `REQUEST_TITLE` guard exists for).
+#
+# FIRST OF A PLAN, AND DORMANT UNTIL THE LAST. This car ships the
+# obligation only; no car carries `proof_owed` until the ship-a-change
+# exit that sets it is published, and the forge door that pays an owed
+# proof on a CLOSED car (and files loudly when one fails) is the next
+# car. The plan rides on the backlog item.
+[[rule]]
+name = "rerun-owed-proofs-on-job-closed"
+why = """
+A CROSS-PROTOCOL REACTOR: the close of a packet of ANY protocol (a
+release, a crawl, an ops-request) re-runs the recorded probe of a
+ship-a-change car that closed landed with its proof owed on that close,
+by filing an ops-request the forge answers — three protocols, and the
+match is per-car data, so no single Workflow `on` consequence can
+declare it. It adds no routing: the car is already closed, and this
+only files the probe run its owed proof is waiting for, keyed to the
+event instead of an hourly ask (b9005734, David 2026-09-24).
+"""
+on_event = "jobs.job.closed"
+[[rule.do]]
+handler = "jobs.run-car-probes"
+args = { scope = "\"owed\"" }

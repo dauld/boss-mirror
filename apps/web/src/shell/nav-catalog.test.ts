@@ -144,7 +144,7 @@ describe('nav catalog — app assignment', () => {
     // The network map — every registry station as a node
     // (stations.md: priority queues, stations, and network nodes are
     // one concept). No edges until motion is evented.
-    // Incidents — active incident-post-mortem packets to respond to,
+    // Incidents — active incident packets to respond to,
     // plus the closed ones rendered as a durable archive (David:
     // "both where we respond to active incidents and document post
     // mortems for posterity").

@@ -82,6 +82,13 @@ fn the_steps_agents_execute_today_declare_their_agent_block() {
         // per code-scanning rule off the reading on the packet — the
         // analyst setting, the same as the retros' work steps.
         "publish-to-github/judge-checks analyst $2.00 medium",
+        // v8's work steps (backlog d4bfe548, David 2026-09-24): the
+        // daily packet sat at `measure` from 00:00Z until the operator
+        // worked it after 03:50Z, because no step before the sign-off
+        // declared an agent. The same analyst setting as judge-checks;
+        // `approve` stays David's and declares none.
+        "publish-to-github/measure analyst $2.00 medium",
+        "publish-to-github/review analyst $2.00 medium",
         // The page march (backlog 4a1b307c, 2026-09-19). Three efforts
         // across four steps of ONE kind, each argued in the TOML beside
         // the step: `measure` subtracts a department's needs from a

@@ -845,6 +845,22 @@ if [ "$1" = "pr" ] && [ "$2" = "create" ]; then
     echo 'https://github.invalid/{mirror_slug}/pull/1'
     exit 0
 fi
+# `pr list --head` is the reuse question, asked through `--jq`: nothing
+# printed means no PR for today's head. Without `--head` it is the
+# supersession sweep's listing, which gh answers `[]` when empty.
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+    case " $* " in *" --head "*) exit 0 ;; esac
+    if [ -f '{api}/_open_prs.json' ]; then cat '{api}/_open_prs.json'; else echo '[]'; fi
+    exit 0
+fi
+# `pr close <n>` brings GitHub's answer for pulls/<n> into being — a
+# closed PR, unless `on_close` planted a different answer.
+if [ "$1" = "pr" ] && [ "$2" = "close" ]; then
+    f='{api}/'"$(echo "{mirror_slug}/pulls/$3" | tr / _)".json
+    if [ -f '{api}/_on_close.json' ]; then cp '{api}/_on_close.json' "$f"
+    else printf '{{"number":%s,"state":"closed","merged":false,"closed_at":"2026-01-02T00:00:00Z"}}\n' "$3" > "$f"; fi
+    exit 0
+fi
 exit 0
 "#,
                 log = root.join("gh.log").display(),
@@ -1043,6 +1059,16 @@ fn a_real_fork_of_the_mirror_is_published_to() {
         "the verb forked a fork that already existed: {}",
         run.gh_log()
     );
+    // With no older publish PR open, the supersession sweep asks and
+    // closes nothing. The sweep's listing is the one WITHOUT `--head`
+    // (that one is the reuse question).
+    let gh = run.gh_log();
+    assert!(
+        gh.lines()
+            .any(|l| l.starts_with("pr list") && !l.contains("--head")),
+        "the verb never listed the mirror's open PRs: {gh}"
+    );
+    assert!(!gh.contains("pr close"), "nothing here is older: {gh}");
 }
 
 /// THE BRANCH LIVES ON THE FORGE TOO (ce5339d6). PR #238 opened at
@@ -1428,7 +1454,10 @@ for a in "$@"; do
         fi
         exit 0
     fi
-    if [ "$a" = "PUT" ]; then exit 0; fi
+    if [ "$a" = "PUT" ]; then
+        {{ tr -d '\n' < "$payload"; echo; }} >> '{puts}'
+        exit 0
+    fi
 done
 # `/api/jobs/<id>` is one packet; `/api/jobs?...` is a listing. The
 # read-back asks the first question and must not be handed the second.
@@ -1451,6 +1480,7 @@ cat '{jobs}'
                 log = self.root.join("curl.log").display(),
                 patch = self.root.join("patch.json").display(),
                 patches = self.root.join("patches.jsonl").display(),
+                puts = self.root.join("puts.jsonl").display(),
                 pulls = self.gh_api.display(),
                 jobs = self.root.join("jobs.json").display(),
                 after = self.root.join("jobs-after.json").display(),
@@ -1765,5 +1795,221 @@ fn the_same_run_passes_once_the_packet_carries_it() {
             .any(|l| l.contains("/api/jobs/") && !l.contains("PATCH")),
         "no read of the packet follows the PATCH — the verb is still trusting the \
          write call's own answer, which is 204 with no body: {log}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// ONE MIRROR PULL REQUEST AT A TIME (backlog d4bfe548, David 2026-09-24).
+//
+// Measured 04:05Z that day: #242 (publish 2026-09-23, packet d2967a9c,
+// closed `pr-opened`) was still OPEN on GitHub, and #243 (packet
+// e0558b28) carried everything in #242 plus newer commits; #239-#242
+// had all been open at once. The mirror's head had not moved since
+// before #239, so each dated snapshot contains every one before it, and
+// nothing marked the older ones superseded. So when a run opens (or
+// reuses) today's PR, it closes each OLDER open `publish/<date>` PR
+// from the same fork with a comment naming the new one, reads GitHub
+// back to prove the close took, and records it on the older packet.
+// ---------------------------------------------------------------------
+
+impl Run {
+    /// What `gh pr list --json …` answers for the mirror's open PRs.
+    fn open_prs(&self, body: &str) {
+        boss_testing::write_file(&self.gh_api.join("_open_prs.json"), body);
+    }
+
+    /// What GitHub answers for a PR after `gh pr close` — by default a
+    /// closed PR; plant anything else to stand in for a close that did
+    /// not take.
+    fn on_close(&self, body: &str) {
+        boss_testing::write_file(&self.gh_api.join("_on_close.json"), body);
+    }
+
+    /// The PR numbers the run asked gh to close, in order.
+    fn closed_prs(&self) -> Vec<String> {
+        self.gh_log()
+            .lines()
+            .filter_map(|l| l.strip_prefix("pr close "))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Every step PUT body the run sent, in order.
+    fn puts(&self) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(self.root.join("puts.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("a PUT body is JSON"))
+            .collect()
+    }
+
+    fn a_real_fork(&self) {
+        self.gh_repo(
+            FORK_SLUG,
+            &format!(
+                r#"{{"full_name":"{FORK_SLUG}","fork":true,
+                     "parent":{{"full_name":"{MIRROR_SLUG}"}},
+                     "source":{{"full_name":"{MIRROR_SLUG}"}},
+                     "default_branch":"main","private":false}}"#
+            ),
+        );
+    }
+}
+
+const OLDER_PACKET: &str = "00000000-0000-0000-0000-0000000000c5";
+
+/// The open packet the run publishes for, plus a CLOSED older packet
+/// whose open-pr recorded pull/5 — the shape d2967a9c had on 2026-09-24.
+fn jobs_with_an_older_publish(run: &Run) {
+    boss_testing::write_file(
+        &run.root.join("jobs.json"),
+        &format!(
+            r#"{{"data":[
+  {{"id":"00000000-0000-0000-0000-0000000000aa","title":"publish to github","status":"open",
+    "steps":[{{"id":"00000000-0000-0000-0000-0000000000bb","spec_slug":"open-pr","status":"ready",
+               "metadata":{{"ops_verb":"publish-github-pr"}}}}]}},
+  {{"id":"{OLDER_PACKET}","title":"publish to github","status":"closed","metadata":{{}},
+    "steps":[{{"id":"00000000-0000-0000-0000-0000000000c6","spec_slug":"open-pr","status":"completed",
+               "metadata":{{"pr_url":"https://github.com/{MIRROR_SLUG}/pull/5"}}}}]}}]}}"#
+        ),
+    );
+}
+
+fn pr_row(n: u32, url: &str, head: &str, owner: &str) -> String {
+    format!(
+        r#"{{"number":{n},"url":"{url}","headRefName":"{head}","headRepositoryOwner":{{"login":"{owner}"}}}}"#
+    )
+}
+
+#[test]
+fn a_new_publish_pr_closes_each_older_publish_pr_as_superseded() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the run path needs a real jq");
+        return;
+    }
+    let run = Run::new("supersede-older");
+    run.a_real_fork();
+    run.echoing_curl();
+    jobs_with_an_older_publish(&run);
+    let owner = FORK_SLUG.split('/').next().unwrap();
+    let url = |n: u32| format!("https://github.com/{MIRROR_SLUG}/pull/{n}");
+    let new_pr = format!("https://github.invalid/{MIRROR_SLUG}/pull/1");
+    run.open_prs(&format!(
+        "[{}]",
+        [
+            // Older publishes from our fork: both superseded.
+            pr_row(5, &url(5), "publish/2026-01-01", owner),
+            pr_row(4, &url(4), "publish/2025-12-31", owner),
+            // Somebody else's branch that happens to be named publish/:
+            // not ours to close.
+            pr_row(6, &url(6), "publish/2025-12-30", "someone-else"),
+            // Ours, but not a publish.
+            pr_row(9, &url(9), "fix-a-typo", owner),
+            // Today's own PR, and a NEWER one: never closed by today's.
+            pr_row(1, &new_pr, &format!("publish/{PUBLISH_DATE}"), owner),
+            pr_row(10, &url(10), "publish/2026-01-03", owner),
+        ]
+        .join(",")
+    ));
+
+    let (ok, out) = run.go();
+    assert!(ok, "{out}");
+
+    let mut closed = run.closed_prs();
+    closed.sort();
+    assert_eq!(
+        closed,
+        vec!["4".to_string(), "5".to_string()],
+        "exactly the OLDER publish PRs from our fork are closed: {}",
+        run.gh_log()
+    );
+    // The comment names the PR that supersedes it, and the new PR exists
+    // BEFORE anything older is closed.
+    let gh = run.gh_log();
+    let created = gh.find("pr create").expect("today's PR was opened");
+    for line in gh.lines().filter(|l| l.starts_with("pr close ")) {
+        assert!(
+            line.contains(&new_pr),
+            "the close comment must name the superseding PR: {line}"
+        );
+        assert!(
+            gh.find(line).is_some_and(|at| at > created),
+            "an older PR was closed before today's was opened: {gh}"
+        );
+    }
+
+    // Recorded on the older packet: the supersession, and GitHub's own
+    // answer about the PR's state, read back after the close.
+    let log = run.curl_log();
+    assert!(
+        log.contains(&format!("api/jobs/{OLDER_PACKET}/metadata")),
+        "nothing was written onto the older packet: {log}"
+    );
+    let patches = run.patches();
+    let sup = patches
+        .iter()
+        .find_map(|p| p.get("pr_superseded"))
+        .unwrap_or_else(|| panic!("no pr_superseded annotation: {patches:?}"));
+    assert_eq!(sup["pr_url"], url(5).as_str(), "{sup}");
+    assert_eq!(sup["by_pr_url"], new_pr.as_str(), "{sup}");
+    let st = patches
+        .iter()
+        .find_map(|p| p.get("pr_state"))
+        .unwrap_or_else(|| panic!("no pr_state read back: {patches:?}"));
+    assert_eq!(st["pr_url"], url(5).as_str(), "{st}");
+    assert_eq!(st["state"], "closed", "{st}");
+    // #4 was recorded by no packet: said, not skipped in silence.
+    assert!(
+        out.contains(&url(4)) && out.contains("no publish packet recorded"),
+        "a closed PR no packet recorded must be named: {out}"
+    );
+
+    // Today's packet carries what it superseded.
+    let puts = run.puts();
+    let done = puts
+        .iter()
+        .find(|p| p["status"] == "completed")
+        .unwrap_or_else(|| panic!("open-pr was never completed: {puts:?}"));
+    let superseded = done["metadata"]["superseded_prs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no superseded_prs on open-pr: {done}"));
+    let mut urls: Vec<&str> = superseded.iter().filter_map(|v| v.as_str()).collect();
+    urls.sort_unstable();
+    assert_eq!(urls, vec![url(4).as_str(), url(5).as_str()], "{done}");
+}
+
+/// A close is a claim until GitHub is read back saying so: a PR that
+/// still reads open after `gh pr close` fails the run, and open-pr is
+/// NOT completed, so a re-run (which reuses today's PR) tries again.
+#[test]
+fn a_close_github_does_not_confirm_fails_the_run_before_open_pr_completes() {
+    if !have_real_jq() {
+        eprintln!("publish_github_pr_sh: SKIPPED — the run path needs a real jq");
+        return;
+    }
+    let run = Run::new("supersede-unconfirmed");
+    run.a_real_fork();
+    run.echoing_curl();
+    jobs_with_an_older_publish(&run);
+    let owner = FORK_SLUG.split('/').next().unwrap();
+    let old = format!("https://github.com/{MIRROR_SLUG}/pull/5");
+    run.open_prs(&format!(
+        "[{}]",
+        pr_row(5, &old, "publish/2026-01-01", owner)
+    ));
+    run.on_close(r#"{"number":5,"state":"open","merged":false}"#);
+
+    let (ok, out) = run.go();
+    assert!(!ok, "a close GitHub still reads open must fail: {out}");
+    assert!(
+        out.contains(&old) && out.contains("still reads open"),
+        "the failure must name the PR and what GitHub said: {out}"
+    );
+    assert!(
+        run.puts().is_empty(),
+        "open-pr was completed over an unconfirmed close: {:?}",
+        run.puts()
     );
 }

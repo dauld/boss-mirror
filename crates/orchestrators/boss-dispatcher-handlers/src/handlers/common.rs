@@ -506,17 +506,37 @@ pub(crate) async fn open_jobs(
     kind: Option<&str>,
     rule_name: &str,
 ) -> Result<Vec<Value>, HandlerError> {
-    const PAGE: usize = 500;
     let kind_q = match kind {
         Some(k) => format!("kind={k}&"),
         None => String::new(),
     };
+    jobs_where(
+        client,
+        jobs_base,
+        &format!("{kind_q}status=open"),
+        rule_name,
+    )
+    .await
+}
+
+/// The same paged walk over any `/api/jobs` filter — `filter` is the
+/// query string without `limit`/`offset`. The open board is one filter
+/// of it; the owed-proof obligation reads CLOSED cars by the key they
+/// carry (`kind=ship-a-change&metadata_has=proof_owed`, b9005734), which
+/// no open-only walk can reach.
+pub(crate) async fn jobs_where(
+    client: &reqwest::Client,
+    jobs_base: &str,
+    filter: &str,
+    rule_name: &str,
+) -> Result<Vec<Value>, HandlerError> {
+    const PAGE: usize = 500;
     let mut rows: Vec<Value> = Vec::new();
     loop {
         let body = get_json(
             client,
             &format!(
-                "{}/api/jobs?{kind_q}status=open&limit={PAGE}&offset={}",
+                "{}/api/jobs?{filter}&limit={PAGE}&offset={}",
                 jobs_base.trim_end_matches('/'),
                 rows.len()
             ),

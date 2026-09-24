@@ -1,6 +1,6 @@
 // The semi-structured post-mortem renderer, pinned at the data layer.
 //
-// incident-post-mortem packets carry their findings as free-form Job
+// Incident packets carry their findings as free-form Job
 // metadata, and the shape has already drifted between the two live
 // packets: the 2026-08-22 one carries incident_at / summary /
 // mitigations_shipped / open_questions / evidence, the 2026-08-13 one

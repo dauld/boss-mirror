@@ -22,10 +22,14 @@
 #      a snapshot whose tree IS forge main's tree is the honest backup;
 #   4. pushes it to the dauld fork as publish/<date> (recreating the
 #      fork once if it is gone), opens the PR against algedonic-dev/boss
-#      as dauld, and completes the packet's open-pr step with pr_url.
+#      as dauld, and completes the packet's open-pr step with pr_url;
+#   5. closes each OLDER open publish/<date> PR from the fork as
+#      superseded by today's, which contains it (backlog d4bfe548) —
+#      so there is only ever one PR to merge.
 #
 # THE MERGE ON GITHUB STAYS DAVID'S — the second gate. Nothing here
-# touches the mirror's main.
+# touches the mirror's main; the only PRs it closes are its own older
+# publish snapshots.
 #
 # THE TOKEN. dauld's GitHub token is provisioned by David's token admin
 # at $BOSS_GITHUB_TOKEN_FILE (default /etc/boss-publish/github.token,
@@ -843,14 +847,100 @@ else
     say "opened $pr_url"
 fi
 
+# 4b. ONE PULL REQUEST AT A TIME (backlog d4bfe548, David 2026-09-24).
+#     Every snapshot's parent is the mirror's main, which moves only
+#     when David merges, so today's PR CONTAINS every older open one.
+#     Measured 04:05Z that day: #242 (packet d2967a9c, closed
+#     `pr-opened`) still open on GitHub while #243 carried all of it and
+#     more, and #239-#242 had all stood open at once — four PRs to read
+#     where one said everything. So each OLDER open `publish/<date>` PR
+#     from our fork is closed with a comment naming today's, AFTER
+#     today's is open. Only our fork's heads, only `publish/` dates
+#     sorting before today's: a newer PR, somebody else's branch, or a
+#     non-publish PR from the fork is never ours to close.
+#
+#     Order, for a re-run: the older packet is annotated FIRST
+#     (`pr_superseded`, the intent), then the PR closed, then GitHub
+#     read back and ITS answer written as `pr_state` (the effect — the
+#     same key and shape `--measure` writes, which the publish region
+#     reads). Any failure stops the run before open-pr completes, so a
+#     re-run reuses today's PR and meets whatever is still open. A PR no
+#     packet recorded is closed all the same and said so by URL.
+gh_t pr list --repo "$MIRROR_SLUG" --state open --limit 100 \
+        --json number,url,headRefName,headRepositoryOwner > "$workdir/open-prs" 2>"$workdir/err" \
+    || fail "the PR is open at $pr_url, but listing the mirror's open pull requests failed — gh said: $(head -c 300 "$workdir/err" | tr '\n' ' '); open-pr on ${job_id:0:8} stays ready and a re-run reuses the PR"
+jq_doc_file "$workdir/open-prs" && jq -e 'type == "array"' "$workdir/open-prs" > /dev/null 2>&1 \
+    || fail "the PR is open at $pr_url, but gh answered the open-PR listing with no list — nothing older was read, so nothing was closed; open-pr on ${job_id:0:8} stays ready"
+jq -c --arg owner "$FORK_OWNER" --arg branch "$BRANCH" --arg url "$pr_url" '
+    .[] | select(((.headRepositoryOwner.login // "") | ascii_downcase) == ($owner | ascii_downcase))
+        | select((.headRefName // "") | startswith("publish/"))
+        | select(.headRefName < $branch and .url != $url)
+        | {number, url, head: .headRefName}' "$workdir/open-prs" > "$workdir/older" \
+    || fail "the open-PR listing could not be read as pull requests"
+: > "$workdir/superseded"
+if [ -s "$workdir/older" ]; then
+    curl -fsS -H "x-boss-user: $BOSS_USER" \
+            "$BASE/api/jobs?kind=publish-to-github&limit=60" > "$workdir/published" 2>"$workdir/err" \
+        || fail "jobs API unreachable at $BASE while recording superseded PRs — $(cat "$workdir/err"); nothing older was closed"
+    while IFS= read -r row; do
+        old_n=$(printf '%s' "$row" | jq -r '.number')
+        old_url=$(printf '%s' "$row" | jq -r '.url')
+        old_head=$(printf '%s' "$row" | jq -r '.head')
+        old_job=$(jq -r --arg url "$old_url" 'first((if type == "object" and has("data") then .data else . end)
+            | .[] | select(any((.steps // [])[]; .spec_slug == "open-pr" and (.metadata.pr_url // "") == $url))
+            | .id) // empty' "$workdir/published")
+        ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        if [ -n "$old_job" ]; then
+            jq -n --arg old "$old_url" --arg new "$pr_url" --arg job "$job_id" --arg ts "$ts" \
+                '{pr_superseded: {pr_url: $old, by_pr_url: $new, by_packet: $job, at: $ts,
+                                  by: "publish-github-pr"}}' > "$workdir/sup"
+            curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
+                    ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
+                    --data-binary @"$workdir/sup" \
+                    "$BASE/api/jobs/$old_job/metadata" > /dev/null 2>"$workdir/err" \
+                || fail "recording on ${old_job:0:8} that $pr_url supersedes $old_url failed — $(head -c 300 "$workdir/err" | tr '\n' ' '); $old_url was not closed"
+        fi
+        gh_t pr close "$old_n" --repo "$MIRROR_SLUG" \
+                --comment "Superseded by $pr_url — today's snapshot of forge main, which carries everything in this one ($old_head) and every commit since. Closed by machine (BOSS publish-to-github, ops verb publish-github-pr, packet $job_id); the one PR to merge is the newest." \
+                > /dev/null 2>"$workdir/err" \
+            || fail "closing $old_url as superseded by $pr_url — gh said: $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+        # A close is a claim until GitHub is read saying so.
+        gh_t api "repos/$MIRROR_SLUG/pulls/$old_n" > "$workdir/closed" 2>"$workdir/err" \
+            || fail "asked GitHub to close $old_url, and it could not be read back — gh said: $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+        jq_doc_file "$workdir/closed" \
+            || fail "asked GitHub to close $old_url, and the read-back answered nothing parseable"
+        old_state=$(jq -r '.state // "no state"' "$workdir/closed")
+        [ "$old_state" = "closed" ] \
+            || fail "asked GitHub to close $old_url as superseded by $pr_url, and it still reads $old_state"
+        if [ -n "$old_job" ]; then
+            jq -c --arg url "$old_url" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+                {pr_state: {pr_url: $url, number, state, merged: (.merged == true),
+                            merged_at, closed_at, read_at: $ts,
+                            read_by: "publish-github-pr (superseded)"}}' \
+                "$workdir/closed" > "$workdir/pr-state"
+            curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
+                    ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
+                    --data-binary @"$workdir/pr-state" \
+                    "$BASE/api/jobs/$old_job/metadata" > /dev/null 2>"$workdir/err" \
+                || fail "$old_url is closed on GitHub, but writing its state onto ${old_job:0:8} failed — $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+            say "superseded $old_url ($old_head) — closed on GitHub, recorded on ${old_job:0:8}"
+        else
+            say "superseded $old_url ($old_head) — closed on GitHub; no publish packet recorded it, so the close comment is its only record"
+        fi
+        printf '%s\n' "$old_url" >> "$workdir/superseded"
+    done < "$workdir/older"
+fi
+
 # 5. Complete open-pr with pr_url. Merge, never replace (the
 #    ops-runner's rule): PUT swaps metadata wholesale.
 printf '%s' "$target" | jq -c --arg url "$pr_url" --arg snap "$snapshot" \
-        --arg fh "$forge_head" --arg mh "$mirror_head" --arg br "$FORK_OWNER:$BRANCH" '
+        --arg fh "$forge_head" --arg mh "$mirror_head" --arg br "$FORK_OWNER:$BRANCH" \
+        --rawfile sup "$workdir/superseded" '
     {status: "completed",
      metadata: ((.step.metadata // {})
                 + {pr_url: $url, snapshot_commit: $snap, forge_head: $fh,
-                   mirror_head: $mh, head: $br, published_by: "publish-github-pr"})}' \
+                   mirror_head: $mh, head: $br, published_by: "publish-github-pr",
+                   superseded_prs: ($sup | split("\n") | map(select(. != "")))})}' \
     > "$workdir/payload"
 if ! curl -fsS -X PUT -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
         ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \

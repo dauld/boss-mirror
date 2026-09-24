@@ -714,6 +714,75 @@ pub fn owned_wait(md: &Value) -> Option<OwnedWait> {
     })
 }
 
+/// THE PROOF A LANDED CAR OWES (backlog b9005734, approved by David
+/// 2026-09-24). The packet measured 21 cars standing at `proven`,
+/// several five to seven days old, each waiting on a rare event nobody
+/// here causes — a Stripe charge, a release David cuts, his destructive
+/// prune, a red nightly crawl — and each holding its item open while the
+/// shed read TROUBLED every hour of every day. A permanently red surface
+/// is read like a silent one (CLAUDE.md §Diagnosis). So a car whose
+/// wait is declared, observed and owned closes LANDED with its proof
+/// owed, and the proof becomes an obligation keyed to the event it
+/// waits on: when that event fires, the recorded probe runs again.
+///
+/// `proof_owed = "true"` is the one marker — a string, because a
+/// protocol predicate compares strings (`job.metadata.proof_owed =
+/// "true"`, the idiom every `abandoned` terminal uses) — and the
+/// obligation reads it through [`owes_proof`]. Paying the proof removes
+/// it; the car's closing outcome keeps the history.
+pub const PROOF_OWED: &str = "proof_owed";
+
+/// Does this car owe its proof? Only under the one marker.
+pub fn owes_proof(md: &Value) -> bool {
+    md.get(PROOF_OWED).and_then(Value::as_str) == Some("true")
+}
+
+/// Inside `waits_on`: the event that settles the wait, declared so a
+/// MACHINE can match it — `{"closes": <kind>, "title": <prefix>}`, the
+/// close of a packet of that kind, optionally narrowed by the start of
+/// its title (an `ops-request`'s title leads with its verb). `on` is
+/// prose for a reader and `seen` a probe for the forge; neither can key
+/// a dispatcher firing, which is what an owed proof needs (b9005734).
+/// The close marker carries `kind` and `title` on all three emit sites,
+/// so this is matched against the event itself, never a re-fetch.
+pub const WAITS_ON_EVENT: &str = "event";
+
+/// A declared wait's event, read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaitEvent {
+    /// The kind of packet whose close is the event.
+    pub closes: String,
+    /// Optional: the closing packet's title must start with this.
+    pub title: Option<String>,
+}
+
+impl WaitEvent {
+    /// Is this `jobs.job.closed` marker the declared event? The kind
+    /// must match, and a declared prefix must lead the closing title —
+    /// a marker with no title satisfies no prefix.
+    pub fn fired_by(&self, closed: &Value) -> bool {
+        let title = closed.get("title").and_then(Value::as_str);
+        closed.get("kind").and_then(Value::as_str) == Some(self.closes.as_str())
+            && self
+                .title
+                .as_deref()
+                .is_none_or(|p| title.is_some_and(|t| t.starts_with(p)))
+    }
+}
+
+/// The event a car's `waits_on` declares, or `None` — for no wait, a
+/// wait naming nothing ([`waits_on`] refuses a blank `on`), or an event
+/// whose `closes` is blank, so an empty object can never key an
+/// obligation to every close there is.
+pub fn wait_event(md: &Value) -> Option<WaitEvent> {
+    waits_on(md)?;
+    let e = md.get(WAITS_ON)?.get(WAITS_ON_EVENT)?;
+    Some(WaitEvent {
+        closes: non_blank(e.get("closes"))?,
+        title: non_blank(e.get("title")),
+    })
+}
+
 /// THE ITEM A CAR ANSWERS, AND AUTHORISES THE CLOSE OF.
 ///
 /// The declared one-to-one job edge (`('ship-a-change', 'backlog_item',
@@ -2943,6 +3012,81 @@ mod waits_on_tests {
         assert_eq!(read(json!(0)).max_wait_hours, None);
         assert_eq!(read(json!(-5)).max_wait_hours, None);
         assert_eq!(read(json!("48")).max_wait_hours, None);
+    }
+
+    /// A declared wait with the event a machine can match — the close of
+    /// a packet of one kind, optionally narrowed by its title.
+    fn with_event(event: Value) -> Value {
+        let mut w = waits_on_value("a cut-a-release tag", Some("true"));
+        w[WAITS_ON_EVENT] = event;
+        json!({ WAITS_ON: w })
+    }
+
+    fn close_marker(kind: &str, title: &str) -> Value {
+        json!({"id": "p1", "kind": kind, "title": title, "outcome": "answered",
+               "closed_on": "2026-09-24", "subject_id": "forge", "parent_step_id": null})
+    }
+
+    /// THE EVENT IS DECLARED AS DATA, and read back only when it names
+    /// the kind whose close it is. A blank or absent `closes`, a wait
+    /// with no `on`, or no `event` at all is no declaration — so an
+    /// empty object cannot key an obligation to every close there is.
+    #[test]
+    fn a_wait_event_is_read_only_when_it_names_the_closing_kind() {
+        let md = with_event(json!({"closes": "ops-request", "title": "tag-release"}));
+        assert_eq!(
+            wait_event(&md),
+            Some(WaitEvent {
+                closes: "ops-request".into(),
+                title: Some("tag-release".into()),
+            })
+        );
+        let bare = with_event(json!({"closes": "maintenance-playground-crawl"}));
+        assert_eq!(wait_event(&bare).and_then(|e| e.title), None);
+        assert_eq!(wait_event(&with_event(json!({"closes": "  "}))), None);
+        assert_eq!(wait_event(&with_event(json!({}))), None);
+        assert_eq!(wait_event(&with_event(Value::Null)), None);
+        let no_on = json!({ WAITS_ON: {"on": "", "event": {"closes": "ops-request"}} });
+        assert_eq!(wait_event(&no_on), None);
+        assert_eq!(wait_event(&json!({})), None);
+    }
+
+    /// FIRED BY exactly the close it names: the kind must match, and a
+    /// declared title prefix must lead the closing packet's title. A
+    /// marker with no title never satisfies a declared prefix.
+    #[test]
+    fn a_wait_event_is_fired_by_the_close_it_names_and_no_other() {
+        let tag = wait_event(&with_event(
+            json!({"closes": "ops-request", "title": "tag-release"}),
+        ))
+        .unwrap();
+        assert!(tag.fired_by(&close_marker(
+            "ops-request",
+            "tag-release on forge — cut-a-release v0.4.0"
+        )));
+        assert!(!tag.fired_by(&close_marker(
+            "ops-request",
+            "converge on forge — a train merged"
+        )));
+        assert!(!tag.fired_by(&close_marker("cut-a-release", "tag-release v0.4.0")));
+        assert!(!tag.fired_by(&json!({"kind": "ops-request", "title": null})));
+        let crawl = wait_event(&with_event(
+            json!({"closes": "maintenance-playground-crawl"}),
+        ))
+        .unwrap();
+        assert!(crawl.fired_by(&close_marker("maintenance-playground-crawl", "anything")));
+        assert!(!crawl.fired_by(&close_marker("maintenance-sweep", "anything")));
+    }
+
+    /// OWED IS ONE MARKER, spelled once: the string `"true"`. Anything
+    /// else — absent, a boolean, `"paid"` — owes nothing, so a car whose
+    /// proof was paid drops out of the obligation by the same read.
+    #[test]
+    fn a_car_owes_its_proof_only_under_the_one_marker() {
+        assert!(owes_proof(&json!({ PROOF_OWED: "true" })));
+        assert!(!owes_proof(&json!({ PROOF_OWED: true })));
+        assert!(!owes_proof(&json!({ PROOF_OWED: "paid" })));
+        assert!(!owes_proof(&json!({})));
     }
 }
 

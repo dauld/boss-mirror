@@ -60,13 +60,20 @@ use serde_json::{Value, json};
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 use boss_jobs::car;
 
-use super::common::{api_client, open_jobs_of_kind, post_json, write_json};
+use super::common::{api_client, jobs_where, open_jobs_of_kind, post_json, write_json};
 
 /// The allowlisted verb (a file under `infra/ops/verbs/`) and the host that
 /// answers it. One definition each, read by the request builder and
 /// the twice-guard.
 pub const VERB: &str = "run-car-probe";
 pub const HOST: &str = "forge";
+
+/// Every request this handler files is titled with this prefix, and the
+/// `owed` scope reads it back: the close of one of OUR requests is never
+/// the event an owed proof waits on, or a car keyed to `ops-request`
+/// closes would re-run on its own probe's answer, and two such cars on
+/// each other's, forever. One definition, written and read here.
+pub(crate) const REQUEST_TITLE: &str = "run the recorded probe for ";
 
 /// The car metadata key the probe rides under. Its ONE definition is
 /// `boss_jobs::car::PROOF_PROBE`, which lands with the companion car
@@ -237,10 +244,19 @@ fn ship_refusal(probe: &str, expect: Option<&str>) -> Option<Value> {
 /// waiting on tomorrow's timer firing, correct but early, and the only
 /// way their probe would run again was a human refiling
 /// `run-car-probe` by hand (rule `recheck-failing-probes-hourly`).
+///
+/// `Owed`: the close marker of a packet that just closed, asking after
+/// every car that closed LANDED with its proof owed and declared THIS
+/// close as the event it waits on (backlog b9005734, rule
+/// `rerun-owed-proofs-on-job-closed`). Those cars are closed and their
+/// `proven` was skipped by the landing, so neither scope above can
+/// reach them: the owed proof is an obligation keyed to its event, and
+/// this is the obligation firing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Scope<'a> {
     Train(&'a str),
     Failing,
+    Owed(&'a Value),
 }
 
 impl Scope<'_> {
@@ -248,14 +264,54 @@ impl Scope<'_> {
         match self {
             Scope::Train(t) => md(car, "train") == Some(t),
             Scope::Failing => car.pointer("/metadata/proof_attempt").is_some(),
+            Scope::Owed(closed) => {
+                let m = car.get("metadata").unwrap_or(&Value::Null);
+                !closes_a_probe_request(closed)
+                    && car::owes_proof(m)
+                    && car::wait_event(m).is_some_and(|e| e.fired_by(closed))
+            }
         }
     }
     fn train_of(&self, car: &Value) -> String {
         match self {
             Scope::Train(t) => t.to_string(),
-            Scope::Failing => md(car, "train").unwrap_or("").to_string(),
+            Scope::Failing | Scope::Owed(_) => md(car, "train").unwrap_or("").to_string(),
         }
     }
+    /// Is the car's `proven` step one this scope may ask about? Open for
+    /// the two scopes over open cars; for an owed car, anything but
+    /// completed — the landing close skipped it, and a car marked owed
+    /// before its protocol's exit was published is still open at it.
+    fn proven_admits(&self, car: &Value) -> bool {
+        match self {
+            Scope::Owed(_) => !proven_is_completed(car),
+            _ => proven_is_open(car),
+        }
+    }
+    /// The packet whose close fired an owed run, for the request's reader.
+    fn event_packet(&self) -> Option<&str> {
+        match self {
+            Scope::Owed(closed) => closed.get("id").and_then(Value::as_str),
+            _ => None,
+        }
+    }
+}
+
+/// PURE: is this close marker the close of a request this handler filed?
+fn closes_a_probe_request(closed: &Value) -> bool {
+    closed.get("kind").and_then(Value::as_str) == Some("ops-request")
+        && closed
+            .get("title")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t.starts_with(REQUEST_TITLE))
+}
+
+/// PURE: has this car's `proven` step been completed?
+fn proven_is_completed(car: &Value) -> bool {
+    car::find_step(car, "proven", "Proven in prod")
+        .and_then(|s| s.get("status"))
+        .and_then(Value::as_str)
+        == Some("completed")
 }
 
 pub(crate) fn probe_requests(
@@ -276,7 +332,7 @@ pub(crate) fn probe_requests(
         .iter()
         .filter(|c| scope.admits(c))
         .filter(|c| md(c, PROOF_PROBE).is_some())
-        .filter(|c| proven_is_open(c))
+        .filter(|c| scope.proven_admits(c))
         .filter_map(|c| {
             let id = c.get("id").and_then(Value::as_str)?;
             if already_asked(id) {
@@ -291,7 +347,7 @@ pub(crate) fn probe_requests(
             let title = c.get("title").and_then(Value::as_str).unwrap_or("");
             Some(json!({
                 "kind": "ops-request",
-                "title": format!("run the recorded probe for {title}"),
+                "title": format!("{REQUEST_TITLE}{title}"),
                 // The CAR is the subject: what this packet is about, and
                 // the cheap handle for anyone asking "was this car's
                 // probe run?"
@@ -308,6 +364,8 @@ pub(crate) fn probe_requests(
                     "branch": md(c, "branch").unwrap_or(""),
                     "train": scope.train_of(c),
                     "recheck": matches!(scope, Scope::Failing),
+                    "owed": matches!(scope, Scope::Owed(_)),
+                    "event_packet": scope.event_packet(),
                     "spawned_by_rule": rule_name,
                     "triggered_by_event_id": event_id,
                     "triggered_by_topic": topic,
@@ -334,9 +392,10 @@ impl Handler for JobsRunCarProbes {
         // in the closing event.
         let scope = match boss_dispatcher::rules::handler::arg_string(args, "scope") {
             Ok("failing") => Scope::Failing,
+            Ok("owed") => Scope::Owed(&ctx.event_payload),
             Ok(other) => {
                 return Err(HandlerError::Permanent(format!(
-                    "jobs.run-car-probes: scope must be \"failing\" (or absent for the arrival rule), not {other:?}"
+                    "jobs.run-car-probes: scope must be \"failing\" or \"owed\" (or absent for the arrival rule), not {other:?}"
                 )));
             }
             Err(HandlerError::MissingArg(_)) => match arrived_train(&ctx.event_payload) {
@@ -345,7 +404,25 @@ impl Handler for JobsRunCarProbes {
             },
             Err(e) => return Err(e),
         };
-        let cars = self.all_open("ship-a-change", &ctx.rule_name).await?;
+        // An owed car is CLOSED, so the open board cannot hold it: read
+        // the cars carrying the marker, whatever their status — one
+        // indexed, usually-empty query per close, the shape
+        // `jobs-clear-waiting-on` already runs on the same topic. And
+        // the close of one of our own requests is dropped before any
+        // read, since `admits` would refuse every car for it anyway.
+        let cars = match scope {
+            Scope::Owed(closed) if closes_a_probe_request(closed) => return Ok(()),
+            Scope::Owed(_) => {
+                jobs_where(
+                    &self.client,
+                    self.base(),
+                    &format!("kind=ship-a-change&metadata_has={}", car::PROOF_OWED),
+                    &ctx.rule_name,
+                )
+                .await?
+            }
+            _ => self.all_open("ship-a-change", &ctx.rule_name).await?,
+        };
         let open_requests = self.all_open("ops-request", &ctx.rule_name).await?;
         let arrival = probe_requests(
             scope,
@@ -660,5 +737,139 @@ mod tests {
         let got = probe_requests(Scope::Train("t1"), &cars, &[], "r", "ev", "jobs.job.closed");
         assert_eq!(got.requests.len(), 1);
         assert!(got.refusals.is_empty());
+    }
+
+    /// A car that closed LANDED with its proof owed (b9005734): closed,
+    /// `proven` skipped by the close, the marker set, and a declared wait
+    /// whose event a machine can match.
+    fn owed_car(id: &str, event: Value) -> Value {
+        let mut m = probed();
+        m[car::PROOF_OWED] = json!("true");
+        m[car::WAITS_ON] = json!({"on": "a cut-a-release tag", "seen": "true",
+                                  "owner": "emp-david", car::WAITS_ON_EVENT: event});
+        let mut c = car(id, "t1", m, "skipped");
+        c["status"] = json!("closed");
+        c
+    }
+
+    fn closed(id: &str, kind: &str, title: &str, subject: &str) -> Value {
+        json!({"id": id, "kind": kind, "title": title, "outcome": "answered",
+               "closed_on": "2026-09-24", "subject_id": subject, "parent_step_id": null})
+    }
+
+    /// THE OBLIGATION (b9005734): the close a car declared it waits on
+    /// runs its recorded probe again — for a CLOSED car whose `proven`
+    /// was skipped by the landing, which no other scope would ask after.
+    /// The request says it is owed and names the packet whose close fired
+    /// it, so a reader of the ops-request sees which event it answers.
+    #[test]
+    fn the_declared_close_runs_an_owed_proof_again() {
+        let cars = [owed_car(
+            "o1",
+            json!({"closes": "ops-request", "title": "tag-release"}),
+        )];
+        let event = closed(
+            "p9",
+            "ops-request",
+            "tag-release on forge — cut-a-release v0.4.0",
+            "forge",
+        );
+        let got = probe_requests(
+            Scope::Owed(&event),
+            &cars,
+            &[],
+            "rerun-owed-proofs-on-job-closed",
+            "ev",
+            "jobs.job.closed",
+        );
+        assert_eq!(got.requests.len(), 1, "{got:?}");
+        let md = &got.requests[0]["metadata"];
+        assert_eq!(md["verb"], VERB);
+        assert_eq!(md["car"], "o1");
+        assert_eq!(md["owed"], true);
+        assert_eq!(md["event_packet"], "p9");
+        assert_eq!(md["recheck"], false);
+    }
+
+    /// Every close that is NOT the declared event asks nothing: another
+    /// kind, the right kind under another title, and a car that owes
+    /// nothing (never marked, or paid) however exactly its event matches.
+    #[test]
+    fn a_close_that_is_not_the_declared_event_or_a_car_that_owes_nothing_asks_nothing() {
+        let event = json!({"closes": "maintenance-playground-crawl"});
+        let mut paid = owed_car("paid", event.clone());
+        paid["metadata"][car::PROOF_OWED] = json!("paid");
+        let mut unmarked = owed_car("unmarked", event.clone());
+        unmarked["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove(car::PROOF_OWED);
+        let cars = [owed_car("o1", event), paid, unmarked];
+        let fire = |e: &Value| {
+            probe_requests(Scope::Owed(e), &cars, &[], "r", "ev", "jobs.job.closed")
+                .requests
+                .iter()
+                .map(|r| r["metadata"]["car"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            fire(&closed("p1", "maintenance-playground-crawl", "crawl", "x")),
+            vec!["o1"]
+        );
+        assert!(fire(&closed("p2", "maintenance-sweep", "crawl", "x")).is_empty());
+        let tag = [owed_car(
+            "t",
+            json!({"closes": "ops-request", "title": "tag-release"}),
+        )];
+        let converge = closed("p3", "ops-request", "converge on forge — a train", "forge");
+        assert!(
+            probe_requests(Scope::Owed(&converge), &tag, &[], "r", "ev", "t")
+                .requests
+                .is_empty()
+        );
+    }
+
+    /// THE LOOP THIS SCOPE COULD MAKE, refused. The request it files is
+    /// an `ops-request` whose close is itself a `jobs.job.closed`, so a
+    /// car keyed to ops-request closes would re-run on its own probe's
+    /// answer, and two such cars on each other's, forever. The close of
+    /// ANY request this handler filed is never an owed event.
+    #[test]
+    fn the_close_of_a_probe_request_this_handler_filed_is_never_an_owed_event() {
+        let cars = [
+            owed_car("a", json!({"closes": "ops-request"})),
+            owed_car("b", json!({"closes": "ops-request"})),
+        ];
+        for subject in ["a", "b", "some-open-car"] {
+            let own = closed(
+                "p1",
+                "ops-request",
+                &format!("{REQUEST_TITLE}Car {subject}"),
+                subject,
+            );
+            let got = probe_requests(Scope::Owed(&own), &cars, &[], "r", "ev", "t");
+            assert!(
+                got.requests.is_empty(),
+                "a probe request's close must not re-run owed proofs: {got:?}"
+            );
+        }
+        // Any other ops-request close is the event both declared.
+        let other = closed("p2", "ops-request", "publish-drift on boss-gcp", "boss-gcp");
+        let got = probe_requests(Scope::Owed(&other), &cars, &[], "r", "ev", "t");
+        assert_eq!(got.requests.len(), 2);
+    }
+
+    /// The request's title is built from the one prefix the loop guard
+    /// reads, so the two cannot drift apart (CLAUDE.md §9a).
+    #[test]
+    fn every_filed_request_carries_the_title_the_loop_guard_reads() {
+        let cars = [car("c1", "t1", probed(), "ready")];
+        let got = probe_requests(Scope::Train("t1"), &cars, &[], "r", "ev", "jobs.job.closed");
+        assert!(
+            got.requests[0]["title"]
+                .as_str()
+                .unwrap()
+                .starts_with(REQUEST_TITLE)
+        );
     }
 }

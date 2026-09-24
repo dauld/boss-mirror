@@ -757,7 +757,17 @@ mod tests {
         // and the entry is checked for staleness both ways, the same
         // discipline `the-live-protocols-are-the-authored-protocols.sh`
         // applies to its own list.
-        const PLUGIN_ONLY_KINDS: [&str; 1] = ["correction-verdict"];
+        //
+        // THE SECOND, decided 2026-09-24 (backlog 59d15039): `incident`'s
+        // review step declares `incident-review` for the same reason —
+        // the surface lays the packet's findings and every step's
+        // answers out as one document, and registered against `task` it
+        // would mount on every task step. It authors no `fields`: the
+        // review is an attestation, and the step's `human_only`
+        // declaration (enforced at assignment) plus `completed_by` IS
+        // its record — the same contract incident-post-mortem's bare
+        // `task` review had, which this protocol replaced.
+        const PLUGIN_ONLY_KINDS: [&str; 2] = ["correction-verdict", "incident-review"];
 
         let reg = StepRegistry::v1();
         let defined: std::collections::HashSet<&str> = reg.all().iter().map(|t| t.kind).collect();

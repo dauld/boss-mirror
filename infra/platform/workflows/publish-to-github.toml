@@ -51,16 +51,36 @@
 #      `pr-opened`; a red one closes only judged. The merge on GitHub
 #      is still David's, and it now follows a judged reading.
 #
+# v8 (backlog d4bfe548, David 2026-09-24: "Sounds good"). Measured that
+# day on e0558b28: opened 00:00Z, drift refreshed by machine at 00:01Z,
+# and `measure` — platform-admin, no agent block — sat unworked until
+# the operator did it after 03:50Z, when David asked. Nothing said an
+# agent could run it, so no actor was ever dispatched.
+#
+#   7. `measure` and `review` carry the analyst block judge-checks
+#      carries. The measure procedure RE-MEASURES with
+#      infra/prep-github-publish.sh --json rather than copying the
+#      machine's `drift_refresh`; the review READS each newly public
+#      file and files an item for anything that should not go public.
+#      `approve` stays David's sign-off and declares no agent.
+#   8. (The verb, not this row.) When publish-github-pr opens a new
+#      mirror PR it closes each older open publish/<date> PR as
+#      superseded by it, a comment naming the new one, recorded on the
+#      older packet as `pr_superseded` + `pr_state` — so David only
+#      ever sees one PR to merge.
+#
 # Cadence: the daily `publish-to-github-daily` rule (129/149) spawns one
 # packet per day, guarded to one open packet per mirror; most days land
 # on `nothing-to-publish`, which is the measurement that the mirror is
 # current.
 #
 # Seeding: this row lands on a FRESH database through the platform seed
-# (insert-if-missing). On the live system of record, where v1–v6 exist,
-# the seed leaves the kind alone and v7 goes live through
-# `boss workflow publish publish-to-github infra/platform/workflows`,
-# which reads this same entry — one definition.
+# (insert-if-missing). On the live system of record, where earlier
+# versions exist, the seed leaves the kind alone and this row goes live
+# through `boss workflow publish publish-to-github infra/platform/workflows`,
+# which reads this same entry — one definition. (The vN labels above are
+# this file's lineage; the registry numbers its own versions, and read
+# version 2 active on 2026-09-24.)
 # ---------------------------------------------------------------------
 [[workflow]]
 kind = "publish-to-github"
@@ -84,6 +104,9 @@ kind = "checklist"
 ready_when = "steps.opened.done"
 title_template = "Measure drift and scan for secrets"
 authority_role = "platform-admin"
+# (7) An agent's step now: the analyst block judge-checks carries.
+agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
+metadata_defaults = { human_only = false, procedure = "RE-MEASURE; DO NOT TRANSCRIBE. The machine's daily `publish-github-pr --measure` writes `drift_refresh` onto this packet. It is a lead, not the answer: `has_drift` = false closes this packet nothing-to-publish, so the value recorded here must be the instrument's own. From the dev pod: `git fetch origin`, then `infra/prep-github-publish.sh --json` (SOURCE_REF defaults to origin/main, the tree the forge publishes; the mirror is read through a read-only anonymous remote named `github`, and when that remote is missing the script refuses and prints the `git remote add` that configures it).\n\nRecord the script's JSON as this step's fields, copied, never retyped from memory: `commits_ahead`, `files_changed`, `secrets_scan` (clean or FAILED, as the script said), `newly_public` (its count) and `has_drift` (its own true or false, never inferred). Record its `newly_public_files` list on this step too, as `newly_public_files`: the review step reads each file it names.\n\nEXIT 2 means a ref did not resolve and NOTHING was measured: complete nothing, and say why on this packet (PATCH /api/jobs/{id}/metadata). EXIT 1 is a BLOCKING finding (a secrets hit, or mirror content the source lacks): record the numbers anyway, with the script's `blocking` text as `blocking` on this step, so the review and David's approve both see it." }
 [[workflow.step.fields]]
 name = "commits_ahead"
 field_type = "string"
@@ -119,6 +142,10 @@ kind = "checklist"
 ready_when = "steps.measure.done AND steps.measure.metadata.has_drift != \"false\""
 title_template = "Review the newly-public surface"
 authority_role = "platform-admin"
+# (7) The same analyst block. What it writes is what David reads at
+# `approve`, the one step here that stays his.
+agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
+metadata_defaults = { human_only = false, procedure = "READ EACH NEWLY PUBLIC FILE; a count is not a review. The measure step recorded `newly_public_files`: files that have never existed on the public mirror and sit under docs/runbooks/ or infra/cluster|caddy|forge/, which describe how to reach and recover the live system. Read every one on the tree that would be published (`git fetch origin`, then `git show origin/main:<path>`).\n\nWrite `newly_public_review` with the verdict FIRST (publish, or do not publish and why), then one line per file: `<path>: ok` with why it is fine to publish, or `<path>: DISCLOSES <what>` (a credential or where one lives, a host or address outside infra/estate/estate.toml, a person's detail, a recovery path that helps an attacker) followed by the backlog-item you FILED for it (`boss job file`). An RFC1918 address or a k8s manifest is not a secret and the repository is open source by intent: say so rather than flag it. Carry forward anything the measurement found blocking (a FAILED secrets scan, a `blocking` note). With no newly public files, say that in one line.\n\nThe approve sign-off that follows is David's. This review is what he reads there, so it must let him decide without opening anything else." }
 [[workflow.step.fields]]
 name = "newly_public_review"
 field_type = "string"

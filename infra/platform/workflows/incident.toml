@@ -1,16 +1,53 @@
 # ---------------------------------------------------------------------------
-# incident — something broke; stabilize it, learn from it, prevent it.
-#
-# stabilize → diagnose → prevent → review, and the review step is the
-# point: a packet that stops at "it works again" has recorded an outage
-# and learned nothing. The prevention is a step of the incident rather
-# than a follow-up someone remembers to file.
+# incident — something broke; stabilize it, then learn from it in the
+# order that forces the questions that are actually missed.
 #
 # Authored live through the API and never written back until 2026-09-10,
 # which is the gap `infra/lint/the-live-protocols-are-the-authored-
-# protocols.sh` now closes. Rendered from the live row rather than
-# retyped; the seed is insert-if-missing, so the live lineage keeps its
-# own version and this file is what a FRESH database gets.
+# protocols.sh` now closes. The seed is insert-if-missing, so the live
+# lineage keeps its own version and this file is what a FRESH database
+# gets; a new live version is `boss workflow publish incident`.
+#
+# ONE INCIDENT PROTOCOL (backlog 59d15039, decided by David 2026-09-22).
+# Three existed — this one, `incident-post-mortem` and `post-mortem` —
+# and measured that day none had ever carried a packet, open or closed.
+# The first real incident (55d001b0, the dark dev-pod doors) ran on v1
+# of this file, and everything the post-mortem protocols would have
+# asked of it went into free-form job metadata (`diagnosis_draft`,
+# `follow_up_packets`) because v1 had no step to hold it. So `incident`
+# keeps `stabilize` first — the live system before the analysis — and
+# folds in incident-post-mortem's forcing questions, in its order:
+#
+#    0. raised          — trigger: what was seen, and who saw it
+#    1. stabilize       — restore service, live site first
+#    2. timeline        — the facts, with timestamps, before any theory
+#    3. attribution     — did we cause it? ("did we just ship this?" —
+#                         the 2026-08-13 SoR outage lost an hour because
+#                         nobody asked it first)
+#    4. diagnose        — the root cause, once the facts and the
+#                         attribution are on the record
+#    5. detection       — what should have found it, and why it did not
+#    6. simplification  — what can be REMOVED, before anything is added:
+#                         the reflex to add a check has to survive the
+#                         question of what could go instead
+#    7. actions         — each action filed as its OWN packet, the refs
+#                         recorded here (v1's `prevent` held one string)
+#    8. review          — a PERSON reads the findings: `human_only`, which
+#                         the step API enforces, because an incident an
+#                         agent grades itself on is not reviewed. Kind
+#                         `incident-review`, the surface built for
+#                         incident-post-mortem's review and never mounted
+#                         (its v1 kept a bare `task`): the packet's
+#                         metadata and every step's answers as one
+#                         document.
+#    9. closed          — outcome terminal
+#
+# `post-mortem`'s one idea not already here — a retrospective is MANY
+# countermeasures, never one operator verdict — is `actions` being an
+# array of packets. Its `abandoned` and incident-post-mortem's
+# `superseded` terminals are not carried: no packet ever needed either,
+# and a terminal gated on a person-set marker is the shape that closed
+# incident-post-mortem packets on open (cb9661fe).
 #
 # `owning_team` below records the live row's value. The bundle loader
 # stamps every row it reads with the bundle's default (`platform`) and
@@ -24,7 +61,7 @@ label = "Incident"
 category = "platform"
 subject_kinds = ["custom"]
 owning_team = "platform"
-description = "An outage or degradation, worked as a packet: raise what was seen, stabilize the live system first, diagnose honestly, ship the prevention, ratify. Authored 2026-08-13 from the boot-viability outage, using the validate-before-publish discipline that incident taught."
+description = "An outage or degradation, worked as a packet: raise what was seen, stabilize the live system first, then learn from it in the order that forces the questions that get missed — the timeline before the theory, 'did we just ship this?' before the root cause, what should have found it, what can be REMOVED before anything is added, each action filed as its own packet — and a person reviews the findings. The platform's one incident protocol since 2026-09-24: incident-post-mortem and post-mortem were folded in and retired (backlog 59d15039)."
 metadata = { surfaces = ["system-design"] }
 
 [[workflow.step]]
@@ -49,10 +86,38 @@ fields = [
   { name = "downtime", field_type = "string" },
 ]
 
+# The facts before any theory. `timeline` is each fact with its time and
+# where it was read; `detected_at` is the one time the detection step
+# measures against (`raised.started_at` is the other end of the lag).
+[[workflow.step]]
+title = "timeline"
+kind = "task"
+ready_when = "steps.stabilize.done"
+title_template = "Establish the timeline from evidence"
+authority_role = "platform-admin"
+fields = [
+  { name = "timeline", field_type = "string", required = true },
+  { name = "detected_at", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "attribution"
+kind = "task"
+ready_when = "steps.timeline.done"
+title_template = "Did we cause it? (did we just ship this?)"
+authority_role = "platform-admin"
+fields = [
+  { name = "self_inflicted", field_type = "yes|no|unknown", required = true },
+  { name = "causing_change", field_type = "string" },
+  { name = "cause_landed_at", field_type = "string" },
+  { name = "what_we_believed_first", field_type = "string", required = true },
+  { name = "evidence_contradicted", field_type = "string" },
+]
+
 [[workflow.step]]
 title = "diagnose"
 kind = "task"
-ready_when = "steps.stabilize.done"
+ready_when = "steps.attribution.done"
 title_template = "Name the root cause"
 fields = [
   { name = "root_cause", field_type = "string", required = true },
@@ -60,23 +125,53 @@ fields = [
   { name = "why_now", field_type = "string" },
 ]
 
+# Who found it is `raised.detected_by`; this step asks what SHOULD have.
 [[workflow.step]]
-title = "prevent"
+title = "detection"
 kind = "task"
 ready_when = "steps.diagnose.done"
-title_template = "Ship the prevention"
+title_template = "What should have found it, and why did it not?"
+authority_role = "platform-admin"
 fields = [
-  { name = "prevention", field_type = "string", required = true },
-  { name = "carried_by", field_type = "string" },
+  { name = "earliest_possible_detection", field_type = "gate|ci|deploy|monitor|impossible-today", required = true },
+  { name = "why_not_caught_earlier", field_type = "string", required = true },
+  { name = "blind_spot", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "simplification"
+kind = "task"
+ready_when = "steps.detection.done"
+title_template = "What can be REMOVED or collapsed?"
+authority_role = "platform-admin"
+fields = [
+  { name = "simplification", field_type = "string", required = true },
+  { name = "facts_living_twice", field_type = "string" },
+  { name = "additions_considered_and_rejected", field_type = "string" },
+]
+
+# An ARRAY because the point is plurality: an incident earns several
+# actions and each is its own packet (a car, a backlog item, a design),
+# so each is routed, owned and closed like any other work. This step
+# records the refs; it builds nothing.
+[[workflow.step]]
+title = "actions"
+kind = "task"
+ready_when = "steps.simplification.done"
+title_template = "File each action as its own packet"
+authority_role = "platform-admin"
+fields = [
+  { name = "action_packets", field_type = "array", required = true },
+  { name = "shipped_in_this_incident", field_type = "string" },
 ]
 
 [[workflow.step]]
 title = "review"
-kind = "sign-off"
-ready_when = "steps.prevent.done"
-title_template = "Ratify the prevention"
+kind = "incident-review"
+ready_when = "steps.actions.done"
+title_template = "Human review of the findings"
 authority_role = "platform-admin"
-fields = [{ name = "decision", field_type = "pending|approved|rejected|changes-requested", required = true }]
+metadata_defaults = { human_only = true }
 
 [[workflow.step]]
 title = "closed"
