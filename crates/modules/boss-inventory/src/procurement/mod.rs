@@ -1,5 +1,6 @@
 //! Procurement — vendor CRM + intelligence, namespaced under
-//! `boss-inventory` per D3 of `examples/used-device-shop/design/procurement-team-needs.md`.
+//! `boss-inventory` beside the parts and POs it buys. Backs /vendors
+//! (the example tenant seeds its vendors from seeds/vendors.toml).
 //!
 //! Session 1 scope: contacts, interactions, account-team, contracts
 //! — the Vendor Knowledge Base four-section plumbing. Jobs + plugins

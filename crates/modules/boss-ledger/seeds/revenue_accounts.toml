@@ -17,20 +17,18 @@
 # in `finance.invoice.issued` payload trips a hard error rather
 # than silently mis-classifying revenue. See the
 # `unknown revenue category` branch in `rules::revenue_account_for`.
-
-# --- Device-shop tenant (used-device-shop) ---
-"new-sales"  = "4100"
-"used-sales" = "4110"
-"service"    = "4120"
-"parts"      = "4130"
-"contracts"  = "4140"
+#
+# The used-device shop's five rows (new-sales, used-sales, service,
+# parts, contracts) left with the shop on 2026-09-24 (backlog
+# a8991c86). Revenue a Workflow posts through
+# `finance.sponsorship.received` does not read this map.
 
 # --- Brewery tenant (Algedonic Ales) ---
 # 4100 Wholesale Beer Sales       ← wholesale
 # 4110 Direct-to-Consumer         ← retail / merchandise
 # 4120 Taproom                    ← taproom
 # 4130 Seasonal & Specialty       ← event-package
-# 4140 Distribution Contracts     ← distribution / contracts / uncategorized
+# 4140 Distribution Contracts     ← distribution / uncategorized
 "wholesale"     = "4100"
 "retail"        = "4110"
 "merchandise"   = "4110"

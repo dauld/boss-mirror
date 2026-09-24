@@ -1,6 +1,6 @@
 //! Marketing Asset KB — files + metadata for marketing-authored
-//! content. New KB entity kind in `boss-catalog` per D1 and D3 of
-//! `examples/used-device-shop/design/marketing-needs.md`.
+//! content, a KB entity kind in `boss-catalog`. The example tenant
+//! turns it on (`marketing-assets` in its tenant.toml modules).
 //!
 //! Session 2 scope: schema, CRUD adapter, HTTP surface. Retire +
 //! supersedes (D9 event-sourced versioning) + KB four-section render

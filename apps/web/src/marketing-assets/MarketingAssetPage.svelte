@@ -338,20 +338,10 @@
           </table>
         {/if}
     </Section>
-
-    <Section title="Insights" wide>
-        <p class="empty">
-          Download count, campaigns used in, and motion references will land
-          with the attribution plugin once it grows past read-only mode.
-        </p>
-    </Section>
-
-    <Section title="In-flight motions" wide>
-        <p class="empty">
-          Active <code>marketing-motion</code> Jobs referencing this asset
-          via their tier 3 checklist step will surface here once session 1's
-          motion execution picks up assets in metadata.
-        </p>
-    </Section>
+    <!-- "Insights" and "In-flight motions" placeholders retired
+         2026-09-24 (backlog a8991c86): each promised a read from the
+         device shop's marketing-motion Workflow and its attribution
+         plugin, both gone. The Campaigns list above is the live way from
+         an asset to the Jobs about it. -->
   {/if}
 </div>

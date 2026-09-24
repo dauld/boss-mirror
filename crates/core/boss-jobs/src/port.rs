@@ -1288,22 +1288,6 @@ pub trait JobsRepository: Send + Sync {
         status: Option<JobStatus>,
     ) -> Result<Vec<(String, i64)>, JobsError>;
 
-    /// For each open Job, compute its "current tier" — the min
-    /// sort_order of any non-terminal step on the Job. Group by
-    /// `(kind, current_tier)` and return the counts. The tier number
-    /// is the step index the Job is currently working on; -1 means
-    /// every step is terminal (completed/skipped) but the Job itself
-    /// hasn't been closed yet.
-    ///
-    /// Drives the live histogram on the operating-model view so a
-    /// Workflow bar can show "how many refurbs are in Acquire vs.
-    /// Refurbish vs. Certify right now." Caller maps tier → phase
-    /// via its own Workflow-specific mapping.
-    async fn jobs_tier_distribution(
-        &self,
-        status: Option<JobStatus>,
-    ) -> Result<Vec<(String, i32, i64)>, JobsError>;
-
     // ----- Cross-job dependency resolution (D10) -----
 
     /// Given a set of step IDs (possibly spanning multiple jobs),

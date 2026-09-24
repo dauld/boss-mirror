@@ -554,47 +554,6 @@ pub(super) fn job_status_str_public(s: JobStatus) -> &'static str {
     }
 }
 
-/// Per-kind distribution of Jobs across step sort_order tiers.
-///
-/// Response shape:
-/// ```json
-/// {
-///   "by_kind": {
-///     "refurb-used": { "tiers": { "0": 12, "1": 55153, "2": 4, "-1": 100 } },
-///     "sale":        { "tiers": { "0": 55779, "1": 3, "-1": 177 } }
-///   },
-///   "status": "open"
-/// }
-/// ```
-/// `tiers[-1]` = Jobs with every step terminal (completed/skipped)
-/// but the Job not yet closed (e.g. awaiting sign-off). Frontend maps
-/// tier → lifecycle phase via the Workflow's step list (sort_order
-/// buckets).
-pub(super) async fn jobs_phase_distribution<R: JobsRepository + 'static, B: EventBus + 'static>(
-    State(state): State<Arc<JobsApiState<R, B>>>,
-    Query(q): Query<JobsSummaryQuery>,
-) -> Response {
-    match state.jobs.jobs_tier_distribution(q.status).await {
-        Ok(rows) => {
-            let mut by_kind: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
-            for (kind, tier, count) in rows {
-                let entry = by_kind
-                    .entry(kind)
-                    .or_insert_with(|| serde_json::json!({ "tiers": {} }));
-                if let Some(tiers) = entry.get_mut("tiers").and_then(|v| v.as_object_mut()) {
-                    tiers.insert(tier.to_string(), serde_json::Value::from(count));
-                }
-            }
-            Json(serde_json::json!({
-                "by_kind": by_kind,
-                "status": q.status.map(job_status_str_public),
-            }))
-            .into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
 #[derive(Deserialize, Default)]
 pub(super) struct CreateJobQuery {
     /// When false, the handler creates the Job row but skips

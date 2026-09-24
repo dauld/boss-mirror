@@ -44,7 +44,7 @@ async fn manual_revenue_credit_flows_into_commerce_summary() {
             "created_by": "drift-test",
             "lines": [
                 {"account_code": "1100", "debit_cents":  amount_cents, "memo": "A/R"},
-                {"account_code": "4100", "credit_cents": amount_cents, "memo": "new-sales"},
+                {"account_code": "4100", "credit_cents": amount_cents, "memo": "wholesale"},
             ],
         }))
         .send(&ledger)
@@ -79,7 +79,7 @@ async fn manual_revenue_credit_flows_into_commerce_summary() {
     let row_4100 = summary
         .revenue_ttm
         .iter()
-        .find(|c| c.category.contains("Wholesale") || c.category == "new-sales")
+        .find(|c| c.category.contains("Wholesale") || c.category == "wholesale")
         .expect("revenue_ttm missing 4100 category row");
     assert_eq!(
         row_4100.revenue_cents, amount_cents,

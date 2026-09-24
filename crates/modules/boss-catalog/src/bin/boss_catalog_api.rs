@@ -120,8 +120,7 @@ async fn main() -> Result<()> {
         classes_client,
         clock,
     };
-    // Merge the Marketing Asset KB sub-router (session 2 of
-    // examples/used-device-shop/design/marketing-needs.md). Postgres-only: marketing_assets
+    // Merge the Marketing Asset KB sub-router. Postgres-only: marketing_assets
     // is backed by Postgres via PgMarketingAssets, no in-memory
     // fallback since the InMemoryKb is device-catalog specific.
     let app = {

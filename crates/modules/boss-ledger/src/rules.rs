@@ -144,8 +144,8 @@ impl RuleSet for BossRuleSet {
 /// Revenue category → revenue account code.
 ///
 /// Loaded once at first call from a TOML map. The embedded
-/// `seeds/revenue_accounts.toml` ships the default brewery +
-/// device-shop mappings; per-tenant overrides land via the
+/// `seeds/revenue_accounts.toml` ships the one example tenant's
+/// mapping as the default; per-tenant overrides land via the
 /// `BOSS_LEDGER_REVENUE_ACCOUNTS_TOML` env var pointing at a
 /// sibling file (replaces — does not merge with — the default).
 /// Same data-as-data shape as D1 (step_types.toml) + D2
@@ -1486,7 +1486,7 @@ fn invoice_issued(fact: &FactRef<'_>) -> Result<JournalEntryDraft, LedgerError> 
 ///   "period_start": "2026-02-01",
 ///   "period_end":   "2026-02-28",
 ///   "amount_cents": 100000,
-///   "category":     "contracts",
+///   "category":     "distribution",
 ///   "account_id":  "account-00042"
 /// }
 /// ```
@@ -1549,7 +1549,7 @@ mod v2_tests {
         let payload = serde_json::json!({
             "invoice_id": "inv-1",
             "line_items": [{
-                "category": "contracts",
+                "category": "distribution",
                 "amount_cents": 1_200_000,
                 "recognition_pattern": "ratable",
             }],
@@ -1577,8 +1577,8 @@ mod v2_tests {
         let payload = serde_json::json!({
             "invoice_id": "inv-bundle",
             "line_items": [
-                { "category": "new-sales", "amount_cents": 500_000, "recognition_pattern": "immediate" },
-                { "category": "contracts", "amount_cents": 1_200_000, "recognition_pattern": "ratable" },
+                { "category": "wholesale", "amount_cents": 500_000, "recognition_pattern": "immediate" },
+                { "category": "distribution", "amount_cents": 1_200_000, "recognition_pattern": "ratable" },
             ],
         });
         let draft = evaluate(&BossRuleSet, &fact(id, "finance.invoice.issued", &payload)).unwrap();
@@ -1588,8 +1588,8 @@ mod v2_tests {
         // (COGS rides the invoice only for FG lines — see
         // `invoice_issued_v2`).
         assert_eq!(draft.total_debits(), 1_700_000);
-        // Credits: 4100 = 500_000 (immediate new-sales) + 2200 =
-        // 1_200_000 (deferred contracts).
+        // Credits: 4100 = 500_000 (immediate wholesale) + 2200 =
+        // 1_200_000 (deferred distribution).
         let mut credits: Vec<(&str, i64)> = draft
             .lines
             .iter()
@@ -1609,8 +1609,8 @@ mod v2_tests {
         let payload = serde_json::json!({
             "invoice_id": "inv-multi",
             "line_items": [
-                { "category": "contracts", "amount_cents": 1_200_000, "recognition_pattern": "ratable" },
-                { "category": "service",   "amount_cents":   300_000, "recognition_pattern": "ratable" },
+                { "category": "distribution", "amount_cents": 1_200_000, "recognition_pattern": "ratable" },
+                { "category": "retail",    "amount_cents":   300_000, "recognition_pattern": "ratable" },
             ],
         });
         let draft = evaluate(&BossRuleSet, &fact(id, "finance.invoice.issued", &payload)).unwrap();
@@ -1623,8 +1623,8 @@ mod v2_tests {
             .collect();
         assert_eq!(deferred.len(), 2);
         let memos: Vec<&str> = deferred.iter().filter_map(|l| l.memo.as_deref()).collect();
-        assert!(memos.iter().any(|m| m.contains("contracts")));
-        assert!(memos.iter().any(|m| m.contains("service")));
+        assert!(memos.iter().any(|m| m.contains("distribution")));
+        assert!(memos.iter().any(|m| m.contains("retail")));
     }
 
     #[test]
@@ -1634,7 +1634,7 @@ mod v2_tests {
         let payload = serde_json::json!({
             "invoice_id": "inv-tax",
             "line_items": [
-                { "category": "contracts", "amount_cents": 1_200_000, "recognition_pattern": "ratable" },
+                { "category": "distribution", "amount_cents": 1_200_000, "recognition_pattern": "ratable" },
             ],
             "tax_lines": [
                 { "account": "2300", "amount_cents": 96_000, "jurisdiction": "US-CA" },
@@ -1651,7 +1651,7 @@ mod v2_tests {
         let payload = serde_json::json!({
             "invoice_id": "inv-m",
             "line_items": [{
-                "category": "contracts",
+                "category": "distribution",
                 "amount_cents": 1_200_000,
                 "recognition_pattern": "milestone",
             }],
@@ -1667,7 +1667,7 @@ mod v2_tests {
         let payload = serde_json::json!({
             "invoice_id": "inv-u",
             "line_items": [{
-                "category": "contracts",
+                "category": "distribution",
                 "amount_cents": 100,
                 "recognition_pattern": "quarterly",
             }],
@@ -1683,7 +1683,7 @@ mod v2_tests {
             "period_start": "2026-02-01",
             "period_end":   "2026-02-28",
             "amount_cents": 100_000,
-            "category":     "contracts",
+            "category":     "distribution",
             "account_id":  "account-00001",
         });
         let draft = evaluate(
@@ -1708,7 +1708,7 @@ mod v2_tests {
                 "period_start": "2026-02-01",
                 "period_end":   "2026-02-28",
                 "amount_cents": amount,
-                "category":     "contracts",
+                "category":     "distribution",
                 "account_id":  "account-00001",
             });
             assert!(

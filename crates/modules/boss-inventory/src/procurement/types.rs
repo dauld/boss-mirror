@@ -1,7 +1,6 @@
 //! Domain types for the Vendor CRM — contacts, interactions,
 //! account-team, contracts. Mirrors the account-side CRM shape
-//! intentionally so the frontend can share rendering components
-//! (see D2 of `examples/used-device-shop/design/procurement-team-needs.md`).
+//! intentionally so the frontend can share rendering components.
 
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};

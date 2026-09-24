@@ -116,7 +116,7 @@ pub fn invoice_fixture(id: &str) -> Invoice {
         line_items: vec![InvoiceLineItem {
             id: format!("{id}-l1"),
             invoice_id: id.to_string(),
-            revenue_category: RevenueCategory::from("new-sales"),
+            revenue_category: RevenueCategory::from("wholesale"),
             amount_cents: 1_200_000,
             currency: "USD".to_string(),
             description: "Device sale".to_string(),

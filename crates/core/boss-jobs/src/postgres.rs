@@ -2133,43 +2133,6 @@ impl JobsRepository for PgJobs {
         Ok(rows)
     }
 
-    async fn jobs_tier_distribution(
-        &self,
-        status: Option<JobStatus>,
-    ) -> Result<Vec<(String, i32, i64)>, JobsError> {
-        // Per-job tier = min(sort_order) over non-done steps, or -1
-        // when every step is terminal. One CTE pass so we don't walk
-        // the steps table twice. Ordered so the frontend receives a
-        // deterministic serialization.
-        let rows: Vec<(String, i32, i64)> = sqlx::query_as(
-            r#"
-            WITH per_job AS (
-              SELECT j.id,
-                     j.kind,
-                     COALESCE(
-                       MIN(s.sort_order) FILTER (
-                         WHERE s.status IN ('pending', 'ready', 'active')
-                       ),
-                       -1
-                     ) AS tier
-              FROM jobs j
-              LEFT JOIN steps s ON s.job_id = j.id
-              WHERE ($1::text IS NULL OR j.status = $1)
-              GROUP BY j.id, j.kind
-            )
-            SELECT kind, tier, COUNT(*)::BIGINT
-            FROM per_job
-            GROUP BY kind, tier
-            ORDER BY kind, tier
-            "#,
-        )
-        .bind(status.map(job_status_str))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| JobsError::Storage(e.to_string()))?;
-        Ok(rows)
-    }
-
     async fn resolve_blockers(
         &self,
         ids: &[StepId],

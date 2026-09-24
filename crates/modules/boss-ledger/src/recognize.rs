@@ -766,7 +766,7 @@ mod tests {
             source_kind: "service_agreement".into(),
             source_id: "sa-1".into(),
             account_id: "account-001".into(),
-            revenue_category: "contracts".into(),
+            revenue_category: "distribution".into(),
             revenue_account: "4140".into(),
             deferred_account: "2200".into(),
             total_cents: total,

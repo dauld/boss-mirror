@@ -101,14 +101,22 @@ async fn rebuild_reproduces_invoices_and_line_items() {
         "INV-001",
         "acc-001",
         vec![
-            (RevenueCategory::from("service"), 5_000, "tune-up"),
-            (RevenueCategory::from("parts"), 3_000, "spare cartridge"),
+            (RevenueCategory::from("taproom"), 5_000, "tune-up"),
+            (
+                RevenueCategory::from("event-package"),
+                3_000,
+                "spare cartridge",
+            ),
         ],
     );
     let i2 = fixture(
         "INV-002",
         "acc-002",
-        vec![(RevenueCategory::from("contracts"), 12_000, "annual support")],
+        vec![(
+            RevenueCategory::from("distribution"),
+            12_000,
+            "annual support",
+        )],
     );
 
     // Drive both creates through the repo alone — the adapter records

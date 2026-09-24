@@ -1029,42 +1029,6 @@ impl JobsRepository for InMemoryJobs {
         Ok(counts.into_iter().collect())
     }
 
-    async fn jobs_tier_distribution(
-        &self,
-        status: Option<JobStatus>,
-    ) -> Result<Vec<(String, i32, i64)>, JobsError> {
-        let state = self.inner.lock().expect("poisoned");
-        let mut counts: std::collections::BTreeMap<(String, i32), i64> =
-            std::collections::BTreeMap::new();
-        for job in state.jobs.values() {
-            if let Some(want) = status
-                && job.status != want
-            {
-                continue;
-            }
-            let min_pending = state
-                .steps
-                .values()
-                .filter(|s| s.job_id.to_string() == job.id.to_string())
-                .filter(|s| {
-                    // Tier = lowest sort_order still awaiting work
-                    // (non-terminal). v2 has no Blocked.
-                    matches!(
-                        s.status,
-                        StepStatus::Pending | StepStatus::Ready | StepStatus::Active,
-                    )
-                })
-                .map(|s| s.sort_order)
-                .min();
-            let tier = min_pending.unwrap_or(-1);
-            *counts.entry((job.kind.clone(), tier)).or_insert(0) += 1;
-        }
-        Ok(counts
-            .into_iter()
-            .map(|((kind, tier), n)| (kind, tier, n))
-            .collect())
-    }
-
     async fn resolve_blockers(
         &self,
         ids: &[StepId],

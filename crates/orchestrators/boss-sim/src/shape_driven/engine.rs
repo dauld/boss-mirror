@@ -1795,10 +1795,9 @@ mod tests {
 
     /// SubjectKind without `created_event_kind` set must NOT
     /// emit any audit event on birth — the field is the explicit
-    /// opt-in, not the default. Used-device-shop's `system` kind
-    /// is the canonical case (system creation runs through the
-    /// catalog API path, not through the sim-engine output
-    /// adapter).
+    /// opt-in, not the default: a kind whose creation runs through
+    /// its own API path, not through the sim-engine output adapter,
+    /// must not be born twice.
     #[test]
     fn subject_birth_without_topic_emits_no_event() {
         use crate::shape_driven::tenant::SubjectRate;

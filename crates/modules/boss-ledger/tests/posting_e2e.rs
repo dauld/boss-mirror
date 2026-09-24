@@ -62,7 +62,7 @@ async fn invoice_issued_produces_balanced_entry() {
     let payload = json!({
         "invoice_id": "inv-e2e-1",
         "amount_cents": 12_000,
-        "line_items": [{"category": "new-sales", "amount_cents": 12_000}],
+        "line_items": [{"category": "wholesale", "amount_cents": 12_000}],
     });
     let fact_id = post_raw_fact(
         &db,
@@ -108,8 +108,8 @@ async fn mixed_category_invoice_splits_revenue_lines() {
         "invoice_id": "inv-e2e-mix",
         "amount_cents": 15_000,
         "line_items": [
-            {"category": "new-sales", "amount_cents": 10_000},
-            {"category": "service", "amount_cents": 5_000},
+            {"category": "wholesale", "amount_cents": 10_000},
+            {"category": "taproom", "amount_cents": 5_000},
         ],
     });
     let fact_id = post_raw_fact(
@@ -146,7 +146,7 @@ async fn posting_the_same_fact_twice_is_idempotent() {
     let payload = json!({
         "invoice_id": "inv-e2e-idem",
         "amount_cents": 500,
-        "line_items": [{"category": "service", "amount_cents": 500}],
+        "line_items": [{"category": "taproom", "amount_cents": 500}],
     });
     let fact_id = Uuid::new_v4();
     let happened_on = NaiveDate::from_ymd_opt(2026, 3, 15).unwrap();
@@ -206,7 +206,7 @@ async fn auto_creates_monthly_period_for_new_month() {
     let payload = json!({
         "invoice_id": "inv-e2e-period",
         "amount_cents": 100,
-        "line_items": [{"category": "service", "amount_cents": 100}],
+        "line_items": [{"category": "taproom", "amount_cents": 100}],
     });
     post_raw_fact(
         &db,

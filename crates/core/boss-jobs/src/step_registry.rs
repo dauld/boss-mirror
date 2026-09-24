@@ -657,9 +657,11 @@ mod tests {
         // `step.done.credential-rotation` instead of firing on every
         // `task` — the same reasoning as `gate-verdict` before it).
         // 47 since `marketing-launch` retired with the launch calendar
-        // (design 2ea444f5, backlog a8991c86).
+        // (design 2ea444f5, backlog a8991c86). 45 since
+        // `marketing-brief` and `marketing-attribution` followed it: no
+        // active Workflow and no in-flight step used either (car 8).
         let reg = StepRegistry::v1();
-        assert_eq!(reg.all().len(), 47);
+        assert_eq!(reg.all().len(), 45);
     }
 
     /// The reason `scope-declaration` is registered at all.
@@ -1056,8 +1058,8 @@ mod tests {
         let v = all_v1_types();
         assert_eq!(
             v.len(),
-            47,
-            "step_types.toml should have 47 [[step_type]] blocks"
+            45,
+            "step_types.toml should have 45 [[step_type]] blocks"
         );
     }
 
