@@ -30,6 +30,11 @@ const LOOP_KINDS = [
   'maintenance-estate-observe-units',
 ];
 
+/// How late the loops' reads answer — the manual-page fix's figure
+/// (0eda772f): long enough that a snapshot straight after mount always
+/// wins the race, short beside the suite's stated expect budget.
+const LOOPS_READ_DELAY_MS = 750;
+
 const json = (r: Route, body: unknown, status = 200): Promise<void> =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 
@@ -42,7 +47,12 @@ const NODES = [
 ];
 
 /// Stamps relative to the test's own clock, so the ages read the same on
-/// any day this runs.
+/// any day this runs — taken when the read is ANSWERED, not when the
+/// file loads. The page rounds an age to the nearest minute, so a stamp
+/// taken at load read "9m ago" as "10m ago" once 30 s had passed, and a
+/// worker that loads this file and then runs its tests for longer than
+/// that under load (or under --repeat-each) failed on the clock, not the
+/// page: measured 4 in 120 runs while fixing a9c76cf7.
 const ago = (minutes: number): string => new Date(Date.now() - minutes * 60_000).toISOString();
 
 const packet = (
@@ -54,7 +64,7 @@ const packet = (
 
 /// The closed read per (kind, host) — the newest terminal. Missing key:
 /// a kind with no finished run at all.
-const CLOSED: Readonly<Record<string, Record<string, unknown>>> = {
+const closed = (): Readonly<Record<string, Record<string, unknown>>> => ({
   'maintenance-forge-converge': packet('f0f0f0f0-0000-0000-0000-000000000001', 'closed',
     { outcome: 'failed', closed_at: ago(7) }, { node_id: 'forge', result: 'exit-code' }),
   'maintenance-boss-gcp-converge': packet('b0b0b0b0-0000-0000-0000-000000000002', 'closed',
@@ -69,13 +79,13 @@ const CLOSED: Readonly<Record<string, Record<string, unknown>>> = {
     { outcome: 'answered', host: 'forge', closed_at: ago(9) }),
   'ops-request:boss-gcp': packet('a2a2a2a2-0000-0000-0000-000000000007', 'closed',
     { outcome: 'refused', host: 'boss-gcp', closed_at: ago(30) }),
-};
+});
 
 /// The open read: one observe-units run in flight.
-const OPEN: Readonly<Record<string, Record<string, unknown>>> = {
+const open = (): Readonly<Record<string, Record<string, unknown>>> => ({
   'maintenance-estate-observe-units': packet('e1e1e1e1-0000-0000-0000-000000000008', 'open',
     { opened_at: ago(2) }),
-};
+});
 
 /// Which fixture a jobs read asks for: `kind`, or `kind:host` when the
 /// read carries the metadata filter.
@@ -90,10 +100,19 @@ async function install(page: Page, jobs: 'fixtures' | 'down'): Promise<void> {
   await installSmokeMocks(page);
   await page.route(/\/api\/estate\/nodes$/, (r) => json(r, NODES));
   // Only the loops' reads — the chrome's own job reads keep the floor.
-  await page.route(/\/api\/jobs\?kind=(maintenance-|ops-request)/, (r) => {
+  //
+  // They answer LATE on purpose (backlog a9c76cf7). The page paints its
+  // h1 at once and the loops table only when every estate read has
+  // answered, so mountPage returns before there is a row to read. This
+  // spec used to snapshot the cells straight after mount and redded gate
+  // a7b1b3df with [] on 2026-09-24; the delay makes that race the
+  // ordinary case, so a snapshot taken before the table is drawn fails
+  // every run rather than one run in a busy hour.
+  await page.route(/\/api\/jobs\?kind=(maintenance-|ops-request)/, async (r) => {
+    await new Promise((ok) => setTimeout(ok, LOOPS_READ_DELAY_MS));
     if (jobs === 'down') return r.fulfill({ status: 502, contentType: 'text/plain', body: 'jobs upstream unavailable' });
     const url = new URL(r.request().url());
-    const table = url.searchParams.get('status') === 'open' ? OPEN : CLOSED;
+    const table = url.searchParams.get('status') === 'open' ? open() : closed();
     const row = table[keyOf(url)];
     const data = row ? [row] : [];
     return json(r, { data, total: data.length });
@@ -103,19 +122,25 @@ async function install(page: Page, jobs: 'fixtures' | 'down'): Promise<void> {
 const loopsTable = (page: Page) => page.locator('table.estate-loops');
 const row = (page: Page, kind: string, nth = 0) => loopsTable(page).locator(`tr[data-loop="${kind}"]`).nth(nth);
 
-async function cells(page: Page, kind: string, nth = 0): Promise<string[]> {
-  return row(page, kind, nth).locator('td').allInnerTexts().then((t) => t.map((s) => s.trim()));
-}
+/// A row's cells as a LOCATOR, not a snapshot of their text (backlog
+/// a9c76cf7): `toHaveText` on it retries until the table is drawn,
+/// where `expect(await allInnerTexts()).toEqual(...)` read whatever was
+/// there the instant mountPage returned — `[]` under gate load. Inner
+/// text, as the snapshot read it.
+const cells = (page: Page, kind: string, nth = 0) => row(page, kind, nth).locator('td');
+const TEXT = { useInnerText: true } as const;
 
 test.describe('/it/estate — the loops', () => {
   test('one row per declared loop, then one ops-request row per host declaring the runner role', async ({ page }) => {
     await install(page, 'fixtures');
     await mountPage(page, PATH);
     await expect(page.getByText('02 — THE LOOPS')).toBeVisible();
-    const kinds = await loopsTable(page).locator('tbody tr').evaluateAll((rows) =>
-      rows.map((r) => r.getAttribute('data-loop')),
-    );
-    expect(kinds).toEqual([...LOOP_KINDS, 'ops-request', 'ops-request']);
+    // Polled, not snapshotted: the order is read again until it holds.
+    await expect
+      .poll(() => loopsTable(page).locator('tbody tr').evaluateAll((rows) =>
+        rows.map((r) => r.getAttribute('data-loop')),
+      ))
+      .toEqual([...LOOP_KINDS, 'ops-request', 'ops-request']);
   });
 
   test('each row reads its newest terminal as outcome and age, linked to the packet', async ({ page }) => {
@@ -123,30 +148,30 @@ test.describe('/it/estate — the loops', () => {
     await mountPage(page, PATH);
 
     // The watchdog: its packet names no host, and the page says so.
-    expect(await cells(page, 'maintenance-cluster-watchdog')).toEqual([
+    await expect(cells(page, 'maintenance-cluster-watchdog')).toHaveText([
       'cluster watchdog', 'not named on the packet', 'completed 3m ago', 'none',
-    ]);
+    ], TEXT);
     const done = row(page, 'maintenance-cluster-watchdog').locator('td.estate-loop-latest a');
     await expect(done).toHaveAttribute('href', '/ux/jobs/c0c0c0c0-0000-0000-0000-000000000003');
     await expect(done).toHaveClass(/estate-ok/);
 
     // A converge names its host on the run step; a failed run LOOKS failed.
-    expect(await cells(page, 'maintenance-forge-converge')).toEqual([
+    await expect(cells(page, 'maintenance-forge-converge')).toHaveText([
       'forge converge', 'forge', 'failed 7m ago', 'none',
-    ]);
+    ], TEXT);
     await expect(row(page, 'maintenance-forge-converge').locator('td.estate-loop-latest a')).toHaveClass(/estate-drift/);
-    expect((await cells(page, 'maintenance-boss-gcp-converge'))[1]).toBe('boss-gcp');
+    await expect(cells(page, 'maintenance-boss-gcp-converge').nth(1)).toHaveText('boss-gcp', TEXT);
 
     // Hours past the hour mark, not "today".
-    expect((await cells(page, 'maintenance-estate-observe-host'))[2]).toBe('completed 3h ago');
+    await expect(cells(page, 'maintenance-estate-observe-host').nth(2)).toHaveText('completed 3h ago', TEXT);
   });
 
   test('an open packet is shown and linked beside the newest terminal', async ({ page }) => {
     await install(page, 'fixtures');
     await mountPage(page, PATH);
-    expect(await cells(page, 'maintenance-estate-observe-units')).toEqual([
+    await expect(cells(page, 'maintenance-estate-observe-units')).toHaveText([
       'observe units', 'not named on the packet', 'completed 4m ago', 'open 2m ago',
-    ]);
+    ], TEXT);
     await expect(row(page, 'maintenance-estate-observe-units').locator('td.estate-loop-open a'))
       .toHaveAttribute('href', '/ux/jobs/e1e1e1e1-0000-0000-0000-000000000008');
   });
@@ -154,14 +179,14 @@ test.describe('/it/estate — the loops', () => {
   test('a loop with no finished run says so, rather than rendering blank', async ({ page }) => {
     await install(page, 'fixtures');
     await mountPage(page, PATH);
-    expect((await cells(page, 'maintenance-cluster-converge'))[2]).toBe('no finished run recorded');
+    await expect(cells(page, 'maintenance-cluster-converge').nth(2)).toHaveText('no finished run recorded', TEXT);
   });
 
   test('the ops-request loop is split per host by the server filter, and a refusal reads as trouble', async ({ page }) => {
     await install(page, 'fixtures');
     await mountPage(page, PATH);
-    expect(await cells(page, 'ops-request', 0)).toEqual(['ops-request', 'forge', 'answered 9m ago', 'none']);
-    expect(await cells(page, 'ops-request', 1)).toEqual(['ops-request', 'boss-gcp', 'refused 30m ago', 'none']);
+    await expect(cells(page, 'ops-request', 0)).toHaveText(['ops-request', 'forge', 'answered 9m ago', 'none'], TEXT);
+    await expect(cells(page, 'ops-request', 1)).toHaveText(['ops-request', 'boss-gcp', 'refused 30m ago', 'none'], TEXT);
     await expect(row(page, 'ops-request', 1).locator('td.estate-loop-latest a')).toHaveClass(/estate-drift/);
   });
 
