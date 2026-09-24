@@ -3,7 +3,7 @@
 // `bun test`.
 
 import { describe, expect, test } from 'bun:test';
-import { canSeeRoute, declaredSurfaces, ROUTES, type RouteName } from './permissions';
+import { canSeeRoute, declaredSurfaces, DEFAULT_WORK, ROUTES, workFor, type RouteName } from './permissions';
 
 const row = (code: string, metadata: Record<string, unknown>) => ({ code, metadata });
 
@@ -97,4 +97,62 @@ describe('the brewery seed declares its surfaces in the vocabulary the SPA reads
     );
     expect(bad).toEqual([]);
   });
+});
+
+describe('workFor — a role\'s Work list is its Class row\'s metadata.work', () => {
+  // Until 2026-09-24 (backlog 6a3b93eb) libs/web-kit carried
+  // WORK_BY_ROLE: a closed map of 66 brewery, device-shop and platform
+  // role codes, and every live role of the company's own tenant fell
+  // through it to the default. The lists moved verbatim onto the
+  // example tenants' role rows as `metadata.work`, beside `surfaces`.
+  test('a role the registry has not answered for, or whose row declares none, gets the default', () => {
+    expect(workFor(undefined)).toEqual(DEFAULT_WORK);
+    expect(workFor(row('platform-admin', { is_system_role: true }))).toEqual(DEFAULT_WORK);
+    expect(DEFAULT_WORK).toEqual(['jobs']);
+  });
+  test('a declared list is the Work list, in its declared order', () => {
+    expect(workFor(row('sales-rep', { work: ['sales', 'accounts'] }))).toEqual(['sales', 'accounts']);
+  });
+  test('an empty declaration is a declaration: no Work rows', () => {
+    expect(workFor(row('content-writer', { work: [] }))).toEqual([]);
+  });
+  test('a non-list reads as nothing declared, never a crash', () => {
+    expect(workFor(row('x', { work: 'jobs' }))).toEqual(DEFAULT_WORK);
+    expect(workFor(row('x', { work: null }))).toEqual(DEFAULT_WORK);
+  });
+  test('an entry that is not a gated RouteName is dropped — the shell looks each one up in its catalog', () => {
+    expect(workFor(row('x', { work: ['jobs', 3, 'refurb', 'qa'] }))).toEqual(['jobs', 'qa']);
+  });
+});
+
+describe('the example tenants declare Work in the vocabulary the SPA reads', () => {
+  // A route renamed in libs/web-kit without the seed following is a
+  // role that silently loses a Work row, so each seed is checked
+  // against ROUTES here rather than trusted.
+  type Seeded = { subject_kind: string; code: string; member_attribute?: string; metadata?: Record<string, unknown> };
+  const seeds: ReadonlyArray<[string, () => Promise<ReadonlyArray<Seeded>>]> = [
+    ['brewery', async () =>
+      (await Bun.file(new URL('../../../../examples/brewery/seeds/classes.json', import.meta.url)).json()) as Seeded[]],
+    ['used-device-shop', async () =>
+      (Bun.TOML.parse(await Bun.file(new URL('../../../../examples/used-device-shop/seeds/classes.toml', import.meta.url)).text()) as { class: Seeded[] }).class],
+  ];
+  for (const [tenant, load] of seeds) {
+    test(`${tenant}: every metadata.work entry is a gated RouteName, and none is schedule`, async () => {
+      const roles = (await load()).filter((r) => r.subject_kind === 'employee' && r.member_attribute === 'role');
+      const declared = roles.filter((r) => Array.isArray(r.metadata?.['work']));
+      expect(declared.length).toBeGreaterThan(20);
+      const known = new Set<string>(ROUTES);
+      const bad = declared.flatMap((r) =>
+        (r.metadata?.['work'] as unknown[])
+          .filter((s) => typeof s !== 'string' || !known.has(s))
+          .map((s) => `${r.code}: ${String(s)}`),
+      );
+      expect(bad).toEqual([]);
+      // "My schedule" is a Home row for every role, gated only by the
+      // row's `surfaces` — listing it in Work showed it twice (backlog
+      // c88fa303, page audit 0e4fef17).
+      const twice = declared.filter((r) => (r.metadata?.['work'] as unknown[]).includes('schedule')).map((r) => r.code);
+      expect(twice).toEqual([]);
+    });
+  }
 });

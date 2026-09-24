@@ -106,6 +106,10 @@
 //! there stands, and one carrying a different count is refused naming
 //! both figures, rather than printing the held row's price as though
 //! it were this command's answer ([`record_line`], backlog b4fd594e).
+//! And once the run is GREEN, the report frees its worktree's cargo
+//! target on the dev pod scratch, recording the bytes on the run as
+//! `scratch_target` ([`crate::scratch_target`], backlog 4e17c49d); a run
+//! that is not green keeps it for the rescue.
 
 use anyhow::{Context, Result, bail};
 use boss_jobs::agent_runs::{PricingBasis, TokenUsage};
@@ -1932,6 +1936,7 @@ pub(crate) async fn report_at(
     base: &str,
     run_ref: &str,
     report: &Report,
+    scratch: Option<&crate::scratch_target::Scratch>,
     actor: &str,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
@@ -1995,6 +2000,35 @@ pub(crate) async fn report_at(
              the report rides the packet, run --report again once the run is at reported",
             line.status
         );
+    }
+
+    // THE RUN'S SCRATCH TARGET (backlog 4e17c49d): a green run's
+    // worktree target is freed here, at the one moment something knows
+    // the run is finished with it, and what was freed — or why it was
+    // kept — rides the packet. Before the agent_runs record, because a
+    // refusal there must not strand ~20 GB on the scratch; and never
+    // fatal, because the handback is the deliverable
+    // ([`crate::scratch_target`] has the measurement and the guards).
+    if let Some(scratch) = scratch {
+        let (run_v, scratch_v) = (run.clone(), scratch.clone());
+        let (said, record) = tokio::task::spawn_blocking(move || {
+            crate::scratch_target::settle(&run_v, &scratch_v, now)
+        })
+        .await
+        .context("the scratch-target pass did not finish")?;
+        eprintln!("boss dispatch: run {short} {said}");
+        if let Err(e) = api_at(
+            Method::PATCH,
+            format!("/api/jobs/{run_id}/metadata"),
+            Some(json!({ "scratch_target": record })),
+        )
+        .await
+        {
+            eprintln!(
+                "boss dispatch: WARNING — run {short}'s scratch_target could not be recorded on \
+                 the packet ({e:#}); the line above is the only copy"
+            );
+        }
     }
 
     // THE FINISH RECORD: what the run cost and how it went, where the
@@ -2104,6 +2138,11 @@ pub async fn report(
             None
         }
     };
+    // Where this box keeps worktree targets, and which worktree has
+    // which branch — read here, at the boundary, like the transcript.
+    let scratch = tokio::task::spawn_blocking(crate::scratch_target::Scratch::from_env)
+        .await
+        .context("reading the worktree list")?;
     report_at(
         &http,
         &base,
@@ -2114,6 +2153,7 @@ pub async fn report(
             tokens,
             meter,
         },
+        Some(&scratch),
         &actor,
         now,
     )
@@ -4213,6 +4253,7 @@ mod wire_tests {
             &base,
             RUN,
             &report,
+            None,
             "claude@algedonic.dev",
             "2026-09-18T19:00:00Z".parse().unwrap(),
         )
@@ -4264,6 +4305,63 @@ mod wire_tests {
         assert_eq!(rec["outcome"], "success", "`building` reached gated");
     }
 
+    /// The report frees a green run's worktree target and records the
+    /// bytes on the packet (backlog 4e17c49d) — over a temp root, never
+    /// the pod's /scratch — and the cost record still follows.
+    #[tokio::test]
+    async fn a_green_runs_report_frees_its_scratch_target_and_records_the_bytes() {
+        let mut run = run_packet("ready");
+        run["steps"][2]["metadata"]["gate_run"] = json!({ "branch": "fix/x" });
+        let (base, log) = report_stub(run).await;
+        let root = boss_testing::scratch_dir("dispatch-report-scratch");
+        let seed = root.join("target");
+        std::fs::create_dir_all(seed.join("debug")).unwrap();
+        let target = root.join("target-agent-a1");
+        std::fs::create_dir_all(target.join("debug")).unwrap();
+        std::fs::write(target.join("debug/libx.rlib"), vec![1u8; 32 * 1024]).unwrap();
+        let scratch = crate::scratch_target::Scratch {
+            root: root.clone(),
+            seed: seed.clone(),
+            porcelain: Some(
+                "worktree /work/boss\nHEAD 1\nbranch refs/heads/main\n\n\
+                 worktree /work/boss/.claude/worktrees/agent-a1\nHEAD 2\nbranch refs/heads/fix/x\n"
+                    .into(),
+            ),
+        };
+        report_at(
+            &reqwest::Client::new(),
+            &base,
+            RUN,
+            &Report {
+                summary: "handback".into(),
+                spend_usd: None,
+                meter: None,
+                tokens: Some(Tokens::Total(1000)),
+            },
+            Some(&scratch),
+            "claude@algedonic.dev",
+            "2026-09-18T19:00:00Z".parse().unwrap(),
+        )
+        .await
+        .expect("reports");
+        assert!(!target.exists(), "the green run's target is freed");
+        assert!(seed.exists(), "the seed stands");
+        let calls = log.calls.lock().unwrap().clone();
+        let rec = calls
+            .iter()
+            .find_map(|(m, _, b)| (m == "PATCH").then(|| b.get("scratch_target")).flatten())
+            .expect("scratch_target on the packet");
+        assert!(
+            rec["freed_bytes"].as_u64().unwrap_or(0) >= 32 * 1024,
+            "{rec}"
+        );
+        assert_eq!(rec["path"], target.display().to_string());
+        assert!(
+            calls.iter().any(|(m, _, _)| m == "POST"),
+            "the cost record still follows: {calls:?}"
+        );
+    }
+
     /// A run that has reached no terminal records no cost row: the
     /// `outcome` column would have to assert something the packet does
     /// not say, and the row is insert-once, so the assertion would
@@ -4286,6 +4384,7 @@ mod wire_tests {
                 meter: None,
                 tokens: Some(Tokens::Total(1000)),
             },
+            None,
             "claude@algedonic.dev",
             "2026-09-18T19:00:00Z".parse().unwrap(),
         )
@@ -4321,6 +4420,7 @@ mod wire_tests {
             &base,
             RUN,
             &report,
+            None,
             "claude@algedonic.dev",
             "2026-09-18T19:00:00Z".parse().unwrap(),
         )
@@ -4363,6 +4463,7 @@ mod wire_tests {
                 meter: None,
                 tokens: None,
             },
+            None,
             "claude@algedonic.dev",
             "2026-09-18T19:00:00Z".parse().unwrap(),
         )
@@ -4424,6 +4525,7 @@ mod wire_tests {
                     output: 17_000,
                 }),
             },
+            None,
             "claude@algedonic.dev",
             "2026-09-19T07:05:00Z".parse().unwrap(),
         )

@@ -29,11 +29,18 @@
   // and the camera is gone. The floor's
   // panels — the departure board, the entity deck and its verbs —
   // mount UNDER the region map, and they are still the Train Yard's
-  // own (YardPage, `embedded`: it drops its page header and its second
-  // copy of the map, keeps everything else). The interiors are fed by
-  // the scene YardPage ALREADY reads, handed up through `onfloor`: one
-  // read of the floor on the page, not two — the same rule that made
-  // the regions endpoint the only reading of a region.
+  // own (YardPage, `embedded`: it drops its page header, keeps
+  // everything else). The region map is fed by the scene YardPage
+  // ALREADY reads, handed up through `onfloor`: one read of the floor
+  // on the page, not two — the same rule that made the regions
+  // endpoint the only reading of a region.
+  //
+  // ONE MAP PER FLOOR (design fe77a1d2, car 2). The region map draws
+  // its region's slice of the floor and YardPage draws no map at all,
+  // so the selection that drives the entity panel crosses between the
+  // two: YardPage hands up what is selected and the function that
+  // selects (`onselection`), and a click on the region map goes
+  // through that function — one selection, whichever surface took it.
   //
   // NO NEW STYLING (the visual redesign reskins): the world is drawn in
   // the yard's own strokes and tokens.
@@ -50,7 +57,7 @@
   import { hasInterior } from './region-contents';
   import RegionMap from './RegionMap.svelte';
   import { hasPlatforms, type Deck } from './world-interior';
-  import type { Scene } from './yard-floor';
+  import type { FloorSelection, Scene } from './yard-floor';
   import { fetchBorders, summaryLine, type Borders } from './borders';
   import WorldMap from './WorldMap.svelte';
   import YardPage from './YardPage.svelte';
@@ -78,6 +85,10 @@
   /** The floor, handed up by the yard page below — the scene its own
    *  reads already built. Null until the first read lands. */
   let floor = $state<Scene | null>(null);
+  /** The floor's selection, handed up by the same page — null until it
+   *  has mounted, when the map selects nothing and a click is dropped
+   *  rather than aimed at a panel that is not there. */
+  let selection = $state<FloorSelection | null>(null);
   /** The platform deck, handed up by whichever queue board is mounted,
    *  WITH the region it was read for: a deck left over from the region
    *  just left would draw the wrong queues for a moment. */
@@ -136,6 +147,8 @@
         regions={regions.data}
         {floor}
         {deck}
+        selected={selection?.selected ?? ''}
+        onselect={(key) => selection?.select(key)}
         onleave={() => navigate('/it')} />
     {:else}
       <WorldMap
@@ -163,7 +176,11 @@
          Keyed on the region so a move from one to another opens the
          new region's panel rather than keeping the old selection. -->
     {#key floorRegion}
-      <YardPage focus={floorRegion} embedded onfloor={(s) => (floor = s)} />
+      <YardPage
+        focus={floorRegion}
+        embedded
+        onfloor={(s) => (floor = s)}
+        onselection={(s) => (selection = s)} />
     {/key}
   {/if}
 

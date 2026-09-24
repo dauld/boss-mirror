@@ -821,7 +821,9 @@ describe('the track — wagons behind a locomotive', () => {
   // both guarded so an unstamped train draws nothing.
   test("the locomotive and the train card name the channel as '<channel> train', guarded", () => {
     const strip = (s: string) => s.replace(/<!--[\s\S]*?-->/g, '');
-    const map = strip(readFileSync(join(import.meta.dir, 'YardMap.svelte'), 'utf8'));
+    // The track region's map draws the locomotives since design
+    // fe77a1d2 car 2 deleted the whole-floor YardMap.
+    const map = strip(readFileSync(join(import.meta.dir, 'RegionFloor.svelte'), 'utf8'));
     expect(map).toMatch(/\{#if l\.channel\}\s*<text[^>]*class="plate">\{l\.channel\} train<\/text>/);
     const page = strip(readFileSync(join(import.meta.dir, 'YardPage.svelte'), 'utf8'));
     expect(page).toMatch(/\{@const channel = serverTrainById\.get\(t\.id\)\?\.channel \?\? null\}/);

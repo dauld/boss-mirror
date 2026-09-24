@@ -18,7 +18,7 @@ import { join } from 'node:path';
  *  styles.css), states no fallback, and reaches no palette token but
  *  those. A retired token then fails loudly here, and round 2's palette
  *  is an edit to the `--map-*` block rather than to these files. */
-const MAP_FILES = ['MapPage.svelte', 'WorldMap.svelte', 'RegionMap.svelte'] as const;
+const MAP_FILES = ['MapPage.svelte', 'WorldMap.svelte', 'RegionMap.svelte', 'RegionFloor.svelte'] as const;
 
 /** The grammar round 2 swaps: grounds, text, rules, the accent, and
  *  each state as a line colour with its ink / bg / edge. */

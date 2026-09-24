@@ -18,10 +18,12 @@ describe('the yard page flows in protocol order', () => {
   const src = readFileSync(join(import.meta.dir, 'YardPage.svelte'), 'utf8');
   const markup = src.slice(src.indexOf('</script>'));
 
-  it('lays out alerts → map → board → entity panel → the lower sections, in that order', () => {
+  // The map left this page on design fe77a1d2 car 2: the region map
+  // above it draws that region's slice of the floor, so the page runs
+  // alerts → board → entity panel, and draws no second map.
+  it('lays out alerts → board → entity panel → the lower sections, in that order', () => {
     const landmarks = [
       'class="yard-alerts"',
-      '<YardMap',
       '<DepartureBoard',
       'class="yard-panel yard-entity"',
       '<ProductionPanel',

@@ -9,8 +9,7 @@
 
   import { session } from '@boss/web-kit/session/session.svelte';
   import { moduleEnabled, getLabel } from '@boss/web-kit/session/manifest.svelte';
-  import { canSeeRoute, type RouteName, type Role } from '@boss/web-kit/session/permissions';
-  import { workForRole } from '@boss/web-kit/session/work-by-role';
+  import { canSeeRoute, workFor, type RouteName, type Role } from '@boss/web-kit/session/permissions';
   import { departmentLabel } from '@boss/web-kit/nav';
   import { departments } from '@boss/web-kit/session/departments.svelte';
   import { href, navigate } from '../router';
@@ -143,13 +142,14 @@
     return app === 'home' || app === 'simulator' ? '' : departmentLabel(app, departments());
   }
 
-  // Work group is role-keyed: each role gets a tailored 3-5 item
-  // list of the surfaces they personally operate from. The same
-  // visible() filter still applies, so a brewery manifest that turns
-  // off a module hides it from Work too.
+  // Work group is role-keyed: each role gets the list its Class row
+  // declares (`metadata.work`, beside `surfaces`), or `['jobs']` when
+  // it declares none — the SPA carries no role codes (backlog 6a3b93eb,
+  // 2026-09-24). The same visible() filter still applies, so a manifest
+  // that turns off a module hides it from Work too.
   const WORK = $derived<NavGroup>({
     label: 'Work',
-    items: workForRole(role).map((r) => ROUTE_CATALOG[r]),
+    items: workFor(roleRow).map((r) => ROUTE_CATALOG[r]),
   });
 
   // The IT department — seven rows. Six came from the 2026-08-31

@@ -493,6 +493,12 @@ const PLAIN_SELECTIONS = [
 ] as const;
 type PlainSelection = (typeof PLAIN_SELECTIONS)[number];
 
+/** The selection as the floor's page hands it up to the region map
+ *  (design fe77a1d2, car 2): the key it holds, and the one function
+ *  that changes it — which also loads the selected packet, so a click
+ *  on the map and a click on the board are the same act. */
+export type FloorSelection = Readonly<{ selected: string; select: (key: string) => void }>;
+
 /** `car:<id>` / `train:<id>` / `bay:<n>` / a machine name → the
  *  selection. Anything else falls back to the track: a key from a
  *  future map must not throw the page. */

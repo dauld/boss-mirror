@@ -71,6 +71,7 @@
     sinceText,
     STAGES,
     type Feeds,
+    type FloorSelection,
     type Scene,
   } from './yard-floor';
   import {
@@ -99,7 +100,6 @@
   import { fetchRegions, floorSelection, lampOf, type Regions } from './regions';
   import { yardSignals } from './yard-signals';
   import { production as productionOf } from './yard-production';
-  import YardMap from './YardMap.svelte';
   import DepartureBoard from './DepartureBoard.svelte';
   import ArrivalReport from './ArrivalReport.svelte';
   import ProductionPanel from './ProductionPanel.svelte';
@@ -127,11 +127,25 @@
   // shows. `onfloor` hands the scene up so the zoomed territory's
   // interior is drawn from the reads this page already makes, rather
   // than a second copy of them.
+  //
+  // DESIGN fe77a1d2, CAR 2: this page draws NO map. The region map
+  // above it draws that region's slice of the floor, clickable, so the
+  // whole-floor YardMap that stood here — every region's wagons again,
+  // under a map already showing this region's — is deleted.
+  // `onselection` hands the selection up with the one function that
+  // changes it, so a click on the region map opens the same entity
+  // panel, and loads the same packet, a click here always did.
   let {
     focus = 'track',
     embedded = false,
     onfloor = (_scene: Scene | null) => {},
-  }: Readonly<{ focus?: string; embedded?: boolean; onfloor?: (scene: Scene | null) => void }> = $props();
+    onselection = (_s: FloorSelection) => {},
+  }: Readonly<{
+    focus?: string;
+    embedded?: boolean;
+    onfloor?: (scene: Scene | null) => void;
+    onselection?: (s: FloorSelection) => void;
+  }> = $props();
 
   let yard = $state<YardState | null>(null);
   let loading = $state(true);
@@ -349,6 +363,12 @@
       entityJobError = null;
     }
   }
+  // Handed up to the region map above (car 2): what is selected, and
+  // `select` itself — the map's clicks go through the same function
+  // the board's and the alerts' do.
+  $effect(() => {
+    onselection({ selected, select });
+  });
 
   // The condensed packet panel (David, fc67bed2) — the "open packet"
   // verb, and what a double-click on any packet card does here.
@@ -616,17 +636,13 @@
       {/if}
     </div>
 
-    <!-- THE MAP — the region's floor in full: the sidings, the ladder,
-         the bays with their progress, the locomotives along the
-         stages. STILL DRAWN when embedded, deliberately. Car 3 zooms
-         the world into a territory and paints one plate per wagon
-         standing in it, which answers "what is moving in here" but is
-         a SUMMARY of this; re-homing these sidings and locomotives
-         inside the territory's rect is the work left before YardPage
-         can retire (design d2154293, cars 4-5). Hiding this in the
-         meantime would have taken detail off the founder's main
-         surface in the same change that added the zoom. -->
-    <YardMap scene={floor} {selected} onselect={select} />
+    <!-- NO MAP HERE (design fe77a1d2, car 2). The whole floor stood
+         here, deliberately, while the region map above could only
+         summarise it as plates. That region map now draws its own
+         slice of this floor — the sidings, the ladder, the bays with
+         their progress, the locomotives along the stages — and every
+         mark on it selects into the panel below, so the detail moved
+         rather than went. -->
 
     <!-- THE DECK: the departure board and the entity panel -->
     <div class="yard-deck">

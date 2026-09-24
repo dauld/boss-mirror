@@ -45,6 +45,7 @@ mod reach;
 mod receipt;
 mod rerail;
 mod running;
+mod scratch_target;
 mod script;
 mod steps;
 mod tenant;
@@ -586,6 +587,10 @@ enum Commands {
         /// The other end of the run: record the builder's handback on
         /// the run named by `<PACKET>`, complete its `reported` step when
         /// the green has opened it, and write the finish to agent_runs.
+        /// A GREEN run's worktree cargo target (`$WT_TARGET_ROOT/
+        /// target-agent-*`, wt-cargo's) is freed and the bytes recorded
+        /// on the run as `scratch_target`; a run that is not green keeps
+        /// its target for the rescue.
         #[arg(long, requires = "handback")]
         report: bool,
         /// With --report: the handback (packet, branch, sha, gate, what

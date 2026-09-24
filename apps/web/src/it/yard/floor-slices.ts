@@ -25,15 +25,16 @@
 //     placed under the wrong region, or left unplaced, is a type error
 //     rather than a wagon drawn nowhere.
 //
-// YardMap draws the union of the six at the coordinates it always drew
-// (floor-slices.test.ts pins both halves). Car 2 has a region map call
-// its own region's function; the static machines YardMap draws that
-// no station keys — the deploy runner, the cluster tower and the
-// conductor's clock — are not assigned a region here, and that
-// assignment is car 2's to make.
+// Car 1 had YardMap draw the union of the six at the coordinates it
+// always drew (floor-slices.test.ts pins both halves). Since car 2 no
+// component draws the union: each region's map draws its own slice
+// (`regionFloorView`, RegionFloor.svelte) and YardMap is deleted. The
+// union stays as `floorPlan`, which is what the six maps together are
+// held against — what the one floor drew.
 
 import { DELIVERY_CHANNELS, type DeliveryChannel } from './yard';
 import { regionOfStation, type FloorRegion, type StationOf } from './region-contents';
+import { MACHINERY_STRIP_H } from './world-machines';
 import { drawnWagons, type Bay, type Loco, type Scene, type Wagon } from './yard-floor';
 
 // ---- the floor's measures: one definition each, read by YardMap ----
@@ -245,6 +246,16 @@ export type FloorPlan = Readonly<{
   wagons: readonly PlacedWagon[];
 }>;
 
+/** The six floor regions, as a list — FLOOR_LAYOUTS' keys, which the
+ *  type holds to STATION_REGION's values. */
+export const FLOOR_REGIONS = Object.keys(FLOOR_LAYOUTS) as readonly FloorRegion[];
+
+/** A region name narrowed to a floor region, or null for one that has
+ *  no floor (receiving, marshalling, the shop floor) or no such name. */
+export function asFloorRegion(name: string): FloorRegion | null {
+  return FLOOR_REGIONS.find(r => r === name) ?? null;
+}
+
 /** The whole floor: the frame, all six slices, and their union. */
 export function floorPlan(scene: Scene): FloorPlan {
   const frame = floorFrame(scene);
@@ -261,4 +272,109 @@ export function floorPlan(scene: Scene): FloorPlan {
     .flatMap(s => s.wagons)
     .sort((a, b) => (order.get(a.wagon.id) ?? 0) - (order.get(b.wagon.id) ?? 0));
   return { frame, slices, wagons };
+}
+
+// ---- car 2: the three machines no station keys ----
+//
+// YardMap drew a deploy runner, a cluster tower and the conductor's
+// clock in one band across the top of the floor, at fixed coordinates,
+// because on one floor every region shared that band. On a region's
+// own map each must stand in a region. The server already says where
+// two of them work (`boss_jobs::regions`: the conductor on the track,
+// the converge runner in arrivals); the tower is this browser's read
+// of the cluster's health and names the build it is running, which is
+// the runner's product, so it stands beside the runner. They now hang
+// off the mainline rather than off the floor's top edge, so a gate
+// queue that drops the mainline carries them down with it and their
+// region never opens a gap between a machine and its rails.
+
+export type FloorMachine = 'runner' | 'cluster' | 'conductor';
+
+export const MACHINE_REGION = {
+  runner: 'arrivals',
+  cluster: 'arrivals',
+  conductor: 'track',
+} as const satisfies Readonly<Record<FloorMachine, FloorRegion>>;
+
+/** Where each machine stands: the runner's and the tower's housing by
+ *  its top-left corner, the clock by its centre. */
+export function machineAt(f: FloorFrame): Readonly<Record<FloorMachine, Readonly<{ x: number; y: number }>>> {
+  return {
+    runner: { x: 790, y: f.mainY - 70 },
+    cluster: { x: 950, y: f.mainY - 100 },
+    // Above the stage names (mainY - 62), with its two lines of words
+    // under the dial clear of them.
+    conductor: { x: 1120, y: f.mainY - 140 },
+  };
+}
+
+// ---- car 2: one region's map ----
+
+/** The rows of the floor a region's map shows, in floor coordinates. */
+export type Band = Readonly<{ top: number; bottom: number }>;
+
+/** The scenery each region draws — its rails, sidings, signs, click
+ *  areas and machines — as rows of the floor. What stands in it is
+ *  added by `sliceBand`, so a crowded siding widens the band rather
+ *  than running off the map. */
+const SCENERY: Readonly<Record<FloorRegion, (f: FloorFrame) => Band>> = {
+  // The "Gate runners" sign down to the approach's click area.
+  gates: f => ({ top: 26, bottom: f.mainY + 50 }),
+  dock: f => ({ top: f.mainY - 54, bottom: f.mainY + 50 }),
+  // The garage siding turns out of the dock's stretch of the mainline.
+  garage: f => ({ top: f.mainY - 16, bottom: f.mainY + 120 }),
+  track: f => ({ top: machineAt(f).conductor.y - 34, bottom: f.mainY + 40 }),
+  // The runner's smoke rises above its chimney, 29 over the housing.
+  arrivals: f => ({ top: Math.min(machineAt(f).cluster.y, machineAt(f).runner.y - 29) - 4, bottom: f.cancelledY + 26 }),
+  // From the ladder's turn off the cancelled siding to the last lane.
+  shed: f => ({ top: f.cancelledY - 4, bottom: f.laneBottom + 8 }),
+};
+
+/** The band a slice needs: its scenery, widened to every mark standing
+ *  in it — a wagon's body and wheels, a locomotive's channel plate and
+ *  wheels, a bay's label and shed. */
+export function sliceBand(slice: FloorSlice, f: FloorFrame): Band {
+  const marks: readonly Band[] = [
+    ...slice.wagons.map(p => ({ top: p.y - 10, bottom: p.y + 16 })),
+    ...slice.locos.map(p => ({ top: p.y - 36, bottom: p.y + 19 })),
+    ...slice.bays.map(p => ({ top: p.y - 22, bottom: p.y + 32 })),
+  ];
+  return marks.reduce<Band>(
+    (b, m) => ({ top: Math.min(b.top, m.top), bottom: Math.max(b.bottom, m.bottom) }),
+    SCENERY[slice.region](f),
+  );
+}
+
+/** The room between the region map's outline and its slice. */
+export const FLOOR_PAD = 12;
+
+/** One region's map of the floor: its slice, the frame the slice hangs
+ *  off, and where it goes on the region's canvas. Horizontally nothing
+ *  moves — the dock is drawn where the dock is on the line, so the six
+ *  maps keep the floor's geography and one scale. Vertically the band
+ *  is lifted to the top of the canvas (`dy` is added to every floor y),
+ *  and the canvas is as tall as the band plus the machinery strip the
+ *  region map keeps along its bottom edge: the room its own contents
+ *  want, not a fixed slot. */
+export type RegionFloorView = Readonly<{
+  slice: FloorSlice;
+  frame: FloorFrame;
+  band: Band;
+  dy: number;
+  width: number;
+  height: number;
+}>;
+
+export function regionFloorView(region: FloorRegion, scene: Scene): RegionFloorView {
+  const frame = floorFrame(scene);
+  const slice = FLOOR_LAYOUTS[region](scene, frame);
+  const band = sliceBand(slice, frame);
+  return {
+    slice,
+    frame,
+    band,
+    dy: FLOOR_PAD - band.top,
+    width: VIEW_W,
+    height: band.bottom - band.top + 2 * FLOOR_PAD + MACHINERY_STRIP_H,
+  };
 }

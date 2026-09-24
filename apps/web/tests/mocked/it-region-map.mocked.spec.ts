@@ -17,10 +17,11 @@
 //
 // WHAT THIS SPEC CAN OBSERVE: that the world map is gone from the DOM
 // and the region's map is present; that the region map carries the
-// region's own head (its count, its state, its why) and its interior
-// with the ids and tags the fixtures put there; that the floor panels
-// still mount beneath it; and that Escape and the way-out control both
-// return to the world. There is no camera left to observe, and the
+// region's own head (its count, its state, its why) and its slice of
+// the floor with the ids and tags the fixtures put there, each wagon a
+// button into the entity panel (design fe77a1d2, car 2); that the
+// floor panels still mount beneath it, with no second map; and that
+// Escape and the way-out control both return to the world. There is no camera left to observe, and the
 // easing and interpolation it needed are deleted rather than unused.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
@@ -67,8 +68,8 @@ async function mocks(page: Page): Promise<void> {
   await page.route(/\/api\/stations\/loading-dock\/queue$/, (r) => json(r, DOCK_QUEUE));
 }
 
-/** The world map's own SVG, scoped by its aria-label: the yard's
- *  detailed floor map below it is a `section.yard svg` too. */
+/** The world map's own SVG, scoped by its aria-label: a region map is
+ *  a `section.yard svg` too. */
 const WORLD_SVG = 'section[aria-label="the IT world map"] svg';
 
 /** A region's own map — the surface that REPLACES the world. */
@@ -105,18 +106,40 @@ test('/it/yard/dock REPLACES the world with the dock\'s own map — not the worl
   await expect(map.locator('.region-count')).toContainText('2');
   await expect(map.locator('.region-why')).toContainText('2 cars parked');
 
-  // THE INTERIOR: the dock's own wagons, the same ids and tags the
-  // floor carries, now laid out in the region's whole canvas.
-  const interior = page.locator(`${regionSvg('dock')} .interior[data-interior="dock"]`);
-  await expect(interior).toHaveCount(1);
-  await expect(interior.locator('.plate')).toHaveCount(2);
-  await expect(interior.locator('.plate[data-car="car-1111"]')).toHaveAttribute('data-station', 'dock');
-  await expect(interior.locator('.plate[data-car="car-1111"] title')).toHaveText(/Teach the dock to breathe/);
+  // THE DOCK'S OWN SLICE OF THE FLOOR (design fe77a1d2, car 2): its
+  // stretch of the mainline with the same wagons, ids and tags the
+  // floor carries — drawn once, here, and not again under it.
+  const floor = page.locator(`${regionSvg('dock')} .floor[data-floor="dock"]`);
+  await expect(floor).toHaveCount(1);
+  await expect(floor.locator('.token.wagon')).toHaveCount(2);
+  await expect(floor.locator('.token.wagon[data-car="car-1111"]')).toHaveAttribute('data-station', 'dock');
+  await expect(floor.locator('.token.wagon[data-car="car-1111"] title')).toHaveText(/Teach the dock to breathe/);
+  await expect(page.locator('section[aria-label="the yard map"]')).toHaveCount(0);
 
   // The floor's panels are still mounted beneath it — the yard's own
   // deck, on the same page. The swap changed the map, not the floor.
   await expect(page.locator('.yard-panel-h', { hasText: 'Entity · loading dock' })).toBeVisible();
   await expect(page.locator('.yard-region-head')).toContainText('dock · clear — 2 cars parked');
+});
+
+test("a wagon on the region's own map selects into the entity panel, as the floor's did", async ({ page }) => {
+  await mocks(page);
+  await page.goto('/it/yard/dock');
+  const wagon = page.locator(`${regionSvg('dock')} .floor .token.wagon[data-car="car-2222"]`);
+  await expect(wagon).toHaveCount(1);
+  await expect(wagon).toHaveAttribute('role', 'button');
+
+  // The keyboard reaches it the way the pointer does; an SVG group has
+  // no fill for a pointer to land on reliably, so both are the handler.
+  await wagon.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.yard-panel-h', { hasText: 'Entity · car' })).toBeVisible();
+  await expect(wagon).toHaveClass(/selected/);
+
+  // And the area itself: the dock's siding selects the dock again.
+  await page.locator(`${regionSvg('dock')} .floor .machine[aria-label^="loading dock"]`).dispatchEvent('click');
+  await expect(page.locator('.yard-panel-h', { hasText: 'Entity · loading dock' })).toBeVisible();
+  await expect(wagon).not.toHaveClass(/selected/);
 });
 
 test('Escape goes back to the world, and so does the way-out control', async ({ page }) => {

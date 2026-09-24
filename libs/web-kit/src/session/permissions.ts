@@ -92,6 +92,27 @@ export function declaredSurfaces(row: RoleRow | undefined): ReadonlyArray<string
   return v.filter((s): s is string => typeof s === 'string');
 }
 
+/// The Work list for a role whose Class row declares none — or before
+/// the registry has answered. Every live role of the company's own
+/// tenant reads this; the default lives here because it names no role.
+export const DEFAULT_WORK: ReadonlyArray<RouteName> = ['jobs'];
+
+/// A role's Work list — the personal half of Home's sidebar — read off
+/// its Class row's `metadata.work`, beside `metadata.surfaces`. Until
+/// 2026-09-24 (backlog 6a3b93eb) this was WORK_BY_ROLE in
+/// session/work-by-role.ts, a closed map of 66 brewery, device-shop and
+/// platform role codes compiled into every deployment; the example
+/// tenants' lists moved verbatim onto their role rows. An absent row,
+/// key, or a non-list reads as nothing declared (the default); an empty
+/// list IS a declaration; an entry that is not a gated RouteName is
+/// dropped, because the shell looks each one up in its route catalog.
+export function workFor(row: RoleRow | undefined): ReadonlyArray<RouteName> {
+  const v = row?.metadata?.['work'];
+  if (!Array.isArray(v)) return DEFAULT_WORK;
+  const known = new Set<string>(ROUTES);
+  return v.filter((s): s is RouteName => typeof s === 'string' && known.has(s));
+}
+
 /// Whether `role` sees `route`. `row` is the role's Class row from the
 /// registry (`classesFor('employee', 'role')`), or undefined before it
 /// has loaded.

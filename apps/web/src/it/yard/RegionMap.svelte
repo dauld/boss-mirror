@@ -13,12 +13,21 @@
   // there is no camera between them — `/it/yard/<region>` renders
   // this, `/it` renders the world, and the route is the state.
   //
-  // WHAT IT DRAWS IS UNCHANGED, and deliberately so. The wagon plates,
-  // the platform tracks with their bounds and flags, and the machinery
-  // glyphs are the same marks cars 3–5 built, off the same reads, with
-  // the same ids and lamps the Train Yard uses. Only the rect they lay
-  // out inside changed — from a slot on the world line to
-  // `regionCanvas`, which every region gets equally.
+  // WHAT IT DRAWS. The platform tracks with their bounds and flags, and
+  // the machinery glyphs, are the same marks cars 3–5 built, off the
+  // same reads, laid out in `regionCanvas`, which every region gets
+  // equally.
+  //
+  // A FLOOR REGION DRAWS ITS SLICE OF THE FLOOR (design fe77a1d2, car
+  // 2). The six regions the yard stands wagons in drew one plate per
+  // wagon here, which could not be clicked, while the whole floor was
+  // drawn again under this map. They now draw their own part of that
+  // floor — the dock its stretch of the mainline, the track its
+  // signals and trains, the shed its probe lanes (RegionFloor.svelte)
+  // — and every wagon, bay, locomotive and machine on it selects into
+  // the entity panel through `selected` / `onselect`. Their canvas is
+  // as tall as their slice (`regionFloorView`), not the fixed slot the
+  // plates were laid out in.
   import { navigate } from '@boss/web-kit/nav';
   import {
     REGION_NAMES,
@@ -31,9 +40,11 @@
   } from './regions';
   import { wrapWords } from './world';
   import { REGION_CANVAS, regionCanvas } from './region-canvas';
-  import { hasInterior, interiorLayout, interiorWagons } from './region-contents';
+  import { asFloorRegion, regionFloorView } from './floor-slices';
+  import RegionFloor from './RegionFloor.svelte';
   import { hasPlatforms, platformLayout, type Deck, type Platform } from './world-interior';
   import { machineTitle, machineryLabel, machineryStrip } from './world-machines';
+  import type { Territory } from './world';
   import type { Scene } from './yard-floor';
 
   type Props = Readonly<{
@@ -47,10 +58,23 @@
     /** The queues standing in receiving or marshalling. Handed up by
      *  the page that owns the read, so this derives nothing. */
     deck?: Deck | null;
+    /** What the entity panel under the map shows, in the floor's one
+     *  selection vocabulary (`car:<id>`, `train:<id>`, `bay:<n>`, a
+     *  machine) — and how a click on the map changes it. */
+    selected?: string;
+    onselect?: (key: string) => void;
     /** Back to the world: Escape, or the control in the corner. */
     onleave?: () => void;
   }>;
-  let { region, regions, floor = null, deck = null, onleave = () => navigate('/it') }: Props = $props();
+  let {
+    region,
+    regions,
+    floor = null,
+    deck = null,
+    selected = '',
+    onselect = (_key: string) => {},
+    onleave = () => navigate('/it'),
+  }: Props = $props();
 
   /** The region's rect IS its canvas. One definition of "lay your
    *  contents out in here", shared with the world's territories.
@@ -64,12 +88,15 @@
   const troubled = $derived(state === 'troubled');
   const why = $derived(r?.why ?? 'the server answered no reading for this region');
 
-  /** What is moving inside, placed in the region's own rect. */
-  const interior = $derived.by(() => {
-    if (floor === null || !hasInterior(region)) return null;
-    return interiorLayout(rect, interiorWagons(floor, region));
-  });
-  const machinery = $derived(machineryStrip(rect, r?.machines ?? []));
+  /** A region the yard stands wagons in, or null for a queue region. */
+  const floorRegion = $derived(asFloorRegion(region));
+  /** That region's slice of the floor, placed on its canvas — null
+   *  until the floor's read lands. */
+  const view = $derived(floor !== null && floorRegion !== null ? regionFloorView(floorRegion, floor) : null);
+  /** The canvas: the slice's own size for a floor region, the fixed
+   *  region canvas for everything else (and while the floor is read). */
+  const canvas = $derived<Territory>(view === null ? rect : { ...rect, w: view.width, h: view.height });
+  const machinery = $derived(machineryStrip(canvas, r?.machines ?? []));
 
   // The head is a region-scale block now, not a compact one squeezed
   // into a slot: the count, the state, the trend and the why all fit,
@@ -106,15 +133,15 @@
   <div class="region-why" class:err={troubled}>{why}</div>
 
   <svg
-    viewBox="0 0 {REGION_CANVAS.width} {REGION_CANVAS.height}"
+    viewBox="0 0 {canvas.w} {canvas.h}"
     role="img"
     aria-label="{region} · {state} — {why}">
     <!-- The region's own outline: its whole canvas, not a slot. -->
     <rect
       x="0.5"
       y="0.5"
-      width={REGION_CANVAS.width - 1}
-      height={REGION_CANVAS.height - 1}
+      width={canvas.w - 1}
+      height={canvas.h - 1}
       class="shed"
       class:warn={state === 'busy'}
       class:err={troubled} />
@@ -173,32 +200,15 @@
           {/if}
         </g>
       {/if}
-    {:else if interior === null}
+    {:else if floor === null || view === null}
       <text x={HEAD_X} y="40" class="tiny">reading what is inside…</text>
-    {:else if interior.placed.length === 0}
-      <text x={HEAD_X} y="40" class="tiny">nothing is standing here</text>
     {:else}
-      <!-- WHAT IS MOVING INSIDE. One plate per wagon standing at a
-           station this region covers, off the floor's own Scene — same
-           ids, same tags, same lamps the Train Yard draws, because they
-           are the same wagons. Keyed on the wagon id, so a wagon that
-           moves between polls moves rather than being rebuilt. -->
-      <g class="interior" data-interior={region}>
-        {#each interior.placed as p (p.wagon.id)}
-          <g class="plate" data-car={p.wagon.id} data-station={p.wagon.station}>
-            <title>{p.wagon.title} — {p.wagon.status}</title>
-            <rect x={p.x} y={p.y} width={p.w} height={p.h} class="wagon {p.wagon.tone}" />
-            <circle cx={p.x + 7} cy={p.y + p.h / 2} r="3" class="lamp {p.wagon.lamp}" />
-            <text x={p.x + 14} y={p.y + p.h / 2 + 3} class="tiny plate-tag">{p.wagon.tag}</text>
-          </g>
-        {/each}
-        {#if interior.hidden > 0}
-          <!-- placed by the layout, above its first row — never in the
-               machinery strip (backlog ba83225e) -->
-          <text x={interior.note.x} y={interior.note.y} text-anchor="end" class="tiny"
-            >+{interior.hidden} more</text>
-        {/if}
-      </g>
+      <!-- THE REGION'S SLICE OF THE FLOOR (design fe77a1d2, car 2): its
+           rails, sidings, machines and every wagon standing in it, off
+           the floor's own Scene — same ids, same tags, the same buttons
+           into the entity panel. An empty region draws its empty
+           sidings, which say so more plainly than a sentence. -->
+      <RegionFloor {view} scene={floor} {selected} {onselect} />
     {/if}
 
     <!-- THE MACHINERY (car 5). The region's actors, read from the
@@ -296,10 +306,6 @@
   .lamp-dot.warn { background: var(--map-warn-edge); }
   .lamp-dot.err { background: var(--map-bad-edge); animation: blink 1s steps(2) infinite; }
 
-  .plate .wagon { fill: var(--map-surface); stroke: var(--map-rule-strong); }
-  .plate .wagon.ok { stroke: var(--map-ok-edge); }
-  .plate .wagon.warn { stroke: var(--map-warn-edge); }
-  .plate .wagon.red { stroke: var(--map-bad-edge); }
   .yard text.plate-tag { fill: var(--map-ink); letter-spacing: 0; }
   .platform .track { stroke: var(--tie); stroke-width: 1; }
   .platform .mark { fill: var(--map-muted); }

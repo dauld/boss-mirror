@@ -1,8 +1,21 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { FLOOR_LAYOUTS, floorFrame, floorPlan } from './floor-slices';
+import {
+  FLOOR_LAYOUTS,
+  FLOOR_PAD,
+  FLOOR_REGIONS,
+  MACHINE_REGION,
+  WAGON_W,
+  asFloorRegion,
+  floorFrame,
+  floorPlan,
+  machineAt,
+  regionFloorView,
+} from './floor-slices';
+import { REGION_CANVAS } from './region-canvas';
 import { INTERIOR_REGIONS, regionOfStation } from './region-contents';
+import { MACHINERY_STRIP_H } from './world-machines';
 import type { DeliveryChannel } from './yard';
 import { drawnWagons, type Bay, type Loco, type Scene, type Station, type Wagon } from './yard-floor';
 
@@ -223,22 +236,141 @@ describe('nothing moves on screen', () => {
   });
 });
 
-// YardMap draws FROM the slices, so the equality above is a claim about
-// the picture rather than about a module nothing renders. Pinned at
-// source in the yard-page-*.test.ts idiom.
-describe('YardMap draws the six slices', () => {
-  const src = readFileSync(join(import.meta.dir, 'YardMap.svelte'), 'utf8');
+// ---------------------------------------------------------------------
+// CAR 2 (design fe77a1d2): A REGION MAP DRAWS ITS OWN SLICE.
+// ---------------------------------------------------------------------
+//
+// Until this car /it/yard/<region> drew the region's wagons twice — a
+// plate on the region map, and a wagon on the whole six-region floor
+// YardMap drew under it — and only the second could be clicked. The
+// region map now draws that region's slice of the floor, clickable, and
+// the whole floor is gone. `floorPlan` is what YardMap drew (the block
+// above pins it to YardMap's own coordinates), so the acceptance check
+// is held against it: every wagon YardMap drew in a region's stations
+// is on that region's map, inside its canvas, and a button selecting
+// it.
 
-  it('reads its layout from floorPlan and keeps no placement of its own', () => {
-    expect(src).toContain("from './floor-slices'");
-    expect(src).toMatch(/floorPlan\(scene\)/);
-    expect(src).not.toContain('function wagonXY');
-    expect(src).not.toContain('function locoX');
+describe("a region map draws its own slice of the floor", () => {
+  const plan = floorPlan(SCENE);
+  const drawnIn = (region: string) =>
+    drawnWagons(SCENE.wagons)
+      .drawn.filter(w => regionOfStation(w.station) === region)
+      .map(w => w.id);
+
+  it('draws every wagon YardMap drew in the region — and none of another region', () => {
+    for (const region of FLOOR_REGIONS) {
+      const view = regionFloorView(region, SCENE);
+      expect(view.slice.wagons.map(p => p.wagon.id), region).toEqual(drawnIn(region));
+      expect(view.slice, region).toEqual(plan.slices[region]);
+    }
+    // Together the six maps hold exactly what the one floor held.
+    const all = FLOOR_REGIONS.flatMap(r => regionFloorView(r, SCENE).slice.wagons.map(p => p.wagon.id));
+    expect([...all].sort()).toEqual(plan.wagons.map(p => p.wagon.id).sort());
   });
 
-  it('draws its wagons, bays and locomotives from the plan', () => {
-    expect(src).toMatch(/\{#each plan\.wagons as /);
-    expect(src).toMatch(/\{#each gates\.bays as /);
-    expect(src).toMatch(/\{#each track\.locos as /);
+  it('draws each mark inside its canvas and above the machinery strip', () => {
+    for (const region of FLOOR_REGIONS) {
+      const v = regionFloorView(region, SCENE);
+      const floorBottom = v.height - MACHINERY_STRIP_H;
+      const inside = (what: string, x: number, top: number, right: number, bottom: number) => {
+        expect(x, what).toBeGreaterThanOrEqual(0);
+        expect(right, what).toBeLessThanOrEqual(v.width);
+        expect(top + v.dy, what).toBeGreaterThanOrEqual(0);
+        expect(bottom + v.dy, what).toBeLessThanOrEqual(floorBottom);
+      };
+      for (const p of v.slice.wagons) inside(`${region}/${p.wagon.id}`, p.x, p.y - 10, p.x + WAGON_W, p.y + 16);
+      for (const p of v.slice.locos) inside(`${region}/train ${p.loco.id}`, p.x, p.y - 36, p.x + 50, p.y + 19);
+      for (const p of v.slice.bays) inside(`${region}/bay ${p.bay.index}`, 226, p.y - 22, 376, p.y + 32);
+    }
+  });
+
+  it('is as wide as a region canvas, and only as tall as its own slice needs', () => {
+    for (const region of FLOOR_REGIONS) {
+      const v = regionFloorView(region, SCENE);
+      expect(v.width, region).toBe(REGION_CANVAS.width);
+      expect(v.height, region).toBe(v.band.bottom - v.band.top + 2 * FLOOR_PAD + MACHINERY_STRIP_H);
+      expect(v.dy, region).toBe(FLOOR_PAD - v.band.top);
+    }
+    // The dock is one stretch of the mainline, not the whole floor's height.
+    expect(regionFloorView('dock', SCENE).height).toBeLessThan(plan.frame.height);
+  });
+
+  it('grows a region to hold what stands in it, rather than cutting it off', () => {
+    // Twelve cars in limbo stack upward from the last bay, past the
+    // gates' sign: the band reaches up to the highest of them.
+    const limbo = Array.from({ length: 12 }, (_, i) => wagon(`lb${i}`, 'limbo', i));
+    const crowded = { ...SCENE, wagons: [...SCENE.wagons, ...limbo] } as Scene;
+    const v = regionFloorView('gates', crowded);
+    const top = Math.min(...v.slice.wagons.map(p => p.y - 10));
+    expect(top).toBeLessThan(0);
+    expect(v.band.top).toBe(top);
+    expect(top + v.dy).toBe(FLOOR_PAD);
+  });
+
+  it('stands the three machines no station keys in a region, inside its band', () => {
+    // The server already places the conductor on the track and the
+    // converge runner in arrivals (boss_jobs::regions); the cluster
+    // tower reports the build that runner deployed, so it stands beside it.
+    expect(MACHINE_REGION).toEqual({ runner: 'arrivals', cluster: 'arrivals', conductor: 'track' });
+    const f = floorFrame(SCENE);
+    const at = machineAt(f);
+    const boxes = {
+      runner: { top: at.runner.y - 29, bottom: at.runner.y + 46 },
+      cluster: { top: at.cluster.y, bottom: at.cluster.y + 76 },
+      conductor: { top: at.conductor.y - 30, bottom: at.conductor.y + 62 },
+    };
+    for (const [m, b] of Object.entries(boxes)) {
+      const v = regionFloorView(MACHINE_REGION[m as keyof typeof MACHINE_REGION], SCENE);
+      expect(b.top, m).toBeGreaterThanOrEqual(v.band.top);
+      expect(b.bottom, m).toBeLessThanOrEqual(v.band.bottom);
+    }
+  });
+
+  it('names only the six floor regions', () => {
+    expect([...FLOOR_REGIONS].sort() as string[]).toEqual([...INTERIOR_REGIONS].sort());
+    expect(asFloorRegion('dock')).toBe('dock');
+    expect(asFloorRegion('receiving')).toBeNull();
+    expect(asFloorRegion('atlantis')).toBeNull();
+  });
+});
+
+// The region map draws FROM the view, so the checks above are a claim
+// about the picture rather than about a module nothing renders — and
+// every mark on it is a button into the entity panel, as YardMap's
+// were. Pinned at source in the yard-page-*.test.ts idiom; the mocked
+// spec (it-region-map) clicks one.
+describe('the region map renders its slice, and every mark on it selects', () => {
+  const floor = readFileSync(join(import.meta.dir, 'RegionFloor.svelte'), 'utf8');
+  const map = readFileSync(join(import.meta.dir, 'RegionMap.svelte'), 'utf8');
+  const page = readFileSync(join(import.meta.dir, 'YardPage.svelte'), 'utf8');
+  const strip = (s: string) => s.replace(/<!--[\s\S]*?-->/g, '');
+
+  it('draws its wagons, bays and locomotives from the view, keeping no placement of its own', () => {
+    expect(floor).toContain("from './floor-slices'");
+    expect(floor).toMatch(/\{#each view\.slice\.wagons as p \(p\.wagon\.id\)\}/);
+    expect(floor).toMatch(/\{#each view\.slice\.bays as p \(p\.bay\.index\)\}/);
+    expect(floor).toMatch(/\{#each view\.slice\.locos as p \(p\.loco\.id\)\}/);
+    expect(floor).not.toContain('function wagonXY');
+    expect(floor).not.toContain('function locoX');
+  });
+
+  it('makes every wagon, bay and locomotive a button that selects it', () => {
+    for (const key of ['`car:${w.id}`', '`bay:${b.index}`', '`train:${l.id}`']) {
+      expect(floor, key).toContain(`onclick={pick(${key})}`);
+      expect(floor, key).toContain(`onkeydown={pickKey(${key})}`);
+    }
+    expect(floor).toMatch(/class="token wagon[^"]*"[\s\S]*?role="button"[\s\S]*?tabindex="0"/);
+  });
+
+  it('is mounted by the region map with the selection, in place of the plates', () => {
+    expect(map).toContain("import RegionFloor from './RegionFloor.svelte'");
+    expect(strip(map)).toMatch(/<RegionFloor[^>]*\{selected\}[^>]*\{onselect\}/);
+    expect(map).not.toContain('interiorLayout');
+  });
+
+  it('leaves no second map under it: the yard page draws none, and YardMap is gone', () => {
+    expect(strip(page)).not.toContain('<YardMap');
+    expect(page).not.toContain("import YardMap");
+    expect(existsSync(join(import.meta.dir, 'YardMap.svelte'))).toBe(false);
   });
 });

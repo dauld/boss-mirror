@@ -540,6 +540,18 @@ spec:
                     # (/work/home/.claude/.credentials.json — placed once by
                     # David; the boot never writes a credential); with either
                     # missing it says so and leaves the pod to ssh, as before.
+                    #
+                    # THE DRAIN RESUMES ITSELF when its switch is on (backlog
+                    # ea83db08, 2026-09-24). A session started with no task
+                    # sits idle, so each roll (four on 2026-09-23/24) ended
+                    # the overnight drain until David typed. When the switch
+                    # file /work/home/.config/boss/drain-on-boot exists — on
+                    # the PVC, so it is turned on or off with touch/rm and no
+                    # deploy — the session's first prompt is the versioned
+                    # standing prompt infra/dev/drain.md, READ AT RUN TIME
+                    # with "$(cat …)": the prompt carries backticks and
+                    # quotes, so it is never inlined here. Without the switch,
+                    # or without the file, the boot is exactly what it was.
                     cat > /work/dev-claude.sh <<'DC'
                     #!/usr/bin/env bash
                     export HOME=/work/home
@@ -547,10 +559,18 @@ spec:
                     export RUSTUP_HOME=/usr/local/rustup
                     export CARGO_TARGET_DIR=/scratch/target
                     cd /work/boss
+                    if [ -e /work/home/.config/boss/drain-on-boot ] && [ -s /work/boss/infra/dev/drain.md ]; then
+                      exec claude --remote-control boss-dev "$(cat /work/boss/infra/dev/drain.md)"
+                    fi
                     exec claude --remote-control boss-dev
                     DC
                     chmod +x /work/dev-claude.sh
                     if [ -x /work/home/.local/bin/claude ] && [ -s /work/home/.claude/.credentials.json ]; then
+                      if [ -e /work/home/.config/boss/drain-on-boot ]; then
+                        echo "dev session: drain-on-boot is ON — the session's first prompt is /work/boss/infra/dev/drain.md"
+                      else
+                        echo "dev session: drain-on-boot is off — the session starts idle (touch /work/home/.config/boss/drain-on-boot to resume the drain on boot)"
+                      fi
                       if HOME=/work/home tmux new-session -d -s dev -c /work/boss /work/dev-claude.sh; then
                         echo "dev session: started claude --remote-control boss-dev in tmux session dev"
                       else
