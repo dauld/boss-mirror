@@ -181,7 +181,11 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   'system-subjects':         { id: 'system-subjects',         label: 'Subjects & Classes',  path: '/it/registry/subjects', permKey: 'system-subjects',    app: 'it' },
   'system-registry-drift':   { id: 'system-registry-drift',   label: 'Protocol drift',      path: '/it/registry/drift', permKey: 'workflows',             app: 'it' },
   'system-dispatcher-rules': { id: 'system-dispatcher-rules', label: 'Dispatcher rules — authoring', path: '/it/registry/rules', permKey: 'system-dispatcher-rules', app: 'it' },
-  'system-dispatcher-rule':  { id: 'system-dispatcher-rule',  label: 'Dispatcher rule — editor',     path: '/it/registry/rules', permKey: 'system-dispatcher-rule',  app: 'it' },
+  // The editor's path is a PATTERN, spelled the way surface-opens records
+  // every open of it (routePattern). It shared the list's path until
+  // backlog 3071e235 (2026-09-24), so the page march — one audit per
+  // catalog path — never reached the page carrying all four rule writes.
+  'system-dispatcher-rule':  { id: 'system-dispatcher-rule',  label: 'Dispatcher rule — editor',     path: '/it/registry/rules/:ruleName', permKey: 'system-dispatcher-rule',  app: 'it' },
   'system-design':           { id: 'system-design',           label: 'Design',              path: '/it/design',       permKey: 'system-design',           app: 'it' },
   'system-experiments':      { id: 'system-experiments',      label: 'Experiments',         path: '/it/design/experiments', permKey: 'system-experiments', app: 'it' },
   'system-feedback':         { id: 'system-feedback',         label: 'Feedback triage',     path: '/it/design/feedback', permKey: 'system-feedback',      app: 'it' },

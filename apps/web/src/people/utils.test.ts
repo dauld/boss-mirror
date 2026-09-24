@@ -72,21 +72,21 @@ describe('departmentBuckets', () => {
 
   it('counts the rows it is given, not the active ones', () => {
     const onLeave = [emp('a', 'on-leave', 'it'), emp('b', 'on-leave', 'it'), emp('c', 'on-leave', 'ops')];
-    expect(departmentBuckets(onLeave, ALL)).toEqual([
+    expect(departmentBuckets(onLeave, ALL, [])).toEqual([
       { code: 'it', label: 'IT', count: 2 },
       { code: 'ops', label: 'Ops', count: 1 },
     ]);
   });
 
   it('gives rows with no department a selectable bucket, last', () => {
-    const buckets = departmentBuckets([emp('a', 'active', 'it'), emp('n', 'active', null)], ALL);
+    const buckets = departmentBuckets([emp('a', 'active', 'it'), emp('n', 'active', null)], ALL, []);
     expect(buckets.at(-1)).toEqual({ code: null, label: 'No department', count: 1 });
-    expect(departmentBuckets([emp('a', 'active', 'it')], ALL).some((b) => b.code === null)).toBe(false);
+    expect(departmentBuckets([emp('a', 'active', 'it')], ALL, []).some((b) => b.code === null)).toBe(false);
   });
 
   it('puts every row in exactly one bucket', () => {
     const rows = [emp('a', 'active', 'sales'), emp('b', 'terminated', 'it'), emp('n', null, null)];
-    const buckets = departmentBuckets(rows, ALL);
+    const buckets = departmentBuckets(rows, ALL, []);
     expect(buckets.map((b) => b.code)).toEqual(['it', 'sales', null]);
     expect(buckets.reduce((n, b) => n + b.count, 0)).toBe(rows.length);
   });
@@ -96,10 +96,22 @@ describe('departmentBuckets', () => {
     // must not hide the active button — the table would read empty
     // with no visible filter explaining why.
     const rows = [emp('a', 'on-leave', 'ops')];
-    expect(departmentBuckets(rows, { kind: 'code', code: 'it' })).toEqual([
+    expect(departmentBuckets(rows, { kind: 'code', code: 'it' }, [])).toEqual([
       { code: 'it', label: 'IT', count: 0 },
       { code: 'ops', label: 'Ops', count: 1 },
     ]);
-    expect(departmentBuckets(rows, { kind: 'code', code: null }).at(-1)).toEqual({ code: null, label: 'No department', count: 0 });
+    expect(departmentBuckets(rows, { kind: 'code', code: null }, []).at(-1)).toEqual({ code: null, label: 'No department', count: 0 });
+  });
+
+  it("labels a department from its Class's display_name, humanizing one the registry lacks", () => {
+    // Backlog 8a331c9b (page audit 0c0265a3 GAP 10): the live
+    // `operations` Class says Operations / IT, and the button printed
+    // Operations. `ops` has no Class, so its code is still the label.
+    const rows = [emp('a', 'active', 'operations'), emp('b', 'active', 'ops')];
+    const classes = [{ code: 'operations', display_name: 'Operations / IT' }];
+    expect(departmentBuckets(rows, ALL, classes)).toEqual([
+      { code: 'operations', label: 'Operations / IT', count: 1 },
+      { code: 'ops', label: 'Ops', count: 1 },
+    ]);
   });
 });

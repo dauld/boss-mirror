@@ -2,7 +2,8 @@
 //! read surface over `audit_log`.
 //!
 //! Covers: authz (operator tier + ceo/cto role allow, plain user
-//! denies), source/kind filtering, limit clamping, descending order —
+//! denies), source/kind/actor filtering, limit clamping, descending
+//! order, and the actor filter on the export and the live stream —
 //! and, since 2026-09-24, the three reads the /it/operate/audit page
 //! makes that had no server test at all (backlog 0398c4d0, from page
 //! audit 65a273d5): the tail's `simulated` provenance lens, the JSONL
@@ -230,6 +231,169 @@ async fn filters_by_kind_substring_case_insensitive() {
     let rows = body.as_array().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["kind"].as_str().unwrap(), "job.step.updated");
+}
+
+/// One row whose payload names who acted, the way every writer stamps
+/// it (`_actor`). `None` writes a row predating the stamp.
+async fn seed_by(writer: &PgAuditWriter, kind: &str, actor: Option<&str>, mins_ago: i64) -> Uuid {
+    let id = Uuid::new_v4();
+    let payload = match actor {
+        Some(a) => serde_json::json!({"_actor": a, "mins_ago": mins_ago}),
+        None => serde_json::json!({"mins_ago": mins_ago}),
+    };
+    writer
+        .write(&Event {
+            id,
+            timestamp: Utc::now() - Duration::minutes(mins_ago),
+            source: "jobs".into(),
+            kind: kind.into(),
+            payload,
+        })
+        .await
+        .unwrap();
+    id
+}
+
+// Backlog 03f79eca: park-a-job, rotate-a-credential and ship-a-change
+// each say the log answers "who and when", and the tail could answer
+// only "when" — who acted rode inside the payload with no parameter
+// that reached it. EXACT match, deliberately not the kind filter's
+// substring: `agent-claude` must not also return `agent-claude-2`.
+// In the WHERE clause, beside the LIMIT, for the reason
+// `TailQuery::simulated` states: a filter applied to a returned page
+// does not filter.
+#[tokio::test(flavor = "multi_thread")]
+async fn filters_by_actor_exactly() {
+    let db = TestDb::new().await;
+    let writer = PgAuditWriter::new(db.pool.clone());
+    let older = seed_by(&writer, "job.opened", Some("agent-claude"), 30).await;
+    seed_by(&writer, "job.opened", Some("agent-claude-2"), 20).await;
+    seed_by(&writer, "job.opened", Some("emp-david"), 10).await;
+    seed_by(&writer, "job.opened", None, 8).await;
+    let newer = seed_by(&writer, "job.closed", Some("agent-claude"), 5).await;
+
+    let app: Router = audit_tail_router(db.pool.clone());
+    let resp = app
+        .clone()
+        .oneshot(get_req(
+            "/api/events/tail?actor=agent-claude",
+            &operator_user(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let ids: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["event_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec![newer.to_string(), older.to_string()], "{body}");
+
+    // Composes with the other filters rather than replacing them.
+    let resp = app
+        .clone()
+        .oneshot(get_req(
+            "/api/events/tail?actor=agent-claude&kind=closed",
+            &operator_user(),
+        ))
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    assert_eq!(body.as_array().unwrap().len(), 1, "{body}");
+
+    // A prefix of an actor is not that actor.
+    let resp = app
+        .oneshot(get_req("/api/events/tail?actor=agent", &operator_user()))
+        .await
+        .unwrap();
+    let body = body_json(resp).await;
+    assert_eq!(body.as_array().unwrap().len(), 0, "{body}");
+}
+
+// The export must honour the same actor lens the table shows — a
+// download that disagreed with the view above it is gap 2 of the same
+// audit (34ea2ae0) in a new place.
+#[tokio::test(flavor = "multi_thread")]
+async fn export_honours_the_actor_filter() {
+    let db = TestDb::new().await;
+    let writer = PgAuditWriter::new(db.pool.clone());
+    let mine = seed_by(&writer, "job.opened", Some("agent-claude"), 30).await;
+    seed_by(&writer, "job.opened", Some("emp-david"), 10).await;
+
+    let app: Router = audit_tail_router(db.pool.clone());
+    let resp = app
+        .oneshot(get_req(
+            "/api/events/export?actor=agent-claude",
+            &operator_user(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{text}");
+    assert_eq!(lines[0]["event_id"].as_str().unwrap(), mine.to_string());
+}
+
+// Live mode is the page's DEFAULT, so an actor filter the stream did
+// not apply would paint every other actor's rows into a view labelled
+// with one — the shape gap 1 (34ea2ae0) found for provenance.
+//
+// The stream anchors at MAX(id) on its first poll and pushes rows
+// after it, so the rows are written in a loop until a frame arrives:
+// whichever write the anchor lands behind, each round writes the
+// OTHER actor's row first, so an unfiltered stream's first frame is
+// always the wrong one.
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_honours_the_actor_filter() {
+    use futures::StreamExt;
+
+    let db = TestDb::new().await;
+    let writer = PgAuditWriter::new(db.pool.clone());
+    let app: Router = audit_tail_router(db.pool.clone());
+    let resp = app
+        .oneshot(get_req(
+            "/api/events/stream?actor=agent-claude",
+            &operator_user(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut body = resp.into_body().into_data_stream();
+
+    let first_frame = async {
+        let mut buf = String::new();
+        loop {
+            let chunk = body.next().await.expect("stream ended").unwrap();
+            buf.push_str(std::str::from_utf8(&chunk).unwrap());
+            if let Some(line) = buf.lines().find(|l| l.starts_with("data:")) {
+                return serde_json::from_str::<serde_json::Value>(line["data:".len()..].trim())
+                    .unwrap();
+            }
+        }
+    };
+    let writes = async {
+        loop {
+            seed_by(&writer, "job.opened", Some("emp-david"), 0).await;
+            seed_by(&writer, "job.opened", Some("agent-claude"), 0).await;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    };
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        tokio::select! {
+            f = first_frame => f,
+            _ = writes => unreachable!("the write loop never ends"),
+        }
+    })
+    .await
+    .expect("a frame within 20s");
+    assert_eq!(frame["payload"]["_actor"], "agent-claude", "{frame}");
 }
 
 #[tokio::test(flavor = "multi_thread")]

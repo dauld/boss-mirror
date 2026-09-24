@@ -42,7 +42,12 @@
     title="Dispatcher rules"
     subtitle={loading
       ? 'Loading…'
-      : `${rules.length} active rule${rules.length === 1 ? '' : 's'} — the side-effect wiring boss-dispatcher runs`}
+      : error
+        ? // A failed read leaves `rules` at [] — counting that painted the
+          // empty registry's "0 active rules" above the failure line
+          // (backlog 14371116). The count is unknown, so say so.
+          'Rule count unknown — the registry read failed'
+        : `${rules.length} active rule${rules.length === 1 ? '' : 's'} — the side-effect wiring boss-dispatcher runs`}
   />
 
   <!-- "+ New rule" opens the authoring guidance, not a form (backlog
@@ -59,7 +64,10 @@
   </div>
 
   {#if error}
-    <p class="empty" style="color:var(--err); padding:0 24px">Failed to load: {error}</p>
+    <!-- load-failed + role=alert: the shared failure marker the outage
+         crawl asserts (tests/mocked/_routes.ts FAILURE_MARKER; backlog
+         cae1a377). Without it the route sat in the crawl's SILENT map. -->
+    <p class="empty load-failed" role="alert" style="color:var(--err); padding:0 24px">Failed to load: {error}</p>
   {/if}
 
   {#if rules.length === 0 && !loading && !error}

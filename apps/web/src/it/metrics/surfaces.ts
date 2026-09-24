@@ -103,8 +103,9 @@ export function perActor(rows: ReadonlyArray<RouteCount>): ReadonlyArray<ActorUs
     .sort((a, b) => b.opens - a.opens || (a.actor_id < b.actor_id ? -1 : a.actor_id > b.actor_id ? 1 : 0));
 }
 
-/// Every path the nav catalog registers, once each, in catalog order
-/// (two catalog entries share `/it/registry/rules`).
+/// Every path the nav catalog registers, once each, in catalog order.
+/// A parameterised path (`/it/registry/rules/:ruleName`) is compared as
+/// the pattern surface-opens records, which is the same spelling.
 export function catalogPaths(): ReadonlyArray<string> {
   return [...new Set(Object.values(ROUTE_CATALOG).map((e) => e.path))];
 }

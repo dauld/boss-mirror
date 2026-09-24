@@ -11,7 +11,7 @@
   import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
   import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import OrgTreeNode from './OrgTreeNode.svelte';
-  import { employmentTone, humanizeClassCode, type Employee } from './types';
+  import { classLabel, employmentTone, type Employee } from './types';
   import {
     departmentBuckets,
     expiringCerts,
@@ -73,6 +73,14 @@
   // terminated and null-status rows reachable only under All, uncounted.
   let statusButtons = $derived(statusBuckets(roster, classesFor('employee', 'status')));
 
+  // Department and role labels come from the same registry, by
+  // display_name — backlog 8a331c9b: every code went through
+  // humanizeClassCode, so `operations` printed Operations where its
+  // Class says Operations / IT. classLabel humanizes only a code the
+  // registry lacks, or every code while it is still loading.
+  let departmentClasses = $derived(classesFor('employee', 'department'));
+  let roleClasses = $derived(classesFor('employee', 'role'));
+
   // The rows the Status selection admits. The Department buttons count
   // these, not the active rows — backlog 1410f145: counted from active
   // rows they contradicted the table under On leave or All, and a
@@ -82,14 +90,14 @@
     const code = status.code;
     return roster.filter((e) => e.status === code);
   });
-  let deptButtons = $derived(departmentBuckets(statusAdmitted, dept));
+  let deptButtons = $derived(departmentBuckets(statusAdmitted, dept, departmentClasses));
 
   let visible = $derived(
     statusAdmitted.filter((e) => {
       if (dept.kind === 'code' && e.department !== dept.code) return false;
       if (query) {
         const q = query.toLowerCase();
-        const hay = `${e.id} ${e.name} ${e.email} ${humanizeClassCode(e.role)}`.toLowerCase();
+        const hay = `${e.id} ${e.name} ${e.email} ${classLabel(e.role, roleClasses)}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -117,7 +125,7 @@
     sort.sorted(visible, {
       id: (e) => e.id,
       name: (e) => e.name,
-      role: (e) => humanizeClassCode(e.role),
+      role: (e) => classLabel(e.role, roleClasses),
       dept: (e) => `${e.department ?? ''} ${e.name ?? ''}`,
       tenure: (e) => tenureYears(e),
       skills: (e) => e.skills.length,
@@ -253,8 +261,8 @@
                   </Link>
                 </td>
                 <td>{e.name}</td>
-                <td class="prose-cell">{humanizeClassCode(e.role)}</td>
-                <td>{humanizeClassCode(e.department)}</td>
+                <td class="prose-cell">{classLabel(e.role, roleClasses)}</td>
+                <td>{classLabel(e.department, departmentClasses)}</td>
                 <td class="num">{tenureYears(e).toFixed(1)}y</td>
                 <td class="num">{e.skills.length}</td>
                 <td>{e.location}</td>

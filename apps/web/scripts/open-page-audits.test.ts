@@ -23,20 +23,29 @@ describe('the roster is the catalog', () => {
     const routes = catalogRoutes();
     const paths = routes.map((r) => r.route);
     expect(new Set(paths).size).toBe(paths.length);
-    const catalogued = new Set(
-      Object.values(ROUTE_CATALOG)
-        .map((e) => e.path)
-        .filter((p) => !p.includes(':')),
-    );
+    const catalogued = new Set(Object.values(ROUTE_CATALOG).map((e) => e.path));
     expect(new Set(paths)).toEqual(catalogued);
     // The design measured 45 on #451; the number is the catalog's to
     // move, and this line is what makes a move visible in the diff.
     // 47 since feedback 92921c2f (2026-09-18): the Receiving Yard and
     // the Marshalling Yard became catalog rows, so their two paths —
-    // routed all along, as Operate tabs — joined the march.
-    expect(paths.length).toBe(47);
-    // The doubled key (two rule-editor ids on one path) collapses.
-    expect(paths.filter((p) => p === '/it/registry/rules')).toHaveLength(1);
+    // routed all along, as Operate tabs — joined the march. 48 since
+    // backlog 3071e235 (2026-09-24): the dispatcher rule editor stopped
+    // sharing the rules list's path.
+    expect(paths.length).toBe(48);
+  });
+
+  it('a parameterised catalog path is a page the march audits', () => {
+    // The rule editor carries all four rule writes and was reached by
+    // 66+ links, and the roster dropped every path with a `:` in it —
+    // so giving it a catalog path alone would still leave it unaudited
+    // (backlog 3071e235). Its path is the pattern surface-opens records.
+    const editor = '/it/registry/rules/:ruleName';
+    expect(catalogRoutes().filter((r) => r.route === editor)).toEqual([
+      { route: editor, department: 'it', label: 'Dispatcher rule — editor' },
+    ]);
+    expect(routeByName(editor)?.route).toBe(editor);
+    expect(marchOrder().map((r) => r.route)).toContain(editor);
   });
 
   it('the department is the app the catalog assigns, and Home is IT', () => {

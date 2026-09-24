@@ -18,14 +18,19 @@
 // THIS SPEC PINS THE PAGE AS IT IS, INCLUDING FILED DEFECTS, and names
 // the item at each one, so the car that fixes a gap flips the assertion
 // named for it:
-//   gap 1 (14371116) the header counts a failed read as "0 active rules";
-//   gap 2 (cae1a377) the failure line carries no FAILURE_MARKER;
+//   gap 1 (14371116) the header counted a failed read as "0 active
+//                    rules" — FIXED: it says the count is unknown;
+//   gap 2 (cae1a377) the failure line carried no FAILURE_MARKER — FIXED:
+//                    it carries it and role=alert, and outage-crawl no
+//                    longer holds the route in SILENT;
 //   gap 4 (f9e34a2c) why/source/authored/when and authored_registry are
 //                    received and not rendered;
 //   gap 6 (0a98d93f) no registry tab bar — FIXED: the page renders under
 //                    the registry tabs, with a Rules tab of its own;
 //   gap 7 (3071e235) the editor the row links and "+ New rule" land on
-//                    has no ROUTE_CATALOG path of its own.
+//                    had no ROUTE_CATALOG path of its own — FIXED: it is
+//                    catalogued as /it/registry/rules/:ruleName, the
+//                    pattern surface-opens records it under.
 // Gap 8 (a9c4ad40) asked for both throw branches of the page's one read
 // to be pinned; the two failure tests at the bottom pin both, as the
 // page renders them.
@@ -44,10 +49,15 @@ import { FAILURE_MARKER } from './_routes';
 import { parseRoute } from '../../src/router';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 import { sectionForRoute } from '../../src/shell/sections';
+import { routePattern } from '../../src/shell/surface-opens';
 
 const PAGE = '/it/registry/rules';
 const TITLE = 'Dispatcher rules';
 const NEW_RULE = '/it/registry/rules/new';
+/// The editor's catalog path: a pattern, spelled the way surface-opens
+/// records every open of it (routePattern), so the usage read and the
+/// page march name the same surface.
+const EDITOR = '/it/registry/rules/:ruleName';
 const CASCADE = '/it/registry/dispatcher';
 
 /// The page's one read, as ruleAuthoring.ts's listActiveRules spells it —
@@ -162,6 +172,9 @@ function catalogued(path: string): string | null {
 }
 
 const SUBTITLE = (n: string) => `${n} — the side-effect wiring boss-dispatcher runs`;
+/// The header under a failed read (backlog 14371116), in the words the
+/// step-plugins page uses for the same state.
+const COUNT_UNKNOWN = 'Rule count unknown — the registry read failed';
 const GUIDANCE =
   "A rule lasts when it is written down: a file under infra/dispatcher/rules/, or a tenant's seeds/rules.toml.";
 const EMPTY = 'No active dispatcher rules. A rule is authored as a file or a tenant seed — + New rule says how.';
@@ -333,11 +346,11 @@ test.describe('/it/registry/rules — the controls', () => {
     // It is a link dressed as the page's primary button.
     await expect(create).toHaveClass(/wb-btn-primary/);
     expect(parseRoute(NEW_RULE)).toEqual({ kind: 'dispatcherRuleEdit', ruleName: 'new' });
-    // GAP 7 (backlog 3071e235), pinned as it stands: the router places
-    // the guidance and it lights the cascade's section, but no
-    // ROUTE_CATALOG entry has its path — nav-catalog gives the editor
-    // this list's path. The fixing car makes this a catalog path.
-    expect(catalogPaths().has(NEW_RULE), `${NEW_RULE} has no ROUTE_CATALOG path (gap 7)`).toBe(false);
+    // GAP 7 (backlog 3071e235), closed: the router places the guidance,
+    // it lights the cascade's section, and the surface it opens is the
+    // editor's own ROUTE_CATALOG path — it used to share this list's.
+    expect(routePattern(parseRoute(NEW_RULE), NEW_RULE)).toBe(EDITOR);
+    expect(catalogPaths().has(EDITOR), `${EDITOR} is a ROUTE_CATALOG path (gap 7)`).toBe(true);
     expect(catalogued(NEW_RULE)).toBe('system-dispatcher');
 
     await create.click();
@@ -364,9 +377,10 @@ test.describe('/it/registry/rules — the controls', () => {
     expect(hrefs).toEqual(SORTED.map((n) => `${PAGE}/${encodeURIComponent(n)}`));
     for (const [i, h] of hrefs.entries()) {
       expect(parseRoute(h), h).toEqual({ kind: 'dispatcherRuleEdit', ruleName: SORTED[i] });
-      // GAP 7 (backlog 3071e235), as above: placed, lights the cascade's
-      // section, and has no catalog path of its own.
-      expect(catalogPaths().has(h), `${h} has no ROUTE_CATALOG path (gap 7)`).toBe(false);
+      // GAP 7 (backlog 3071e235), closed as above: placed, lights the
+      // cascade's section, and opens the editor's own catalog path.
+      expect(routePattern(parseRoute(h), h), h).toBe(EDITOR);
+      expect(catalogPaths().has(EDITOR), `${EDITOR} is a ROUTE_CATALOG path (gap 7)`).toBe(true);
       expect(catalogued(h)).toBe('system-dispatcher');
     }
 
@@ -414,18 +428,21 @@ test.describe('/it/registry/rules — empty and failed are never the same paint'
     // The one action stays reachable under a failed read.
     await expect(page.getByRole('link', { name: '+ New rule' })).toHaveCount(1);
 
-    // GAP 2 (backlog cae1a377), pinned as it stands: the line carries
-    // neither FAILURE_MARKER nor role=alert, which is why outage-crawl
-    // holds this route in SILENT. The fixing car flips both counts to 1
-    // and deletes that SILENT line.
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
-    await expect(page.locator('.catalog [role=alert]')).toHaveCount(0);
+    // GAP 2 (backlog cae1a377), closed: the line carries the shared
+    // FAILURE_MARKER and role=alert, so outage-crawl asserts this route
+    // instead of holding it in SILENT.
+    await expect(page.locator(FAILURE_MARKER)).toHaveCount(1);
+    await expect(page.locator('.catalog [role=alert]')).toHaveCount(1);
+    await expect(page.locator(`.catalog ${FAILURE_MARKER}[role=alert]`)).toHaveText(
+      'Failed to load: HTTP 503: dispatcher down',
+    );
 
-    // GAP 1 (backlog 14371116), pinned as it stands: the header counts
-    // the failed read as an empty registry — the same words the empty
-    // test above asserts. The fixing car replaces this with a header
-    // that says the count is unknown.
-    await expect(page.locator('.catalog header.exec-header p')).toHaveText(SUBTITLE('0 active rules'));
+    // GAP 1 (backlog 14371116), closed: a failed read leaves the count
+    // unknown, and the header says so rather than counting nothing as
+    // "0 active rules" — the empty registry's words, asserted above.
+    const subtitle = page.locator('.catalog header.exec-header p');
+    await expect(subtitle).toHaveText(COUNT_UNKNOWN);
+    await expect(subtitle).not.toContainText(/\d/);
   });
 
   test('a 200 whose body carries an error is a failure, not an empty registry', async ({ page }) => {
@@ -449,8 +466,9 @@ test.describe('/it/registry/rules — empty and failed are never the same paint'
     );
     await expect(page.getByText('No active dispatcher rules')).toHaveCount(0);
     await expect(page.locator('.catalog table')).toHaveCount(0);
-    // GAPS 1 and 2 again, on this branch: unmarked line, "0" header.
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
-    await expect(page.locator('.catalog header.exec-header p')).toHaveText(SUBTITLE('0 active rules'));
+    // GAPS 1 and 2 again, closed on this branch too: a marked line, and
+    // a header that does not count what it could not read.
+    await expect(page.locator(`.catalog ${FAILURE_MARKER}[role=alert]`)).toHaveCount(1);
+    await expect(page.locator('.catalog header.exec-header p')).toHaveText(COUNT_UNKNOWN);
   });
 });

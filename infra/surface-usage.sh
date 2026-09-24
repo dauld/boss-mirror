@@ -176,9 +176,11 @@ api() { # <method> <path> [body]
 # THE ROSTER — every `path:` the nav catalog declares, once each. Read
 # off the source with a regex rather than by importing it: this host
 # has no bun, and the catalog's own test pins that each entry carries
-# exactly this `path: '…'` shape. Two entries share `/it/registry/rules`,
-# hence the dedup. A catalog that yields no path is unreadable, not
-# empty — the file has never had fewer than twenty.
+# exactly this `path: '…'` shape. The dedup holds if two entries ever
+# share a path again (the rules list and its editor did until backlog
+# 3071e235). A parameterised path (`/it/registry/rules/:ruleName`) is
+# already the pattern the SPA records. A catalog that yields no path is
+# unreadable, not empty — the file has never had fewer than twenty.
 # ---------------------------------------------------------------------
 catalog_paths() { # prints one path per line, catalog order, deduped
     grep -oE "path: '[^']+'" "$CATALOG" | sed -E "s/^path: '([^']+)'$/\1/" | awk '!seen[$0]++'

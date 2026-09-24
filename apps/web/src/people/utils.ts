@@ -1,6 +1,13 @@
 // Pure helpers on employee data. Ported from apps/web/src/people/utils.ts.
 
-import { humanizeClassCode, type Certification, type Employee, type EmployeeId } from './types';
+import {
+  classLabel,
+  humanizeClassCode,
+  type Certification,
+  type ClassName,
+  type Employee,
+  type EmployeeId,
+} from './types';
 import { appNow } from '@boss/web-kit/sim-clock';
 
 /// One Status filter button: a status code (`null` = the rows with no
@@ -57,9 +64,13 @@ export type DepartmentBucket = Readonly<{ code: string | null; label: string; co
 /// has none, so every row sits in exactly one bucket. The `selected`
 /// department keeps its button at zero when the rows hold none of it,
 /// so a Status change never hides the filter that empties the table.
+/// Each button is labelled from its (employee, department) Class's
+/// display_name, humanizing only a code the registry lacks (backlog
+/// 8a331c9b: `operations` printed Operations for Operations / IT).
 export function departmentBuckets(
   rows: ReadonlyArray<Employee>,
   selected: CodeFilter,
+  departmentClasses: ReadonlyArray<ClassName>,
 ): DepartmentBucket[] {
   const countOf = (code: string | null): number =>
     rows.filter((e) => e.department === code).length;
@@ -69,7 +80,7 @@ export function departmentBuckets(
     .filter((d): d is string => d !== null)
     .sort();
   return [
-    ...named.map((d) => ({ code: d, label: humanizeClassCode(d), count: countOf(d) })),
+    ...named.map((d) => ({ code: d, label: classLabel(d, departmentClasses), count: countOf(d) })),
     ...(codes.has(null) ? [{ code: null, label: 'No department', count: countOf(null) }] : []),
   ];
 }

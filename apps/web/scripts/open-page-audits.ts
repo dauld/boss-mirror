@@ -91,16 +91,16 @@ export const HOME_DEPARTMENT = 'it';
 type CatalogEntry = Readonly<{ label: string; path: string; app?: string }>;
 
 /// Every catalogued route, once, in catalog order — with the department
-/// the catalog assigns it. Two catalog keys can share a path
-/// (`system-dispatcher-rules` and `system-dispatcher-rule` both answer
-/// /it/registry/rules), so the first entry names it; a parameterised
-/// path is not a page.
+/// the catalog assigns it. If two catalog keys ever share a path the
+/// first entry names it. A parameterised path (`/it/registry/rules/
+/// :ruleName`) IS a page: it used to be filtered out here, which is why
+/// the rule editor — its four writes behind 66+ links — was never
+/// audited even once it had a path of its own (backlog 3071e235).
 export function catalogRoutes(
   catalog: Readonly<Record<string, CatalogEntry>> = ROUTE_CATALOG,
 ): ReadonlyArray<PlannedAudit> {
   const seen = new Set<string>();
   return Object.values(catalog)
-    .filter((e) => !e.path.includes(':'))
     .filter((e) => {
       if (seen.has(e.path)) return false;
       seen.add(e.path);

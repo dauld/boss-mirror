@@ -49,12 +49,18 @@ const PR_URL: &str = "https://github.com/algedonic-dev/boss/pull/239";
 /// The CodeQL check-run's id in the fixture — the annotations URL
 /// GitHub hands back is keyed on it.
 const CODEQL_RUN: &str = "105867839495";
-/// A deadline for a case that must END in a reading. The default three
-/// seconds is a count of polls for the cases that must run out of time;
-/// under a loaded pod one poll took seven (2026-09-23, load 124), so a
-/// case that reads on its first or second poll gets room to, and still
-/// exits the moment it reads.
-const ROOMY: (&str, &str) = ("BOSS_CHECKS_DEADLINE_SECONDS", "60");
+/// How many polls a case tolerates before the verb gives up. The wait in
+/// a test is counted in POLLS, never wall-clock seconds (backlog
+/// 167f26e3): a three-second deadline stood in for "two or three polls"
+/// until a loaded pod (load 124, 2026-09-23) took seven seconds over ONE
+/// poll, and a case that must see two polls before running out of time
+/// can then see one. A count is the same number on an idle pod and a
+/// loaded one.
+const POLLS: u32 = 3;
+/// The wall-clock deadline in a test, set far past any poll count's
+/// worth of work so it is never the bound a case measures — it only
+/// stops a verb that ignores the poll bound from spinning forever.
+const WALL_SECONDS: &str = "300";
 
 fn fixture(name: &str) -> PathBuf {
     repo_root()
@@ -208,10 +214,11 @@ exit 22
             .env("BOSS_JOBS_URL", "http://jobs.invalid")
             .env("BOSS_GITHUB_API", "https://api.github.invalid")
             .env("BOSS_MIRROR_SLUG", "fixture-upstream/mirror")
-            // No waiting in a test: the loop polls at once and the
-            // deadline is the number of polls it tolerates.
+            // No waiting in a test: the loop polls at once, and the
+            // bound is the number of polls it tolerates (see POLLS).
             .env("BOSS_CHECKS_POLL_SECONDS", "0")
-            .env("BOSS_CHECKS_DEADLINE_SECONDS", "3");
+            .env("BOSS_CHECKS_MAX_POLLS", POLLS.to_string())
+            .env("BOSS_CHECKS_DEADLINE_SECONDS", WALL_SECONDS);
         for (k, v) in extra {
             cmd.env(k, v);
         }
@@ -429,10 +436,17 @@ fn a_check_still_running_is_waited_for_and_named_when_the_deadline_passes() {
         last.starts_with("read-publish-checks: FAILED — ") && last.contains("Analyze (rust)"),
         "the failure names the run still in flight: {last}"
     );
-    assert!(
-        run.log().matches("/check-runs").count() >= 2,
-        "the verb polled more than once before giving up:\n{}",
+    assert_eq!(
         run.log()
+            .matches(&format!("/commits/{HEAD}/check-runs"))
+            .count(),
+        POLLS as usize,
+        "the verb polled exactly its bound before giving up, however long each poll took:\n{}",
+        run.log()
+    );
+    assert!(
+        last.contains(&format!("after {POLLS} polls")),
+        "the failure says how long it waited in the unit it was bounded by: {last}"
     );
     // What it saw is on the record, marked partial; the step is not done.
     let reading = run.reading();
@@ -458,7 +472,7 @@ fn an_empty_check_list_is_not_yet_and_the_next_poll_reads_it() {
     run.route(&format!("/commits/{HEAD}/check-runs"), &empty);
     run.route_pr239_complete();
 
-    let (code, text) = run.go(&[], &[ROOMY]);
+    let (code, text) = run.go(&[], &[]);
     assert_eq!(code, 0, "{text}");
     assert_eq!(run.reading()["complete"], true);
     assert_eq!(
@@ -506,7 +520,7 @@ fn a_non_scanning_check_still_running_does_not_hold_the_reading() {
     run.route(&format!("/commits/{HEAD}/check-runs"), &checks);
     run.route_pr239_complete();
 
-    let (code, text) = run.go(&[], &[ROOMY]);
+    let (code, text) = run.go(&[], &[]);
     assert_eq!(code, 0, "{text}");
     assert_eq!(
         run.log()
@@ -568,7 +582,7 @@ fn a_running_gate_before_the_scan_registers_is_not_yet() {
     run.route(&format!("/commits/{HEAD}/check-runs"), &then);
     run.route_pr239_complete();
 
-    let (code, text) = run.go(&[], &[ROOMY]);
+    let (code, text) = run.go(&[], &[]);
     assert_eq!(code, 0, "{text}");
     assert_eq!(
         run.log()

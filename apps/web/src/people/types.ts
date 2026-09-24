@@ -40,6 +40,21 @@ export function humanizeClassCode(code: string | null | undefined): string {
     .join(' ');
 }
 
+/// A Class row as far as a label needs it — what `classesFor` answers.
+export type ClassName = Readonly<{ code: string; display_name: string }>;
+
+/// A department or role code's label: the registry's `display_name`,
+/// falling back to `humanizeClassCode` only for a code the registry
+/// lacks (or while `classesFor` still answers []). Backlog 8a331c9b:
+/// the roster humanized every code, so `operations` printed Operations
+/// where its Class says Operations / IT.
+export function classLabel(
+  code: string | null | undefined,
+  classes: ReadonlyArray<ClassName>,
+): string {
+  return classes.find((c) => c.code === code)?.display_name ?? humanizeClassCode(code);
+}
+
 export type EmploymentStatus = 'active' | 'on-leave' | 'terminated';
 
 /// Tone for the web-kit StatusChip; mirrors the retired chip-emp-*

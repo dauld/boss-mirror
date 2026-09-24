@@ -105,6 +105,14 @@ SCAN_CHECK="${BOSS_CODE_SCANNING_CHECK:-CodeQL}"
 SCAN_JOBS="${BOSS_CODE_SCANNING_JOBS:-Analyze (}"
 POLL="${BOSS_CHECKS_POLL_SECONDS:-60}"
 DEADLINE="${BOSS_CHECKS_DEADLINE_SECONDS:-1500}"
+# A bound on the wait counted in POLLS, beside the wall-clock one; 0 (the
+# default, and the forge's) is no bound, so $DEADLINE alone governs there.
+# It exists for the tests (backlog 167f26e3): they poll with no sleep, and
+# a case that must see N polls before giving up cannot be bounded in
+# seconds — a loaded pod took seven over ONE poll (2026-09-23, load 124),
+# so a three-second deadline sometimes allowed one poll and sometimes
+# hundreds. A count is the same number on an idle pod and a loaded one.
+MAX_POLLS="${BOSS_CHECKS_MAX_POLLS:-0}"
 # GitHub pages a check-run's annotations 100 at a time; ten pages is
 # well past what it exposes for one run.
 MAX_PAGES=10
@@ -132,6 +140,9 @@ check_inputs() {
     esac
     case "$POLL$DEADLINE" in
         *[!0-9]*) echo "$me: BOSS_CHECKS_POLL_SECONDS ($POLL) and BOSS_CHECKS_DEADLINE_SECONDS ($DEADLINE) must be whole seconds" >&2; rc=1 ;;
+    esac
+    case "${MAX_POLLS:-empty}" in
+        empty|*[!0-9]*) echo "$me: BOSS_CHECKS_MAX_POLLS ($MAX_POLLS) must be a whole number of polls (0 is no bound)" >&2; rc=1 ;;
     esac
     return $rc
 }
@@ -209,8 +220,10 @@ gh_get() {
 checks="$workdir/checks.json"
 seen=0
 note=""
+polls=0
 SECONDS=0
 while :; do
+    polls=$((polls + 1))
     if gh_get "commits/$head/check-runs?per_page=100" > "$checks.new"; then
         mv "$checks.new" "$checks"
         seen=1
@@ -236,7 +249,7 @@ while :; do
     else
         note="GET commits/${head:0:12}/check-runs — $(head -c 200 "$workdir/err" | tr '\n' ' ')"
     fi
-    if [ "$SECONDS" -ge "$DEADLINE" ]; then
+    if [ "$SECONDS" -ge "$DEADLINE" ] || { [ "$MAX_POLLS" -gt 0 ] && [ "$polls" -ge "$MAX_POLLS" ]; }; then
         # Past the deadline: what was seen goes on the record as a
         # PARTIAL reading, and the step stays open — a check still
         # running is not a conclusion.
@@ -253,7 +266,7 @@ while :; do
                 --data-binary @"$workdir/partial" "$BASE/api/jobs/$job_id/metadata" > /dev/null 2>"$workdir/err" \
                 || say "the partial reading could not be written onto ${job_id:0:8} — $(head -c 200 "$workdir/err" | tr '\n' ' ')"
         fi
-        fail "$note after ${SECONDS}s — the reading is partial (code_scanning.complete=false on ${job_id:0:8}); re-file the request once the checks finish"
+        fail "$note after $polls polls, ${SECONDS}s — the reading is partial (code_scanning.complete=false on ${job_id:0:8}); re-file the request once the checks finish"
     fi
     say "not yet — $note; polling again in ${POLL}s"
     sleep "$POLL"
