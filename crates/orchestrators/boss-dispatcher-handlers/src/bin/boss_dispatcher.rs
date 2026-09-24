@@ -46,6 +46,7 @@ use boss_dispatcher_handlers::handlers::{
     jobs_complete_linked_step::JobsCompleteLinkedStep,
     jobs_complete_step::JobsCompleteStep,
     jobs_complete_step_matching::JobsCompleteStepMatching,
+    jobs_flight_overdue::JobsFlightOverdue,
     jobs_reclaim_abandoned_step::JobsReclaimAbandonedStep,
     jobs_run_car_probes::JobsRunCarProbes,
     jobs_subjob_resolve::JobsSubjobResolve,
@@ -460,6 +461,15 @@ async fn main() -> Result<()> {
             // how many hours ride the rule row; it files and withdraws
             // its own alarm and never touches the late step.
             handlers.register(JobsAgentStepOverdue::new(
+                cfg.jobs_api_url.clone(),
+                platform_owner.clone(),
+            ));
+            // The same alarm shape for flights (design c4c2a607): a
+            // flight past its observe period with no verdict, or decided
+            // and not cleaned out of the code. Which steps and how many
+            // days ride the rule row; it files and withdraws its own
+            // alarm and never touches the flight.
+            handlers.register(JobsFlightOverdue::new(
                 cfg.jobs_api_url.clone(),
                 platform_owner.clone(),
             ));

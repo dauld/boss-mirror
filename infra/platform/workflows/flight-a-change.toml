@@ -1,0 +1,214 @@
+# ---------------------------------------------------------------------
+# flight-a-change — ship a change to our own instance behind a flag,
+# turn it on for an audience, watch it, then promote it or pull it
+# (design c4c2a607, decided by David 2026-09-24; backlog 73c31776).
+#
+# David, 2026-09-24: "We need to be able to flight ideas safely too, so
+# we can use this as an excuse to create and use those protocols." Until
+# this row the only switch was the tenant manifest's `[modules]` — per
+# tenant, redeployed to change — so a new idea landed for everyone or
+# not at all.
+#
+# THE PACKET IS THE FLIGHT; there is no flights table. The filer puts
+# the declaration in JOB metadata under `flight` (the schema below
+# requires it): `code` (kebab-case — the token source names in
+# `flightOn('<code>')`), `hypothesis`, `signal` (the reading that
+# decides), `audience` = {actors: [ids], roles: [codes]}, `owner`, and
+# `observe_days`. The subject is `custom` with the code as its id, so
+# every step title names the flight.
+#
+# THE STATE IS THE COMPLETIONS. A step whose completion changes the
+# flight declares the state it sets in `metadata_defaults.flight_state`
+# (`boss_jobs::flights::STATE_KEY`), and `GET /api/flights/mine` reads
+# it off this row as the packet's pinned version — never off the
+# packet's own step metadata, which the completing actor writes. So
+# every state change is a step completion, already an event with its
+# actor and instant. `turn-on` sets on-for-audience, `widen` on-for-all,
+# `pull` off; off is final. Closing the packet retires the flight: the
+# read only lists open packets.
+#
+# WHO MAY DO WHAT is the design review's one answer (David, 2026-09-24):
+# an agent may file, ship, turn on for David, record its reading and
+# pull at any time — pulling is the safe direction. Widening to
+# everyone and a promote verdict need his sign-off while he is the only
+# human user. So `widen` and `decide` are `human_only`, and the flights
+# read also counts `widen`'s on-for-all only when `completed_by` is a
+# person: the record shows the sign-off was his, not a belief that it
+# was. The row names no person: on an instance with a second human, the
+# role decides, and the design says to revisit then.
+#
+# EXTEND ONCE. `extend` is one step, so a flight is extended at most
+# once by construction, and `reobserve` records the second reading;
+# after that the answer is `decide` or `pull`. It sets no state and
+# widens nothing, so an agent may take it. The design put `extend` among
+# decide's verdicts; it is its own step here so the verdict fork stays
+# the two exclusive terminals, and so the stale-flight alarm can restart
+# the period from its completion with the period it names.
+#
+# `decide` names `widen` and `reobserve` beside `observe` in its
+# ready_when. Each implies `observe` is done, so the predicate is not
+# stricter for it; it is the edge that says the decision reads them,
+# and without it the two optional steps are leaves that reach no
+# terminal, which the publish lint refuses.
+#
+# THE CLEANUP IS PROVEN, NOT SAID. Either verdict ends in a car that
+# deletes the fork (promote keeps the new path, pull keeps the old), and
+# `retired` means the code no longer names the flag: `cleanup` records
+# the car and the machine probe's reading — `git grep -n
+# "flightOn('<code>')"` on origin/main printing nothing — and that car's
+# own recorded probe is what proves it on the forge.
+#
+# STALE FLIGHTS ALARM. `infra/dispatcher/rules/a-flight-past-its-period-
+# is-an-alarm.toml` files an alarm, hourly, for a flight past its
+# observe period + 7 days with no verdict, or decided 14 days ago and
+# not cleaned up — a timer over a threshold, which no event reports.
+#
+# NOT ENFORCED HERE: `observe` refusing a reading before `observe_days`
+# have elapsed since `turn-on` (a predicate cannot compare instants
+# today; the procedure asks for it and the alarm bounds the other end),
+# and a code's uniqueness among open flights at admission (the read
+# answers an ambiguous code OFF, the safe direction, until it is).
+
+[[workflow]]
+kind = "flight-a-change"
+label = "Flight"
+category = "platform"
+subject_kinds = ["custom"]
+owning_team = "platform"
+description = """
+A change shipped to our own instance behind a flight: turned on for an audience (David first), watched for a declared period with the reading recorded, then promoted (the flag and the old path deleted) or pulled (the flag and the new path deleted). The hypothesis and the signal that decides are on the packet before the reading, so the reading can prove the hypothesis wrong.
+
+The packet IS the flight - its job metadata carries the declaration under `flight` (code, hypothesis, signal, audience, owner, observe_days), and its state is what its completed steps declare: turn-on is on for the audience, widen is on for everyone, pull is off for good. GET /api/flights/mine answers, for the viewer, the codes that are on; a code it does not list is off.
+
+An agent may file, ship, turn on, record the reading, extend once and pull at any time. Widening to everyone and deciding are a person's (human_only) while one person runs the company: David, 2026-09-24."""
+metadata = { owner_role = "platform-admin" }
+metadata_schema = { type = "object", required = ["flight"], properties = { flight = { type = "object", required = ["code", "hypothesis", "signal", "audience", "owner", "observe_days"], properties = { code = { type = "string", description = "Kebab-case; the token source names in flightOn('<code>'). Unique among open flights." }, hypothesis = { type = "string" }, signal = { type = "string", description = "The reading that decides, stated before it is taken." }, audience = { type = "object", description = "{actors: [ids], roles: [codes]} - who sees the flight once it is turned on." }, owner = { type = "string" }, observe_days = { type = "number", description = "The declared observe period, in days." } } } } }
+
+[[workflow.step]]
+title = "opened"
+kind = "trigger"
+ready_when = "true"
+title_template = "Flight filed: {subject.id}"
+metadata_defaults = { trigger_kind = "operator", trigger_name = "author-files-a-flight" }
+
+[[workflow.step]]
+title = "ship"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Ship {subject.id} behind its flag"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "Land the change with the new path behind `flightOn('<code>')` (web) or the boss-jobs-client flights read (Rust), the old path as the default. Complete this step once the car has MERGED, naming it in `car` - the flag is inert until turn-on, so shipping changes nothing anyone sees." }
+fields = [
+  { name = "car", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "turn-on"
+kind = "task"
+ready_when = "steps.ship.done"
+title_template = "Turn {subject.id} on for its audience"
+authority_role = "platform-admin"
+metadata_defaults = { flight_state = "on-for-audience", procedure = "Completing this step turns the flight on for the audience its packet declares (David first). Record who that is in `turned_on_for`. The observe period starts now." }
+fields = [
+  { name = "turned_on_for", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "observe"
+kind = "task"
+ready_when = "steps.turn-on.done"
+title_template = "Record the reading on {subject.id}"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "After the packet's `observe_days` have passed since turn-on, record what was seen against the declared signal: by whom, when, and what it showed - `reading`. An exhibit (a recording, a screenshot board) may ride as `exhibit`. `observed_days` is the period actually watched. A reading that contradicts the hypothesis is a result, not a failure." }
+fields = [
+  { name = "reading", field_type = "string", required = true },
+  { name = "observed_days", field_type = "string", required = true },
+  { name = "exhibit", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "widen"
+kind = "task"
+ready_when = "steps.observe.done"
+title_template = "Widen {subject.id} to everyone"
+authority_role = "platform-admin"
+metadata_defaults = { flight_state = "on-for-all", human_only = true, procedure = "Optional. Completing this step turns the flight on for EVERYONE on this instance. It is a person's sign-off while one person runs the company (David, 2026-09-24); leave it when the audience already is everyone who matters." }
+fields = [
+  { name = "why", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "extend"
+kind = "task"
+ready_when = "steps.observe.done"
+title_template = "Extend the observe period on {subject.id} (once)"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "Optional, and once: the reading was not enough to decide. Name the further period in `observe_days` and why in `reason`; the stale-flight alarm measures the new period from this completion. There is one extend step, so there is no second extend - after this the answer is decide or pull." }
+fields = [
+  { name = "observe_days", field_type = "string", required = true },
+  { name = "reason", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "reobserve"
+kind = "task"
+ready_when = "steps.extend.done"
+title_template = "Record the extended reading on {subject.id}"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "After the extension's `observe_days` have passed, record the second reading against the same signal, the way `observe` recorded the first." }
+fields = [
+  { name = "reading", field_type = "string", required = true },
+  { name = "observed_days", field_type = "string", required = true },
+  { name = "exhibit", field_type = "string" },
+]
+
+[[workflow.step]]
+title = "pull"
+kind = "task"
+ready_when = "steps.opened.done"
+title_template = "Pull {subject.id}"
+authority_role = "platform-admin"
+metadata_defaults = { flight_state = "off", procedure = "Turn the flight off for good, at any time - the safe direction, open to an agent. It is off the moment this completes; the cleanup car then deletes the fork and the new path." }
+fields = [
+  { name = "reason", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "decide"
+kind = "task"
+ready_when = "steps.observe.done OR steps.widen.done OR steps.reobserve.done"
+title_template = "Decide {subject.id}: promote or pull"
+authority_role = "platform-admin"
+metadata_defaults = { human_only = true, procedure = "Read the hypothesis, the signal and the reading (and the extension's, if there was one), then decide. `promote` keeps the new path: the cleanup car deletes the flag and the old path. `pull` keeps the old path: the cleanup car deletes the flag and the new one. `decision` says why, against the signal stated at filing." }
+fields = [
+  { name = "verdict", field_type = "promote|pull", required = true },
+  { name = "decision", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "cleanup"
+kind = "task"
+ready_when = "steps.decide.done OR steps.pull.done"
+title_template = "Clean {subject.id} out of the code"
+authority_role = "platform-admin"
+metadata_defaults = { procedure = "Land the car that deletes the fork - promote keeps the new path, pull keeps the old - with a recorded probe that `git grep -n \"flightOn('<code>')\"` on the converged main prints nothing. Complete this step once it merged: `cleanup_car` names the car, `fork_gone` quotes the probe's reading. Retired means the code no longer names the flag, proven by that probe rather than said." }
+fields = [
+  { name = "cleanup_car", field_type = "string", required = true },
+  { name = "fork_gone", field_type = "string", required = true },
+]
+
+[[workflow.step]]
+title = "promoted"
+kind = "outcome"
+ready_when = "steps.cleanup.done AND steps.decide.done AND steps.decide.metadata.verdict = \"promote\" AND NOT steps.pull.done"
+title_template = "Promoted: {subject.id}"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "promoted" }
+
+[[workflow.step]]
+title = "pulled"
+kind = "outcome"
+ready_when = "steps.cleanup.done AND (steps.pull.done OR (steps.decide.done AND steps.decide.metadata.verdict = \"pull\"))"
+title_template = "Pulled: {subject.id}"
+metadata_defaults = { outcome_kind = "completed" }
+terminal = { outcome = "pulled" }

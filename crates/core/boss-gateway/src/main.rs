@@ -476,6 +476,16 @@ fn build_router(
             "/api/yard/rule-firings",
             axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
+        // The flights read (design c4c2a607, backlog 73c31776): the
+        // codes on for THIS session, which the jobs upstream resolves
+        // from the signed `x-boss-user` the role-header layer sets. The
+        // SPA reads it inlined on index.html (static_files.rs); this
+        // route is the same answer for a fetch, routed in the car that
+        // adds the read so it never ships unreachable at the door.
+        .route(
+            "/api/flights/mine",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         // The agent-run record — which actor built what, and what it
         // cost. `GET /api/agent-runs[?actor_id=&branch=&since=]` lists
         // the rows and `/cost` rolls them up; both live on the jobs
@@ -1161,6 +1171,9 @@ mod routing_tests {
             // David's screen; `every_api_path_the_web_fetches_is_routed`
             // below now derives this list from the bundle instead.
             "/api/yard/regions",
+            // The flights read (73c31776): inlined on index.html, and
+            // the same answer for a page the gateway did not serve.
+            "/api/flights/mine",
             // The agent-run record — what each actor built and what it
             // cost. Shipped on the jobs upstream in train #294 and
             // unreachable at the human door ever since: the Crew Board

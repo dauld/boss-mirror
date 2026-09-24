@@ -40,6 +40,52 @@ pub struct JobSummary {
     pub closed_on: Option<NaiveDate>,
 }
 
+/// Who a flights read is for — the actor a behaviour flight gates, passed
+/// explicitly because a service has no session of its own to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Viewer<'a> {
+    pub id: &'a str,
+    pub role: &'a str,
+}
+
+/// The flights on for one viewer (design c4c2a607, backlog 73c31776):
+/// the Rust half of the web's `flightOn`, reading the SAME
+/// `GET /api/flights/mine` the gateway inlines into the page, so a
+/// behaviour flight and a UI flight cannot disagree about who is in.
+///
+/// A code it does not hold is off. The default — no answer — holds
+/// none, so a caller that falls back to it on an error takes the old
+/// path, which is the safe one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FlightsOn(std::collections::BTreeSet<String>);
+
+impl FlightsOn {
+    /// Is the flight `code` on for the viewer this was read for?
+    pub fn on(&self, code: &str) -> bool {
+        self.0.contains(code)
+    }
+
+    /// The set a `{"flights": [codes]}` answer names. A body of any
+    /// other shape is refused by name, never read as "nothing on" —
+    /// the caller decides whether a refusal falls back to off.
+    pub fn from_answer(body: &serde_json::Value) -> Result<Self, JobsClientError> {
+        body.get("flights")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|codes| {
+                codes
+                    .iter()
+                    .map(|c| c.as_str().map(str::to_string))
+                    .collect::<Option<_>>()
+            })
+            .map(Self)
+            .ok_or_else(|| {
+                JobsClientError::MalformedBody(format!(
+                    "not a flights answer (want {{\"flights\": [codes]}}): {body}"
+                ))
+            })
+    }
+}
+
 #[async_trait]
 pub trait JobsClient: Send + Sync {
     /// List Jobs matching the given filters. `kind` selects a
@@ -51,6 +97,11 @@ pub trait JobsClient: Send + Sync {
         subject_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<JobSummary>, JobsClientError>;
+
+    /// The flights on for `viewer` — `GET /api/flights/mine` asked as
+    /// that viewer. `FlightsOn::default()` is the safe fallback on an
+    /// error: every flight off.
+    async fn flights_for(&self, viewer: &Viewer<'_>) -> Result<FlightsOn, JobsClientError>;
 }
 
 /// Production `JobsClient` that calls the jobs HTTP API over reqwest.
@@ -90,6 +141,27 @@ impl JobsClient for ReqwestJobsClient {
             JobsClientError::MalformedBody(format!("missing data array in {body}"))
         })?;
         Ok(project_job_summaries(data))
+    }
+
+    async fn flights_for(&self, viewer: &Viewer<'_>) -> Result<FlightsOn, JobsClientError> {
+        // The identity header the jobs API resolves the audience from —
+        // the shape the gateway signs for a browser session.
+        let user = serde_json::json!({ "id": viewer.id, "role": viewer.role }).to_string();
+        let resp = self
+            .http
+            .get(format!("{}/api/flights/mine", self.base_url))
+            .header("x-boss-user", user)
+            .send()
+            .await
+            .map_err(|e| JobsClientError::Unreachable(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(JobsClientError::UnexpectedStatus(resp.status().as_u16()));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| JobsClientError::MalformedBody(e.to_string()))?;
+        FlightsOn::from_answer(&body)
     }
 }
 
@@ -169,6 +241,75 @@ mod tests {
             Some(NaiveDate::from_ymd_opt(2026, 1, 7).unwrap())
         );
         assert!(projected[1].closed_on.is_none());
+    }
+
+    #[test]
+    fn a_flights_answer_is_the_set_of_codes_on_and_unlisted_is_off() {
+        let on = FlightsOn::from_answer(&json!({"flights": ["it-map-motion"]})).unwrap();
+        assert!(on.on("it-map-motion"));
+        assert!(!on.on("something-else"));
+        assert!(
+            !FlightsOn::default().on("it-map-motion"),
+            "no answer: all off"
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_the_answer_is_refused_not_read_as_all_off() {
+        for bad in [
+            json!({}),
+            json!({"flights": "it-map-motion"}),
+            json!({"flights": ["x", 1]}),
+        ] {
+            assert!(
+                matches!(
+                    FlightsOn::from_answer(&bad),
+                    Err(JobsClientError::MalformedBody(_))
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    /// The Rust half reads the SAME endpoint the page does, as the
+    /// viewer it names: the id and role ride as the `x-boss-user` the
+    /// jobs API resolves the audience from.
+    #[tokio::test]
+    async fn flights_for_asks_the_one_read_as_the_named_viewer() {
+        use axum::http::HeaderMap;
+        let app = axum::Router::new().route(
+            "/api/flights/mine",
+            axum::routing::get(|headers: HeaderMap| async move {
+                let user: serde_json::Value = headers
+                    .get("x-boss-user")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                let on = user["id"] == "emp-david" && user["role"] == "platform-admin";
+                axum::Json(json!({ "flights": if on { vec!["it-map-motion"] } else { vec![] } }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = ReqwestJobsClient::new(base);
+        let david = client
+            .flights_for(&Viewer {
+                id: "emp-david",
+                role: "platform-admin",
+            })
+            .await
+            .unwrap();
+        assert!(david.on("it-map-motion"));
+        let other = client
+            .flights_for(&Viewer {
+                id: "emp-ops",
+                role: "operator",
+            })
+            .await
+            .unwrap();
+        assert!(!other.on("it-map-motion"));
     }
 
     #[test]
