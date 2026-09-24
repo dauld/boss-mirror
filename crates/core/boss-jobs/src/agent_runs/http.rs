@@ -62,21 +62,6 @@ pub fn router(state: AgentRunsApiState) -> Router {
 fn err_response(e: AgentRunError) -> Response {
     match e {
         AgentRunError::BadRequest(m) => (StatusCode::BAD_REQUEST, m).into_response(),
-        // 409, the status every other refused-by-state write on this
-        // service answers with (a terminal step, incomplete sign-offs):
-        // the report was well-formed, and the record's state — the
-        // actor's spend against its cap — is what refused it. The body
-        // is the decision, not a bare string, so a caller can show it.
-        AgentRunError::Denied { reason } => (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "run refused against the actor's budget",
-                "budget": { "kind": "deny", "reason": reason },
-                "hint": "the refusal is on the log as agents.run.denied; \
-                         the window rolls an hour after the spend it counted",
-            })),
-        )
-            .into_response(),
         AgentRunError::Storage(m) => (StatusCode::INTERNAL_SERVER_ERROR, m).into_response(),
     }
 }
@@ -260,6 +245,8 @@ mod tests {
             // these tests see the shape the surface actually serves: a
             // total-only run, priced at the blend, saying so.
             blended_input_share_ppm: Some(875_000),
+            cache_read_usd_micros_per_mtok: None,
+            cache_write_usd_micros_per_mtok: None,
         }]
     }
 
@@ -655,13 +642,15 @@ mod tests {
         assert!(out["summary"].get("by_actor").is_none(), "body: {body}");
     }
 
-    /// A refused run answers 409 with the decision in the body — the
-    /// status every other refused-by-state write on this service uses
-    /// — and an admitted one carries its decision on the run. Through
-    /// the door, so the wire shape is what is pinned: a caller reads
-    /// `budget.kind` off either answer.
+    /// An over-cap run is RECORDED and carries its budget reading
+    /// (backlog e6b2066f). Until then it answered 409 and left no row,
+    /// and once runs are priced from what they consumed that refusal
+    /// would have dropped real spend from the record; David's direction
+    /// is that a budget is a signal, not a limit. Through the door, so
+    /// the wire shape is what is pinned: a caller reads `budget.kind`
+    /// off the run either way.
     #[tokio::test]
-    async fn a_refused_run_is_a_409_carrying_the_decision() {
+    async fn an_over_cap_run_is_recorded_carrying_its_deny_reading() {
         // A cap of zero is a declared cap: the agent is switched off.
         let log = InMemoryAgentRuns::new(card()).with_budgeted_agent(
             "agent-claude",
@@ -702,11 +691,12 @@ mod tests {
                 .to_bytes(),
         )
         .into_owned();
-        assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+        assert_eq!(status, StatusCode::OK, "body: {body}");
         let out: serde_json::Value = serde_json::from_str(&body).expect("JSON");
-        assert_eq!(out["budget"]["kind"], "deny", "body: {body}");
+        assert_eq!(out["recorded"], true, "body: {body}");
+        assert_eq!(out["run"]["budget"]["kind"], "deny", "body: {body}");
         assert!(
-            out["budget"]["reason"]
+            out["run"]["budget"]["reason"]
                 .as_str()
                 .is_some_and(|r| r.contains("0 of 0")),
             "body: {body}"

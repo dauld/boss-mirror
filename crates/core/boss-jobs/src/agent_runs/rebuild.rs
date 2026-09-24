@@ -127,6 +127,20 @@ async fn insert_run(
                 .map(|b| serde_json::to_value(b).unwrap_or_default()),
         )
         .bind(run.recorded_at)
+        // A metered run's cache counts, replayed as recorded; NULL for
+        // every other shape (backlog e6b2066f).
+        .bind(
+            run.run
+                .tokens
+                .cache_read()
+                .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+        )
+        .bind(
+            run.run
+                .tokens
+                .cache_write()
+                .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+        )
         .execute(conn)
         .await?;
     Ok(())
@@ -146,8 +160,9 @@ mod tests {
         let sql = insert_run_sql();
         let columns = super::super::postgres::RUN_COLUMNS.split(',').count();
         assert_eq!(
-            columns, 18,
-            "agent_runs has eighteen columns (model joined on 2026-09-15, budget on 2026-09-16)"
+            columns, 20,
+            "agent_runs has twenty columns (model joined on 2026-09-15, budget on 2026-09-16, \
+             the two cache counts on 2026-09-24)"
         );
         for n in 1..=columns {
             assert!(

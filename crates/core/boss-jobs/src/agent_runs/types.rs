@@ -141,6 +141,18 @@ pub struct RateCardRow {
     /// measured.
     #[serde(default)]
     pub blended_input_share_ppm: Option<u64>,
+    /// What a million prompt tokens READ FROM THE CACHE cost, and what
+    /// a million WRITTEN TO IT cost (backlog e6b2066f) — the two rates
+    /// a [`TokenUsage::Metered`] run needs beyond the two above. Prices
+    /// as data, like the others, so a changed multiplier is a
+    /// migration and never a constant here. `None` on a row that
+    /// declares none, which leaves a metered run on that model
+    /// unpriced: pricing three of four counts would read as the whole
+    /// bill.
+    #[serde(default)]
+    pub cache_read_usd_micros_per_mtok: Option<u64>,
+    #[serde(default)]
+    pub cache_write_usd_micros_per_mtok: Option<u64>,
 }
 
 /// Parts per million, the unit [`RateCardRow::blended_input_share_ppm`]
@@ -187,6 +199,12 @@ pub enum PricingBasis {
     /// Honest about being an estimate: the tokens are measured, the
     /// division between them is an assumption read out of the registry.
     Blended,
+    /// Priced from the run's four MEASURED counts — uncached input,
+    /// cache writes, cache reads, output — each at its own rate
+    /// (backlog e6b2066f). The strongest basis: a `Split` carries no
+    /// cache counts, and cache reads were a median 96.8% of what a
+    /// dispatched run processed.
+    Metered,
 }
 
 impl PricingBasis {
@@ -194,6 +212,7 @@ impl PricingBasis {
         match self {
             PricingBasis::Split => "split",
             PricingBasis::Blended => "blended",
+            PricingBasis::Metered => "metered",
         }
     }
 
@@ -201,17 +220,29 @@ impl PricingBasis {
         match s {
             "split" => Some(PricingBasis::Split),
             "blended" => Some(PricingBasis::Blended),
+            "metered" => Some(PricingBasis::Metered),
             _ => None,
         }
     }
 
+    /// How measured a basis is: metered over split over blended.
+    fn rank(self) -> u8 {
+        match self {
+            PricingBasis::Blended => 0,
+            PricingBasis::Split => 1,
+            PricingBasis::Metered => 2,
+        }
+    }
+
     /// A bucket is only as measured as its least-measured run: one
-    /// blended figure in a sum makes the sum blended. The rule the
-    /// roll-up folds with, written once here rather than at each call.
+    /// blended figure in a sum makes the sum blended, one split among
+    /// metered runs makes it split. The rule the roll-up folds with,
+    /// written once here rather than at each call.
     pub fn least_measured(self, other: PricingBasis) -> PricingBasis {
-        match (self, other) {
-            (PricingBasis::Split, PricingBasis::Split) => PricingBasis::Split,
-            _ => PricingBasis::Blended,
+        if other.rank() < self.rank() {
+            other
+        } else {
+            self
         }
     }
 }
@@ -227,6 +258,7 @@ pub fn pricing_basis(tokens: TokenUsage, usd_micros: Option<u64>) -> Option<Pric
     usd_micros?;
     match tokens {
         TokenUsage::Split { .. } => Some(PricingBasis::Split),
+        TokenUsage::Metered { .. } => Some(PricingBasis::Metered),
         TokenUsage::TotalOnly { .. } => Some(PricingBasis::Blended),
         // Unreachable by construction — `price_run` prices no count at
         // all at nothing — and `None` rather than a panic if it ever
@@ -610,6 +642,21 @@ pub fn price_run(card: &[RateCardRow], run: &NewAgentRun) -> Option<(u64, String
                 + u128::from(output) * u128::from(row.output_usd_micros_per_mtok),
             PPM,
         ),
+        // Every count at its own rate, or nothing: a row that declares
+        // no cache rate cannot price 97% of what the run processed,
+        // and three of four terms would read as the whole bill.
+        TokenUsage::Metered {
+            input,
+            cache_write,
+            cache_read,
+            output,
+        } => rounded_div(
+            u128::from(input) * u128::from(row.input_usd_micros_per_mtok)
+                + u128::from(cache_write) * u128::from(row.cache_write_usd_micros_per_mtok?)
+                + u128::from(cache_read) * u128::from(row.cache_read_usd_micros_per_mtok?)
+                + u128::from(output) * u128::from(row.output_usd_micros_per_mtok),
+            PPM,
+        ),
         // The declared blend, through the same accessor a surface
         // shows, so the figure a reader checks by hand is the figure
         // charged.
@@ -815,8 +862,9 @@ fn blank(key: &str) -> GroupSpend {
         wall_secs: 0,
         usd_micros: Some(0),
         // The identity a fold starts from, like the measured zero
-        // beside it: an empty bucket has nothing blended in it.
-        pricing_basis: Some(PricingBasis::Split),
+        // beside it: an empty bucket has nothing blended in it, so it
+        // starts at the strongest basis and each run can only lower it.
+        pricing_basis: Some(PricingBasis::Metered),
         unpriced_runs: 0,
         total_only_runs: 0,
         unreported_runs: 0,
@@ -848,7 +896,9 @@ fn fold(into: &mut GroupSpend, run: &AgentRun) {
         None => None,
     };
     match run.run.tokens {
-        TokenUsage::Split { input, output } => {
+        // A metered run's halves are its uncached input and its output;
+        // its cache counts ride the row, and its total above holds them.
+        TokenUsage::Split { input, output } | TokenUsage::Metered { input, output, .. } => {
             into.input_tokens = into.input_tokens.map(|t| t.saturating_add(input));
             into.output_tokens = into.output_tokens.map(|t| t.saturating_add(output));
         }
@@ -909,6 +959,8 @@ mod tests {
                 output_usd_micros_per_mtok: 25_000_000,
                 note: "test".into(),
                 blended_input_share_ppm: None,
+                cache_read_usd_micros_per_mtok: None,
+                cache_write_usd_micros_per_mtok: None,
             },
             RateCardRow {
                 model: "haiku-4-5".into(),
@@ -916,6 +968,8 @@ mod tests {
                 output_usd_micros_per_mtok: 5_000_000,
                 note: "test".into(),
                 blended_input_share_ppm: None,
+                cache_read_usd_micros_per_mtok: None,
+                cache_write_usd_micros_per_mtok: None,
             },
             // The one row that declares a blend, as the migration
             // seeds it: the model 99 of the last 100 recorded runs ran
@@ -928,8 +982,62 @@ mod tests {
                 output_usd_micros_per_mtok: 25_000_000,
                 note: "test".into(),
                 blended_input_share_ppm: Some(875_000),
+                // The cache rates the migration seeds (backlog
+                // e6b2066f): 0.1x input to read, 1.25x to write. The
+                // two rows above carry none, which leaves a metered
+                // run on them unpriced rather than half-priced.
+                cache_read_usd_micros_per_mtok: Some(500_000),
+                cache_write_usd_micros_per_mtok: Some(6_250_000),
             },
         ]
+    }
+
+    fn metered(actor: &str) -> NewAgentRun {
+        with_tokens(
+            actor,
+            TokenUsage::Metered {
+                input: 40,
+                cache_write: 30_000,
+                cache_read: 1_470_000,
+                output: 9_000,
+            },
+        )
+    }
+
+    /// Backlog e6b2066f: every count at its own rate. 40 x $5 + 30,000
+    /// x $6.25 + 1,470,000 x $0.50 + 9,000 x $25 per MTok = $1.1477,
+    /// the shape of the operator's 2026-09-23 spot check: a run whose
+    /// harness reported ~150k tokens (its final context, $1.13 at the
+    /// $7.50 blend) processed ~1.5M.
+    #[test]
+    fn a_metered_run_is_priced_at_four_rates_and_says_so() {
+        let mut new = metered("agent-claude");
+        new.model = Some("opus-5[1m]".into());
+        let run = recorded(new, &card());
+        assert_eq!(run.usd_micros, Some(1_147_700));
+        assert_eq!(run.pricing_basis(), Some(PricingBasis::Metered));
+    }
+
+    #[test]
+    fn a_metered_run_on_a_row_without_cache_rates_is_unpriced_not_half_priced() {
+        let mut new = metered("agent-claude");
+        new.model = Some("haiku-4-5".into());
+        let run = recorded(new, &card());
+        assert_eq!(run.usd_micros, None);
+    }
+
+    #[test]
+    fn a_bucket_is_metered_only_while_every_run_in_it_is() {
+        let mut m = metered("agent-claude");
+        m.model = Some("opus-5[1m]".into());
+        let alone = summarize(&[recorded(m.clone(), &card())]);
+        assert_eq!(alone.pricing_basis, Some(PricingBasis::Metered));
+        assert_eq!(alone.total_tokens, Some(1_509_040));
+        let mut s = a_run("agent-claude", 100, 10);
+        s.run_id = "run-split".into();
+        s.model = Some("opus-5[1m]".into());
+        let mixed = summarize(&[recorded(m, &card()), recorded(s, &card())]);
+        assert_eq!(mixed.pricing_basis, Some(PricingBasis::Split));
     }
 
     fn a_run(actor: &str, input: u64, output: u64) -> NewAgentRun {
@@ -1788,11 +1896,20 @@ mod tests {
                 },
                 TokenUsage::TotalOnly { total: 11 },
                 TokenUsage::Unreported,
+                TokenUsage::Metered {
+                    input: 1,
+                    cache_write: 2,
+                    cache_read: 3,
+                    output: 4,
+                },
             ] {
                 let run = recorded(with_tokens(&actor, tokens), &card);
                 match (run.usd_micros, run.run.tokens) {
                     (Some(_), TokenUsage::Split { .. }) => {
                         assert_eq!(run.pricing_basis(), Some(PricingBasis::Split), "{model}")
+                    }
+                    (Some(_), TokenUsage::Metered { .. }) => {
+                        assert_eq!(run.pricing_basis(), Some(PricingBasis::Metered), "{model}")
                     }
                     (Some(_), TokenUsage::TotalOnly { .. }) => {
                         assert_eq!(run.pricing_basis(), Some(PricingBasis::Blended), "{model}")

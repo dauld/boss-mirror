@@ -444,6 +444,43 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
     expect(seen.stream.length).toBe(1);
     expect(seen.tail.length).toBe(tails + 1);
   });
+
+  test('a frame that beats the snapshot is still on screen after the snapshot paints (697f9f87)', async ({ page }) => {
+    // The page fires the tail read and opens the stream in one effect
+    // run, so either may answer first. The server anchors the stream at
+    // MAX(id) when it connects, so a frame that lands before the
+    // snapshot answers is a row the snapshot may never carry — and the
+    // page used to REPLACE it with the snapshot. Here the snapshot is
+    // held until the frames have painted, then released: the rows must
+    // be exactly what the other order paints — the new frame on top,
+    // the snapshot below it, the duplicate once.
+    await installAuditReads(page);
+    let releaseSnapshot: () => void = () => {};
+    const framesPainted = new Promise<void>((r) => (releaseSnapshot = r));
+    await page.route(TAIL, async (r) => {
+      await framesPainted;
+      await json(r, ROWS).catch(() => {});
+    });
+    const frames = [
+      // A duplicate of a snapshot row: must still paint once.
+      ROWS[0],
+      { event_id: 'ev-4', timestamp: '2026-09-23T21:45:00.000Z', source: 'jobs', kind: 'jobs.job.opened', payload: { id: 'job-2', _actor: 'agent-claude', _simulated: false } },
+    ];
+    const body = 'retry: 3600000\n' + frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join('');
+    await page.route(STREAM, (r) =>
+      r.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' }, body }),
+    );
+    await mountPage(page, PATH, { titleMatch: /Audit Log/ });
+    // The frames alone, before any snapshot has answered.
+    await expect(stream(page).locator('td:nth-child(3)')).toHaveText(['jobs.job.opened', 'jobs.step.updated']);
+    releaseSnapshot();
+    await expect(stream(page).locator('td:nth-child(3)')).toHaveText([
+      'jobs.job.opened',
+      'jobs.step.updated',
+      'dispatcher.rule.fired',
+      'credential.rotate.verified',
+    ]);
+  });
 });
 
 test.describe('/it/operate/audit — Download ⤓ (GET /api/events/export)', () => {

@@ -8,13 +8,13 @@
 //! map), admitting through the same [`admit`] over the same
 //! [`measure_load`], and listing newest finish first. Events are
 //! collected rather than delivered, so a test can assert that recording
-//! a run — or refusing one — put a fact on the log.
+//! a run put a fact on the log.
 
 use std::collections::HashMap;
 
 use async_trait::async_trait;
 use boss_core::actor::ActorId;
-use boss_core::agent::{AgentCaps, BudgetDecision};
+use boss_core::agent::AgentCaps;
 use boss_core::event::Event;
 use tokio::sync::RwLock;
 
@@ -102,18 +102,10 @@ impl AgentRunLog for InMemoryAgentRuns {
         };
         let priced = price_run(&self.card, &run);
 
-        // Admit against the budget before anything is written. A
-        // refusal is an event and an error, never a row.
+        // Judge the budget and RECORD the judgement — a reading, never a
+        // refusal (backlog e6b2066f): the run has already happened.
         let prior: Vec<AgentRun> = guard.values().cloned().collect();
-        let load = measure_load(&prior, &run);
-        let budget = admit(agent, load);
-        if let BudgetDecision::Deny { reason } = budget {
-            let caps = agent.map(|a| a.caps).unwrap_or_default();
-            let event =
-                super::events::run_denied_event(recorded_by, &run, &priced, caps, load, &reason);
-            self.events.write().await.push(event);
-            return Err(AgentRunError::Denied { reason });
-        }
+        let budget = admit(agent, measure_load(&prior, &run));
 
         let event = super::events::run_recorded_event(recorded_by, &run, &priced, &budget);
         let recorded = AgentRun {

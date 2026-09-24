@@ -294,11 +294,12 @@ async fn a_second_process_claims_work_the_first_one_only_left_in_the_record() {
 }
 
 /// THE ONE BUDGET DOOR. The inbox claims through `agent_budget` like
-/// every other claim — there is no second rule for queued work — and a
-/// refusal leaves the work IN the queue, because stations hold rather
-/// than drop.
+/// every other claim — there is no second rule for queued work. Since
+/// backlog e6b2066f that door READS the money rather than refusing on
+/// it (David 2026-09-23: budgets must not limit building), so an
+/// over-cap inbox claim is admitted and the reading rides the log.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_inbox_claims_through_the_one_budget_door_and_a_refusal_leaves_the_work_queued() {
+async fn the_inbox_claims_through_the_one_budget_door_and_over_budget_is_a_reading() {
     let db = TestDb::new().await;
     declare_the_protocol(&db).await;
     cap_the_agent(&db, 3_000_000).await;
@@ -312,23 +313,23 @@ async fn the_inbox_claims_through_the_one_budget_door_and_a_refusal_leaves_the_w
     .as_user(AGENT, ROLE)
     .send(&app)
     .await;
-    resp.assert_status(StatusCode::CONFLICT);
+    resp.assert_status(StatusCode::OK);
     let body: serde_json::Value = resp.assert_json();
-    assert_eq!(body["spent_usd_micros"], 1_000_870);
-    assert_eq!(body["budget_usd_micros"], 5_000_000);
-    assert_eq!(body["hourly_budget_usd_micros"], 3_000_000);
+    assert_eq!(body["assignee_id"], AGENT);
 
-    // Still queued, still ready, still nobody's: the hour will open.
-    let queue = inbox(&app).await;
-    assert_eq!(
-        queue["total"], 1,
-        "a refused claim does not drop it: {queue}"
-    );
+    let reading: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM event_outbox WHERE kind = 'agents.claim.over_budget'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("the reading is on the log");
+    assert_eq!(reading["spent_usd_micros"], 1_000_870);
+    assert_eq!(reading["budget_usd_micros"], 5_000_000);
+    assert_eq!(reading["hourly_budget_usd_micros"], 3_000_000);
     let step = PgJobs::new(db.pool.clone())
         .get_step(&step_id)
         .await
         .expect("the step reads")
         .expect("the step is there");
-    assert_eq!(step.status, StepStatus::Ready);
-    assert_eq!(step.assignee_id, None);
+    assert_eq!(step.status, StepStatus::Active);
 }

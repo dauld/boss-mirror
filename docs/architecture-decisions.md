@@ -1576,6 +1576,24 @@ unreported run answer `None`; a measured split always wins; (3) **the
 record an assurance nobody has, so the series starts where the pricing
 does.
 
+**A run is priced from what it consumed, and a budget is a reading,
+not a limit** (backlog `e6b2066f`, David 2026-09-23: "the goal is the
+PLUMBING to understand costs … we do NOT want budgets to limit
+building"). Measured: the bare total the blend above priced was the
+harness's `subagent_tokens` — the run's FINAL context size, within 1%
+of its last turn on 62 of 68 runs — while its summed per-turn tokens
+were a median 48x larger, 96.8% cache reads; real spend was a median
+4.9x the recorded figure. Decided: (1) `boss dispatch --report` meters
+a run from its subagent transcript — the four counts (uncached input,
+cache write, cache read, output) of every turn's `message.usage` — and
+the typed count rides `detail` beside it; (2) `agent_rate_card` prices
+cache reads and writes as data (0.1x and 1.25x input, the 5-minute
+write rate, so a 1-hour write is a floor), basis `metered`; (3) the
+`opus-5[1m]` blend is retired, so an unmetered total is unpriced rather
+than about five times low; (4) an over-cap claim is admitted and
+`agents.claim.over_budget` rides the log beside it, and an over-cap run
+is recorded with its `budget` reading `deny` — neither refuses.
+
 **A destructive change is approved by the founder's passkey over a
 rendered plan and executed by the machine** (design `17835005`, David
 2026-09-21, all five questions accepted as proposed). The occasion was

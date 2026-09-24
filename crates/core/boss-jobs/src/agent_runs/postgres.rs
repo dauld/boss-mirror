@@ -39,7 +39,7 @@ fn storage(e: sqlx::Error) -> AgentRunError {
 /// and the rebuilder's INSERT cannot disagree about the row's shape.
 pub(super) const RUN_COLUMNS: &str = "run_id, actor_id, model, started_at, finished_at, outcome, \
      error, total_tokens, input_tokens, output_tokens, tool_calls, usd_micros, priced_by, job_id, \
-     branch, detail, budget, recorded_at";
+     branch, detail, budget, recorded_at, cache_read_tokens, cache_write_tokens";
 
 /// What a READ selects from. `agent_runs` is what a WRITE inserts
 /// into, and the two are deliberately different relations: the view
@@ -93,11 +93,18 @@ pub(super) fn row_to_run(row: &sqlx::postgres::PgRow) -> Result<AgentRun, AgentR
     let total_tokens: Option<i64> = row.try_get("total_tokens").map_err(storage)?;
     let input_tokens: Option<i64> = row.try_get("input_tokens").map_err(storage)?;
     let output_tokens: Option<i64> = row.try_get("output_tokens").map_err(storage)?;
+    // A metered run's cache counts (backlog e6b2066f), NULL on every
+    // other shape; the table's CHECKs hold them to both-or-neither.
+    let cache_read: Option<i64> = row.try_get("cache_read_tokens").map_err(storage)?;
+    let cache_write: Option<i64> = row.try_get("cache_write_tokens").map_err(storage)?;
     let run_id: String = row.try_get("run_id").map_err(storage)?;
-    let tokens = TokenUsage::from_parts(
-        input_tokens.map(|v| u64::try_from(v).unwrap_or(0)),
-        output_tokens.map(|v| u64::try_from(v).unwrap_or(0)),
-        Some(total_tokens.map(|v| u64::try_from(v).unwrap_or(0))),
+    let n = |v: i64| u64::try_from(v).unwrap_or(0);
+    let tokens = TokenUsage::from_wire(
+        input_tokens.map(n),
+        output_tokens.map(n),
+        cache_read.map(n),
+        cache_write.map(n),
+        Some(total_tokens.map(n)),
     )
     .map_err(|e| {
         AgentRunError::Storage(format!(
@@ -171,8 +178,8 @@ fn agent_row(row: &sqlx::postgres::PgRow) -> Result<RegisteredAgent, AgentRunErr
 /// inside its transaction and the read endpoint reads it outside one,
 /// and a list that lived twice would drift the next time a column is
 /// added (CLAUDE.md §9a — `blended_input_share_ppm` was the next time).
-const CARD_COLUMNS: &str =
-    "model, input_usd_micros_per_mtok, output_usd_micros_per_mtok, note, blended_input_share_ppm";
+const CARD_COLUMNS: &str = "model, input_usd_micros_per_mtok, output_usd_micros_per_mtok, note, blended_input_share_ppm, \
+     cache_read_usd_micros_per_mtok, cache_write_usd_micros_per_mtok";
 
 fn card_row(row: &sqlx::postgres::PgRow) -> Result<RateCardRow, AgentRunError> {
     let input: i64 = row.try_get("input_usd_micros_per_mtok").map_err(storage)?;
@@ -181,12 +188,24 @@ fn card_row(row: &sqlx::postgres::PgRow) -> Result<RateCardRow, AgentRunError> {
     // run unpriced — not a zero share, which would price every token at
     // the output rate.
     let share: Option<i64> = row.try_get("blended_input_share_ppm").map_err(storage)?;
+    // NULL is "no cache rate declared", which leaves a metered run on
+    // this model unpriced — never a zero rate, which would price the
+    // cache reads that are most of the bill as free.
+    let cache_read: Option<i64> = row
+        .try_get("cache_read_usd_micros_per_mtok")
+        .map_err(storage)?;
+    let cache_write: Option<i64> = row
+        .try_get("cache_write_usd_micros_per_mtok")
+        .map_err(storage)?;
+    let n = |v: i64| u64::try_from(v).unwrap_or(0);
     Ok(RateCardRow {
         model: row.try_get("model").map_err(storage)?,
-        input_usd_micros_per_mtok: u64::try_from(input).unwrap_or(0),
-        output_usd_micros_per_mtok: u64::try_from(output).unwrap_or(0),
+        input_usd_micros_per_mtok: n(input),
+        output_usd_micros_per_mtok: n(output),
         note: row.try_get("note").map_err(storage)?,
-        blended_input_share_ppm: share.map(|v| u64::try_from(v).unwrap_or(0)),
+        blended_input_share_ppm: share.map(n),
+        cache_read_usd_micros_per_mtok: cache_read.map(n),
+        cache_write_usd_micros_per_mtok: cache_write.map(n),
     })
 }
 
@@ -241,13 +260,14 @@ impl AgentRunLog for PgAgentRuns {
         };
         let priced = price_run(&card, run);
 
-        // Admit against the budget before anything is written. The
-        // actor's rows since the window opened are the whole input to
-        // the ONE load measure (`measure_load`): every row that counts
-        // toward spend finished inside the window, and every row in
-        // flight at the run's start finished after it, so one bounded
-        // read holds both. A refusal commits its event and nothing
-        // else, then answers `Denied`.
+        // Judge the run against its actor's budget and RECORD the
+        // judgement (backlog e6b2066f): an over-cap run is a row whose
+        // `budget` reads `deny`, never a run missing from the record.
+        // The actor's rows since the window opened are the whole input
+        // to the ONE load measure (`measure_load`): every row that
+        // counts toward spend finished inside the window, and every row
+        // in flight at the run's start finished after it, so one
+        // bounded read holds both.
         let prior_rows = sqlx::query(&format!(
             "SELECT {RUN_COLUMNS} FROM {READ_RELATION} WHERE actor_id = $1 AND finished_at >= $2"
         ))
@@ -260,18 +280,7 @@ impl AgentRunLog for PgAgentRuns {
             .iter()
             .map(row_to_run)
             .collect::<Result<Vec<_>, _>>()?;
-        let load = measure_load(&prior, run);
-        let budget = admit(agent.as_ref(), load);
-        if let BudgetDecision::Deny { reason } = budget {
-            let caps: AgentCaps = agent.map(|a| a.caps).unwrap_or_default();
-            let denied =
-                super::events::run_denied_event(recorded_by, run, &priced, caps, load, &reason);
-            boss_events::outbox::record_event_in_tx(&mut tx, &denied)
-                .await
-                .map_err(AgentRunError::Storage)?;
-            tx.commit().await.map_err(storage)?;
-            return Err(AgentRunError::Denied { reason });
-        }
+        let budget = admit(agent.as_ref(), measure_load(&prior, run));
 
         let event = super::events::run_recorded_event(recorded_by, run, &priced, &budget);
 
@@ -316,6 +325,16 @@ impl AgentRunLog for PgAgentRuns {
             .bind(serde_json::to_value(&budget).unwrap_or_default())
             // The event's instant, so the row and the record agree.
             .bind(event.timestamp)
+            .bind(
+                run.tokens
+                    .cache_read()
+                    .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+            )
+            .bind(
+                run.tokens
+                    .cache_write()
+                    .map(|v| i64::try_from(v).unwrap_or(i64::MAX)),
+            )
             .execute(&mut *tx)
             .await
             .map_err(storage)?

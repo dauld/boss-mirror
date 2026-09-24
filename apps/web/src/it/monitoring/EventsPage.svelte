@@ -172,6 +172,18 @@
     const auto = autoRefresh;
 
     let cancelled = false;
+    // Frames this run applied before its snapshot answered (697f9f87).
+    // The tail read and the stream start together below, so either may
+    // answer first, and the server anchors the stream at MAX(id) when it
+    // connects — a frame that beats the snapshot may be a row the
+    // snapshot never carries. Replacing the rows with the snapshot lost
+    // it. So the snapshot MERGES: the early frames not already in it go
+    // on top, exactly where they would sit had the snapshot come first.
+    // Opening the stream only after the snapshot paints was the other
+    // fix, and a worse one: rows landing between the snapshot's query
+    // and the stream's anchor would reach neither.
+    let early: ReadonlyArray<AuditEntry> = [];
+    let snapshotPainted = false;
 
     async function fetchSnapshot(): Promise<void> {
       const params = new URLSearchParams();
@@ -190,7 +202,11 @@
         }
         const body = (await r.json()) as ReadonlyArray<AuditEntry>;
         if (!cancelled) {
-          loadState = { kind: 'ready', rows: body };
+          const inSnapshot = new Set(body.map((r) => r.event_id));
+          const rows = [...early.filter((r) => !inSnapshot.has(r.event_id)), ...body];
+          loadState = { kind: 'ready', rows: rows.slice(0, LIVE_BUFFER_CAP) };
+          early = [];
+          snapshotPainted = true;
           lastFetched = new Date();
         }
       } catch (e) {
@@ -231,6 +247,9 @@
         if (cancelled) return;
         try {
           const entry = JSON.parse(ev.data) as AuditEntry;
+          if (!snapshotPainted && !early.some((r) => r.event_id === entry.event_id)) {
+            early = [entry, ...early].slice(0, LIVE_BUFFER_CAP);
+          }
           // Prepend new row, dedupe, cap.
           if (loadState.kind === 'ready') {
             const existing = loadState.rows;

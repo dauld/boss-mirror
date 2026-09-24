@@ -670,16 +670,22 @@ pub(crate) fn effort_line(settings: &Settings) -> String {
     )
 }
 
-/// The spend cap as the runner takes it (car 3, backlog cb78818d): the
-/// block's `budget_usd` rendered as the `--max-budget-usd` flag a
-/// runner passes to its session, and as a sentence for the operator
-/// who pastes the prompt by hand today. The claim door admitted this
-/// run against the agent's hourly budget with exactly this number, so
-/// the runner's cap and the door's reservation are one value.
+/// The block's `budget_usd`, as the run is told it (car 3, backlog
+/// cb78818d). It was rendered as a `--max-budget-usd` cap the agent
+/// was to stop before; nothing in the tree passed that flag to a
+/// session, and since backlog e6b2066f the number is a reading the
+/// record compares a run against, the same one the claim door's
+/// reservation reads.
 pub(crate) fn budget_line(budget_usd: f64) -> String {
+    // A SIGNAL, NOT A STOP (backlog e6b2066f). This line told every
+    // builder to stop before its budget; once a run is priced from what
+    // it consumed, about five times the old figure, that would have
+    // stopped most of them mid-car, and David's direction (2026-09-23)
+    // is that budgets must not limit building.
     format!(
-        "Spend cap: --max-budget-usd {budget_usd} — the claim door reserved this much of the \
-         agent's hourly budget for the run; stop and report before you pass it."
+        "Budget: ${budget_usd} declared for this run — a cost reading, not a limit. The report \
+         meters your run from its transcript and records the spend against it; do not stop \
+         work to stay under it."
     )
 }
 
@@ -1390,7 +1396,18 @@ pub(crate) const REPORTED_SLUG: &str = "reported";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tokens {
     Total(u64),
-    Split { input: u64, output: u64 },
+    Split {
+        input: u64,
+        output: u64,
+    },
+    /// The four counts read from the run's transcript — never typed
+    /// (backlog e6b2066f; [`crate::transcript_usage`]).
+    Metered {
+        input: u64,
+        cache_write: u64,
+        cache_read: u64,
+        output: u64,
+    },
 }
 
 impl Tokens {
@@ -1398,6 +1415,35 @@ impl Tokens {
         match self {
             Tokens::Total(t) => t,
             Tokens::Split { input, output } => input.saturating_add(output),
+            Tokens::Metered {
+                input,
+                cache_write,
+                cache_read,
+                output,
+            } => input
+                .saturating_add(cache_write)
+                .saturating_add(cache_read)
+                .saturating_add(output),
+        }
+    }
+
+    /// The record's own shape for this count — one mapping, so the
+    /// basis a line prints is the one the record derives.
+    pub(crate) fn usage(self) -> TokenUsage {
+        match self {
+            Tokens::Total(total) => TokenUsage::TotalOnly { total },
+            Tokens::Split { input, output } => TokenUsage::Split { input, output },
+            Tokens::Metered {
+                input,
+                cache_write,
+                cache_read,
+                output,
+            } => TokenUsage::Metered {
+                input,
+                cache_write,
+                cache_read,
+                output,
+            },
         }
     }
 }
@@ -1426,7 +1472,28 @@ pub(crate) fn parse_tokens(s: &str) -> std::result::Result<Tokens, String> {
 pub(crate) struct Report {
     pub summary: String,
     pub spend_usd: Option<f64>,
+    /// The count the caller TYPED (`--tokens`), when it typed one.
     pub tokens: Option<Tokens>,
+    /// The run's transcript, read (backlog e6b2066f). When present it
+    /// is the count the record carries ([`Report::counted`]) and the
+    /// typed one rides `detail` beside it for comparison.
+    pub meter: Option<crate::transcript_usage::Metered>,
+}
+
+impl Report {
+    /// The count the record carries: the transcript's four counts when
+    /// the run was metered, else what the caller typed.
+    pub(crate) fn counted(&self) -> Option<Tokens> {
+        match &self.meter {
+            Some(m) => Some(Tokens::Metered {
+                input: m.usage.input,
+                cache_write: m.usage.cache_write,
+                cache_read: m.usage.cache_read,
+                output: m.usage.output,
+            }),
+            None => self.tokens,
+        }
+    }
 }
 
 /// The merging PATCH the report writes onto the run packet: the keys
@@ -1439,7 +1506,7 @@ pub(crate) fn report_patch(r: &Report) -> Value {
     if let Some(d) = r.spend_usd {
         md.insert("spend_usd".into(), json!(d));
     }
-    if let Some(t) = r.tokens {
+    if let Some(t) = r.counted() {
         md.insert("tokens".into(), json!(t.total()));
     }
     Value::Object(md)
@@ -1458,7 +1525,7 @@ pub(crate) fn reported_body(existing: &Value, r: &Report) -> Value {
     if let Some(d) = r.spend_usd {
         md.insert("spend_usd".into(), json!(d.to_string()));
     }
-    if let Some(t) = r.tokens {
+    if let Some(t) = r.counted() {
         md.insert("tokens".into(), json!(t.total().to_string()));
     }
     json!({ "status": "completed", "metadata": Value::Object(md) })
@@ -1616,10 +1683,21 @@ pub(crate) fn run_record(
         .map(str::to_string)
         .or_else(|| text("opened_at"))
         .with_context(|| format!("run {run_id} has neither a briefed stamp nor opened_at"))?;
-    let tokens = match r.tokens {
+    let tokens = match r.counted() {
         Some(Tokens::Split { input, output }) => {
             json!({ "input_tokens": input, "output_tokens": output })
         }
+        Some(Tokens::Metered {
+            input,
+            cache_write,
+            cache_read,
+            output,
+        }) => json!({
+            "input_tokens": input,
+            "output_tokens": output,
+            "cache_read_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+        }),
         Some(Tokens::Total(t)) => json!({ "total_tokens": t }),
         // A report with no count is still a record of the run, and it
         // says so: an EXPLICIT null, which the API reads as
@@ -1663,6 +1741,27 @@ pub(crate) fn run_record(
     if let (Some(dst), Some(src)) = (body.as_object_mut(), tokens.as_object()) {
         dst.extend(src.clone());
     }
+    // Where a metered count came from, and the two readings that make
+    // it checkable (backlog e6b2066f): the final context — the figure a
+    // harness total reports — and the typed count it superseded, both
+    // BESIDE the record and never as it. A 1-hour cache write is priced
+    // at the card's 5-minute rate, so its count says the price is a
+    // floor.
+    if let (Some(m), Some(detail)) = (
+        &r.meter,
+        body.get_mut("detail").and_then(Value::as_object_mut),
+    ) {
+        detail.insert(
+            "metered".into(),
+            json!({
+                "transcript": m.path.display().to_string(),
+                "turns": m.usage.turns,
+                "final_context_tokens": m.usage.final_context,
+                "cache_write_1h_tokens": m.usage.cache_write_1h,
+                "typed_tokens": r.tokens.map(Tokens::total),
+            }),
+        );
+    }
     Ok(body)
 }
 
@@ -1672,8 +1771,19 @@ pub(crate) fn run_record(
 /// `None` for a row that states it holds no count.
 pub(crate) fn row_tokens(row: &Value) -> Option<Tokens> {
     let n = |k: &str| row.get(k).and_then(Value::as_u64);
-    match (n("input_tokens"), n("output_tokens")) {
-        (Some(input), Some(output)) => Some(Tokens::Split { input, output }),
+    match (
+        n("input_tokens"),
+        n("output_tokens"),
+        n("cache_read_tokens"),
+        n("cache_write_tokens"),
+    ) {
+        (Some(input), Some(output), Some(cache_read), Some(cache_write)) => Some(Tokens::Metered {
+            input,
+            cache_write,
+            cache_read,
+            output,
+        }),
+        (Some(input), Some(output), _, _) => Some(Tokens::Split { input, output }),
         _ => n("total_tokens").map(Tokens::Total),
     }
 }
@@ -1683,6 +1793,14 @@ pub(crate) fn row_tokens(row: &Value) -> Option<Tokens> {
 pub(crate) fn tokens_phrase(t: Option<Tokens>) -> String {
     match t {
         Some(Tokens::Split { input, output }) => format!("{input} in / {output} out"),
+        Some(Tokens::Metered {
+            input,
+            cache_write,
+            cache_read,
+            output,
+        }) => format!(
+            "{input} in / {cache_write} cache write / {cache_read} cache read / {output} out"
+        ),
         Some(Tokens::Total(total)) => format!("{total} total, unsplit"),
         None => "no count at all".to_string(),
     }
@@ -1703,6 +1821,10 @@ fn price_phrase(priced: Option<u64>, basis: Option<PricingBasis>) -> String {
         (Some(m), Some(PricingBasis::Split)) => {
             format!("at {} (rate card, measured split)", dollars(m))
         }
+        (Some(m), Some(PricingBasis::Metered)) => format!(
+            "at {} (rate card, METERED: four counts summed from the run's transcript)",
+            dollars(m)
+        ),
         // Priced, but the row carries no count this build can read, so
         // the figure is stated and the claim about it is not: naming a
         // basis here would be guessing one.
@@ -1755,11 +1877,7 @@ pub(crate) fn record_line(
         .and_then(|v| v.get("usd_micros"))
         .and_then(Value::as_u64);
     let held = row.and_then(row_tokens);
-    let usage = match held {
-        Some(Tokens::Split { input, output }) => TokenUsage::Split { input, output },
-        Some(Tokens::Total(total)) => TokenUsage::TotalOnly { total },
-        None => TokenUsage::Unreported,
-    };
+    let usage = held.map_or(TokenUsage::Unreported, Tokens::usage);
     let basis = boss_jobs::agent_runs::pricing_basis(usage, priced);
     let phrase = price_phrase(priced, basis);
 
@@ -1767,12 +1885,18 @@ pub(crate) fn record_line(
         let mut line =
             format!("boss dispatch: agent_runs holds run {short} for {actor_id} {phrase}");
         match basis {
-            Some(PricingBasis::Blended) => line.push_str(
-                ". Give --tokens IN,OUT when a split exists and it is priced at the two rates \
-                 instead",
+            Some(PricingBasis::Metered) => {}
+            // A typed count was all the record had: say how to meter
+            // the run instead (backlog e6b2066f).
+            Some(_) => line.push_str(
+                ". Not metered: pass --transcript <the run's subagent transcript> and its four \
+                 counts are priced instead",
             ),
-            _ if priced.is_none() => line.push_str(". The run is recorded in full either way"),
-            _ => {}
+            None if priced.is_none() => line.push_str(
+                ". The run is recorded in full either way; pass --transcript <the run's \
+                 subagent transcript> to meter it",
+            ),
+            None => {}
         }
         return Ok(line);
     }
@@ -1781,7 +1905,7 @@ pub(crate) fn record_line(
         .and_then(|v| v.get("recorded_at"))
         .and_then(Value::as_str)
         .unwrap_or("an earlier report");
-    if held == r.tokens {
+    if held == r.counted() {
         return Ok(format!(
             "boss dispatch: agent_runs already held run {short} for {actor_id} {phrase}, \
              recorded {at}. This report carries the same count, so the row is unchanged — it is \
@@ -1797,7 +1921,7 @@ pub(crate) fn record_line(
          this command's answer; correcting a recorded cost needs a record that can take a \
          correction (backlog b4fd594e)",
         tokens_phrase(held),
-        tokens_phrase(r.tokens),
+        tokens_phrase(r.counted()),
     ))
 }
 
@@ -1914,6 +2038,7 @@ pub async fn report(
     summary: String,
     spend_usd: Option<f64>,
     tokens: Option<String>,
+    transcript: Option<std::path::PathBuf>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
     if summary.trim().is_empty() {
@@ -1931,14 +2056,63 @@ pub async fn report(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let base = crate::gate::resolve_jobs_base(None)?;
     let actor = crate::identity::sign(&reqwest::Method::POST, "/api/jobs")?;
+    let http = reqwest::Client::new();
+    // METER THE RUN (backlog e6b2066f): its transcript's four counts
+    // are what it consumed, and they supersede a typed count. Read here,
+    // at the CLI boundary, because it is filesystem I/O. The week only
+    // prunes the scan — the run-id phrase is what picks the transcript —
+    // and a report arrives within hours of its run.
+    let run_id = crate::job::fetch_and_resolve(&http, &run_ref).await?;
+    let week = std::time::Duration::from_secs(7 * 24 * 3600);
+    let since = std::time::SystemTime::now()
+        .checked_sub(week)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    let root = crate::transcript_usage::projects_root();
+    let meter = match crate::transcript_usage::meter(
+        transcript.as_deref(),
+        root.as_deref(),
+        &run_id,
+        since,
+    ) {
+        Ok(m) => {
+            let u = m.usage;
+            eprintln!(
+                "boss dispatch: metered run {} from {}: {} turns, {} in / {} cache write / {} \
+                 cache read / {} out = {} processed (final context {}{})",
+                &run_id[..8.min(run_id.len())],
+                m.path.display(),
+                u.turns,
+                u.input,
+                u.cache_write,
+                u.cache_read,
+                u.output,
+                u.total(),
+                u.final_context,
+                match tokens {
+                    Some(t) => format!("; the typed --tokens {} is kept beside it", t.total()),
+                    None => String::new(),
+                },
+            );
+            Some(m)
+        }
+        // A named transcript that cannot be read is the caller's error;
+        // a search that found none is a fact about this box, and the
+        // report goes on with what it was given.
+        Err(why) if transcript.is_some() => bail!("{why}"),
+        Err(why) => {
+            eprintln!("boss dispatch: not metered — {why}");
+            None
+        }
+    };
     report_at(
-        &reqwest::Client::new(),
+        &http,
         &base,
-        &run_ref,
+        &run_id,
         &Report {
             summary,
             spend_usd,
             tokens,
+            meter,
         },
         &actor,
         now,
@@ -2418,8 +2592,11 @@ mod tests {
         let s = run_section("5b1d2c3e-0000-4000-8000-000000000001", &block(), None);
         assert!(s.contains("export BOSS_AGENT_RUN=5b1d2c3e-0000-4000-8000-000000000001"));
         assert!(s.contains("opus-5[1m]") && s.contains("$5") && s.contains("high"));
-        // The cap reaches the runner as the flag it passes (car 3).
-        assert!(s.contains("--max-budget-usd 5"), "{s}");
+        // The budget reaches the run as a reading, never as a stop
+        // (backlog e6b2066f: budgets must not limit building).
+        assert!(s.contains("Budget: $5 declared"), "{s}");
+        assert!(s.contains("not a limit"), "{s}");
+        assert!(!s.contains("stop and report before"), "{s}");
     }
 
     /// The declared effort must reach a CONTROL (backlog e720dd00):
@@ -2552,6 +2729,7 @@ mod tests {
         let split = Report {
             summary: "done".into(),
             spend_usd: Some(4.2),
+            meter: None,
             tokens: Some(Tokens::Split {
                 input: 10,
                 output: 5,
@@ -2586,6 +2764,7 @@ mod tests {
         let total = Report {
             summary: "done".into(),
             spend_usd: None,
+            meter: None,
             tokens: Some(Tokens::Total(761_000)),
         };
         let rec = run_record(&run, "agent-claude", &total, at, "success").unwrap();
@@ -2598,6 +2777,39 @@ mod tests {
             run_record(&bare, "agent-claude", &total, at, "success").unwrap()["started_at"],
             "2026-09-18T17:00:00Z"
         );
+
+        // METERED (backlog e6b2066f): the transcript's four counts are
+        // the record, and the typed harness total — the final context
+        // size — rides `detail` beside them, never as them.
+        let metered = Report {
+            summary: "done".into(),
+            spend_usd: None,
+            meter: Some(crate::transcript_usage::Metered {
+                path: "/work/home/.claude/projects/p/s/subagents/agent-a1.jsonl".into(),
+                usage: crate::transcript_usage::Usage {
+                    input: 40,
+                    cache_write: 30_000,
+                    cache_read: 1_470_000,
+                    output: 9_000,
+                    cache_write_1h: 0,
+                    turns: 88,
+                    final_context: 153_121,
+                },
+            }),
+            tokens: Some(Tokens::Total(153_746)),
+        };
+        let rec = run_record(&run, "agent-claude", &metered, at, "success").unwrap();
+        assert_eq!(rec["input_tokens"], 40);
+        assert_eq!(rec["output_tokens"], 9_000);
+        assert_eq!(rec["cache_read_tokens"], 1_470_000);
+        assert_eq!(rec["cache_write_tokens"], 30_000);
+        assert!(rec.get("total_tokens").is_none(), "derived by the API");
+        assert_eq!(rec["detail"]["metered"]["typed_tokens"], 153_746);
+        assert_eq!(rec["detail"]["metered"]["final_context_tokens"], 153_121);
+        assert_eq!(rec["detail"]["metered"]["turns"], 88);
+        let parsed: boss_jobs::agent_runs::NewAgentRun = serde_json::from_value(rec).unwrap();
+        assert_eq!(parsed.tokens.total(), Some(1_509_040));
+        assert_eq!(report_patch(&metered)["tokens"], 1_509_040);
     }
 
     /// THE CAR THE RUN PRODUCED, AND THE COUNT NOBODY TOOK — the two
@@ -2673,6 +2885,7 @@ mod tests {
         let silent = Report {
             summary: "done".into(),
             spend_usd: None,
+            meter: None,
             tokens: None,
         };
         let rec = run_record(&gated, "agent-claude", &silent, at, "success").unwrap();
@@ -2744,6 +2957,7 @@ mod tests {
         let r = Report {
             summary: "done".into(),
             spend_usd: None,
+            meter: None,
             tokens: Some(Tokens::Total(761_000)),
         };
         let rec = run_record(&run(done("refused")), "agent-claude", &r, at, "cancelled").unwrap();
@@ -2852,6 +3066,7 @@ mod tests {
         let r = Report {
             summary: "packet x, branch y, sha z".into(),
             spend_usd: Some(3.5),
+            meter: None,
             tokens: Some(Tokens::Total(1000)),
         };
         let patch = report_patch(&r);
@@ -2875,6 +3090,7 @@ mod tests {
         let bare = Report {
             summary: "s".into(),
             spend_usd: None,
+            meter: None,
             tokens: None,
         };
         assert!(report_patch(&bare).get("spend_usd").is_none());
@@ -2907,6 +3123,7 @@ mod tests {
         let r = Report {
             summary: "handback".into(),
             spend_usd: None,
+            meter: None,
             tokens: Some(Tokens::Split {
                 input: 300_000,
                 output: 17_000,
@@ -2949,6 +3166,7 @@ mod tests {
         let r = Report {
             summary: "handback".into(),
             spend_usd: None,
+            meter: None,
             tokens: Some(Tokens::Total(210_000)),
         };
         let line = record_line("54f43757", "agent-claude", Some(&out), &r)
@@ -2973,6 +3191,7 @@ mod tests {
         let r = Report {
             summary: "s".into(),
             spend_usd: None,
+            meter: None,
             tokens: Some(Tokens::Split {
                 input: 740_000,
                 output: 21_000,
@@ -2989,16 +3208,32 @@ mod tests {
         let r = Report {
             summary: "s".into(),
             spend_usd: None,
+            meter: None,
             tokens: Some(Tokens::Total(210_000)),
         };
         let line = record_line("54f43757", "agent-claude", Some(&blended), &r).expect("recorded");
         assert!(line.contains("BLENDED, not measured"), "{line}");
-        assert!(line.contains("Give --tokens IN,OUT"), "{line}");
+        // The advice is metering now (backlog e6b2066f): a typed split
+        // omits the cache reads that are most of a run.
+        assert!(line.contains("pass --transcript"), "{line}");
+
+        let metered = json!({
+            "recorded": true,
+            "run": {
+                "usd_micros": 1_147_700, "input_tokens": 40, "output_tokens": 9_000,
+                "cache_read_tokens": 1_470_000, "cache_write_tokens": 30_000,
+            },
+        });
+        let line = record_line("54f43757", "agent-claude", Some(&metered), &r).expect("recorded");
+        assert!(line.contains("$1.1477"), "{line}");
+        assert!(line.contains("METERED"), "{line}");
+        assert!(!line.contains("--transcript"), "nothing to advise: {line}");
 
         let unpriced = json!({ "recorded": true, "run": { "total_tokens": null } });
         let r = Report {
             summary: "s".into(),
             spend_usd: None,
+            meter: None,
             tokens: None,
         };
         let line = record_line("54f43757", "agent-claude", Some(&unpriced), &r).expect("recorded");
@@ -3967,6 +4202,7 @@ mod wire_tests {
         let report = Report {
             summary: "packet cb78818d, branch feat/x, sha abc1234, gate e47f2238".into(),
             spend_usd: Some(4.2),
+            meter: None,
             tokens: Some(Tokens::Split {
                 input: 740_000,
                 output: 21_000,
@@ -4047,6 +4283,7 @@ mod wire_tests {
             &Report {
                 summary: "handback".into(),
                 spend_usd: None,
+                meter: None,
                 tokens: Some(Tokens::Total(1000)),
             },
             "claude@algedonic.dev",
@@ -4076,6 +4313,7 @@ mod wire_tests {
         let report = Report {
             summary: "handback".into(),
             spend_usd: None,
+            meter: None,
             tokens: Some(Tokens::Total(1000)),
         };
         report_at(
@@ -4122,6 +4360,7 @@ mod wire_tests {
             &Report {
                 summary: "s".into(),
                 spend_usd: None,
+                meter: None,
                 tokens: None,
             },
             "claude@algedonic.dev",
@@ -4179,6 +4418,7 @@ mod wire_tests {
             &Report {
                 summary: "handback".into(),
                 spend_usd: None,
+                meter: None,
                 tokens: Some(Tokens::Split {
                     input: 300_000,
                     output: 17_000,

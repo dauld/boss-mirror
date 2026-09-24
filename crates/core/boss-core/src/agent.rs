@@ -15,7 +15,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// What a run spent, in the three shapes a reporter can actually be in.
+/// What a run spent, in the shapes a reporter can actually be in — and
+/// since backlog e6b2066f a fourth, [`TokenUsage::Metered`], the one a
+/// dispatched run's transcript measures.
 ///
 /// **The total is one fact with one definition.** For a [`Split`] it is
 /// DERIVED from the halves, so a stored total cannot drift from them
@@ -59,6 +61,27 @@ pub enum TokenUsage {
     /// wire and a NULL column in the row. The run is recorded in full;
     /// what it spent is unknown, and unknown is not zero.
     Unreported,
+    /// The four counts every turn is billed by, summed over the run:
+    /// uncached `input`, `cache_write` (prompt written to the cache),
+    /// `cache_read` (prompt served from it) and `output` — the fields
+    /// of the harness's own per-turn `message.usage`, read from the
+    /// run's transcript (backlog e6b2066f). The strongest shape: the
+    /// card prices each count at its own rate, and the total is what
+    /// the run PROCESSED.
+    ///
+    /// It exists because the other two shapes described the wrong
+    /// thing. A dispatched builder's `subagent_tokens` — recorded as a
+    /// bare total — is the size of its FINAL context window: it matched
+    /// the last turn's four counts within 1% on 62 of 68 runs, while the
+    /// run's summed per-turn tokens were a median 48x larger, 96.8% of
+    /// them cache reads. Priced at a blend, that read about a fifth of
+    /// the real spend.
+    Metered {
+        input: u64,
+        cache_write: u64,
+        cache_read: u64,
+        output: u64,
+    },
 }
 
 impl TokenUsage {
@@ -86,6 +109,57 @@ impl TokenUsage {
         output: Option<u64>,
         total: Option<Option<u64>>,
     ) -> Result<Self, String> {
+        Self::from_wire(input, output, None, None, total)
+    }
+
+    /// [`TokenUsage::from_parts`] with the two cache keys beside it —
+    /// the whole wire (backlog e6b2066f). The cache counts are a
+    /// refinement of a split, never a shape of their own: both or
+    /// neither, and only beside both halves, because a cache count on a
+    /// bare total would describe a division of a number that was never
+    /// divided. A stated total must equal the four-way sum.
+    pub fn from_wire(
+        input: Option<u64>,
+        output: Option<u64>,
+        cache_read: Option<u64>,
+        cache_write: Option<u64>,
+        total: Option<Option<u64>>,
+    ) -> Result<Self, String> {
+        match (cache_read, cache_write) {
+            (None, None) => {}
+            (Some(_), None) => {
+                return Err("cache_write_tokens is missing — report BOTH cache counts \
+                     (cache_read_tokens and cache_write_tokens) or neither"
+                    .into());
+            }
+            (None, Some(_)) => {
+                return Err("cache_read_tokens is missing — report BOTH cache counts \
+                     (cache_read_tokens and cache_write_tokens) or neither"
+                    .into());
+            }
+            (Some(cache_read), Some(cache_write)) => {
+                let (Some(input), Some(output)) = (input, output) else {
+                    return Err("cache counts need input_tokens and output_tokens beside \
+                         them — the four counts are one measurement, and a cache count on a \
+                         bare total divides a number nobody divided"
+                        .into());
+                };
+                let m = TokenUsage::Metered {
+                    input,
+                    cache_write,
+                    cache_read,
+                    output,
+                };
+                return match (total.flatten(), m.total()) {
+                    (Some(t), Some(derived)) if t != derived => Err(format!(
+                        "total_tokens is {t} but the four counts sum to {derived} — send the \
+                         counts alone (the total is derived from them), not two numbers that \
+                         disagree"
+                    )),
+                    _ => Ok(m),
+                };
+            }
+        }
         // The stated "no count", ahead of the shapes that carry one.
         if let (None, None, Some(None)) = (input, output, total) {
             return Ok(TokenUsage::Unreported);
@@ -133,13 +207,27 @@ impl TokenUsage {
             TokenUsage::Split { input, output } => Some(input.saturating_add(*output)),
             TokenUsage::TotalOnly { total } => Some(*total),
             TokenUsage::Unreported => None,
+            TokenUsage::Metered {
+                input,
+                cache_write,
+                cache_read,
+                output,
+            } => Some(
+                input
+                    .saturating_add(*cache_write)
+                    .saturating_add(*cache_read)
+                    .saturating_add(*output),
+            ),
         }
     }
 
-    /// The input half, when it was measured.
+    /// The input half, when it was measured. For a [`Metered`] run it
+    /// is the UNCACHED input alone, as the harness bills it.
+    ///
+    /// [`Metered`]: TokenUsage::Metered
     pub fn input(&self) -> Option<u64> {
         match self {
-            TokenUsage::Split { input, .. } => Some(*input),
+            TokenUsage::Split { input, .. } | TokenUsage::Metered { input, .. } => Some(*input),
             TokenUsage::TotalOnly { .. } | TokenUsage::Unreported => None,
         }
     }
@@ -147,8 +235,24 @@ impl TokenUsage {
     /// The output half, when it was measured.
     pub fn output(&self) -> Option<u64> {
         match self {
-            TokenUsage::Split { output, .. } => Some(*output),
+            TokenUsage::Split { output, .. } | TokenUsage::Metered { output, .. } => Some(*output),
             TokenUsage::TotalOnly { .. } | TokenUsage::Unreported => None,
+        }
+    }
+
+    /// Prompt tokens served from the cache — only a metered run knows.
+    pub fn cache_read(&self) -> Option<u64> {
+        match self {
+            TokenUsage::Metered { cache_read, .. } => Some(*cache_read),
+            _ => None,
+        }
+    }
+
+    /// Prompt tokens written to the cache — only a metered run knows.
+    pub fn cache_write(&self) -> Option<u64> {
+        match self {
+            TokenUsage::Metered { cache_write, .. } => Some(*cache_write),
+            _ => None,
         }
     }
 
@@ -168,7 +272,33 @@ impl TokenUsage {
     ///
     /// [`Unreported`]: TokenUsage::Unreported
     pub fn saturating_sum(self, other: TokenUsage) -> TokenUsage {
+        // A measured zero adds nothing to any shape — the fold identity
+        // `Cost::ZERO` stays one when it meets a metered run.
+        const NOTHING: TokenUsage = TokenUsage::Split {
+            input: 0,
+            output: 0,
+        };
         match (self, other) {
+            (NOTHING, x) | (x, NOTHING) => x,
+            (
+                TokenUsage::Metered {
+                    input: a_in,
+                    cache_write: a_cw,
+                    cache_read: a_cr,
+                    output: a_out,
+                },
+                TokenUsage::Metered {
+                    input: b_in,
+                    cache_write: b_cw,
+                    cache_read: b_cr,
+                    output: b_out,
+                },
+            ) => TokenUsage::Metered {
+                input: a_in.saturating_add(b_in),
+                cache_write: a_cw.saturating_add(b_cw),
+                cache_read: a_cr.saturating_add(b_cr),
+                output: a_out.saturating_add(b_out),
+            },
             (
                 TokenUsage::Split {
                     input: a_in,
@@ -214,6 +344,13 @@ struct TokenFields {
     /// (backlog 65c9c05a).
     #[serde(default, deserialize_with = "stated_total")]
     total_tokens: Option<Option<u64>>,
+    /// The cache counts of a metered run (backlog e6b2066f). Omitted,
+    /// not nulled, on every other shape, so a payload written before
+    /// they existed serializes exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache_write_tokens: Option<u64>,
 }
 
 /// Called only when `total_tokens` IS present, so the wrapping `Some`
@@ -235,6 +372,8 @@ impl Serialize for TokenUsage {
             // unreported run: an absent key would read as a payload
             // that forgot to say.
             total_tokens: Some(self.total()),
+            cache_read_tokens: self.cache_read(),
+            cache_write_tokens: self.cache_write(),
         }
         .serialize(s)
     }
@@ -243,8 +382,14 @@ impl Serialize for TokenUsage {
 impl<'de> Deserialize<'de> for TokenUsage {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let f = TokenFields::deserialize(d)?;
-        TokenUsage::from_parts(f.input_tokens, f.output_tokens, f.total_tokens)
-            .map_err(serde::de::Error::custom)
+        TokenUsage::from_wire(
+            f.input_tokens,
+            f.output_tokens,
+            f.cache_read_tokens,
+            f.cache_write_tokens,
+            f.total_tokens,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -440,6 +585,87 @@ impl Window {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Backlog e6b2066f: the four counts the harness bills a turn by,
+    /// summed over a run. The total is what the run PROCESSED — every
+    /// cache read included — not the final context size a bare
+    /// `subagent_tokens` is.
+    #[test]
+    fn a_metered_run_totals_all_four_counts_and_round_trips() {
+        let m = TokenUsage::Metered {
+            input: 40,
+            cache_write: 30_000,
+            cache_read: 1_470_000,
+            output: 9_000,
+        };
+        assert_eq!(m.total(), Some(1_509_040));
+        assert_eq!((m.input(), m.output()), (Some(40), Some(9_000)));
+        assert_eq!(
+            (m.cache_read(), m.cache_write()),
+            (Some(1_470_000), Some(30_000))
+        );
+        let v = serde_json::to_value(m).unwrap();
+        assert_eq!(v["cache_read_tokens"], 1_470_000);
+        assert_eq!(v["cache_write_tokens"], 30_000);
+        assert_eq!(v["total_tokens"], 1_509_040);
+        assert_eq!(serde_json::from_value::<TokenUsage>(v).unwrap(), m);
+        // A split states no cache keys at all, so every payload written
+        // before this variant existed serializes exactly as it did.
+        let split = serde_json::to_value(TokenUsage::Split {
+            input: 1,
+            output: 2,
+        })
+        .unwrap();
+        assert!(split.get("cache_read_tokens").is_none(), "{split}");
+    }
+
+    #[test]
+    fn cache_counts_are_refused_unless_whole_and_beside_a_split() {
+        let half = TokenUsage::from_wire(Some(1), Some(2), Some(3), None, None).unwrap_err();
+        assert!(half.contains("cache_write_tokens is missing"), "{half}");
+        let bare = TokenUsage::from_wire(None, None, Some(3), Some(4), Some(Some(7))).unwrap_err();
+        assert!(bare.contains("input_tokens and output_tokens"), "{bare}");
+        let wrong =
+            TokenUsage::from_wire(Some(1), Some(2), Some(3), Some(4), Some(Some(3))).unwrap_err();
+        assert!(wrong.contains("sum to 10"), "{wrong}");
+        assert_eq!(
+            TokenUsage::from_wire(Some(1), Some(2), Some(3), Some(4), Some(Some(10))),
+            Ok(TokenUsage::Metered {
+                input: 1,
+                cache_write: 4,
+                cache_read: 3,
+                output: 2
+            })
+        );
+    }
+
+    #[test]
+    fn metered_runs_sum_as_metered_and_zero_is_still_the_identity() {
+        let m = TokenUsage::Metered {
+            input: 1,
+            cache_write: 2,
+            cache_read: 3,
+            output: 4,
+        };
+        assert_eq!(
+            m.saturating_sum(m),
+            TokenUsage::Metered {
+                input: 2,
+                cache_write: 4,
+                cache_read: 6,
+                output: 8
+            }
+        );
+        assert_eq!((Cost::ZERO.tokens).saturating_sum(m), m);
+        assert_eq!(m.saturating_sum(Cost::ZERO.tokens), m);
+        // A split beside it has no cache counts, so the sum's four-way
+        // division is not known: a total, the least-measured shape.
+        let split = TokenUsage::Split {
+            input: 5,
+            output: 5,
+        };
+        assert_eq!(m.saturating_sum(split), TokenUsage::TotalOnly { total: 20 });
+    }
 
     #[test]
     fn cost_add_saturates_and_sums_fields() {

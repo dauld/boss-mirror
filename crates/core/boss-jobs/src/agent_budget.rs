@@ -12,6 +12,17 @@
 //! spend must fit under the row's cap, else the claim is refused with
 //! the three numbers and the step stays in its queue.
 //!
+//! THE MONEY HALF IS A READING NOW (backlog e6b2066f, 2026-09-23). The
+//! spend it measured was a run's FINAL context size priced at a blend —
+//! about a fifth of what the run consumed. Priced from the transcript's
+//! four counts, the same hour reads about five times higher, and the
+//! claims it would then refuse are the building David's direction says
+//! a budget must not limit. So an over-cap reservation admits the claim
+//! and puts [`CLAIM_OVER_BUDGET`] on the log beside it, carrying the
+//! same numbers the 409 did: a cost signal a protocol can read, not a
+//! gate. The concurrency half below is unchanged — it counts runs, not
+//! money, and no accurate figure moves it.
+//!
 //! `spent + budget <= cap` and not `spent >= cap`
 //! ([`boss_core::agent::BudgetDecision::decide`]): the recorder judges
 //! a run that already happened, so it asks whether the hour was
@@ -128,12 +139,19 @@ pub struct Reservation {
     pub decision: BudgetDecision,
 }
 
+/// The reading an over-budget claim leaves on the log beside the claim
+/// itself (backlog e6b2066f) — the payload that was a 409 body until
+/// the door stopped refusing.
+pub const CLAIM_OVER_BUDGET: &str = "agents.claim.over_budget";
+
 impl Reservation {
-    /// The 409 body: every number the refusal rests on, so the reader
-    /// never re-derives what the door already measured.
-    pub fn refusal_body(&self) -> serde_json::Value {
+    /// The [`CLAIM_OVER_BUDGET`] payload: every number the reading rests
+    /// on, so the reader never re-derives what the door already
+    /// measured. It was the 409 body until backlog e6b2066f turned the
+    /// refusal into a reading.
+    pub fn reading_body(&self) -> serde_json::Value {
         serde_json::json!({
-            "error": "claim over the agent's hourly budget",
+            "reading": "claim over the agent's hourly budget",
             "actor": self.actor,
             "spent_usd_micros": self.spent_usd_micros,
             "budget_usd_micros": self.budget_usd_micros,
@@ -357,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn the_refusal_body_carries_every_number() {
+    fn the_reading_carries_every_number() {
         let r = Reservation {
             actor: "agent-claude".into(),
             spent_usd_micros: 1_000_870,
@@ -366,7 +384,8 @@ mod tests {
             window_from: "2026-09-18T18:00:00Z".parse().unwrap(),
             decision: reserve(Some(3_000_000), 1_000_870, 5_000_000),
         };
-        let body = r.refusal_body();
+        let body = r.reading_body();
+        assert_eq!(body["reading"], "claim over the agent's hourly budget");
         assert_eq!(body["actor"], "agent-claude");
         assert_eq!(body["spent_usd_micros"], 1_000_870);
         assert_eq!(body["budget_usd_micros"], 5_000_000);

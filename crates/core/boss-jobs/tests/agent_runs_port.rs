@@ -13,8 +13,8 @@
 use boss_core::actor::ActorId;
 use boss_core::agent::{AgentCaps, BudgetDecision};
 use boss_jobs::agent_runs::{
-    AGENT_RUN_DENIED, AGENT_RUN_RECORDED, AgentRunError, AgentRunLog, InMemoryAgentRuns,
-    NewAgentRun, PricingBasis, RateCardRow, RunFilter, RunOutcome, TokenUsage, summarize,
+    AGENT_RUN_RECORDED, AgentRunLog, InMemoryAgentRuns, NewAgentRun, PricingBasis, RateCardRow,
+    RunFilter, RunOutcome, TokenUsage, summarize,
 };
 use boss_testing::assert_explicit_null;
 use chrono::{DateTime, Duration, Utc};
@@ -27,6 +27,8 @@ fn card() -> Vec<RateCardRow> {
             output_usd_micros_per_mtok: 25_000_000,
             note: "Claude Opus 5 — $5.00/$25.00 per MTok".into(),
             blended_input_share_ppm: None,
+            cache_read_usd_micros_per_mtok: None,
+            cache_write_usd_micros_per_mtok: None,
         },
         RateCardRow {
             model: "haiku-4-5".into(),
@@ -34,6 +36,8 @@ fn card() -> Vec<RateCardRow> {
             output_usd_micros_per_mtok: 5_000_000,
             note: "Claude Haiku 4.5 — $1.00/$5.00 per MTok".into(),
             blended_input_share_ppm: None,
+            cache_read_usd_micros_per_mtok: None,
+            cache_write_usd_micros_per_mtok: None,
         },
     ]
 }
@@ -711,8 +715,14 @@ async fn an_admitted_run_carries_what_was_left_at_admission() {
     assert_eq!(events[1].payload["budget"]["remaining_usd_micros"], 13_000);
 }
 
+/// Backlog e6b2066f: a run past the cap is RECORDED, and its row says
+/// it was over — a reading, not a refusal. Until then it left no row,
+/// only an `agents.run.denied` event, and once runs are priced from
+/// what they consumed (about five times the old figure) that would have
+/// dropped real spend from the record. David 2026-09-23: budgets give
+/// protocols a cost signal; they do not limit building.
 #[tokio::test]
-async fn a_run_past_the_cap_is_refused_and_the_refusal_is_a_fact_on_the_log() {
+async fn a_run_past_the_cap_is_recorded_with_a_deny_reading() {
     let log = budgeted_log();
     for (id, mm) in [("run-1", 0), ("run-2", 10), ("run-3", 20)] {
         log.record_run(&registered_at(id, 1, mm), &filer())
@@ -720,36 +730,25 @@ async fn a_run_past_the_cap_is_refused_and_the_refusal_is_a_fact_on_the_log() {
             .expect("under the cap");
     }
     // 21,000 spent in the hour before 01:30 against a 20,000 cap.
-    let err = log
+    let out = log
         .record_run(&registered_at("run-4", 1, 30), &filer())
         .await
-        .expect_err("over the cap is a refusal");
-    let AgentRunError::Denied { reason } = &err else {
-        panic!("a budget refusal is its own error class, not a 400: {err:?}");
+        .expect("over the cap is still a record");
+    assert!(out.recorded);
+    let Some(BudgetDecision::Deny { reason }) = &out.run.budget else {
+        panic!("the row carries the over-cap reading: {:?}", out.run.budget);
     };
     assert!(reason.contains("21000 of 20000"), "{reason}");
+    assert_eq!(out.run.usd_micros, Some(7_000), "and its cost is on it");
 
-    // Not recorded as a run...
     let runs = log.list_runs(&RunFilter::default()).await.expect("lists");
-    assert_eq!(runs.len(), 3, "the refused run is not a row");
-
-    // ...but recorded as a refusal: which actor, for what, against
-    // which cap, in which window — and what the refused run itself
-    // cost, so the money is on the log even though the row is not.
+    assert_eq!(runs.len(), 4, "the over-cap run is a row like any other");
     let events = log.recorded_events().await;
-    let denied = events
-        .iter()
-        .find(|e| e.kind == AGENT_RUN_DENIED)
-        .expect("the refusal is an event");
-    assert_eq!(denied.payload["run_id"], "run-4");
-    assert_eq!(denied.payload["actor_id"], "agent-claude");
-    assert_eq!(denied.payload["reason"], reason.as_str());
-    assert_eq!(denied.payload["spent_usd_micros"], 21_000);
-    assert_eq!(denied.payload["hourly_budget_usd_micros"], 20_000);
-    assert_eq!(denied.payload["window"]["kind"], "last_hour");
-    assert_eq!(denied.payload["window_from"], "2026-09-10T00:30:00Z");
-    assert_eq!(denied.payload["usd_micros"], 7_000);
-    assert_eq!(denied.payload["_actor"], "claude:opus-5[1m]");
+    assert!(
+        events.iter().all(|e| e.kind == AGENT_RUN_RECORDED),
+        "nothing is refused, so nothing but records reach the log"
+    );
+    assert_eq!(events[3].payload["budget"]["kind"], "deny");
 }
 
 #[tokio::test]
@@ -815,7 +814,7 @@ async fn a_legacy_colon_form_actor_has_no_row_and_is_unbudgeted() {
 }
 
 #[tokio::test]
-async fn a_run_that_started_while_the_cap_was_full_of_flights_is_refused() {
+async fn a_run_that_started_while_the_cap_was_full_of_flights_is_read_as_over() {
     let log = InMemoryAgentRuns::new(card()).with_budgeted_agent(
         "agent-claude",
         "opus-5",
@@ -830,28 +829,26 @@ async fn a_run_that_started_while_the_cap_was_full_of_flights_is_refused() {
         ..registered_at("run-long", 1, 0)
     };
     log.record_run(&long, &filer()).await.expect("first in");
-    // run-mid started at 01:05, while run-long was in flight.
-    let err = log
+    // run-mid started at 01:05, while run-long was in flight: recorded,
+    // and read as over the concurrency cap (backlog e6b2066f).
+    let mid = log
         .record_run(&registered_at("run-mid", 1, 5), &filer())
         .await
-        .expect_err("one of one in flight is full");
-    let AgentRunError::Denied { reason } = &err else {
-        panic!("{err:?}");
+        .expect("a finished run is recorded whatever it read");
+    let Some(BudgetDecision::Deny { reason }) = &mid.run.budget else {
+        panic!("{:?}", mid.run.budget);
     };
     assert!(reason.contains("1 of 1"), "{reason}");
     assert!(reason.contains("in flight"), "{reason}");
-    let denied = log
-        .recorded_events()
-        .await
-        .into_iter()
-        .find(|e| e.kind == AGENT_RUN_DENIED)
-        .expect("refusal on the log");
-    assert_eq!(denied.payload["in_flight"], 1);
-    assert_eq!(denied.payload["max_concurrent_runs"], 1);
-    // And a run that started after run-long finished is admitted.
-    log.record_run(&registered_at("run-after", 1, 11), &filer())
+    // And a run that started after run-long finished reads as under.
+    let after = log
+        .record_run(&registered_at("run-after", 1, 11), &filer())
         .await
         .expect("nothing in flight at 01:11");
+    assert!(matches!(
+        after.run.budget,
+        Some(BudgetDecision::Allow { .. })
+    ));
 }
 
 /// The gap design 91a9bfe7 closed, exercised through the port: the
@@ -870,6 +867,8 @@ async fn a_total_only_run_on_a_model_that_declares_a_blend_is_priced_and_says_so
         // 87.5% input, as the migration seeds it from nine measured
         // splits: a $7.50/MTok blend.
         blended_input_share_ppm: Some(875_000),
+        cache_read_usd_micros_per_mtok: None,
+        cache_write_usd_micros_per_mtok: None,
     }]);
 
     let mut run = measured_total_only(

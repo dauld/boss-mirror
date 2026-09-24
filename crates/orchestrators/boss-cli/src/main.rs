@@ -53,6 +53,7 @@ mod tenant_publish;
 mod tenant_stamp;
 mod train;
 mod train_gate;
+mod transcript_usage;
 mod upgrade;
 mod workflow;
 
@@ -591,9 +592,18 @@ enum Commands {
         /// With --report: the token count — a total (761000) or the
         /// input,output split (740000,21000). A split is priced at the
         /// card's two rates; a total at the model's declared blend, and
-        /// the record says which.
+        /// the record says which. SUPERSEDED whenever the run's
+        /// transcript is read (backlog e6b2066f): the report meters the
+        /// run from it and keeps this figure beside the record only for
+        /// comparison — a harness `subagent_tokens` is the run's final
+        /// context size, not what it consumed.
         #[arg(long, requires = "report")]
         tokens: Option<String>,
+        /// With --report: the run's subagent transcript, when the
+        /// report cannot find it itself (it looks for the one
+        /// `<projects>/*/*/subagents/agent-*.jsonl` naming the run).
+        #[arg(long, requires = "report")]
+        transcript: Option<std::path::PathBuf>,
         /// Dispatch anyway when a car carrying this packet's fix has
         /// already MERGED (a7837d81). The refusal is not a guess about
         /// the tree: it names the car, its branch and its merge. Force
@@ -1654,6 +1664,7 @@ async fn main() -> Result<()> {
             summary_file,
             spend_usd,
             tokens,
+            transcript,
             force,
             ..
         } => {
@@ -1669,6 +1680,7 @@ async fn main() -> Result<()> {
                     )?,
                     spend_usd,
                     tokens,
+                    transcript,
                     chrono::Utc::now(),
                 )
                 .await

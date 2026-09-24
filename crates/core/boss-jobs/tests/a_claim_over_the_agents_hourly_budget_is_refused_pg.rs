@@ -12,9 +12,14 @@
 //! (migration 20260915212644, caps NULL), the seeded rate card, and one
 //! run this test records so the hour holds a priced spend.
 //!
+//! Since backlog e6b2066f the money half is a READING, not a gate: the
+//! file keeps its name so its history reads straight, and contract 1
+//! says what the door does now.
+//!
 //! Contracts:
-//! 1. A cap the reservation would exceed is a 409 naming spent, budget
-//!    and cap; the step is still `ready`, unassigned.
+//! 1. A cap the reservation would exceed ADMITS the claim and commits
+//!    `agents.claim.over_budget` beside it, naming spent, budget and
+//!    cap.
 //! 2. A reservation that fits is admitted: the step goes `active` under
 //!    the agent, exactly as a claim did before this car.
 //! 3. A person claiming the same step is admitted — the budget is the
@@ -211,40 +216,38 @@ async fn claim(
     resp.assert_json()
 }
 
+/// Backlog e6b2066f: the hour the reservation cannot hold ADMITS the
+/// claim and puts the reading on the log beside it — a cost signal,
+/// never a refusal (David 2026-09-23: budgets must not limit building).
 #[tokio::test(flavor = "multi_thread")]
-async fn a_claim_the_hour_cannot_hold_is_refused_with_the_numbers() {
+async fn a_claim_the_hour_cannot_hold_is_admitted_and_the_reading_is_on_the_log() {
     let db = TestDb::new().await;
     cap_the_agent(&db, Some(3_000_000)).await;
     spend_a_dollar(&db).await;
-    let (app, jobs, step_id) = app_with_step(&db, 5.0).await;
+    let (app, _jobs, step_id) = app_with_step(&db, 5.0).await;
 
-    let body = claim(&app, &step_id, AGENT, StatusCode::CONFLICT).await;
-    assert_eq!(body["actor"], AGENT);
-    assert_eq!(body["spent_usd_micros"], 1_000_870);
-    assert_eq!(body["budget_usd_micros"], 5_000_000);
-    assert_eq!(body["hourly_budget_usd_micros"], 3_000_000);
+    let body = claim(&app, &step_id, AGENT, StatusCode::OK).await;
+    assert_eq!(body["assignee_id"], AGENT, "{body}");
+    assert_eq!(body["status"], "active", "{body}");
+
+    let reading: serde_json::Value = sqlx::query_scalar(
+        "SELECT payload FROM event_outbox WHERE kind = 'agents.claim.over_budget'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("the reading is committed with the claim");
+    assert_eq!(reading["actor"], AGENT);
+    assert_eq!(reading["step_id"], step_id.as_str());
+    assert_eq!(reading["spent_usd_micros"], 1_000_870);
+    assert_eq!(reading["budget_usd_micros"], 5_000_000);
+    assert_eq!(reading["hourly_budget_usd_micros"], 3_000_000);
     assert!(
-        body["reason"]
+        reading["reason"]
             .as_str()
             .unwrap_or_default()
             .contains("over the cap"),
-        "{body}"
+        "{reading}"
     );
-    // The step never entered the race.
-    let step = jobs
-        .get_step(&boss_core::job::StepId::from_uuid(
-            Uuid::parse_str(&step_id).unwrap(),
-        ))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(step.status, StepStatus::Ready);
-    assert_eq!(step.assignee_id, None);
-
-    // A person doing the work by hand is admitted: the budget is the
-    // agent's.
-    let body = claim(&app, &step_id, "emp-david", StatusCode::OK).await;
-    assert_eq!(body["assignee_id"], "emp-david");
 }
 
 #[tokio::test(flavor = "multi_thread")]

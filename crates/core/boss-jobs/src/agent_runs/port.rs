@@ -18,13 +18,6 @@ use super::types::{AgentRun, NewAgentRun, RateCardRow, RunFilter};
 pub enum AgentRunError {
     #[error("bad request: {0}")]
     BadRequest(String),
-    /// The run was refused against its actor's budget (backlog
-    /// 7dd9f28c). Its own class, not a `BadRequest`: the report was
-    /// well-formed, the actor was over its cap, and the refusal is
-    /// already a fact on the log (`agents.run.denied`) by the time the
-    /// caller sees this.
-    #[error("budget denied: {reason}")]
-    Denied { reason: String },
     #[error("storage: {0}")]
     Storage(String),
 }
@@ -75,17 +68,14 @@ pub trait AgentRunLog: Send + Sync {
     /// Idempotent on `run_id`, so the reporter can retry a failed
     /// report without inventing a second run.
     ///
-    /// Admitted against the actor's budget first (backlog 7dd9f28c):
-    /// the actor's registry caps against its priced spend in the hour
+    /// Judged against the actor's budget (backlog 7dd9f28c): the
+    /// actor's registry caps against its priced spend in the hour
     /// before the run started and its runs in flight at that instant
-    /// ([`super::types::measure_load`]), judged by [`admit`]. An
-    /// `Allow` rides the row and the event as `budget`; a `Deny` is
-    /// written to the log as `agents.run.denied` — actor, window,
-    /// spend, cap, reason, and what the refused run itself cost — and
-    /// answered as [`AgentRunError::Denied`] with no row written. Each
-    /// refused attempt is its own event: a retry of a refused report
-    /// is a second ask, and is refused (or admitted, if the hour has
-    /// rolled) on its own measurement.
+    /// ([`super::types::measure_load`]), judged by [`admit`]. The
+    /// judgement rides the row and the event as `budget`, `Allow` or
+    /// `Deny` — a READING either way, never a refusal (backlog
+    /// e6b2066f): the run has happened, and a record that dropped the
+    /// over-cap ones would understate exactly the spend a cap is about.
     ///
     /// `recorded_by` is who FILED the record — usually the dispatching
     /// session, sometimes the agent itself. It rides the event as

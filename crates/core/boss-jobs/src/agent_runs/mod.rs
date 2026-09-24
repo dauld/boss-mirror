@@ -36,16 +36,18 @@
 //! column priced the run against what it actually ran, which is what
 //! made the join possible). The recorder measures the actor's priced
 //! spend in the hour before the run STARTED plus its runs in flight at
-//! that instant (`types::measure_load`), admits or refuses
-//! (`port::admit`), and writes the decision down: an `Allow` rides the
-//! row and the event as `budget`, a `Deny` is its own event
-//! (`agents.run.denied`) and no row. So a refusal is as visible as
-//! spend, which is the whole point of the value-shaped decision: on
-//! 2026-09-08 a session ran out of credit and the only signal was the
-//! work stopping. HONEST LIMIT: this record is written at FINISH, so
-//! "admitted" here is a judgement of a run that already happened — the
-//! refusal is a fact the desk can act on, not a gate that stopped the
-//! spend. Stopping it needs a run that opens at start (below).
+//! that instant (`types::measure_load`), judges it (`port::admit`),
+//! and writes the judgement down: `Allow` or `Deny`, it rides the row
+//! and the event as `budget`. A `Deny` is a READING, not a refusal
+//! (backlog e6b2066f): until then it was its own event
+//! (`agents.run.denied`) and NO row, and once a run was priced from
+//! what it consumed — about five times the old figure — that would
+//! have dropped real runs from the record of what they cost. David's
+//! direction (2026-09-23) is that budgets give protocols a cost
+//! signal and do not limit building, so the record keeps every run and
+//! says which ones were over. It was never a gate anyway: this record
+//! is written at FINISH, so the judgement is of a run that already
+//! happened.
 //!
 //! **Not in scope, deliberately.** One sibling packet borders this one
 //! and this module is additive to it:
@@ -127,7 +129,7 @@ pub mod postgres;
 pub mod rebuild;
 pub mod types;
 
-pub use events::{AGENT_RUN_DENIED, AGENT_RUN_RECORDED};
+pub use events::AGENT_RUN_RECORDED;
 pub use in_memory::InMemoryAgentRuns;
 pub use port::{AgentRunError, AgentRunLog, RecordedRun, RegisteredAgent, admit};
 #[cfg(feature = "postgres")]

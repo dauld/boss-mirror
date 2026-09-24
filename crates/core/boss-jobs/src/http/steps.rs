@@ -1789,6 +1789,17 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     // numbers, BEFORE the CAS, so a claim the budget does not admit
     // never enters the race. A person, an unregistered login, and a
     // row with no cap reserve nothing (see `agent_budget`).
+    //
+    // A READING, NOT A REFUSAL, since backlog e6b2066f. Once a run is
+    // priced from what it consumed — about five times the figure this
+    // gate was calibrated against — the $40 hour would have refused
+    // claims all day, and David's direction (2026-09-23) is that
+    // budgets give protocols a cost signal and do not limit building.
+    // So an over-cap reservation admits the claim and puts the reading
+    // on the log beside it (`agents.claim.over_budget`, committed with
+    // the claim), and a failed read of the hour is logged and admits
+    // too: a gate that no longer refuses must not refuse on a hiccup.
+    let mut over_budget: Option<serde_json::Value> = None;
     if let (Some(door), Some(row), Some(budget_usd)) = (
         state.agent_budget.as_ref(),
         agent_row.as_ref(),
@@ -1800,15 +1811,12 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
         let now = boss_clock_client::now_from(&state.clock).await;
         match door.reserve(row, budget_usd, now).await {
             Ok(reservation) if reservation.decision.is_allowed() => {}
-            Ok(reservation) => {
-                return (StatusCode::CONFLICT, Json(reservation.refusal_body())).into_response();
-            }
+            Ok(reservation) => over_budget = Some(reservation.reading_body()),
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("budget gate could not measure the actor's hour: {e}"),
-                )
-                    .into_response();
+                tracing::warn!(
+                    actor = %row.id,
+                    "budget reading could not measure the actor's hour, claim admitted: {e}"
+                );
             }
         }
     }
@@ -1902,6 +1910,16 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
         events::STEP_UPDATED,
         serde_json::to_value(&claimed).unwrap_or_default(),
     )];
+    // The over-budget reading, on the log in the same commit as the
+    // claim it describes (backlog e6b2066f): which step, which actor,
+    // and every number the old refusal carried.
+    if let Some(mut reading) = over_budget {
+        if let Some(obj) = reading.as_object_mut() {
+            obj.insert("job_id".into(), serde_json::json!(job_id.to_string()));
+            obj.insert("step_id".into(), serde_json::json!(step_id.to_string()));
+        }
+        claim_events.push(stamp.event(crate::agent_budget::CLAIM_OVER_BUDGET, reading));
+    }
     // An assignment marker only when the executor genuinely changed —
     // the same alias-aware answer the run edge took above, so a re-claim
     // and a respelled holder announce nothing (735ddc03). Payload
