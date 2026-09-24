@@ -1,4 +1,4 @@
-// incident-review.js — the custom Step UX for the post-mortem's
+// incident-review.js — the custom Step UX for the incident protocol's
 // "Human review of the findings" step.
 //
 // Two feedback packets said the review step renders the findings
@@ -41,7 +41,7 @@ const REVIEW_STEP = {
 
 const JOB = {
   id: 'job-ipm-1',
-  kind: 'incident-post-mortem',
+  kind: 'incident',
   workflow_version: 1,
   subject: { subject_kind: 'custom', id: 'incident-2026-08-22-etcd' },
   title: 'Post-mortem: cp-2 etcd degradation',
@@ -62,7 +62,7 @@ const JOB = {
   },
   steps: [
     {
-      id: 's-t0', job_id: 'job-ipm-1', spec_slug: 'opened', title: 'Incident opened',
+      id: 's-t0', job_id: 'job-ipm-1', spec_slug: 'raised', title: 'Incident raised',
       kind: 'trigger', status: 'completed', assignee_id: null, sort_order: 0,
       blocked_by: [], completed_on: '2026-08-22',
       metadata: { trigger_kind: 'operator', trigger_name: 'incident-declared' },

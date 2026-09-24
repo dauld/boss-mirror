@@ -1,5 +1,8 @@
-// incident-review.js — custom Step UX for the incident-post-mortem
-// Workflow's "Human review of the findings" step.
+// incident-review.js — custom Step UX for the `incident` Workflow's
+// "Human review of the findings" step. Written for incident-post-mortem,
+// whose review never mounted it; that protocol was folded into
+// `incident` on 2026-09-24 (backlog 59d15039), whose review step is the
+// first to declare kind=incident-review.
 //
 // WHY THIS EXISTS. Two feedback packets said the review step renders
 // the findings unusably; one asked for "a custom step UX that
@@ -30,10 +33,10 @@
 // WHY A NEW KIND AND NOT A PLUGIN ON `task`. Plugins register by step
 // kind and the SPA mounts by kind; registering for `task` would hijack
 // every task step in the system (same rationale recorded on
-// 146-correction-verdict-plugin.sql). The Workflow's review step moves
-// to kind=incident-review in the next workflow version; the Rust
-// StepRegistry does not need to learn the kind (validate_metadata is
-// permissive for kinds it does not know).
+// 146-correction-verdict-plugin.sql). The Workflow's review step
+// declares kind=incident-review; the Rust StepRegistry does not need to
+// learn the kind (validate_metadata is permissive for kinds it does not
+// know).
 //
 // Plugin contract: window.__boss_register_step_plugin(kind, mount).
 // Host calls mount(container, props) with { step, jobId, onUpdate }.

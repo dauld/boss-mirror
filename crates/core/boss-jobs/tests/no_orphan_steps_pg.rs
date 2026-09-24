@@ -56,7 +56,12 @@ use boss_testing::TestDb;
 /// read-checks`, the second MACHINE step of that protocol — the forge
 /// ops-runner completes it through the read-publish-checks verb, the
 /// same class and the same registry gap as `open-pr` beside it.
-const ORPHANS_PINNED: usize = 30;
+///
+/// 30 -> 29 on 2026-09-24 (backlog 59d15039): `incident/prevent` left
+/// with the fold of the post-mortem questions into `incident`; the
+/// `actions` step that replaces it declares `platform-admin`, as does
+/// every other step the fold added.
+const ORPHANS_PINNED: usize = 29;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_persons_step_no_station_holds_is_named_and_the_count_is_pinned() {

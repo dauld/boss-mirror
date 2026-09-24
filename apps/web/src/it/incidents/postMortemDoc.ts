@@ -1,4 +1,6 @@
-// Semi-structured rendering for incident-post-mortem packets.
+// Semi-structured rendering for incident packets — the post-mortem an
+// incident becomes once it closes. Written for incident-post-mortem,
+// folded into `incident` with it on 2026-09-24 (backlog 59d15039).
 //
 // A post-mortem's findings live in free-form Job metadata, and the
 // shape has already drifted between the live packets (incident_at /

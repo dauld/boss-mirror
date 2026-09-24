@@ -6,7 +6,9 @@
   // both where we respond to active incidents and document post
   // mortems for posterity." Two panels answer the two halves:
   //
-  //   * Active incidents — every open incident-post-mortem packet,
+  //   * Active incidents — every open `incident` packet (the one
+  //     incident protocol since backlog 59d15039 folded
+  //     incident-post-mortem and post-mortem into it, 2026-09-24),
   //     with a compact strip of its step states, who holds the current
   //     step, and the link into the packet where the response work
   //     actually happens. This panel is a lens over the queue, not a
@@ -15,8 +17,8 @@
   //     readable document, newest first, each with the terminal it
   //     ended on. This is the "for posterity" half: the packet's
   //     metadata IS the post-mortem, and the renderer is
-  //     semi-structured (postMortemDoc.ts) because the live packets
-  //     already carry two different shapes.
+  //     semi-structured (postMortemDoc.ts) because packets have
+  //     carried different shapes.
   //
   // Failure renders as failure (packet 3fba9c35, the false-empty
   // sweep): an incidents page that reports calm during an outage is
@@ -37,8 +39,8 @@
   async function fetchIncidents(): Promise<void> {
     load = { kind: 'loading' };
     try {
-      const res = await fetch('/api/jobs?kind=incident-post-mortem&limit=200');
-      if (!res.ok) throw new Error(`incident-post-mortem jobs: HTTP ${res.status}`);
+      const res = await fetch('/api/jobs?kind=incident&limit=200');
+      if (!res.ok) throw new Error(`incident jobs: HTTP ${res.status}`);
       const body = await res.json();
       const jobs = (Array.isArray(body) ? body : (body.data ?? [])) as Job[];
       load = { kind: 'ready', jobs };
@@ -80,7 +82,7 @@
 
 <PageHeader
   title="Incidents"
-  subtitle="Respond to active incidents, and read the post-mortems for posterity. Every incident is an incident-post-mortem packet — this page is the lens over that queue."
+  subtitle="Respond to active incidents, and read the post-mortems for posterity. Every incident is an incident packet — this page is the lens over that queue."
 />
 
 {#if load.kind === 'loading'}

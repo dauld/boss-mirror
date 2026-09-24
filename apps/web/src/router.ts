@@ -116,7 +116,7 @@ export type Route =
   | { kind: 'systemCrew' }
   /// The hardware registry, declared beside observed (59ef456a).
   | { kind: 'systemEstate' }
-  /// The IT incidents surface — active incident-post-mortem packets +
+  /// The IT incidents surface — active incident packets +
   /// the closed ones rendered as a durable archive.
   | { kind: 'incidents' }
   | { kind: 'systemSubjects' }

@@ -3,10 +3,10 @@
 // David: "Do we have a good surface for IT to view post mortems more
 // durably? I think we probably need a new 'Incidents' page that is
 // both where we respond to active incidents and document post mortems
-// for posterity." Two panels: active incident-post-mortem packets
+// for posterity." Two panels: active incident packets
 // (respond), and closed ones rendered as readable documents (the
-// archive). The renderer is SEMI-structured — the two live packets
-// already carry different metadata shapes, and both must render
+// archive). The renderer is SEMI-structured — packets have carried
+// different metadata shapes, and every one must render
 // without dropping content or dumping JSON.
 //
 // The failed-fetch case is pinned per the false-empty sweep (packet
@@ -27,7 +27,7 @@ const json = (r: Route, b: unknown, status = 200) =>
 /// one ready step assigned to an agent.
 const OPEN_JOB = {
   id: 'ipm-open-1',
-  kind: 'incident-post-mortem',
+  kind: 'incident',
   workflow_version: 1,
   subject: { subject_kind: 'custom', id: 'incident-2026-08-22-etcd' },
   title: 'Post-mortem: cp-2 etcd degradation',
@@ -46,7 +46,7 @@ const OPEN_JOB = {
     evidence: 'readyz verbose (etcd failed) captured 18:1xZ.',
   },
   steps: [
-    { id: 's-open-0', job_id: 'ipm-open-1', kind: 'trigger', title: 'Incident opened', assignee_id: null, status: 'completed', sort_order: 0, blocked_by: [], completed_on: '2026-08-22', metadata: {} },
+    { id: 's-open-0', job_id: 'ipm-open-1', kind: 'trigger', title: 'Incident raised', assignee_id: null, status: 'completed', sort_order: 0, blocked_by: [], completed_on: '2026-08-22', metadata: {} },
     { id: 's-open-1', job_id: 'ipm-open-1', kind: 'task', title: 'Establish the timeline from evidence', assignee_id: 'claude@algedonic.dev', status: 'ready', sort_order: 1, blocked_by: ['s-open-0'], completed_on: null, metadata: { authority_role: 'platform-admin' } },
     { id: 's-open-2', job_id: 'ipm-open-1', kind: 'task', title: 'Did we cause it?', assignee_id: null, status: 'pending', sort_order: 2, blocked_by: ['s-open-1'], completed_on: null, metadata: { authority_role: 'platform-admin' } },
   ],
@@ -61,8 +61,8 @@ const CLOSED_NEW = {
   opened_on: '2026-08-20',
   closed_on: '2026-08-22',
   steps: [
-    { id: 's-cn-0', job_id: 'ipm-closed-new', kind: 'trigger', title: 'Incident opened', assignee_id: null, status: 'completed', sort_order: 0, blocked_by: [], completed_on: '2026-08-20', metadata: {} },
-    { id: 's-cn-7', job_id: 'ipm-closed-new', kind: 'outcome', title: 'Post-mortem closed', assignee_id: null, status: 'completed', sort_order: 7, blocked_by: [], completed_on: '2026-08-22', metadata: {} },
+    { id: 's-cn-0', job_id: 'ipm-closed-new', kind: 'trigger', title: 'Incident raised', assignee_id: null, status: 'completed', sort_order: 0, blocked_by: [], completed_on: '2026-08-20', metadata: {} },
+    { id: 's-cn-7', job_id: 'ipm-closed-new', kind: 'outcome', title: 'Closed', assignee_id: null, status: 'completed', sort_order: 7, blocked_by: [], completed_on: '2026-08-22', metadata: {} },
   ],
 };
 
@@ -71,7 +71,7 @@ const CLOSED_NEW = {
 /// must render its content as labeled prose, not drop it.
 const CLOSED_OLD = {
   id: 'ipm-closed-old',
-  kind: 'incident-post-mortem',
+  kind: 'incident',
   workflow_version: 1,
   subject: { subject_kind: 'custom', id: 'incident-2026-08-13-sor' },
   title: 'Post-mortem: production DB crash',
@@ -89,12 +89,12 @@ const CLOSED_OLD = {
     outcome: 'Five protocol changes filed',
   },
   steps: [
-    { id: 's-co-0', job_id: 'ipm-closed-old', kind: 'trigger', title: 'Incident opened', assignee_id: null, status: 'completed', sort_order: 0, blocked_by: [], completed_on: '2026-08-13', metadata: {} },
-    { id: 's-co-7', job_id: 'ipm-closed-old', kind: 'outcome', title: 'Post-mortem closed', assignee_id: null, status: 'completed', sort_order: 7, blocked_by: [], completed_on: '2026-08-14', metadata: {} },
+    { id: 's-co-0', job_id: 'ipm-closed-old', kind: 'trigger', title: 'Incident raised', assignee_id: null, status: 'completed', sort_order: 0, blocked_by: [], completed_on: '2026-08-13', metadata: {} },
+    { id: 's-co-7', job_id: 'ipm-closed-old', kind: 'outcome', title: 'Closed', assignee_id: null, status: 'completed', sort_order: 7, blocked_by: [], completed_on: '2026-08-14', metadata: {} },
   ],
 };
 
-const LIST = /\/api\/jobs\?kind=incident-post-mortem/;
+const LIST = /\/api\/jobs\?kind=incident&/;
 
 async function mocks(page: Page) {
   await installSmokeMocks(page);
@@ -134,8 +134,9 @@ test('active packets and the archive both render, archive newest first', async (
   await expect(newest.getByText('Summary', { exact: true })).toBeVisible();
   await expect(newest.getByText(/Six queued gates killed/)).toBeVisible();
   await expect(newest.getByText('Evidence', { exact: true })).toBeVisible();
-  // Its outcome — the terminal that fired.
-  await expect(newest.getByText('Post-mortem closed')).toBeVisible();
+  // Its outcome — the terminal that fired. Scoped to the badge: the
+  // terminal is titled `Closed`, and "closed <date>" sits beside it.
+  await expect(newest.locator('.inc-outcome')).toHaveText('Closed');
 
   // Old shape: unknown keys as labeled prose — content survives.
   const oldest = docs.nth(1);
