@@ -745,6 +745,11 @@ mod tests {
             // The check and the receipt the run lands on.
             "boss tenant check",
             "tenant-check.txt",
+            // The item's own exit (4bcf1265), which ends the run through
+            // the delivery rule — and the hand fallback for a packet
+            // pinned before that exit existed.
+            "disposition=delivered",
+            "agent-run-delivers-when-its-step-is-done",
             "result=delivered",
             "--tenant-check-file",
             "--tenant-branch",
