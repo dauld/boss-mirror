@@ -359,13 +359,45 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
       'not json',
     ];
     const body = 'retry: 3600000\n' + frames.map((f) => `data: ${typeof f === 'string' ? f : JSON.stringify(f)}\n\n`).join('');
-    await page.route(STREAM, (r) =>
-      r.fulfill({ status: 200, headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' }, body }),
-    );
+    // THE FRAMES ARE RELEASED ONLY AFTER THE SNAPSHOT THEY DEDUPE AGAINST
+    // HAS PAINTED (backlog 797c5fcb). Each filter change re-runs the
+    // page's effect, which fires the tail read and opens the stream in
+    // the same tick, and a snapshot that answers AFTER the frames
+    // REPLACES them. Mocked with the frames on every stream and the rows
+    // on every tail, the order was the scheduler's: under
+    // --repeat-each=10 --workers=4 this test went red 3 times in 10, each
+    // time reading the snapshot's own rows where the frames belonged
+    // (and two unrelated gates on 2026-09-23 went red the same way). So
+    // the order is fixed here, not waited out: the reads before the last
+    // filter answer nothing, which makes the filtered snapshot's three
+    // rows the only three-row paint there can be; the streams before it
+    // carry no frames; and the filtered stream is held until the test
+    // has SEEN that paint. What the frames then do to it is the page's
+    // doing alone. (The page's own race — a live frame landing before
+    // its snapshot is lost — is a property of EventsPage.svelte, not of
+    // this pin.)
+    const filtered = (url: string): boolean => param(url, 'kind') === 'j';
+    let releaseFrames: () => void = () => {};
+    const snapshotPainted = new Promise<void>((r) => (releaseFrames = r));
+    await page.route(TAIL, (r) => json(r, filtered(r.request().url()) ? ROWS : []));
+    await page.route(STREAM, async (r) => {
+      const live = filtered(r.request().url());
+      if (live) await snapshotPainted;
+      await r
+        .fulfill({
+          status: 200,
+          headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+          body: live ? body : 'retry: 3600000\n\n',
+        })
+        // A held stream the page has already closed has nothing to fulfil.
+        .catch(() => {});
+    });
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     await page.getByLabel('Source').fill('jobs');
     await page.getByLabel('Kind contains').fill('j');
     await expect.poll(() => seen.stream.length).toBeGreaterThan(0);
+    await expect(stream(page)).toHaveCount(3);
+    releaseFrames();
     await expect(stream(page)).toHaveCount(5);
     const ids = await stream(page).locator('td:nth-child(3)').allInnerTexts();
     expect(ids.slice(0, 2)).toEqual(['brewery.batch.started', 'jobs.job.opened']);

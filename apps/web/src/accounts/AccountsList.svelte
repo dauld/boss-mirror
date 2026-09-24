@@ -24,6 +24,7 @@
   import { fetchPaged, isCapped, type Paged } from '../data/paginated';
   import { fetchAccountsPage } from './api';
   import { moduleEnabled } from '@boss/web-kit/session/manifest.svelte';
+  import { okRead, readStateOf, type ReadState } from '../data/readState';
 
   type Tier = Account['tier'] | 'all';
 
@@ -54,6 +55,15 @@
   const supportOn = $derived(moduleEnabled('support'));
 
   let invoicesPage = $state<Paged<Invoice> | null>(null);
+  // What each secondary read did. Their `failed` arms were dropped on
+  // the floor (`dPaged.kind === 'ready' ? dPaged.page : null`), and the
+  // tenant-shaping below hides an all-zero column — so a failed read
+  // removed its column without a word, the paint of "no account has
+  // any" (backlogs 223ebcd6 and e30ee8b9). The column still goes, since
+  // there is nothing true to put in it, but the page now says why.
+  let devicesRead = $state<ReadState>(okRead);
+  let jobsRead = $state<ReadState>(okRead);
+  let invoicesRead = $state<ReadState>(okRead);
 
   let devices = $derived(devicesPage?.data ?? []);
   let jobs = $derived(jobsPage?.data ?? []);
@@ -93,6 +103,9 @@
           devicesPage = dPaged.kind === 'ready' ? dPaged.page : null;
           jobsPage = jPaged && jPaged.kind === 'ready' ? jPaged.page : null;
           invoicesPage = iPaged.kind === 'ready' ? iPaged.page : null;
+          devicesRead = readStateOf(dPaged);
+          jobsRead = jPaged ? readStateOf(jPaged) : okRead;
+          invoicesRead = readStateOf(iPaged);
           loading = false;
         }
       } catch (e) {
@@ -175,6 +188,15 @@
       .join(' · ') || undefined,
   );
 
+  // Each failed secondary read, with the column it takes away.
+  let failedColumns = $derived(
+    [
+      { what: 'installed devices', read: devicesRead, column: 'Equipment' },
+      { what: 'service jobs', read: jobsRead, column: 'Open SRs' },
+      { what: 'invoices', read: invoicesRead, column: 'Open AR' },
+    ].flatMap((f) => (f.read.kind === 'failed' ? [{ ...f, error: f.read.error }] : [])),
+  );
+
   const TIERS: ReadonlyArray<'platinum' | 'gold' | 'silver'> = [
     'platinum', 'gold', 'silver',
   ];
@@ -247,6 +269,13 @@
     </aside>
 
     <section class="list-section">
+      {#if !loading && !error}
+        {#each failedColumns as f (f.what)}
+          <p class="empty load-failed" role="alert">
+            Couldn't load {f.what} — {f.error}. The {f.column} column is not shown: its counts are unknown, not zero.
+          </p>
+        {/each}
+      {/if}
       {#if loading}
         <p class="empty">Loading…</p>
       {:else if error}

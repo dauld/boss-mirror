@@ -592,16 +592,18 @@ test.describe('/ux/accounts — empty, loading, and a failed read', () => {
     await expect(body(page).locator('table')).toHaveCount(0);
   });
 
-  // UNFILED: the three secondary reads degrade their column by HIDING
-  // it, with no failure line — the paint of "no account has any", the
-  // false-empty class one level down. A failed invoices read reads as
-  // "nobody owes anything".
-  for (const [name, re, gone] of [
-    ['GET /api/assets', ASSETS, 'Equipment'],
-    ['GET /api/jobs?department=support', JOBS, 'Open SRs'],
-    ['GET /api/commerce/invoices', INVOICES, 'Open AR'],
+  // Backlogs 223ebcd6 / e30ee8b9, answered: the three secondary reads
+  // still degrade their column by hiding it — there is nothing true to
+  // put in it — but each now says so with the shared failure line,
+  // naming the read and the column. Before, the page painted "no
+  // account has any", and a failed invoices read read as "nobody owes
+  // anything".
+  for (const [name, re, url, what, gone] of [
+    ['GET /api/assets', ASSETS, ASSETS_URL, 'installed devices', 'Equipment'],
+    ['GET /api/jobs?department=support', JOBS, JOBS_URL, 'service jobs', 'Open SRs'],
+    ['GET /api/commerce/invoices', INVOICES, INVOICES_URL, 'invoices', 'Open AR'],
   ] as const) {
-    test(`a failed ${name} hides the ${gone} column and says nothing`, async ({ page }) => {
+    test(`a failed ${name} hides the ${gone} column and says why`, async ({ page }) => {
       await installFleet(page);
       await page.route(re, (r) => json(r, { error: 'down' }, 503));
       await mountFleet(page);
@@ -609,9 +611,9 @@ test.describe('/ux/accounts — empty, loading, and a failed read', () => {
       const headings = FLEET_HEADINGS.filter((h) => h !== gone);
       await expect(body(page).locator('thead th')).toHaveText(headings);
       await expect(nameColumn(page)).toHaveText(FLEET_NAMES);
-      await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
-      await expect(body(page).locator('[role=alert]')).toHaveCount(0);
-      await expect(body(page)).not.toContainText("Couldn't load");
+      await expect(body(page).locator(`${FAILURE_MARKER}[role=alert]`)).toHaveText(
+        `Couldn't load ${what} — ${url}: HTTP 503. The ${gone} column is not shown: its counts are unknown, not zero.`,
+      );
     });
   }
 });

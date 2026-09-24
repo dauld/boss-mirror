@@ -41,6 +41,9 @@ struct State {
     /// The estate as declared through `declare_estate_nodes` — empty
     /// until a test declares one, exactly as a fresh database is.
     estate: Vec<crate::port::EstateNode>,
+    /// Packets whose steps read fails, set by
+    /// [`InMemoryJobs::fail_steps_read`].
+    unreadable_steps: BTreeSet<String>,
 }
 
 impl InMemoryJobs {
@@ -52,6 +55,19 @@ impl InMemoryJobs {
     /// in-memory analogue of the Pg adapter's in-tx recording).
     pub fn recorded_events(&self) -> Vec<boss_core::event::Event> {
         self.recorded.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    /// Make every later `list_steps` of this packet fail with a
+    /// storage error — the in-memory stand-in for a steps read the
+    /// database could not answer. It exists so a reader's handling of
+    /// that failure is testable: until 2026-09-23 the station queue and
+    /// load answered it with `unwrap_or_default()`, which read as "this
+    /// packet has no steps" and dropped it from every station whose
+    /// predicate reads step state (backlog c11e9d3c).
+    pub fn fail_steps_read(&self, job_id: &JobId) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.unreadable_steps.insert(job_key(job_id));
+        }
     }
 
     fn record_all(&self, events: &[boss_core::event::Event]) {
@@ -796,6 +812,11 @@ impl JobsRepository for InMemoryJobs {
     async fn list_steps(&self, job_id: &JobId) -> Result<Vec<Step>, JobsError> {
         let state = self.inner.lock().expect("poisoned");
         let job_key = job_id.to_string();
+        if state.unreadable_steps.contains(&job_key) {
+            return Err(JobsError::Storage(format!(
+                "steps of job {job_key} unreadable (injected by fail_steps_read)"
+            )));
+        }
         let mut steps: Vec<Step> = state
             .steps
             .values()

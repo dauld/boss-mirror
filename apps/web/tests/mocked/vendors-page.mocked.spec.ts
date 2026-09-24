@@ -27,7 +27,8 @@
 // item. They are meant to be edited by the car that fixes it, so the fix
 // shows up here as a changed expectation instead of a silently-passing
 // one:
-//   gap 1 223ebcd6  orders + vendor-invoices fold an outage into zeros
+//   gap 1 223ebcd6  orders + vendor-invoices folded an outage into
+//                   zeros — ANSWERED: each now paints `.load-failed`
 //   gap 2 c3e4edcc  the one failure line is not `.load-failed`
 //   gap 3 003f4db2  the route is not gated by the warehouse module
 //   gap 4 35aeb30d  the empty line blames filters when there are none
@@ -379,20 +380,57 @@ test.describe('/ux/vendors — empty and failed reads', () => {
     await expect(page.locator('table.data-table')).toHaveCount(0);
   });
 
-  test('a refused orders read and a refused invoices read paint as zeros, with no failure line', async ({ page }) => {
+  test('a refused orders read and a refused invoices read each say so, and their columns read unknown', async ({ page }) => {
     await install(page, { vendors: VENDOR_ROWS, orders: noUpstream, invoices: noUpstream });
     await mountPage(page, PATH, { titleMatch: /4 vendors/ });
 
-    // Gap 1 (223ebcd6): both refusals fold into `[]`. Every row reads
-    // as a vendor with no POs and no bills, the header states $0.00,
-    // and nothing on the page says two of its three reads failed.
+    // Gap 1 (223ebcd6), answered: the refusals no longer fold into
+    // `[]`. Each paints the shared failure line naming its read and the
+    // columns it blanks; the vendor rows stand, their count columns read
+    // `?`, and the header says unknown instead of stating $0.00.
     await expect(bodyRows(page)).toHaveCount(4);
-    expect((await table(page)).map((row) => row.slice(5))).toEqual([
-      ['0', '0', '—'], ['0', '0', '—'], ['0', '0', '—'], ['0', '0', '—'],
+    await expect(page.locator(FAILURE_MARKER)).toHaveText([
+      "Couldn't load purchase orders — /api/inventory/orders: HTTP 502. Open POs below are unknown, not zero.",
+      "Couldn't load vendor invoices — /api/inventory/vendor-invoices: HTTP 502. Unpaid bills and Outstanding below are unknown, not zero.",
     ]);
-    await expectHeader(page, '4 vendors', ZERO_SUBTITLE);
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+    await expect(page.locator(FAILURE_MARKER).first()).toHaveAttribute('role', 'alert');
+    expect((await table(page)).map((row) => row.slice(5))).toEqual([
+      ['?', '?', '?'], ['?', '?', '?'], ['?', '?', '?'], ['?', '?', '?'],
+    ]);
+    await expectHeader(page, '4 vendors', 'open POs unknown · outstanding unknown');
     await expect(page.getByText("Couldn't load vendors")).toHaveCount(0);
+  });
+
+  test('a refused invoices read alone leaves the PO counts standing', async ({ page }) => {
+    await install(page, { ...FIXTURES, invoices: noUpstream });
+    await mountPage(page, PATH, { titleMatch: /4 vendors/ });
+
+    await expect(page.locator(FAILURE_MARKER)).toHaveText([
+      "Couldn't load vendor invoices — /api/inventory/vendor-invoices: HTTP 502. Unpaid bills and Outstanding below are unknown, not zero.",
+    ]);
+    expect((await table(page)).map((row) => row.slice(5))).toEqual([
+      ['2/ 3', '?', '?'], ['0', '?', '?'], ['0', '?', '?'], ['1/ 1', '?', '?'],
+    ]);
+    await expectHeader(page, '4 vendors', '3 open POs · outstanding unknown');
+  });
+
+  test('the vendor page says which of its side reads failed, and its figures read unknown', async ({ page }) => {
+    await install(page, { ...FIXTURES, orders: noUpstream, invoices: noUpstream });
+    await mountPage(page, '/ux/vendors/vnd-hops-001');
+    await expect(page.locator('h1.detail-title')).toHaveText('Cascade Hop Farm');
+
+    // Gap 1 (223ebcd6), the detail half: VendorPage parsed all four of
+    // its reads as `[]` on a refusal, so this vendor read "No purchase
+    // orders for this vendor yet" and "$0.00 outstanding" as fact.
+    await expect(page.locator(`p${FAILURE_MARKER}[role=alert]`)).toHaveText([
+      "Couldn't load purchase orders — /api/inventory/orders: HTTP 502. The PO figures and the Purchase orders section are unknown, not zero.",
+      "Couldn't load vendor invoices — /api/inventory/vendor-invoices: HTTP 502. The bill and spend figures and the Vendor invoices section are unknown, not zero.",
+    ]);
+    const meta = (label: string) => page.locator('.detail-meta > *').filter({ hasText: label });
+    await expect(meta('Open POs')).toContainText('?');
+    await expect(meta('Outstanding')).toContainText('?');
+    await expect(page.getByText('No purchase orders for this vendor yet.')).toHaveCount(0);
+    await expect(page.getByText('No invoices received from this vendor yet.')).toHaveCount(0);
   });
 
   test('a refused vendors read alone still names only vendors', async ({ page }) => {

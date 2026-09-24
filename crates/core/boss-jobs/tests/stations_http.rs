@@ -2,8 +2,8 @@
 //! (docs/design/stations.md, Q1–Q4 ratified).
 //!
 //! - `GET /api/stations` lists the active registry rows; a caller
-//!   whose job-read scope is None sees an empty collection (one
-//!   policy path with /api/jobs).
+//!   whose job-read scope is None is REFUSED (403) on every station
+//!   read, never answered an empty collection (backlog 8dcd28ce).
 //! - `GET /api/stations/{name}/queue` evaluates the predicate over
 //!   the caller's policy-scoped open Jobs and orders by the
 //!   discipline; the envelope names the discipline and carries the
@@ -271,14 +271,32 @@ async fn list_stations_returns_active_rows() {
     );
 }
 
+/// A refused scope refuses — on every station read surface.
+///
+/// Until 2026-09-23 each of these answered `{"data": [], "total": 0}`
+/// with a 200, which is word for word what an idle network says. A
+/// caller who may read nothing was told there was nothing, and a
+/// surface rendering it drew an empty board with no hint that the read
+/// had been denied (backlog 8dcd28ce; CLAUDE.md, "a wrong target
+/// answers instead of erroring").
 #[tokio::test]
-async fn a_denied_caller_sees_no_stations() {
+async fn a_denied_caller_is_refused_by_every_station_read() {
     let (app, _jobs) = app();
+    post_car(&app, "feat/a", "standard", "2026-08-01", false).await;
     // "intern" holds no job-read grant: scope predicate is None.
-    let (status, v) = get_json(&app, "/api/stations", "emp-x", "intern").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["total"], 0);
-    assert_eq!(v["data"], serde_json::json!([]));
+    for path in [
+        "/api/stations",
+        "/api/stations/load",
+        "/api/stations/flow",
+        "/api/stations/test-dock/queue",
+    ] {
+        let (status, v) = get_json(&app, path, "emp-x", "intern").await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path} answered {v}");
+        // Control: the same read by a caller who may see packets is a
+        // 200, so the 403 is the scope and not a broken route.
+        let (status, _) = get_json(&app, path, "emp-ceo", "ceo").await;
+        assert_eq!(status, StatusCode::OK, "{path} as ceo");
+    }
 }
 
 #[tokio::test]
@@ -317,15 +335,53 @@ async fn queue_is_evaluated_ordered_and_advisory_flagged() {
 }
 
 #[tokio::test]
-async fn queue_of_unknown_station_is_404_and_denied_caller_sees_empty() {
+async fn queue_of_unknown_station_is_404() {
     let (app, _jobs) = app();
     let (status, _) = get_json(&app, "/api/stations/no-such/queue", "emp-ceo", "ceo").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
 
-    post_car(&app, "feat/a", "standard", "2026-08-01", false).await;
-    let (status, v) = get_json(&app, "/api/stations/test-dock/queue", "emp-x", "intern").await;
+/// A packet whose steps cannot be read is not a packet with no steps.
+///
+/// The dock's predicate reads step state, so the handler reads each
+/// candidate's steps. It answered a failed read with
+/// `unwrap_or_default()` — an empty list — and the step clause then
+/// could not match, so the packet fell out of the queue and the 200
+/// said the queue was one shorter than it was (backlog c11e9d3c). The
+/// read that could not be made must fail the whole answer, loudly,
+/// naming the packet it could not read.
+#[tokio::test]
+async fn a_failed_steps_read_fails_the_queue_rather_than_dropping_the_packet() {
+    let (app, jobs) = app();
+    let id = post_car(&app, "feat/a", "standard", "2026-08-01", false).await;
+
+    // Control: readable, the packet is a member.
+    let (status, v) = get_json(&app, "/api/stations/test-dock/queue", "emp-ceo", "ceo").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(v["total"], 0, "policy-scoped universe: None sees nothing");
+    assert_eq!(v["total"], 1);
+
+    jobs.fail_steps_read(&boss_core::job::JobId::from_uuid(id.parse().unwrap()));
+    let resp = get_text(&app, "/api/stations/test-dock/queue").await;
+    assert_eq!(resp.0, StatusCode::INTERNAL_SERVER_ERROR, "{}", resp.1);
+    assert!(resp.1.contains(&id), "names the packet: {}", resp.1);
+}
+
+/// The raw body as text, read as the ceo — an error body is prose,
+/// not JSON, and the test needs the words.
+async fn get_text(app: &axum::Router, path: &str) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get(path)
+                .header("x-boss-user", user_header("emp-ceo", "ceo"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -439,8 +495,16 @@ async fn one_row_serves_every_actor_and_no_actor_sees_another_s() {
     }
 }
 
+/// A per-actor station asked by nobody is refused, not answered empty.
+///
+/// `@me` has nothing to bind to, so there is no queue to evaluate. The
+/// handler used to answer the station's envelope with an empty `data`
+/// and a 200 — the same bytes as "you have filed nothing", which is a
+/// claim about the caller the server cannot make (backlog c11e9d3c).
+/// The binding still never falls back to the literal placeholder: the
+/// refusal carries no packet at all.
 #[tokio::test]
-async fn a_guest_gets_an_empty_watchlist_not_everyone_s() {
+async fn a_guest_is_refused_the_watchlist_rather_than_shown_an_empty_one() {
     let (app, jobs) = app();
     jobs.create_job(&filed_packet("emp-r", "Mine", 1, None))
         .await
@@ -452,16 +516,15 @@ async fn a_guest_gets_an_empty_watchlist_not_everyone_s() {
         .unwrap();
 
     let (status, v) = get_json_anonymous(&app, "/api/stations/my-watchlist/queue").await;
-    assert_eq!(status, StatusCode::OK, "read-only and guest-safe: no 401");
     assert_eq!(
-        v["station"], "my-watchlist",
-        "the station still describes itself"
+        status,
+        StatusCode::UNAUTHORIZED,
+        "no actor to bind @me to: refused, answered {v}"
     );
-    assert_eq!(
-        v["total"], 0,
-        "nobody to bind @me to means an EMPTY queue, never a wide one"
+    assert!(
+        !v.to_string().contains("Literal placeholder"),
+        "the refusal carries no packet: {v}"
     );
-    assert_eq!(v["data"], serde_json::json!([]));
 }
 
 #[tokio::test]

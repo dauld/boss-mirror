@@ -220,8 +220,10 @@ export function windowNote(windowDays: number | null): string | null {
 export const WATCHLIST_STATION = 'my-watchlist';
 
 /// Read-only, and safe for a guest: the server binds `@me` to the
-/// requesting actor and answers an anonymous caller with an empty
-/// queue rather than somebody else's.
+/// requesting actor and REFUSES an anonymous caller (401) rather than
+/// answering with somebody else's queue — or with an empty one that
+/// would read as "you filed nothing" (backlog c11e9d3c). A refusal
+/// renders as the `error` state.
 export async function fetchWatchlist(): Promise<WatchlistState> {
   try {
     const r = await fetch(`/api/stations/${encodeURIComponent(WATCHLIST_STATION)}/queue`);

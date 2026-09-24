@@ -37,6 +37,7 @@
     type VendorContract,
   } from './types';
   import { href } from '../router';
+  import { okRead, readStateOfResponse, type ReadState } from '../data/readState';
 
   let { vendorLookup } = $props<{ vendorLookup: string }>();
 
@@ -53,6 +54,13 @@
   let team = $state<VendorAccountTeamMember[]>([]);
   let contracts = $state<VendorContract[]>([]);
   let loading = $state(true);
+  // The three reads the page builds beside the vendor record. Until
+  // backlog 223ebcd6 each refusal was parsed as `[]`, so an inventory
+  // outage said "No purchase orders for this vendor yet" and "$0.00
+  // outstanding" as fact; the outcome now survives and the page says it.
+  let posRead = $state<ReadState>(okRead);
+  let billsRead = $state<ReadState>(okRead);
+  let peopleRead = $state<ReadState>(okRead);
 
   let lookup = $derived(decodeURIComponent(vendorLookup));
   let vendor = $derived<Vendor | undefined>(
@@ -73,12 +81,19 @@
           fetch('/api/inventory/vendor-invoices'),
           fetch('/api/people'),
         ]);
-        const vBody = vResp.ok ? await vResp.json() : [];
-        const pBody = pResp.ok ? await pResp.json() : [];
-        const iBody = iResp.ok ? await iResp.json() : [];
-        const peopleBody = peopleResp.ok ? await peopleResp.json() : [];
+        const vRead = readStateOfResponse('/api/inventory/vendors', vResp);
+        const pRead = readStateOfResponse('/api/inventory/orders', pResp);
+        const iRead = readStateOfResponse('/api/inventory/vendor-invoices', iResp);
+        const eRead = readStateOfResponse('/api/people', peopleResp);
+        const vBody = vRead.kind === 'ok' ? await vResp.json() : [];
+        const pBody = pRead.kind === 'ok' ? await pResp.json() : [];
+        const iBody = iRead.kind === 'ok' ? await iResp.json() : [];
+        const peopleBody = eRead.kind === 'ok' ? await peopleResp.json() : [];
         if (!cancelled) {
-          loadFailed = vResp.ok ? null : `HTTP ${vResp.status}`;
+          loadFailed = vRead.kind === 'failed' ? vRead.error : null;
+          posRead = pRead;
+          billsRead = iRead;
+          peopleRead = eRead;
           vendors = Array.isArray(vBody) ? vBody : (vBody.data ?? []);
           pos = Array.isArray(pBody) ? pBody : (pBody.data ?? []);
           vendorInvoices = Array.isArray(iBody) ? iBody : (iBody.data ?? []);
@@ -187,6 +202,21 @@
   let primaryContact = $derived(contacts.find((c) => c.is_primary));
   let activeContracts = $derived(contracts.filter((c) => c.status === 'active'));
 
+  let posUnknown = $derived(posRead.kind === 'failed');
+  let billsUnknown = $derived(billsRead.kind === 'failed');
+  /// A figure built from a read that failed is not a figure.
+  function known(unknown: boolean, figure: string | number): string | number {
+    return unknown ? '?' : figure;
+  }
+  // Each failed side read, with what it leaves unknown on this page.
+  let failedReads = $derived(
+    [
+      { what: 'purchase orders', read: posRead, blanks: 'The PO figures and the Purchase orders section are unknown, not zero.' },
+      { what: 'vendor invoices', read: billsRead, blanks: 'The bill and spend figures and the Vendor invoices section are unknown, not zero.' },
+      { what: 'people', read: peopleRead, blanks: 'Employees below show as ids rather than names.' },
+    ].flatMap((f) => (f.read.kind === 'failed' ? [{ ...f, error: f.read.error }] : [])),
+  );
+
 </script>
 
 {#if loading}
@@ -225,20 +255,26 @@
           {vendor.city}, {vendor.state}
         </div>
         <div class="detail-meta">
-          <Meta label="Open POs">{openPos.length}</Meta>
-          <Meta label="POs lifetime">{vendorPos.length}</Meta>
-          <Meta label="Unpaid bills">{unpaidBills.length}</Meta>
-          <Meta label="Outstanding">{formatMoney({ amount_cents: outstandingCents, currency: 'USD' })}</Meta>
-          <Meta label="Spend lifetime">{formatMoney({ amount_cents: lifetimeSpendCents, currency: 'USD' })}</Meta>
-          <Meta label="Paid lifetime">{formatMoney({ amount_cents: lifetimePaidCents, currency: 'USD' })}</Meta>
-          <Meta label="Last PO">{lastPoDate ?? '—'}</Meta>
-          <Meta label="Last bill">{lastBillDate ?? '—'}</Meta>
+          <Meta label="Open POs">{known(posUnknown, openPos.length)}</Meta>
+          <Meta label="POs lifetime">{known(posUnknown, vendorPos.length)}</Meta>
+          <Meta label="Unpaid bills">{known(billsUnknown, unpaidBills.length)}</Meta>
+          <Meta label="Outstanding">{known(billsUnknown, formatMoney({ amount_cents: outstandingCents, currency: 'USD' }))}</Meta>
+          <Meta label="Spend lifetime">{known(billsUnknown, formatMoney({ amount_cents: lifetimeSpendCents, currency: 'USD' }))}</Meta>
+          <Meta label="Paid lifetime">{known(billsUnknown, formatMoney({ amount_cents: lifetimePaidCents, currency: 'USD' }))}</Meta>
+          <Meta label="Last PO">{known(posUnknown, lastPoDate ?? '—')}</Meta>
+          <Meta label="Last bill">{known(billsUnknown, lastBillDate ?? '—')}</Meta>
           <Meta label="Lead time">{vendor.lead_time_days} days</Meta>
           <Meta label="Contacts">{contacts.length}</Meta>
           <Meta label="Active contracts">{activeContracts.length}</Meta>
         </div>
       </div>
     </header>
+
+    {#each failedReads as f (f.what)}
+      <p class="empty load-failed" role="alert">
+        Couldn't load {f.what} — {f.error}. {f.blanks}
+      </p>
+    {/each}
 
     <div class="subject-actions">
       <a
@@ -447,8 +483,10 @@
     </Section>
 
     <!-- Section 4 — Work -->
-    <Section title={`Purchase orders (${vendorPos.length})`} wide>
-        {#if vendorPos.length === 0}
+    <Section title={`Purchase orders (${known(posUnknown, vendorPos.length)})`} wide>
+        {#if posRead.kind === 'failed'}
+          <p class="empty load-failed">Couldn't load purchase orders — {posRead.error}</p>
+        {:else if vendorPos.length === 0}
           <p class="empty">No purchase orders for this vendor yet.</p>
         {:else}
           <table class="data-table">
@@ -471,8 +509,10 @@
         {/if}
     </Section>
 
-    <Section title={`Vendor invoices (${vendorBills.length})`} wide>
-        {#if vendorBills.length === 0}
+    <Section title={`Vendor invoices (${known(billsUnknown, vendorBills.length)})`} wide>
+        {#if billsRead.kind === 'failed'}
+          <p class="empty load-failed">Couldn't load vendor invoices — {billsRead.error}</p>
+        {:else if vendorBills.length === 0}
           <p class="empty">No invoices received from this vendor yet.</p>
         {:else}
           <table class="data-table">

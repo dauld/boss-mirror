@@ -5,7 +5,9 @@
 //! lists: the caller's read-scope Predicate on the `job` resource is
 //! computed once and pushed into the packet query, so a station
 //! queue can never show a caller a packet /api/jobs would hide. A
-//! denied caller gets a clean empty collection, matching list_jobs.
+//! denied caller is REFUSED (403), and a read that could not be made
+//! fails the answer (500 naming it) — neither is ever an empty 200,
+//! which is what an idle network says (backlogs 8dcd28ce, c11e9d3c).
 
 use super::*;
 
@@ -117,6 +119,52 @@ fn lint_result_json(problems: &[crate::station_lint::StationLintError]) -> serde
     })
 }
 
+/// The caller's packet-read predicate, or the refusal every station
+/// read owes a caller who may read no packets.
+///
+/// One definition for the four read surfaces, because the posture is
+/// one decision. Until 2026-09-23 each answered a denied scope with
+/// `{"data": [], "total": 0}` and a 200 — the same bytes an idle
+/// network sends — so a caller who could read nothing was told there
+/// was nothing, and a board rendered it as calm (backlog 8dcd28ce).
+/// A refused scope refuses: 403, naming the caller.
+///
+/// Refused on the TRANSLATED scope, not only `Predicate::None`: a
+/// `DepartmentIs` grant for another department also translates to
+/// [`JobScope::None`], and the queue it produced was the same empty
+/// 200 for the same reason.
+#[allow(
+    clippy::result_large_err,
+    reason = "idiomatic axum Response error; crate-wide Box<Response> cleanup tracked separately"
+)]
+async fn readable_predicate<R: JobsRepository, B: EventBus>(
+    state: &JobsApiState<R, B>,
+    user: &boss_policy_client::User,
+) -> Result<boss_policy_client::Predicate, Response> {
+    let predicate = state
+        .policy
+        .scope_predicate(user, Resource::job())
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("policy check failed: {e}"),
+            )
+                .into_response()
+        })?;
+    match job_scope_from_predicate(user, &predicate) {
+        JobScope::None => Err((
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} (role {}) may read no packets, so no station can be evaluated for them",
+                user.id, user.role
+            ),
+        )
+            .into_response()),
+        _ => Ok(predicate),
+    }
+}
+
 /// Station authoring is a network-configuration change, so it is
 /// gated on the `workflow` resource — the same privilege that governs
 /// the other registries a protocol is assembled from. A reader who
@@ -211,9 +259,9 @@ pub(super) async fn station_by_name<R: JobsRepository, B: EventBus>(
 }
 
 /// `GET /api/stations` — every active station row. The registry rows
-/// themselves carry no packet data; the policy gate mirrors the job
-/// list's posture (scope predicate on the `job` resource; a caller
-/// who can see no packets sees no queues either).
+/// themselves carry no packet data; the policy gate is the one every
+/// station read shares ([`readable_predicate`]: a caller who may read
+/// no packets is refused, not shown an empty registry).
 pub(super) async fn list_stations<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(user): CurrentUser,
@@ -222,18 +270,8 @@ pub(super) async fn list_stations<R: JobsRepository + 'static, B: EventBus + 'st
         Ok(r) => r,
         Err(r) => return r,
     };
-    let predicate = match state.policy.scope_predicate(&user, Resource::job()).await {
-        Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
-        }
-    };
-    if matches!(predicate, boss_policy_client::Predicate::None) {
-        return Json(serde_json::json!({ "data": [], "total": 0 })).into_response();
+    if let Err(r) = readable_predicate(&state, &user).await {
+        return r;
     }
     match effective_stations(&state, reg).await {
         Ok(rows) => {
@@ -287,19 +325,12 @@ pub(super) async fn stations_load<R: JobsRepository + 'static, B: EventBus + 'st
         Ok(r) => r,
         Err(r) => return r,
     };
-    let predicate = match state.policy.scope_predicate(&user, Resource::job()).await {
+    // A caller who may read no packets is refused (403), not shown a
+    // network with every depth at zero (backlog 8dcd28ce).
+    let predicate = match readable_predicate(&state, &user).await {
         Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
-        }
+        Err(r) => return r,
     };
-    if matches!(predicate, boss_policy_client::Predicate::None) {
-        return Json(serde_json::json!({ "data": [], "total": 0 })).into_response();
-    }
     let stations = match effective_stations(&state, reg).await {
         Ok(s) => s,
         Err(r) => return r,
@@ -405,20 +436,10 @@ pub(super) async fn stations_flow<R: JobsRepository + 'static, B: EventBus + 'st
         Ok(r) => r,
         Err(r) => return r,
     };
-    // Same read gate as every other station surface: an unreadable
-    // caller gets an empty collection, not a 403.
-    let predicate = match state.policy.scope_predicate(&user, Resource::job()).await {
-        Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
-        }
-    };
-    if matches!(predicate, boss_policy_client::Predicate::None) {
-        return Json(serde_json::json!({ "data": [], "total": 0 })).into_response();
+    // Same read gate as every other station surface: a caller who may
+    // read no packets is refused (403), never shown a calm network.
+    if let Err(r) = readable_predicate(&state, &user).await {
+        return r;
     }
     let stations = match effective_stations(&state, reg).await {
         Ok(s) => s,
@@ -504,24 +525,28 @@ pub(super) async fn station_queue<R: JobsRepository + 'static, B: EventBus + 'st
 
     // Bind the self placeholder ONCE, here, before any packet is
     // compared — a per-actor station is one registry row whose queue
-    // depends on who is asking. A caller with no identity (guest) gets
-    // the station's own empty queue: the envelope still describes the
-    // station truthfully, it just holds nothing.
+    // depends on who is asking. A caller with no identity is REFUSED
+    // (401): there is nobody to bind `@me` to, so there is no queue to
+    // answer with. It used to get the station's envelope with an empty
+    // `data` and a 200 — the same bytes as "you have filed nothing",
+    // a claim about the caller the server cannot make (backlog
+    // c11e9d3c). It still never falls back to the unbound row.
     let Some(spec) = row.bind_self(self_id(&user)) else {
-        return Json(evaluate_station(&row, Vec::new(), today)).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            format!(
+                "station {name} is per-actor (@me) and this request names no actor to bind it to"
+            ),
+        )
+            .into_response();
     };
 
     // One policy path with /api/jobs: scope predicate → JobScope,
-    // pushed into the adapter query.
-    let predicate = match state.policy.scope_predicate(&user, Resource::job()).await {
+    // pushed into the adapter query — and a scope that admits nothing
+    // is refused, not evaluated into an empty queue.
+    let predicate = match readable_predicate(&state, &user).await {
         Ok(p) => p,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
-        }
+        Err(r) => return r,
     };
     let scope = job_scope_from_predicate(&user, &predicate);
 
@@ -573,7 +598,24 @@ pub(super) async fn station_queue<R: JobsRepository + 'static, B: EventBus + 'st
     let mut recorded: BTreeMap<String, Vec<boss_core::job::Step>> = BTreeMap::new();
     for job in jobs {
         let steps = if needs_steps {
-            let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
+            // A failed read is NOT an empty step list. Taken as one
+            // (`unwrap_or_default()`, until 2026-09-23), the step clause
+            // could not match, so the packet silently left the queue and
+            // the 200 reported one member fewer (backlog c11e9d3c). The
+            // whole answer fails instead, naming the packet.
+            let steps = match state.jobs.list_steps(&job.id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "cannot evaluate station {name} — steps of packet {} unreadable: {e}",
+                            job.id
+                        ),
+                    )
+                        .into_response();
+                }
+            };
             let resolved = crate::agent_spec::resolved_steps(&steps, active.get(&job.kind));
             recorded.insert(job.id.to_string(), steps);
             resolved

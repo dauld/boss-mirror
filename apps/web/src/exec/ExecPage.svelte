@@ -17,6 +17,12 @@
     type CommerceSummary,
   } from '../finance/api';
   import { getLabel } from '@boss/web-kit/session/manifest.svelte';
+  import {
+    failedRead,
+    okRead,
+    readStateOfResponse,
+    type ReadState,
+  } from '../data/readState';
 
   // --- Shared formatting ---------------------------------------------------
 
@@ -45,22 +51,29 @@
   let summary = $state<CommerceSummary | null>(null);
   let summaryLoading = $state(true);
   let empNames = $state<Map<string, string>>(new Map());
+  // The people read only names the launch owners, so a failure degrades
+  // those names to ids rather than failing a panel — but it says so.
+  // Until backlog 223ebcd6 a refusal was parsed as `[]` and a network
+  // error was ignored, and the owners silently became ids.
+  let peopleRead = $state<ReadState>(okRead);
 
   $effect(() => {
     let cancelled = false;
     (async () => {
       try {
         const pResp = await fetch('/api/people');
-        const pBody = pResp.ok ? await pResp.json() : [];
+        const read = readStateOfResponse('/api/people', pResp);
+        const pBody = read.kind === 'ok' ? await pResp.json() : [];
         if (!cancelled) {
           const m = new Map<string, string>();
           for (const e of pBody as Array<{ id: string; name: string }>) {
             m.set(e.id, e.name);
           }
           empNames = m;
+          peopleRead = read;
         }
-      } catch {
-        // ignore
+      } catch (e) {
+        if (!cancelled) peopleRead = failedRead(e instanceof Error ? e.message : String(e));
       }
       try {
         const s = await loadCommerceSummary();
@@ -434,6 +447,11 @@
             {/each}
           </tbody>
         </table>
+        {#if peopleRead.kind === 'failed'}
+          <p class="load-failed" role="alert" style="font-size:12px">
+            Couldn't load owner names — {peopleRead.error}. Owners show as ids.
+          </p>
+        {/if}
         <div style="margin-top:8px; font-size:12px; color:#78716c">
           {#if scheduled.length > 8}+{scheduled.length - 8} more · {/if}
           {#if unscheduled > 0}{unscheduled} unscheduled · {/if}
