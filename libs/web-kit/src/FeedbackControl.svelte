@@ -371,6 +371,12 @@
     color: var(--text);
     border: 1px solid var(--border);
   }
+  /* On a phone the chrome bar scrolls sideways and so clips anything
+     hanging out of it (PerspectiveTabs, car G of design 62de32ae): the
+     panel pins under the band, the screen's width less a margin. */
+  @media (max-width: 720px) {
+    .fb-panel { position: fixed; top: 52px; left: 8px; right: 8px; width: auto; }
+  }
   .fb-label {
     font-size: 12px;
     color: var(--text-dim);

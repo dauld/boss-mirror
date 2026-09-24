@@ -69,6 +69,9 @@
   import CrewBoardPage from '../crew/CrewBoardPage.svelte';
   import ReceivingYardPage from '../receiving/ReceivingYardPage.svelte';
   import MarshallingYardPage from '../marshalling/MarshallingYardPage.svelte';
+  import { MediaQuery } from 'svelte/reactivity';
+  import PhoneStrip from './PhoneStrip.svelte';
+  import { PHONE_QUERY } from './phone-strip';
 
   type Props = Readonly<{
     /** The territory the camera is in — the `/it/yard/<region>` route.
@@ -101,6 +104,11 @@
   const deck = $derived<Deck | null>(
     platformRegion !== null && held !== null && held.region === platformRegion ? held.deck : null,
   );
+  /** A phone: the world is drawn as the strip map rather than the SVG
+   *  shrunk (design 62de32ae decision 12, car G). ONE of the two is
+   *  mounted, never both hidden by CSS — a hidden world would still be
+   *  read, counted and crawled as if it were on the screen. */
+  const phone = new MediaQuery(PHONE_QUERY);
 
   let regions = $state<Remote<Regions>>({ kind: 'loading' });
   let borders = $state<Remote<Borders>>({ kind: 'loading' });
@@ -181,6 +189,10 @@
           </div>
         {/snippet}
       </svelte:boundary>
+    {:else if phone.current}
+      <PhoneStrip
+        regions={regions.data}
+        borders={borders.kind === 'ready' ? borders.data : null} />
     {:else}
       <WorldMap
         regions={regions.data}
@@ -238,6 +250,9 @@
      it uses — same names, nothing new). The colours are the map's own
      --map-* tokens, with no fallback (42f66fb3, map-palette.test.ts). */
   .yard-root { padding: 0 32px 32px; }
+  /* On a phone the shell's own 16px gutter is the page's (styles.css,
+     car G); this page's 32px on top of it left the strip 294px of 390. */
+  @media (max-width: 720px) { .yard-root { padding: 0 0 24px; } }
   .yard-empty { color: var(--map-muted); padding: 12px 0; font-size: 14px; }
   .yard-flow { font-family: var(--font-mono); font-size: 11px;
     letter-spacing: var(--ls-nav); color: var(--map-muted);
