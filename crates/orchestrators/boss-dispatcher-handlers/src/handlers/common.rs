@@ -1195,9 +1195,11 @@ mod lane_pin {
         // Nine since `ops.queue.alarm` (a45b38c1), which files
         // `ops_queue:<host>` stamped `Telemetry`; ten since
         // `jobs.agent_step_overdue` (078ddcb0), whose alarm per late
-        // real-work step is stamped `Telemetry` too.
+        // real-work step is stamped `Telemetry` too; eleven since
+        // `jobs.flight_overdue` (73c31776), whose stale-flight alarm is
+        // `Telemetry` for the same reason.
         assert_eq!(
-            filings, 10,
+            filings, 11,
             "the number of machine filing sites changed. That is fine — but check the new \
              one stamps a lane, then update this count, which exists so a filing that \
              DISAPPEARS from the scan (a renamed key, a reshaped body) cannot read as \
