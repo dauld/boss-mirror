@@ -315,8 +315,8 @@ pub const CONTRACT: &[Entry] = &[
         paths: &["seeds/classes.json", "seeds/classes.toml"],
         required: false,
         read_by: "POST /api/classes/batch, one boss-classes `http::ClassInput` per row — sent by \
-                  the tenant prepare (brewery: classes.json; used-device-shop: classes.toml \
-                  `[[class]]`) and infra/postgres/reset-to-baseline.sh",
+                  the tenant prepare (brewery: classes.json) and \
+                  infra/postgres/reset-to-baseline.sh",
         shape: "JSON array (or TOML `[[class]]` rows) of {subject_kind, code, display_name, \
                 parent_code?, member_attribute?, metadata?, sort_order?}",
         parse: parse_classes,
@@ -367,7 +367,7 @@ pub const CONTRACT: &[Entry] = &[
                   instance is the truth; `--take employees` PUTs the declared fields and keeps \
                   the rest (design e187198f) — sent by `boss tenant publish` (the brewery \
                   engine's prepare reads it at the FIXED path /opt/boss/examples/brewery/seeds/, \
-                  not from the bundle; used-device-shop reads data/employees.json instead)",
+                  not from the bundle)",
         shape: "JSON array of Employee rows: id, name, email, role, department, hire_date, \
                 location, manager_id, employment_type, status, skills[], certifications[], \
                 annual_salary_cents; role/department/location are validated against the \
@@ -1373,8 +1373,7 @@ This directory is **{display}** described as a tenant of BOSS: what the
 company is (its taxonomy, people, calendars, access rules) and how it
 operates (its protocols). It lives OUTSIDE the product tree, in exactly
 the shape the product reads: `tenant.toml` (the manifest) + `seeds/`.
-The product's `examples/brewery` and `examples/used-device-shop`
-exercise the same contract publicly.
+The product's `examples/brewery` exercises the same contract publicly.
 
 Scaffolded by `boss tenant init {name}`. Validate it any time with
 `boss tenant check .` — it judges every file with the product's own
@@ -2150,7 +2149,9 @@ mod tests {
             .map(|e| e.path())
             .filter(|p| p.join("seeds").is_dir())
             .collect();
-        assert!(examples.len() >= 2, "expected brewery + used-device-shop");
+        // At least the brewery: an empty list would pass this test by
+        // judging nothing (the used-device shop retired, backlog a8991c86).
+        assert!(!examples.is_empty(), "expected at least examples/brewery");
         for ex in examples {
             assert_all_ok(&ex);
         }

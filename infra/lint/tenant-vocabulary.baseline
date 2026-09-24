@@ -11,11 +11,14 @@
 # Written 2026-09-16 from the lint's measurement of origin/main b4d7a0fd
 # plus this car — the brewery's and the used-device shop's VOCABULARY
 # together, 23 terms, with a tenant's name as a path or an id exempt.
-crates/core 348
-crates/modules 368
-crates/orchestrators 809
-apps/web/src 287
+# Since 2026-09-24 (backlog a8991c86, car 7) the used-device shop and
+# its VOCABULARY are deleted, so the lines count the brewery's 20 terms
+# alone — re-measured with this lint on that car's tree.
+crates/core 306
+crates/modules 336
+crates/orchestrators 801
+apps/web/src 260
 apps/simulator 55
-infra/postgres/schema 202
+infra/postgres/schema 175
 infra/platform 2
 infra/cluster 8
