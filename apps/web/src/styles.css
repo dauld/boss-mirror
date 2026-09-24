@@ -803,9 +803,25 @@ a:hover { color: var(--fog); }
 
 /* A failed load is a failure, not an empty (packet 3fba9c35). Every
    surface that renders its primary dataset marks the failed state
-   with this class so an outage can never pass for "truly empty". */
-.load-failed {
-  color: var(--err);
+   with this class so an outage can never pass for "truly empty".
+   It is drawn as the round-2 board's failed read (backlog 6f471ff6,
+   car 3): a white card with an 8px troubled rail down its left, its
+   words 600 in troubled ink — "the same device as a department line,
+   so it reads as 'this line is down'". The selector outranks any ONE
+   page class on the same element, because the marker rides beside
+   them. Measured under the outage crawl on 2026-09-24, before this
+   rule: of 39 routes showing the marker, NONE drew a rail, and on 25
+   its words were not red at all but an empty's muted grey — the
+   `.theme-exec .empty` it shares a paragraph with (0-2-0), or a scoped
+   page class, won the colour back from the bare `.load-failed`. */
+:root body .load-failed {
+  background: var(--card);
+  border: 0;
+  border-left: 8px solid var(--troubled);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  color: var(--troubled-ink);
+  font-weight: 600;
   font-style: normal;
 }
 
@@ -2288,11 +2304,6 @@ button.manual-tree-node {
 @media (max-width: 900px) { .jd-layout { grid-template-columns: 1fr; } }
 .jd-main { min-width: 0; }
 .jd-sidebar { display: flex; flex-direction: column; gap: 16px; }
-
-/* Progress */
-.jd-progress { margin-bottom: 16px; }
-.jd-progress-bar { height: 6px; background: var(--border); border-radius: var(--radius); overflow: hidden; }
-.jd-progress-fill { height: 100%; background: var(--accent); border-radius: var(--radius); transition: width 0.3s; }
 
 /* Step list */
 .jd-steps { display: flex; flex-direction: column; gap: 6px; }

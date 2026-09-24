@@ -127,7 +127,14 @@ async function installOutage(page: Page, current: () => string): Promise<void> {
   });
 }
 
-type Seen = { route: string; markers: number; shell: boolean };
+/// `bare` is every marker on the route NOT drawn as the failed read's red
+/// rail (backlog 6f471ff6, car 3), as its computed left edge — so a page
+/// whose own class takes the rail back is named here, by route.
+type Seen = { route: string; markers: number; shell: boolean; bare: string[] };
+
+/// The rail as a browser computes it: 8px of the troubled plate's red
+/// (#C8283D, --troubled).
+const RAIL = '8px solid rgb(200, 40, 61)';
 
 /// THE READS A ROUTE FIRES, OBSERVED (backlog e6bc776b). The crawl used
 /// to give a painted shell a flat 700 ms for "onMount effects and the
@@ -211,7 +218,15 @@ async function crawl(page: Page, routes: ReadonlyArray<string>): Promise<Seen[]>
     // Let onMount's reads be ANSWERED and the failure branch render.
     if (shell) await settle(page, reads);
     const markers = shell ? await page.locator(FAILURE_MARKER).count() : 0;
-    seen.push({ route, markers, shell });
+    const edges = shell
+      ? await page.locator(FAILURE_MARKER).evaluateAll((els) =>
+          els.map((e) => {
+            const s = getComputedStyle(e);
+            return `${s.borderLeftWidth} ${s.borderLeftStyle} ${s.borderLeftColor}`;
+          }),
+        )
+      : [];
+    seen.push({ route, markers, shell, bare: edges.filter((e) => e !== RAIL) });
   }
   return seen;
 }
@@ -229,6 +244,16 @@ test.describe('the outage crawl — a surface cannot render a falsehood', () => 
         `${FAILURE_MARKER} — so they are telling the operator something ` +
         `they do not know. Render the failure (the branch, not a lint: see ` +
         `src/data/remote.ts), or move the route to SILENT with what it reads.`,
+    ).toEqual([]);
+
+    // What it SAYS it in: the failed read is a red rail on every page that
+    // names the marker, because the marker's own rule draws it — a failure
+    // set as red words on an empty's line reads as an empty.
+    const bare = seen.filter((s) => s.bare.length > 0);
+    expect(
+      bare.map((s) => `${s.route}: ${s.bare.join(', ')}`).sort(),
+      `These surfaces show ${FAILURE_MARKER} without the ${RAIL} rail — ` +
+        `a page rule outranks the marker's (styles.css, the failed read).`,
     ).toEqual([]);
   });
 

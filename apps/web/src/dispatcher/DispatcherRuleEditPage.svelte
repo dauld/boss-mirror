@@ -234,7 +234,7 @@
     <!-- load-failed + role=alert: the shared marker the outage crawl
          asserts (tests/mocked/_routes.ts FAILURE_MARKER), in the rules
          list's own words for its failed read (backlog d7732e88). -->
-    <p class="empty load-failed" role="alert" style="color:var(--err); padding:0 24px">Failed to load: {loadState.message}</p>
+    <p class="empty load-failed" role="alert" style="margin:0 24px">Failed to load: {loadState.message}</p>
   </div>
 {:else}
   {@const versions = loadState.versions}

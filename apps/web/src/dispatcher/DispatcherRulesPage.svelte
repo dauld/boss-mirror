@@ -77,7 +77,7 @@
     <!-- load-failed + role=alert: the shared failure marker the outage
          crawl asserts (tests/mocked/_routes.ts FAILURE_MARKER; backlog
          cae1a377). Without it the route sat in the crawl's SILENT map. -->
-    <p class="empty load-failed" role="alert" style="color:var(--err); padding:0 24px">Failed to load: {error}</p>
+    <p class="empty load-failed" role="alert" style="margin:0 24px">Failed to load: {error}</p>
   {/if}
 
   {#if rules.length === 0 && !loading && !error}
