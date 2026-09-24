@@ -970,8 +970,9 @@ pub fn borders(inputs: &BorderInputs<'_>) -> Borders {
 /// traffic waiting while the machine that moves it has been silent past
 /// its own declared cadence — the shape the whole design is for — or,
 /// for an event rule that declares no cadence, traffic that arrived
-/// before the machine's last firing (c53f8f38). Busy: anything waiting.
-/// Clear: a rail with room.
+/// before the machine's last firing (c53f8f38). Clear: everything else,
+/// a queue moving on a live machine included — its size is the rail's
+/// `waiting`, not its colour.
 fn judge(spec: &BorderSpec, flow: &Flow, machine: &Machine, w: &Windows) -> (RegionState, String) {
     if let Some(unread) = flow.unread.as_deref() {
         return (RegionState::Troubled, unread.to_string());
@@ -1021,6 +1022,12 @@ fn judge(spec: &BorderSpec, flow: &Flow, machine: &Machine, w: &Windows) -> (Reg
             ),
         );
     }
+    // TRAFFIC WAITING ON A LIVE MACHINE IS A RAIL WORKING — clear, with
+    // the queue named (design 62de32ae, decision 1: one vocabulary
+    // everywhere, and clear includes busy-and-healthy). It was `busy`
+    // until 2026-09-24, which painted every rail with anything on it the
+    // same amber as a saturated one; the waiting count rides the rail
+    // either way.
     if waiting > 0 {
         let first = flow
             .holds
@@ -1028,7 +1035,7 @@ fn judge(spec: &BorderSpec, flow: &Flow, machine: &Machine, w: &Windows) -> (Reg
             .map(|h| format!("{} ({})", h.what, h.why))
             .unwrap_or_else(|| spec.crossing.to_string());
         return (
-            RegionState::Busy,
+            RegionState::Clear,
             format!(
                 "{} waiting to cross — {first}",
                 plural(waiting, "packet", "packets")
@@ -1486,7 +1493,7 @@ mod tests {
             Some(2),
             "p2 stands at two stations, counted once"
         );
-        assert_eq!(b.state, RegionState::Busy, "{}", b.why);
+        assert_eq!(b.state, RegionState::Clear, "{}", b.why);
         assert_eq!(
             b.holds.first().map(|h| h.what.as_str()),
             Some("backlog"),
@@ -1603,7 +1610,7 @@ mod tests {
             "why: {}",
             border.why
         );
-        // A fresh firing is the same queue, busy rather than troubled.
+        // A fresh firing is the same queue, clear rather than troubled.
         let fresh = vec![CadenceFiring {
             rule: "train-board-on-dock-depth".to_string(),
             fired_at: Some(t("2026-09-19T11:50:00Z")),
@@ -1616,7 +1623,7 @@ mod tests {
         });
         let border = only(&ok, "gates", "track");
         assert_eq!(border.machine.silent, Some(false));
-        assert_eq!(border.state, RegionState::Busy);
+        assert_eq!(border.state, RegionState::Clear);
         assert!(border.holds.iter().all(|h| !h.why.is_empty()));
     }
 
@@ -1657,7 +1664,7 @@ mod tests {
         let held = status.held.len() + status.stranded.len();
         assert_eq!(b.waiting, Some(held));
         if held > 0 {
-            assert_eq!(b.state, RegionState::Busy);
+            assert_eq!(b.state, RegionState::Clear);
             assert!(
                 b.holds.iter().any(|h| h.what == "fix/a-held-green"),
                 "holds: {:?}",
@@ -1829,13 +1836,13 @@ mod tests {
         assert_eq!(b.machine.silent, None);
 
         // The control: the same queue with a firing AFTER the oldest
-        // arrived is busy, not troubled — the machine is running.
+        // arrived is clear, not troubled — the machine is running.
         let ok = borders(&BorderInputs {
             regions: &inputs,
             firings: Some(&[]),
             dispatcher_firings: Some(&fired(Some("2026-09-19T11:00:00Z"))),
         });
-        assert_eq!(only(&ok, "shop-floor", "dock").state, RegionState::Busy);
+        assert_eq!(only(&ok, "shop-floor", "dock").state, RegionState::Clear);
     }
 
     #[test]
@@ -1861,7 +1868,7 @@ mod tests {
         assert_eq!(b.waiting, Some(1), "it still stands at the border");
         assert_eq!(
             b.state,
-            RegionState::Busy,
+            RegionState::Clear,
             "an arrival nobody stamped is not an alarm: {}",
             b.why
         );
@@ -1898,7 +1905,7 @@ mod tests {
         });
         let b = only(&out, "shop-floor", "dock");
         assert_eq!(b.waiting, Some(1));
-        assert_eq!(b.state, RegionState::Busy, "why: {}", b.why);
+        assert_eq!(b.state, RegionState::Clear, "why: {}", b.why);
     }
 
     #[test]

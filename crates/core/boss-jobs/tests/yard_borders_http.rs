@@ -300,7 +300,7 @@ async fn every_border_carries_its_flow_its_queue_and_its_machine() {
     // border is holding traffic, with the record's own reason on it.
     let boarding = border(&v, "gates", "track");
     assert_eq!(boarding["waiting"], 1, "{boarding}");
-    assert_eq!(boarding["state"], "busy");
+    assert_eq!(boarding["state"], "clear");
     let hold = &boarding["holds"][0];
     assert_eq!(hold["what"], "fix/a");
     assert!(
@@ -329,7 +329,7 @@ async fn the_machine_is_read_from_its_own_firing_record_and_silence_is_trouble()
     assert_eq!(boarding["machine"]["kind"], "cadence");
     assert_eq!(boarding["machine"]["last_fired"], Value::Null);
     assert_eq!(boarding["machine"]["silent"], Value::Null);
-    assert_eq!(boarding["state"], "busy");
+    assert_eq!(boarding["state"], "clear");
 
     // Fired three hours ago against a declared 30-minute heartbeat,
     // with a car waiting: the border is troubled, and the why names it.

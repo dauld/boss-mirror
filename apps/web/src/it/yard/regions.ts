@@ -2,7 +2,7 @@
 // (design 0524fc95, decided 2026-09-19; car 1 is the server read, this
 // is car 2, the map page). Eight regions in map order — dock, gates,
 // track, shed, arrivals, garage, receiving, marshalling — each a card
-// with a count, a clear / busy / troubled state, one sentence of why,
+// with a count, a clear / attention / troubled state, one sentence of why,
 // and a trend (this window against the previous). Every number on a
 // card is the server's: this module parses the payload ONCE and turns
 // it into words, and nothing here derives a count or a state of its
@@ -38,12 +38,42 @@ export const REGION_NAMES = [
 ] as const;
 export type RegionName = (typeof REGION_NAMES)[number];
 
-/** Clear: room to spare and nothing wrong. Busy: at a bound or holding
- *  work that waits on the machine. Troubled: a threshold the yard or an
- *  alarm already enforces, crossed — or a reading that could not be
- *  taken, refused like a failure rather than drawn as clear. */
-export type RegionState = 'clear' | 'busy' | 'troubled';
-const STATES: ReadonlyArray<RegionState> = ['clear', 'busy', 'troubled'];
+/** ONE VOCABULARY, regions and borders alike (design 62de32ae,
+ *  decision 1; the server's `boss_jobs::region_states` is the
+ *  definition). Clear: flowing within its declared bounds — busy and
+ *  healthy included, so a dock with a train due is clear. Attention: a
+ *  declared band crossed. Troubled: ours and not moving, or a reading
+ *  that could not be taken, refused like a failure rather than drawn as
+ *  clear. `busy` is gone rather than aliased: it meant three things on
+ *  six of ten regions, and a server still sending it fails this parse
+ *  loudly instead of drawing a new meaning under an old word. */
+export type RegionState = 'clear' | 'attention' | 'troubled';
+const STATES: ReadonlyArray<RegionState> = ['clear', 'attention', 'troubled'];
+
+/** What a bound IS (decision 5): the most a place holds, or the depth at
+ *  which something is due. "DOCK 6 / 1" read as six cars in a space for
+ *  one; it was six cars against a boarding threshold of one. */
+export type BoundKind = 'capacity' | 'threshold';
+const BOUND_KINDS: ReadonlyArray<BoundKind> = ['capacity', 'threshold'];
+
+/** One number of a region's KPI, with its unit (decisions 5 and 9).
+ *  `text` is the server's sentence — the map prints it, never builds
+ *  one; `value` is null where nothing could be measured. */
+export type Measure = Readonly<{ name: string; value: number | null; unit: string; text: string }>;
+
+/** THE BAND THAT DECIDED A NON-CLEAR STATE (decisions 1 and 2): the
+ *  reading against the declared line ("oldest 5d > the 3-day triage
+ *  band"), the period its condition had to hold, and how long the
+ *  record says it has held — `held` is the server's own "16m", so the
+ *  map and `boss orient` say "troubled for 16m" in one voice. */
+export type Decided = Readonly<{
+  id: string;
+  reads: string;
+  hold_minutes: number;
+  since: string | null;
+  held_minutes: number | null;
+  held: string | null;
+}>;
 
 /** This window against the previous one. A half nobody measured is
  *  `null` — a rate nobody measured is not zero. */
@@ -85,9 +115,18 @@ export type Region = Readonly<{
   count: number | null;
   /** The bound the count is read against, where the region has one. */
   bound: number | null;
+  /** What the bound is; null with the bound, and on an older server —
+   *  which `countText` then reads as the capacity it always meant. */
+  bound_kind: BoundKind | null;
+  /** What the count counts: `cars parked`. Empty on an older server. */
+  unit: string;
   state: RegionState;
   why: string;
+  /** The band that decided a non-clear state; null when clear. */
+  band: Decided | null;
   trend: Trend;
+  /** The region's KPI, primary first. Empty on an older server. */
+  kpi: ReadonlyArray<Measure>;
   /** The machinery standing in this region. Empty for a region no
    *  machine of ours works in, and empty on an older server — which
    *  draws no glyphs rather than inventing idle ones. */
@@ -135,19 +174,53 @@ function parseMachine(raw: unknown): Machine {
   };
 }
 
+function parseMeasure(raw: unknown): Measure {
+  const o = asObject(raw, 'measure');
+  return {
+    name: String(o.name ?? ''),
+    value: numberOrNull(o.value),
+    unit: String(o.unit ?? ''),
+    text: String(o.text ?? ''),
+  };
+}
+
+function parseDecided(raw: unknown): Decided | null {
+  if (raw === null || raw === undefined) return null;
+  const o = asObject(raw, 'band');
+  return {
+    id: String(o.id ?? ''),
+    reads: String(o.reads ?? ''),
+    hold_minutes: numberOrNull(o.hold_minutes) ?? 0,
+    since: typeof o.since === 'string' ? o.since : null,
+    held_minutes: numberOrNull(o.held_minutes),
+    held: typeof o.held === 'string' ? o.held : null,
+  };
+}
+
 function parseRegion(raw: unknown): Region {
   const o = asObject(raw, 'region');
+  const name = String(o.name ?? '?');
   const state = String(o.state ?? '');
   if (!(STATES as ReadonlyArray<string>).includes(state)) {
-    throw new Error(`region ${String(o.name ?? '?')}: unknown state ${JSON.stringify(state)}`);
+    throw new Error(`region ${name}: unknown state ${JSON.stringify(state)}`);
+  }
+  // Absent is an older server; present and unknown is a newer one whose
+  // bound this client cannot read — refused, like an unknown state.
+  const kind = o.bound_kind;
+  if (kind !== undefined && kind !== null && !(BOUND_KINDS as ReadonlyArray<unknown>).includes(kind)) {
+    throw new Error(`region ${name}: unknown bound kind ${JSON.stringify(kind)}`);
   }
   return {
     name: String(o.name ?? ''),
     count: numberOrNull(o.count),
     bound: numberOrNull(o.bound),
+    bound_kind: (kind ?? null) as BoundKind | null,
+    unit: String(o.unit ?? ''),
     state: state as RegionState,
     why: String(o.why ?? ''),
+    band: parseDecided(o.band),
     trend: parseTrend(o.trend),
+    kpi: Array.isArray(o.kpi) ? o.kpi.map(parseMeasure) : [],
     machines: Array.isArray(o.machines) ? o.machines.map(parseMachine) : [],
   };
 }
@@ -213,15 +286,45 @@ export function floorSelection(region: string): string {
 
 /** The yard's lamp for a state (`.yard-lamp-dot.<lamp>`). */
 export function lampOf(state: RegionState): 'ok' | 'warn' | 'err' {
-  return state === 'clear' ? 'ok' : state === 'busy' ? 'warn' : 'err';
+  return state === 'clear' ? 'ok' : state === 'attention' ? 'warn' : 'err';
 }
 
-/** What is here, over its bound when it has one; "no reading" for a
- *  count the server could not take — never 0. */
+/** What is here, in its unit, against its bound — "3 / 3 bays in use"
+ *  for a capacity, "6 cars parked · threshold 1" for a threshold, so a
+ *  trigger never reads as room (decision 5). "no reading" for a count
+ *  the server could not take — never 0. */
 export function countText(r: Region): string {
   if (r.count === null) return 'no reading';
-  return r.bound === null ? String(r.count) : `${r.count} / ${r.bound}`;
+  const unit = r.unit === '' ? '' : ` ${r.unit}`;
+  if (r.bound === null) return `${r.count}${unit}`;
+  return r.bound_kind === 'threshold'
+    ? `${r.count}${unit} · threshold ${r.bound}`
+    : `${r.count} / ${r.bound}${unit}`;
 }
+
+/** The count as a territory has room for it: the number against its
+ *  bound, with the threshold still named — the unit rides the KPI line
+ *  and the title. */
+export function compactCountText(r: Region): string {
+  if (r.count === null) return 'no reading';
+  if (r.bound === null) return String(r.count);
+  return r.bound_kind === 'threshold' ? `${r.count} · threshold ${r.bound}` : `${r.count} / ${r.bound}`;
+}
+
+/** The state with how long the record says it has held — "troubled
+ *  for 16m" (decision 2). A clear state, or one whose onset the record
+ *  does not hold, is the bare word. */
+export function stateText(r: Region | undefined): string {
+  if (r === undefined) return 'troubled';
+  return r.band?.held ? `${r.state} for ${r.band.held}` : r.state;
+}
+
+/** The band that decided a non-clear state, read against its number —
+ *  "oldest 5d > the 3-day triage band"; null when clear. */
+export const bandText = (r: Region | undefined): string | null => r?.band?.reads ?? null;
+
+/** The region's KPI as one line, each measure in the server's words. */
+export const kpiText = (r: Region): string => r.kpi.map((m) => m.text).join(' · ');
 
 /** A number as the card prints it: one decimal at most, and no
  *  trailing `.0`. */

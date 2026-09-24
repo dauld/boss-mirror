@@ -26,7 +26,18 @@
   // visual redesign reskins one grammar (Q1, decided 2026-09-19).
   import { untrack } from 'svelte';
   import { navigate } from '@boss/web-kit/nav';
-  import { countText, floorHref, lampOf, trendText, type Region, type Regions } from './regions';
+  import {
+    bandText,
+    compactCountText,
+    countText,
+    floorHref,
+    kpiText,
+    lampOf,
+    stateText,
+    trendText,
+    type Region,
+    type Regions,
+  } from './regions';
   import {
     densityOf,
     machineText,
@@ -105,9 +116,33 @@
   // The text inside an outline: 9px mono is ~5.8px a character, and a
   // why gets the lines the outline has room for below the trend.
   const chars = (t: Territory): number => Math.floor((t.w - 16) / 5.8);
-  const whyLines = (t: Territory): number => Math.max(1, Math.min(4, Math.floor((t.h - 116) / 12)));
   const stateOf = (r: Region | undefined) => r?.state ?? 'troubled';
   const whyOf = (r: Region | undefined) => r?.why ?? 'the server answered no reading for this region';
+  /** What a non-clear territory says under its trend: the band that
+   *  decided it, read against its number (design 62de32ae, decision 1),
+   *  and for trouble the why after it — three lines at most, so the
+   *  machinery strip along the bottom edge keeps its room. A payload
+   *  with no band (an older server) gives the why the three lines. */
+  function verdictLines(t: Territory, r: Region | undefined): ReadonlyArray<string> {
+    const state = stateOf(r);
+    if (state === 'clear') return [];
+    const band = bandText(r);
+    if (band === null) return wrapWords(whyOf(r), chars(t), 3);
+    const lines = wrapWords(band, chars(t), 2);
+    return state === 'troubled' ? [...lines, ...wrapWords(whyOf(r), chars(t), 3 - lines.length)] : lines;
+  }
+  /** The hover and the screen reader get everything the outline has no
+   *  room for: the count in its unit, the state with how long it has
+   *  held, the band that decided it, the KPI and the why. */
+  const titleOf = (name: string, r: Region | undefined): string =>
+    r === undefined
+      ? `${name} · troubled — ${whyOf(r)}`
+      : [
+          `${name} · ${countText(r)} · ${stateText(r)}${bandText(r) ? ` [${bandText(r)}]` : ''} — ${r.why}`,
+          kpiText(r),
+        ]
+          .filter((s) => s !== '')
+          .join('\n');
 
   function open(e: MouseEvent, href: string): void {
     e.preventDefault();
@@ -149,29 +184,41 @@
         data-region={t.name}
         data-state={state}
         href={floorHref(t.name)}
-        aria-label="{t.name} · {state} — {whyOf(r)}"
+        aria-label={titleOf(t.name, r)}
         onclick={(e) => open(e, floorHref(t.name))}>
-        <title>{t.name} · {state} — {whyOf(r)}</title>
-        <rect x={t.x} y={t.y} width={t.w} height={t.h} class="shed" class:warn={state === 'busy'} class:err={troubled} />
+        <title>{titleOf(t.name, r)}</title>
+        <rect x={t.x} y={t.y} width={t.w} height={t.h} class="shed" class:warn={state === 'attention'} class:err={troubled} />
         <text x={t.x + 8} y={t.y + 18}>{t.name}</text>
-        <text x={t.x + 8} y={t.y + 44} class="count">{r ? countText(r) : 'no reading'}</text>
+        <text x={t.x + 8} y={t.y + 44} class="count">{r ? compactCountText(r) : 'no reading'}</text>
         <circle cx={t.x + 12} cy={t.y + 58} r="4" class="lamp {lampOf(state)}" />
-        <text x={t.x + 22} y={t.y + 62} class:err={troubled}>{state}</text>
+        <!-- the state with how long the record says it has held
+             (design 62de32ae, decision 2): "troubled for 16m" -->
+        <text x={t.x + 22} y={t.y + 62} class="state" class:err={troubled}>{stateText(r)}</text>
         {#if r}
+          <!-- THE KPI, each measure in its unit (decision 9), as the
+               server wrote it — the region's one number to read -->
+          {#if r.kpi.length > 0}
+            <text x={t.x + 8} y={t.y + 80} class="tiny kpi">
+              {#each wrapWords(r.kpi[0]!.text, chars(t), 2) as line, i (i)}
+                <tspan x={t.x + 8} dy={i === 0 ? 0 : 12}>{line}</tspan>
+              {/each}
+            </text>
+          {/if}
           <!-- the trend as the card printed it, one part per line so
                the samples do not run past the outline -->
-          <text x={t.x + 8} y={t.y + 80} class="tiny">{r.trend.metric}</text>
-          <text x={t.x + 8} y={t.y + 92} class="tiny trend">
+          <text x={t.x + 8} y={t.y + 108} class="tiny">{r.trend.metric}</text>
+          <text x={t.x + 8} y={t.y + 120} class="tiny trend">
             {#each trendText(r.trend).split(' · ') as part, i (i)}
               <tspan x={t.x + 8} dy={i === 0 ? 0 : 12}>{part}</tspan>
             {/each}
           </text>
         {/if}
-        {#if troubled}
-          <!-- a verdict must name what failed: the why, where the
-               trouble is, wrapped to the outline (whole in the title) -->
-          <text x={t.x + 8} y={t.y + 122} class="tiny err why">
-            {#each wrapWords(whyOf(r), chars(t), whyLines(t)) as line, i (i)}
+        {#if state !== 'clear'}
+          <!-- THE BAND THAT DECIDED IT (decision 1), read against its
+               number, where the state is — and for trouble the why:
+               a verdict must name what failed (whole in the title) -->
+          <text x={t.x + 8} y={t.y + 148} class="tiny why" class:err={troubled} class:warn={!troubled}>
+            {#each verdictLines(t, r) as line, i (i)}
               <tspan x={t.x + 8} dy={i === 0 ? 0 : 12}>{line}</tspan>
             {/each}
           </text>
@@ -282,8 +329,10 @@
   .yard text.tiny { font-size: 9px; letter-spacing: 0.04em; text-transform: none; }
   .yard text.count { font-size: 18px; font-weight: 600; fill: var(--map-ink); letter-spacing: 0; text-transform: none; }
   .yard text.err { fill: var(--map-bad-ink); }
+  .yard text.warn { fill: var(--map-warn-ink); }
+  .yard text.kpi { fill: var(--map-ink); }
   .rail { stroke: var(--rail); stroke-width: 2; fill: none; }
-  .rail[data-state='busy'] { stroke: var(--map-warn-edge); }
+  .rail[data-state='attention'] { stroke: var(--map-warn-edge); }
   .rail[data-state='troubled'] { stroke: var(--map-bad-edge); }
   /* The traffic: dashes running the rail from A to B. Weight and speed
      come from the measured rate; `unknown` is deliberately a sparse,
@@ -299,7 +348,7 @@
   @keyframes flow { to { stroke-dashoffset: -48; } }
   /* The token standing on the rail: what waits to cross, right now. */
   .token { fill: var(--map-surface); stroke: var(--map-rule-strong); stroke-width: 1.5; }
-  .token.busy { stroke: var(--map-warn-edge); }
+  .token.attention { stroke: var(--map-warn-edge); }
   .token.troubled { stroke: var(--map-bad-edge); }
   .yard text.token-count { font-size: 9px; letter-spacing: 0; text-transform: none;
     fill: var(--map-ink); }

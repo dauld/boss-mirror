@@ -8,7 +8,7 @@
 // half of the read that answers all three.
 //
 // NOTHING HERE DERIVES A JUDGEMENT. The rate, the queue, each hold's
-// reason, the machine's silence and the border's clear/busy/troubled
+// reason, the machine's silence and the border's clear/attention/troubled
 // state are all the server's (boss_jobs::borders); this module parses
 // them ONCE and turns them into words. The only thing it decides is how
 // THICK to draw a rail (`densityOf`), which is presentation — the
@@ -64,7 +64,7 @@ export type Borders = Readonly<{
   now: string;
 }>;
 
-const STATES: ReadonlyArray<RegionState> = ['clear', 'busy', 'troubled'];
+const STATES: ReadonlyArray<RegionState> = ['clear', 'attention', 'troubled'];
 
 function asObject(raw: unknown, where: string): Record<string, unknown> {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
