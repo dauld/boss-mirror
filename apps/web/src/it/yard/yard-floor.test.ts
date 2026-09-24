@@ -825,7 +825,7 @@ describe('the track — wagons behind a locomotive', () => {
     // fe77a1d2 car 2 deleted the whole-floor YardMap.
     const map = strip(readFileSync(join(import.meta.dir, 'RegionFloor.svelte'), 'utf8'));
     expect(map).toMatch(/\{#if l\.channel\}\s*<text[^>]*class="plate">\{l\.channel\} train<\/text>/);
-    const page = strip(readFileSync(join(import.meta.dir, 'YardPage.svelte'), 'utf8'));
+    const page = strip(readFileSync(join(import.meta.dir, 'FloorDeck.svelte'), 'utf8'));
     expect(page).toMatch(/\{@const channel = serverTrainById\.get\(t\.id\)\?\.channel \?\? null\}/);
     expect(page).toMatch(/\{#if channel\}\s*<span class="yard-chip"[^>]*>\{channel\} train<\/span>/);
   });

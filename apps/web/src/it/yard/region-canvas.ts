@@ -20,11 +20,12 @@
 // simpler thing to draw: the camera, its easing and its interpolation
 // are gone.
 //
-// THE RECT IS A `Territory` because that is what the three layout
-// functions already take — `interiorLayout`, `platformLayout` and
-// `machineryStrip` each place their contents inside one. Handing them
-// a canvas-sized rect instead of a world-sized slot is the entire
-// change on their side; none of them needed editing.
+// THE RECT IS A `Territory` because that is what the layout functions
+// already took — `interiorLayout` (deleted with the wagon plates,
+// design fe77a1d2 car 3), `platformLayout` and `machineryStrip` each
+// placed their contents inside one. Handing them a canvas-sized rect
+// instead of a world-sized slot was the entire change on their side;
+// none of them needed editing.
 
 import type { RegionName } from './regions';
 import { WORLD, type Territory } from './world';

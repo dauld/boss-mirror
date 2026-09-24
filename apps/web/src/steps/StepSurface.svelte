@@ -15,6 +15,7 @@
   import GenericSurface from './GenericSurface.svelte';
   import DecisionContext from './DecisionContext.svelte';
   import StepProcedure from './StepProcedure.svelte';
+  import StepCorrections from './StepCorrections.svelte';
   import ApprovalSurface from './ApprovalSurface.svelte';
   import RepairSurface from './RepairSurface.svelte';
   import InspectionSurface from './InspectionSurface.svelte';
@@ -56,6 +57,9 @@
     }[];
     metadata: Record<string, unknown>;
     notes: string | null;
+    /** The job's corrections that target this step, attached by the
+     *  job GET (design 4105b020); absent when there are none. */
+    corrections?: unknown;
   };
 
   type Props = {
@@ -206,6 +210,11 @@
      as the generic surface was. A procedure is what the protocol says
      about doing the work; it is not a presentation choice. -->
 <StepProcedure {step} />
+<!-- The step's corrections, above both sides of the fork for the same
+     reason as the procedure (design 4105b020): a reader of a step is
+     handed what corrects it, whichever surface draws the step — a
+     plugin that never reads `corrections` still sits under the marker. -->
+<StepCorrections {step} />
 {#if pluginAvailable === true}
   <!-- Plugin-backed steps can also take the whole viewport. Reading
        tasks (a design review is a document plus decisions) compete

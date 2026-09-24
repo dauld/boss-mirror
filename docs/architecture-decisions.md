@@ -1266,8 +1266,16 @@ completed step — a damaged sentence needs a signature, not a review;
 and field for each; the 409 hint names the new door instead, and two
 weeks after it ships the scan is re-run with a target of zero new
 ad-hoc keys. `reproof` and `regate_receipt` stay as they are: they
-supersede by precedence, and each has its reader. Not yet built: the
-409 still sends an author to free-form job metadata.
+supersede by precedence, and each has its reader. Built (first car,
+2026-09-24): the door, its refusals and a withdrawal that must name a
+live entry of the same step and say why; the event, spelled
+`jobs.step.corrected` in the jobs crate's namespace and recorded beside
+the JOB_UPDATED row state in one transaction; the PATCH refusal, and
+the job PUT carrying the stored list forward so a whole-metadata body
+cannot erase it; `step.corrections` on the job GET and its live stream;
+`boss correct`; `boss brief`; and the terminal-freeze hint, one constant
+(`boss_jobs::corrections::TERMINAL_STEP_HINT`) at both sites and in the
+dispatcher's test double. Not yet built: the shared web marker.
 
 ## Finance & ledger
 
@@ -2043,9 +2051,12 @@ resolves to the track). The last two both edit `MapPage`, so they ride
 one after the other; (3) **built now in the `--map-*` tokens**, not held
 for the Transit reskin above, which chooses how the map looks rather
 than what it shows and will then restyle one map per region instead of
-two. Not yet built: `YardPage.svelte` still draws `YardMap` when
-embedded ("STILL DRAWN when embedded, deliberately"), and no
-per-region layout function exists.
+two. Built, all three cars (2026-09-24): `floor-slices.ts` lays the
+floor out one region at a time, `RegionMap` draws its slice through
+`RegionFloor.svelte` and `YardMap.svelte` is deleted, and the deck is
+`FloorDeck.svelte`, mounted by `MapPage` — `YardPage.svelte` is gone,
+and with it the wagon plates' `interiorLayout` that nothing read once
+the region map drew the floor.
 
 **What the website says is checked against what the record holds;
 whether it works is a reading with a threshold named first** (design

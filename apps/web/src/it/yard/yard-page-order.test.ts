@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // The Train Yard reads top to bottom in the order a change travels.
@@ -7,19 +7,24 @@ import { join } from 'node:path';
 // numbered table blocks (00 DELIVERY … 06 AWAITING PROOF), hand-ordered
 // in the template and pinned here. The rail map now carries the
 // protocol order itself — approach → gates → dock → track → arrivals is
-// the map's geometry, tested in yard-floor.test.ts — and the page reads:
-// the alerts strip, the map, the deck (departure board + entity panel),
-// then the lower deck (production and signals), then the sections the
-// map does not draw: the delivery scoreboard,
-// recent arrivals, awaiting proof, and the flow line. The regions are
-// still hand-ordered in the template, so this pins their sequence; a
-// region moved out of order is a wrong page, not a style choice.
-describe('the yard page flows in protocol order', () => {
-  const src = readFileSync(join(import.meta.dir, 'YardPage.svelte'), 'utf8');
+// the map's geometry, tested in yard-floor.test.ts — and the deck under
+// it reads: the alerts strip, the deck (departure board + entity
+// panel), then the lower deck (production and signals), then the
+// sections the map does not draw: the delivery scoreboard, recent
+// arrivals, awaiting proof, and the flow line. The regions are still
+// hand-ordered in the template, so this pins their sequence; a region
+// moved out of order is a wrong page, not a style choice.
+//
+// The deck is FloorDeck.svelte since design fe77a1d2 car 3: the Train
+// Yard page it lived in (YardPage.svelte) had nothing left of a page
+// once the region map drew its floor, so the deck is a component the
+// map page mounts and the page is deleted.
+describe('the floor deck flows in protocol order', () => {
+  const src = readFileSync(join(import.meta.dir, 'FloorDeck.svelte'), 'utf8');
   const markup = src.slice(src.indexOf('</script>'));
 
-  // The map left this page on design fe77a1d2 car 2: the region map
-  // above it draws that region's slice of the floor, so the page runs
+  // The map left the deck on design fe77a1d2 car 2: the region map
+  // above it draws that region's slice of the floor, so the deck runs
   // alerts → board → entity panel, and draws no second map.
   it('lays out alerts → board → entity panel → the lower sections, in that order', () => {
     const landmarks = [
@@ -38,9 +43,10 @@ describe('the yard page flows in protocol order', () => {
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
   });
 
-  it('names the whole flow, proof included, in the subtitle and the footer line', () => {
-    expect(src).toContain('Gated → parked → boarded → departed → arrived → proven');
-    expect(src).toContain('ARRIVED → PROVEN');
+  it('names the whole flow, proof included, in the footer line', () => {
+    // The subtitle that also named it was the retired page's header;
+    // the map page's own header stands above the deck now.
+    expect(markup).toContain('GATED → PARKED → BOARDED → <em>DEPARTED</em> → ARRIVED → PROVEN');
   });
 
   it('the entity panel has a home for every selectable thing on the map', () => {
@@ -54,5 +60,18 @@ describe('the yard page flows in protocol order', () => {
   it('the factory floor is gone — the map replaced it', () => {
     expect(src).not.toContain('YardFactory');
     expect(src).not.toContain('yard-factory');
+  });
+
+  it('is a component the map page mounts, and the Train Yard page is deleted', () => {
+    // No page header of its own and no `embedded` switch: the deck is
+    // only ever mounted under a region map, whose page carries the one
+    // header. A second mount site would be a second page.
+    expect(src).not.toContain('PageHeader');
+    expect(src).not.toContain('embedded');
+    const map = readFileSync(join(import.meta.dir, 'MapPage.svelte'), 'utf8');
+    expect(map).toContain("import FloorDeck from './FloorDeck.svelte'");
+    expect(map).toMatch(/<FloorDeck\s+focus=\{floorRegion\}/);
+    expect(map).not.toMatch(/import YardPage|<YardPage/);
+    expect(existsSync(join(import.meta.dir, 'YardPage.svelte'))).toBe(false);
   });
 });

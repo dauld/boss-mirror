@@ -194,14 +194,17 @@
     font: inherit;
     font-size: 13px;
     padding: 4px 10px;
-    border-radius: 5px;
+    /* A white field let into the enamel band (backlog 7eb59678 car 2):
+       squared to a field's 3px, and focused with the amber ring — the
+       action blue measures 3.1:1 against the band, too faint to find. */
+    border-radius: var(--radius-field);
     border: 1px solid var(--border);
     background: var(--bg);
     color: var(--text);
   }
   .gs-input:focus {
-    outline: 2px solid var(--accent);
-    outline-offset: -1px;
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
     background: var(--card);
   }
   .gs-scrim {

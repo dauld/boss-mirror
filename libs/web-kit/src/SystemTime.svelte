@@ -99,7 +99,7 @@
     <span class="system-time-label">System time</span>
     <span class="system-time-val">{display}</span>
     {#if isSim}
-      <span class="system-time-sim" class:paused={clock?.paused}>
+      <span class="plate" class:plate-busy={!clock?.paused} class:plate-troubled={clock?.paused}>
         {clock?.paused ? 'Sim · paused' : 'Sim'}
       </span>
     {/if}
@@ -107,39 +107,27 @@
 {/if}
 
 <style>
+  /* Sits on the chrome bar's enamel band (backlog 7eb59678 car 2): the
+     band's white for the reading, its dimmer white for the label. The
+     Sim tag is a state, so it is a plate — busy while the model runs,
+     troubled when paused (apps/web styles.css, "States are plates"). */
   .system-time {
     display: inline-flex;
     align-items: baseline;
     gap: 8px;
     font-size: 12px;
-    color: var(--static);
+    color: var(--on-band-dim);
     white-space: nowrap;
   }
   .system-time-label {
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--static);
+    color: var(--on-band-dim);
   }
   .system-time-val {
     font-variant-numeric: tabular-nums;
     font-weight: 600;
-    color: var(--fog);
-  }
-  .system-time-sim {
-    font-size: 10px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    background: var(--warn-wash);
-    color: var(--warn);
-    border: 1px solid var(--busy);
-    border-radius: 4px;
-    padding: 1px 6px;
-  }
-  .system-time-sim.paused {
-    background: var(--err-wash);
-    color: var(--err);
-    border-color: var(--troubled);
+    color: var(--on-band);
   }
 </style>

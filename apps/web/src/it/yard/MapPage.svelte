@@ -27,20 +27,23 @@
   // click but not literally increase the size of content on the world
   // map." The route was already right — only what it drew was wrong,
   // and the camera is gone. The floor's
-  // panels — the departure board, the entity deck and its verbs —
-  // mount UNDER the region map, and they are still the Train Yard's
-  // own (YardPage, `embedded`: it drops its page header, keeps
-  // everything else). The region map is fed by the scene YardPage
-  // ALREADY reads, handed up through `onfloor`: one read of the floor
-  // on the page, not two — the same rule that made the regions
-  // endpoint the only reading of a region.
+  // panels — the alerts, the departure board, the entity deck and its
+  // verbs, production and signals — mount UNDER the region map as
+  // FloorDeck. The region map is fed by the scene FloorDeck ALREADY
+  // reads, handed up through `onfloor`: one read of the floor on the
+  // page, not two — the same rule that made the regions endpoint the
+  // only reading of a region.
   //
-  // ONE MAP PER FLOOR (design fe77a1d2, car 2). The region map draws
-  // its region's slice of the floor and YardPage draws no map at all,
+  // ONE MAP PER FLOOR (design fe77a1d2). Car 2: the region map draws
+  // its region's slice of the floor and the deck draws no map at all,
   // so the selection that drives the entity panel crosses between the
-  // two: YardPage hands up what is selected and the function that
+  // two: the deck hands up what is selected and the function that
   // selects (`onselection`), and a click on the region map goes
   // through that function — one selection, whichever surface took it.
+  // Car 3: the deck was still the Train Yard page (YardPage), mounted
+  // with its header switched off — a page in name only, with this as
+  // its one mount site — so it became the FloorDeck component and the
+  // page was deleted. Every route is unchanged.
   //
   // NO NEW STYLING (the visual redesign reskins): the world is drawn in
   // the yard's own strokes and tokens.
@@ -60,7 +63,7 @@
   import type { FloorSelection, Scene } from './yard-floor';
   import { fetchBorders, summaryLine, type Borders } from './borders';
   import WorldMap from './WorldMap.svelte';
-  import YardPage from './YardPage.svelte';
+  import FloorDeck from './FloorDeck.svelte';
   import CrewBoardPage from '../crew/CrewBoardPage.svelte';
   import ReceivingYardPage from '../receiving/ReceivingYardPage.svelte';
   import MarshallingYardPage from '../marshalling/MarshallingYardPage.svelte';
@@ -185,14 +188,14 @@
   {/if}
 
   {#if floorRegion !== null}
-    <!-- THE FLOOR, under the region's map: the Train Yard's own
-         panels, mounted in place rather than on a page of their own.
-         Keyed on the region so a move from one to another opens the
-         new region's panel rather than keeping the old selection. -->
+    <!-- THE FLOOR'S DECK, under the region's map: the Train Yard's
+         panels, a component of this page rather than a page of their
+         own (design fe77a1d2, car 3). Keyed on the region so a move
+         from one to another opens the new region's panel rather than
+         keeping the old selection. -->
     {#key floorRegion}
-      <YardPage
+      <FloorDeck
         focus={floorRegion}
-        embedded
         onfloor={(s) => (floor = s)}
         onselection={(s) => (selection = s)} />
     {/key}
@@ -217,7 +220,7 @@
 </div>
 
 <style>
-  /* The yard's classes, as YardPage.svelte declares them (Svelte scopes
+  /* The yard's classes, as FloorDeck.svelte declares them (Svelte scopes
      a component's styles, so the page carries its own copy of the ones
      it uses — same names, nothing new). The colours are the map's own
      --map-* tokens, with no fallback (42f66fb3, map-palette.test.ts). */

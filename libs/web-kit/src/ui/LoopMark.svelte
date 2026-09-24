@@ -17,6 +17,7 @@
     ring = true,
     spin = false,
     title = '',
+    band = false,
   }: Readonly<{
     size?: number;
     ring?: boolean;
@@ -26,6 +27,10 @@
     /// decorative and hides it from assistive tech, which is correct
     /// wherever a text wordmark sits beside it.
     title?: string;
+    /// Drawn on an enamel band (the chrome bar, backlog 7eb59678 car 2):
+    /// the adjusting arc is night ink, which would vanish into the band,
+    /// so there it is set in the band's white instead.
+    band?: boolean;
   }> = $props();
 </script>
 
@@ -53,7 +58,7 @@
     <path
       d="M 50 78 A 28 28 0 0 1 24 39"
       fill="none"
-      stroke="var(--fog)"
+      stroke={band ? 'var(--on-band)' : 'var(--fog)'}
       stroke-width="5"
       stroke-linecap="round"
     />

@@ -22,9 +22,31 @@
 //! a warm target is the difference between seconds and a cold build.
 //! The report says so and names the second `--report` that frees it.
 //!
-//! WHICH DIR. The run packet does not hold the builder's worktree — its
-//! `worktree` key is the DISPATCHER's cwd — but the green does hold the
-//! branch ([`crate::dispatch::run_branch`]), and git holds which linked
+//! AND AT THE GREEN ITSELF (backlog a3355e14, decided 2026-09-24). The
+//! report is not the green: a background builder's run is reported by
+//! the agent-stop hook when the Agent tool RETURNS, which for a
+//! background agent is at launch (run 781e6e9e's report reads "(the
+//! Agent tool returned no text)"), so the report above always found the
+//! run not green and kept the target. The decision read "the
+//! dispatcher's green handler frees it"; the dispatcher cannot — the
+//! scratch is an emptyDir private to the dev pod (boss-dev.yaml: "a
+//! sidecar, not a CronJob, because the two things it cleans are
+//! pod-private"). The one party ON the pod that sees the green is the
+//! gate that went green: `boss gate --wait`, in the builder's own shell,
+//! reads its verdict off the gate-run, and the gate-run carries the
+//! run's edge and the worktree it was launched from (both stamped at
+//! launch). So the waiter frees the target there
+//! ([`settle_at_green`]) and records it on the run, by [`GREEN_BY`]; a
+//! later report reads that record and leaves it alone. A green nobody
+//! waited for is still the hourly reclaim's.
+//!
+//! WHICH DIR. The gate stamps the worktree it was launched from (`git
+//! rev-parse --show-toplevel`) beside the run's edge, and the landing
+//! rule carries it onto `building` as `gate_run.worktree` — the one
+//! record of where a run was built; the run packet's own `worktree` key
+//! used to be the DISPATCHER's cwd, and `boss dispatch` no longer
+//! writes it. A green from before that stamp still holds the branch
+//! ([`crate::dispatch::run_branch`]), and git holds which linked
 //! worktree has that branch checked out (`git worktree list
 //! --porcelain`; git refuses one branch in two worktrees). The name is
 //! then wt-cargo's own: [`target_dir`] is `wt_target_dir` in
@@ -65,6 +87,10 @@ pub(crate) const DEFAULT_SEED: &str = "/scratch/target";
 const BUILDER_PREFIX: &str = "agent-";
 /// Every per-worktree target's name starts so; the seed's does not.
 const TARGET_PREFIX: &str = "target-";
+/// Who freed it, on the record: the waiter that saw the green, or the
+/// handback that came after it.
+pub(crate) const GREEN_BY: &str = "boss gate --wait, on its green";
+pub(crate) const REPORT_BY: &str = "boss dispatch --report";
 
 /// Where this box keeps worktree targets, and the one it must never
 /// touch, with the worktree list read at the CLI boundary.
@@ -81,23 +107,77 @@ impl Scratch {
     /// wt-cargo's two knobs (or its defaults) and this checkout's
     /// worktree list. Blocking: it runs git.
     pub(crate) fn from_env() -> Self {
-        let path = |key: &str, default: &str| {
-            std::env::var_os(key)
-                .filter(|v| !v.is_empty())
-                .map_or_else(|| PathBuf::from(default), PathBuf::from)
-        };
         let porcelain = std::process::Command::new("git")
             .args(["worktree", "list", "--porcelain"])
             .output()
             .ok()
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        let (root, seed) = roots_from_env();
         Scratch {
-            root: path(ROOT_ENV, DEFAULT_ROOT),
-            seed: path(SEED_ENV, DEFAULT_SEED),
+            root,
+            seed,
             porcelain,
         }
     }
+}
+
+/// wt-cargo's two knobs, or its defaults: the scratch root and the
+/// seed. No git — the gate's waiter already knows the worktree.
+pub(crate) fn roots_from_env() -> (PathBuf, PathBuf) {
+    let path = |key: &str, default: &str| {
+        std::env::var_os(key)
+            .filter(|v| !v.is_empty())
+            .map_or_else(|| PathBuf::from(default), PathBuf::from)
+    };
+    (path(ROOT_ENV, DEFAULT_ROOT), path(SEED_ENV, DEFAULT_SEED))
+}
+
+/// The worktree the run's gate stamped at launch, carried onto
+/// `building` by the landing rule as `gate_run.worktree`.
+pub(crate) fn stamped_worktree(run: &Value) -> Option<PathBuf> {
+    crate::envelope::steps(run)
+        .into_iter()
+        .find(|s| {
+            s.get("spec_slug").and_then(Value::as_str) == Some(crate::dispatch::BUILDING_SLUG)
+        })?
+        .pointer("/metadata/gate_run/worktree")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .map(PathBuf::from)
+}
+
+/// A BUILDER worktree's target (`agent-*`, the predicate wt-cargo
+/// bounds builders by), or `None` for any other tree.
+fn builder_target(root: &Path, worktree: &Path) -> Option<PathBuf> {
+    let is_builder = worktree
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(BUILDER_PREFIX));
+    target_dir(root, worktree).filter(|_| is_builder)
+}
+
+fn not_a_builder(worktree: &Path, branch: &str) -> String {
+    format!(
+        "{} has {branch} checked out but is not a builder worktree ({BUILDER_PREFIX}*), \
+         so its target is not the run's",
+        worktree.display()
+    )
+}
+
+/// The path the run's record says was already freed, when it says so.
+fn already_freed(run: &Value) -> Option<String> {
+    let rec = run.pointer("/metadata/scratch_target")?;
+    rec.get("removed")
+        .and_then(Value::as_array)
+        .filter(|r| !r.is_empty())?;
+    Some(
+        rec.get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("(path unrecorded)")
+            .to_string(),
+    )
 }
 
 /// wt-cargo's name for a worktree's target: `<root>/target-<basename>`.
@@ -151,40 +231,43 @@ pub(crate) fn plan(run: &Value, porcelain: Option<&str>, root: &Path) -> Plan {
                 .into(),
         );
     }
-    let Some(branch) = crate::dispatch::run_branch(run) else {
-        return Plan::Keep(
-            "the green names no branch on `building`, so no worktree can be mapped to it".into(),
-        );
+    let branch = crate::dispatch::run_branch(run);
+    // The gate's own stamp first (a3355e14); the worktree list only for
+    // a green from before the stamp existed.
+    let worktree = match (stamped_worktree(run), branch.as_deref()) {
+        (Some(stamped), _) => stamped,
+        (None, None) => {
+            return Plan::Keep(
+                "the green names no branch and no worktree on `building`, so no worktree can \
+                 be mapped to it"
+                    .into(),
+            );
+        }
+        (None, Some(branch)) => {
+            let Some(porcelain) = porcelain else {
+                return Plan::Keep(
+                    "`git worktree list` could not be read here, so no worktree can be mapped \
+                     to the run's branch"
+                        .into(),
+                );
+            };
+            let Some(worktree) = worktree_on(porcelain, branch) else {
+                return Plan::Keep(format!(
+                    "no linked worktree here has {branch} checked out — gone already, or \
+                     another box; the hourly reclaim takes a gone worktree's target"
+                ));
+            };
+            worktree
+        }
     };
-    let Some(porcelain) = porcelain else {
-        return Plan::Keep(
-            "`git worktree list` could not be read here, so no worktree can be mapped to \
-             the run's branch"
-                .into(),
-        );
-    };
-    let Some(worktree) = worktree_on(porcelain, &branch) else {
-        return Plan::Keep(format!(
-            "no linked worktree here has {branch} checked out — gone already, or another \
-             box; the hourly reclaim takes a gone worktree's target"
-        ));
-    };
-    let is_builder = worktree
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| n.starts_with(BUILDER_PREFIX));
-    let target = target_dir(root, &worktree).filter(|_| is_builder);
-    match target {
+    let branch = branch.unwrap_or_else(|| "(no branch on the green)".into());
+    match builder_target(root, &worktree) {
         Some(target) => Plan::Free {
             branch,
             worktree,
             target,
         },
-        None => Plan::Keep(format!(
-            "{} has {branch} checked out but is not a builder worktree ({BUILDER_PREFIX}*), \
-             so its target is not the run's",
-            worktree.display()
-        )),
+        None => Plan::Keep(not_a_builder(&worktree, &branch)),
     }
 }
 
@@ -299,34 +382,90 @@ fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
-/// The whole settlement: plan, free, and what to say and record. The
-/// line is printed after `boss dispatch: run <short>`; the record is
-/// `scratch_target` on the run packet.
+fn stamp(now: chrono::DateTime<chrono::Utc>) -> String {
+    now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// The report's settlement: plan, free, and what to say and record.
+/// The line is printed after `boss dispatch: run <short>`; the record
+/// is `scratch_target` on the run packet — `None` when the gate's
+/// waiter already freed it at the green, whose record stands.
 pub(crate) fn settle(
     run: &Value,
     scratch: &Scratch,
     now: chrono::DateTime<chrono::Utc>,
-) -> (String, Value) {
-    let at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let (branch, worktree, target) = match plan(run, scratch.porcelain.as_deref(), &scratch.root) {
-        Plan::Keep(why) => {
-            return (
-                format!("kept its scratch target: {why}"),
-                json!({ "kept": why, "at": at }),
-            );
-        }
+) -> (String, Option<Value>) {
+    let at = stamp(now);
+    if let Some(path) = already_freed(run) {
+        return (
+            format!("already freed its scratch target {path} — the record on the run stands"),
+            None,
+        );
+    }
+    match plan(run, scratch.porcelain.as_deref(), &scratch.root) {
+        Plan::Keep(why) => (
+            format!("kept its scratch target: {why}"),
+            Some(json!({ "kept": why, "at": at, "by": REPORT_BY })),
+        ),
         Plan::Free {
             branch,
             worktree,
             target,
-        } => (branch, worktree, target),
-    };
+        } => {
+            let (line, rec) = free_and_record(
+                &branch,
+                &worktree,
+                &target,
+                &scratch.root,
+                &scratch.seed,
+                &at,
+                REPORT_BY,
+            );
+            (line, Some(rec))
+        }
+    }
+}
+
+/// The gate's settlement (backlog a3355e14): its own verdict is green,
+/// so no run step needs reading — only the worktree it stamped at
+/// launch, held to a builder's.
+pub(crate) fn settle_at_green(
+    worktree: &Path,
+    branch: &str,
+    root: &Path,
+    seed: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (String, Value) {
+    let at = stamp(now);
+    match builder_target(root, worktree) {
+        Some(target) => free_and_record(branch, worktree, &target, root, seed, &at, GREEN_BY),
+        None => {
+            let why = not_a_builder(worktree, branch);
+            (
+                format!("kept its scratch target: {why}"),
+                json!({ "kept": why, "at": at, "by": GREEN_BY }),
+            )
+        }
+    }
+}
+
+/// Free one mapped target and say what happened, both ways.
+fn free_and_record(
+    branch: &str,
+    worktree: &Path,
+    target: &Path,
+    root: &Path,
+    seed: &Path,
+    at: &str,
+    by: &str,
+) -> (String, Value) {
     let path = target.display().to_string();
     let base = json!({
         "path": path,
         "worktree": worktree.display().to_string(),
         "branch": branch,
         "at": at,
+        "by": by,
     });
     let with = |extra: Value| {
         let mut rec = base.clone();
@@ -335,7 +474,7 @@ pub(crate) fn settle(
         }
         rec
     };
-    match free(&target, &scratch.root, &scratch.seed) {
+    match free(target, root, seed) {
         Freed::Removed { bytes, removed } => (
             format!(
                 "freed its scratch target {path} — {bytes} bytes ({}) as du counts them, its \
@@ -567,6 +706,98 @@ mod tests {
         assert!(other.join("CACHEDIR.TAG").exists());
     }
 
+    /// The gate's stamp names the worktree (backlog a3355e14): once the
+    /// green carried it onto `building`, no worktree list is needed to
+    /// map the branch — and the stamp is still held to a BUILDER's
+    /// worktree, because an operator's hand gate stamps its own tree.
+    #[test]
+    fn the_gates_stamp_names_the_worktree_without_git() {
+        let root = Path::new("/scratch");
+        let mut run = green_run("fix/x");
+        run["steps"][0]["metadata"]["gate_run"]["worktree"] =
+            json!("/work/boss/.claude/worktrees/agent-a9");
+        assert_eq!(
+            plan(&run, None, root),
+            Plan::Free {
+                branch: "fix/x".into(),
+                worktree: PathBuf::from("/work/boss/.claude/worktrees/agent-a9"),
+                target: PathBuf::from("/scratch/target-agent-a9"),
+            },
+            "the stamp wins, no worktree list needed"
+        );
+        // The stamp wins over a worktree list that maps elsewhere.
+        let text = porcelain("fix/x", "/work/boss/.claude/worktrees/agent-a1");
+        assert!(matches!(
+            plan(&run, Some(&text), root),
+            Plan::Free { ref target, .. } if target == Path::new("/scratch/target-agent-a9")
+        ));
+
+        run["steps"][0]["metadata"]["gate_run"]["worktree"] = json!("/work/boss");
+        let Plan::Keep(why) = plan(&run, Some(&text), root) else {
+            panic!("the operator's checkout is never a run's");
+        };
+        assert!(why.contains("agent-"), "{why}");
+    }
+
+    /// A target the gate already freed on its green is the record; a
+    /// later `--report` must not overwrite the bytes it freed with an
+    /// "absent" of its own.
+    #[test]
+    fn a_target_freed_at_the_green_is_not_recorded_twice() {
+        let root = boss_testing::scratch_dir("scratch-target-twice");
+        let scratch = Scratch {
+            root: root.clone(),
+            seed: root.join("target"),
+            porcelain: None,
+        };
+        let mut run = green_run("fix/x");
+        run["steps"][0]["metadata"]["gate_run"]["worktree"] =
+            json!("/work/boss/.claude/worktrees/agent-a9");
+        run["metadata"] = json!({ "scratch_target": {
+            "path": "/scratch/target-agent-a9", "freed_bytes": 42,
+            "removed": ["/scratch/target-agent-a9"], "by": GREEN_BY } });
+        let (line, rec) = settle(&run, &scratch, "2026-09-24T06:00:00Z".parse().unwrap());
+        assert!(rec.is_none(), "nothing re-recorded: {rec:?}");
+        assert!(line.contains("already freed"), "{line}");
+        assert!(line.contains("/scratch/target-agent-a9"), "{line}");
+    }
+
+    /// THE GATE'S HALF: `boss gate --wait` saw its own green, and the
+    /// gate-run names the worktree it launched from. A builder's target
+    /// goes, with the bytes and who freed it on the record; the
+    /// operator's tree is kept and says why.
+    #[test]
+    fn at_the_green_a_builders_target_is_freed_and_an_operators_kept() {
+        let root = boss_testing::scratch_dir("scratch-target-green");
+        let seed = root.join("target");
+        filled(&seed);
+        let target = root.join("target-agent-a9");
+        filled(&target);
+        let now = "2026-09-24T06:00:00Z".parse().unwrap();
+
+        let (line, rec) = settle_at_green(
+            Path::new("/work/boss/.claude/worktrees/agent-a9"),
+            "fix/x",
+            &root,
+            &seed,
+            now,
+        );
+        assert!(!target.exists(), "{line}");
+        assert!(seed.exists());
+        assert!(
+            rec["freed_bytes"].as_u64().unwrap_or(0) >= 64 * 1024,
+            "{rec}"
+        );
+        assert_eq!(rec["by"], GREEN_BY);
+        assert_eq!(rec["branch"], "fix/x");
+        assert!(line.contains("freed"), "{line}");
+
+        let (line, rec) = settle_at_green(Path::new("/work/boss"), "fix/x", &root, &seed, now);
+        assert!(rec["kept"].is_string(), "{rec}");
+        assert!(line.contains("kept"), "{line}");
+        assert!(seed.join("CACHEDIR.TAG").exists());
+    }
+
     /// End to end over a temp root: the line names the bytes, the
     /// record carries them, and a red run's target is untouched.
     #[test]
@@ -586,11 +817,14 @@ mod tests {
         let mut red = green_run("fix/x");
         red["steps"][0]["metadata"]["result"] = json!("refused");
         let (line, rec) = settle(&red, &scratch, now);
+        let rec = rec.expect("a keep is recorded");
         assert!(target.exists(), "a run that is not green keeps its target");
         assert!(rec["kept"].is_string(), "{rec}");
         assert!(line.contains("kept"), "{line}");
 
         let (line, rec) = settle(&green_run("fix/x"), &scratch, now);
+        let rec = rec.expect("a free is recorded");
+        assert_eq!(rec["by"], REPORT_BY);
         assert!(!target.exists());
         assert!(seed.exists());
         let bytes = rec["freed_bytes"].as_u64().expect("bytes on the record");

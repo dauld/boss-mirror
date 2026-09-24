@@ -765,6 +765,25 @@ pub trait JobsRepository: Send + Sync {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<Job, JobsError>;
 
+    /// Append one entry to the Job's reserved `corrections` list
+    /// (`crate::corrections`, design 4105b020), atomically against the
+    /// row as it stands, and return the post-append Job with the index
+    /// the entry landed at. A non-list under the key, or a non-object
+    /// metadata, folds to an empty list first.
+    ///
+    /// Append, never read-modify-write: two corrections landing at once
+    /// must both survive, which a caller-side GET → push → PATCH cannot
+    /// promise. Records, in the same transaction, JOB_UPDATED (full row
+    /// state, what the rebuild consumes — so it must be built from the
+    /// post-append row, as `merge_job_metadata_at`'s is) and
+    /// STEP_CORRECTED naming the step (the entry's `step`) and index.
+    async fn append_step_correction_at(
+        &self,
+        id: &JobId,
+        entry: &serde_json::Value,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<(Job, usize), JobsError>;
+
     /// Every machine the estate declares.
     ///
     /// Declaring a machine is a change to the TREE that converges

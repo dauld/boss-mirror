@@ -53,9 +53,11 @@
 //!    the claim door — a Ready→Active compare-and-set that answers 409
 //!    with the holder, so two operators dispatching one step is a
 //!    refusal naming the other, not two runs.
-//! 4. Files the `agent-run` packet with the settings, the actor, the
-//!    worktree and the host on it, and the rendered brief as `brief`
-//!    — the record of what the agent was told.
+//! 4. Files the `agent-run` packet with the settings, the actor and
+//!    the host on it, and the rendered brief as `brief` — the record
+//!    of what the agent was told. Not the worktree: this verb's cwd is
+//!    the dispatcher's, and the builder's own gate stamps the real one
+//!    (backlog a3355e14).
 //! 5. Prints the EXACT prompt: `boss brief`'s rendering (the packet,
 //!    the invariants, the rules document for the profile) and the run
 //!    id — what the operator pastes into the Agent tool today and what
@@ -109,7 +111,8 @@
 //! And once the run is GREEN, the report frees its worktree's cargo
 //! target on the dev pod scratch, recording the bytes on the run as
 //! `scratch_target` ([`crate::scratch_target`], backlog 4e17c49d); a run
-//! that is not green keeps it for the rescue.
+//! that is not green keeps it for the rescue, and a target the gate's
+//! waiter already freed at the green keeps that record (a3355e14).
 
 use anyhow::{Context, Result, bail};
 use boss_jobs::agent_runs::{PricingBasis, TokenUsage};
@@ -471,7 +474,6 @@ pub(crate) fn run_body(
     step_slug: &str,
     agent: &str,
     settings: &Settings,
-    worktree: &str,
     host: &str,
     brief: &str,
     owner: &str,
@@ -489,7 +491,11 @@ pub(crate) fn run_body(
             "model": settings.model,
             "budget_usd": settings.budget_usd,
             "effort": settings.effort,
-            "worktree": worktree,
+            // No `worktree` (backlog a3355e14): this verb runs in the
+            // DISPATCHER's session, so its cwd is not where the run is
+            // built. The builder's gate stamps its own worktree, and
+            // the green carries it onto `building` as
+            // `gate_run.worktree`.
             "host": host,
             "brief": brief,
         })),
@@ -916,7 +922,6 @@ pub(crate) async fn dispatch_at(
     force: bool,
     actor: &str,
     owner: &str,
-    worktree: &str,
     host: &str,
     source: BriefSource<'_>,
 ) -> Result<Dispatched> {
@@ -1099,9 +1104,7 @@ pub(crate) async fn dispatch_at(
         BriefSource::Handed { prompt, .. } => prompt.to_string(),
     };
 
-    let mut body = run_body(
-        &id, &title, &slug, actor, &settings, worktree, host, &brief, owner,
-    );
+    let mut body = run_body(&id, &title, &slug, actor, &settings, host, &brief, owner);
     if let BriefSource::Handed {
         session: Some(session),
         ..
@@ -1259,7 +1262,6 @@ pub(crate) async fn next_at(
     over: &Overrides,
     actor: &str,
     owner: &str,
-    worktree: &str,
     host: &str,
 ) -> Result<Option<Dispatched>> {
     use reqwest::Method;
@@ -1335,7 +1337,6 @@ pub(crate) async fn next_at(
             false,
             actor,
             owner,
-            worktree,
             host,
             BriefSource::Rendered,
         )
@@ -1363,9 +1364,6 @@ pub async fn next(
     let actor = crate::identity::sign(&reqwest::Method::POST, "/api/jobs")?;
     let owner = crate::owner::for_filing_at(&base).await;
     let host = crate::prove::host();
-    let worktree = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
     let over = Overrides {
         model,
         budget_usd: budget,
@@ -1384,7 +1382,6 @@ pub async fn next(
         &over,
         &actor,
         &owner,
-        &worktree,
         &host,
     )
     .await?;
@@ -2017,12 +2014,15 @@ pub(crate) async fn report_at(
         .await
         .context("the scratch-target pass did not finish")?;
         eprintln!("boss dispatch: run {short} {said}");
-        if let Err(e) = api_at(
-            Method::PATCH,
-            format!("/api/jobs/{run_id}/metadata"),
-            Some(json!({ "scratch_target": record })),
-        )
-        .await
+        // `None`: the gate's waiter freed it at the green (a3355e14),
+        // and its record — the bytes — is the one to keep.
+        if let Some(record) = record
+            && let Err(e) = api_at(
+                Method::PATCH,
+                format!("/api/jobs/{run_id}/metadata"),
+                Some(json!({ "scratch_target": record })),
+            )
+            .await
         {
             eprintln!(
                 "boss dispatch: WARNING — run {short}'s scratch_target could not be recorded on \
@@ -2175,9 +2175,6 @@ pub async fn run(
     let actor = crate::identity::sign(&reqwest::Method::POST, "/api/jobs")?;
     let owner = crate::owner::for_filing_at(&base).await;
     let host = crate::prove::host();
-    let worktree = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
     let over = Overrides {
         model,
         budget_usd: budget,
@@ -2199,7 +2196,6 @@ pub async fn run(
         force,
         &actor,
         &owner,
-        &worktree,
         &host,
         BriefSource::Rendered,
     )
@@ -2595,7 +2591,6 @@ mod tests {
             "build",
             "claude@algedonic.dev",
             &block(),
-            "/work/boss/.claude/worktrees/agent-a5",
             "boss-dev-0",
             "== THE PACKET ==\nverbatim",
             "emp-david",
@@ -2608,7 +2603,9 @@ mod tests {
             assert!(!md[k].is_null(), "{k} is written");
         }
         assert_eq!(md["budget_usd"], 5.0);
-        assert_eq!(md["worktree"], "/work/boss/.claude/worktrees/agent-a5");
+        // Never the dispatcher's cwd (a3355e14): the only worktree the
+        // run records is the one its gate stamps, carried by the green.
+        assert!(md.get("worktree").is_none(), "{md}");
         assert_eq!(md["host"], "boss-dev-0");
         assert_eq!(md["brief"], "== THE PACKET ==\nverbatim");
         // The API's clock owns the date (no `opened_on` sent, so the
@@ -3527,7 +3524,6 @@ mod wire_tests {
             false,
             "claude@algedonic.dev",
             "emp-david",
-            "/work/boss/.claude/worktrees/agent-x",
             "boss-dev-0",
             BriefSource::Rendered,
         )
@@ -3613,9 +3609,9 @@ mod wire_tests {
             "the override, and only it"
         );
         assert_eq!(filed["metadata"]["effort"], "high");
-        assert_eq!(
-            filed["metadata"]["worktree"],
-            "/work/boss/.claude/worktrees/agent-x"
+        assert!(
+            filed["metadata"].get("worktree").is_none(),
+            "the dispatcher's cwd is not the run's worktree (a3355e14)"
         );
         assert_eq!(filed["metadata"]["host"], "boss-dev-0");
         let brief = filed["metadata"]["brief"].as_str().unwrap();
@@ -3665,7 +3661,6 @@ mod wire_tests {
             false,
             "claude@algedonic.dev",
             "emp-david",
-            "/wt",
             "h",
             BriefSource::Rendered,
         )
@@ -3734,7 +3729,6 @@ mod wire_tests {
             false,
             "claude@algedonic.dev",
             "emp-david",
-            "/wt",
             "h",
             BriefSource::Rendered,
         )
@@ -3776,7 +3770,6 @@ mod wire_tests {
             false,
             "claude@algedonic.dev",
             "emp-david",
-            "/wt",
             "h",
             BriefSource::Handed {
                 prompt: "p",
@@ -3878,7 +3871,6 @@ mod wire_tests {
             false,
             "claude@algedonic.dev",
             "emp-david",
-            "/wt",
             "h",
             BriefSource::Rendered,
         )
@@ -3914,7 +3906,6 @@ mod wire_tests {
             false,
             "claude@algedonic.dev",
             "emp-david",
-            "/wt",
             "h",
             BriefSource::Handed {
                 prompt: "p",
@@ -3956,7 +3947,6 @@ mod wire_tests {
             false,
             "claude@algedonic.dev",
             "emp-david",
-            "/wt",
             "h",
             handed,
         )
@@ -3983,7 +3973,6 @@ mod wire_tests {
                 false,
                 "claude@algedonic.dev",
                 "emp-david",
-                "/wt",
                 "h",
                 handed,
             )
@@ -4009,7 +3998,6 @@ mod wire_tests {
             false,
             "claude@algedonic.dev",
             "emp-david",
-            "/wt",
             "h",
             BriefSource::Rendered,
         )
@@ -4074,7 +4062,6 @@ mod wire_tests {
             false,
             "claude@algedonic.dev",
             "emp-david",
-            "/wt",
             "h",
             BriefSource::Rendered,
         )
@@ -4162,7 +4149,6 @@ mod wire_tests {
             true,
             "claude@algedonic.dev",
             "emp-david",
-            "/wt",
             "h",
             BriefSource::Rendered,
         )
@@ -4684,7 +4670,6 @@ mod wire_tests {
                 &Overrides::default(),
                 "agent-claude",
                 "emp-david",
-                "/work/boss/.claude/worktrees/agent-x",
                 "boss-dev-0",
             )
             .await

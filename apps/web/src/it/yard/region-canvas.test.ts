@@ -6,27 +6,23 @@
 import { describe, expect, it } from 'bun:test';
 
 import { REGION_CANVAS, regionCanvas } from './region-canvas';
-import { interiorLayout } from './region-contents';
 import { platformLayout, type Platform } from './world-interior';
 import { MACHINERY_STRIP_H } from './world-machines';
 import { TERRITORIES, WORLD, territoryOf } from './world';
-import type { Wagon } from './yard-floor';
 
-const wagon = (id: string): Wagon => ({
-  id,
-  tag: id,
-  title: `car ${id}`,
-  branch: `fix/${id}`,
-  head: null,
-  kind: 'backlog-item',
-  sim: false,
-  station: 'dock',
-  slot: 0,
-  trainId: null,
-  tone: 'static',
-  lamp: 'off',
-  status: 'standing',
-  since: null,
+// The layout these are measured through is `platformLayout`, the one
+// left that divides a region's canvas: the wagon plates' grid
+// (`interiorLayout`) was deleted with design fe77a1d2 car 3, when the
+// region map began drawing its slice of the floor itself — that
+// slice's own room is pinned in floor-slices.test.ts.
+const platform = (name: string): Platform => ({
+  key: name,
+  name,
+  standing: 3,
+  bound: null,
+  rate: 1,
+  flag: { from: 'tail', n: 0 },
+  note: '',
 });
 
 describe('the region canvas', () => {
@@ -49,11 +45,11 @@ describe('the region canvas', () => {
     expect(slots.size).toBeGreaterThan(1);
   });
 
-  it('fits strictly more wagons than the same region did on the world line', () => {
-    const wagons = Array.from({ length: 60 }, (_, i) => wagon(`c${i}`));
+  it('fits strictly more than the same region did on the world line', () => {
+    const platforms = Array.from({ length: 60 }, (_, i) => platform(`s${i}`));
     for (const t of TERRITORIES) {
-      const onTheLine = interiorLayout(t, wagons);
-      const onItsOwnCanvas = interiorLayout(regionCanvas(t.name), wagons);
+      const onTheLine = platformLayout(t, platforms);
+      const onItsOwnCanvas = platformLayout(regionCanvas(t.name), platforms);
       expect(onItsOwnCanvas.placed.length).toBeGreaterThan(onTheLine.placed.length);
       expect(onItsOwnCanvas.hidden).toBeLessThan(onTheLine.hidden);
     }
@@ -76,34 +72,17 @@ describe('the region canvas', () => {
 // rows ending at y 400, the strip's top edge exactly. `contentsBox`
 // (backlog 3a916816) took the strip out of the division, but nothing
 // held the canvas's HEIGHT against the constants it is divided by —
-// and both layouts force a first row (`Math.max(1, …)`), so a canvas
+// and the layout forces a first row (`Math.max(1, …)`), so a canvas
 // shrunk in the coming redesign would still draw one, over the strip.
-// These are asserted on what the layouts actually place, not on a copy
-// of their constants, so a change to either side is caught here.
-
-const platform = (name: string): Platform => ({
-  key: name,
-  name,
-  standing: 3,
-  bound: null,
-  rate: 1,
-  flag: { from: 'tail', n: 0 },
-  note: '',
-});
+// These are asserted on what the layout actually places, not on a copy
+// of its constants, so a change to either side is caught here.
 
 describe('the region canvas leaves room for its contents AND the whole strip', () => {
-  const wagons = Array.from({ length: 200 }, (_, i) => wagon(`c${i}`));
   const platforms = Array.from({ length: 60 }, (_, i) => platform(`s${i}`));
 
   for (const t of TERRITORIES) {
     const canvas = regionCanvas(t.name);
     const stripTop = canvas.y + canvas.h - MACHINERY_STRIP_H;
-
-    it(`${t.name}: every wagon plate ends above the strip`, () => {
-      const { placed } = interiorLayout(canvas, wagons);
-      expect(placed.length).toBeGreaterThan(0);
-      for (const p of placed) expect(p.y + p.h, p.wagon.id).toBeLessThanOrEqual(stripTop);
-    });
 
     it(`${t.name}: every platform row ends above the strip`, () => {
       const { placed } = platformLayout(canvas, platforms);
@@ -125,7 +104,6 @@ describe('the overflow note', () => {
   /** A 9 px note's ascent, rounded up: `.tiny` is 9 px, and "+N more"
    *  has no descender, so the baseline is its lowest pixel. */
   const NOTE_ASCENT = 9;
-  const wagons = Array.from({ length: 200 }, (_, i) => wagon(`c${i}`));
   const platforms = Array.from({ length: 60 }, (_, i) => platform(`s${i}`));
 
   for (const t of TERRITORIES) {
@@ -133,12 +111,8 @@ describe('the overflow note', () => {
     const stripTop = canvas.y + canvas.h - MACHINERY_STRIP_H;
 
     it(`${t.name}: sits inside the outline, above every row, and clear of the strip`, () => {
-      const plates = interiorLayout(canvas, wagons);
       const decks = platformLayout(canvas, platforms);
-      const rows = [
-        { note: plates.note, tops: plates.placed.map((p) => p.y) },
-        { note: decks.note, tops: decks.placed.map((p) => p.y) },
-      ];
+      const rows = [{ note: decks.note, tops: decks.placed.map((p) => p.y) }];
       for (const { note, tops } of rows) {
         expect(note.y).toBeLessThan(stripTop);
         expect(note.y - NOTE_ASCENT).toBeGreaterThanOrEqual(canvas.y);

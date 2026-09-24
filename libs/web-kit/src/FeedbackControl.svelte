@@ -325,10 +325,12 @@
      Matching `.signin-btn` rather than inventing another treatment:
      the two are the only bordered buttons in the bar, and they sat
      one gap apart with different borders, radii, and padding. */
-  /* Ghost button, §04 — matches .signin-btn beside it. */
+  /* Ghost button, §04 — matches .signin-btn beside it. The bar is an
+     enamel band now (backlog 7eb59678 car 2), so the word and frame are
+     the band's white, and hover fills the frame white under ink. */
   .fb-trigger {
     background: transparent;
-    border: 1px solid var(--hairline);
+    border: 1px solid var(--band-rule);
     border-radius: var(--radius);
     padding: 5px 12px;
     font-family: var(--font-mono);
@@ -337,15 +339,15 @@
     text-transform: uppercase;
     letter-spacing: var(--ls-nav);
     line-height: 1.4;
-    color: var(--fog);
+    color: var(--on-band);
     cursor: pointer;
     white-space: nowrap;
     transition: background 0.1s, color 0.1s, border-color 0.1s;
   }
   .fb-trigger:hover {
-    background: var(--fog);
-    color: var(--void);
-    border-color: var(--fog);
+    background: var(--on-band);
+    color: var(--band);
+    border-color: var(--on-band);
   }
   .fb-trigger:focus-visible,
   .fb-send:focus-visible {

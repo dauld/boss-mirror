@@ -342,7 +342,7 @@ describe("a region map draws its own slice of the floor", () => {
 describe('the region map renders its slice, and every mark on it selects', () => {
   const floor = readFileSync(join(import.meta.dir, 'RegionFloor.svelte'), 'utf8');
   const map = readFileSync(join(import.meta.dir, 'RegionMap.svelte'), 'utf8');
-  const page = readFileSync(join(import.meta.dir, 'YardPage.svelte'), 'utf8');
+  const page = readFileSync(join(import.meta.dir, 'FloorDeck.svelte'), 'utf8');
   const strip = (s: string) => s.replace(/<!--[\s\S]*?-->/g, '');
 
   it('draws its wagons, bays and locomotives from the view, keeping no placement of its own', () => {
@@ -368,10 +368,12 @@ describe('the region map renders its slice, and every mark on it selects', () =>
     expect(map).not.toContain('interiorLayout');
   });
 
-  it('leaves no second map under it: the yard page draws none, and YardMap is gone', () => {
+  it('leaves no second map under it: the floor deck draws none, and YardMap is gone', () => {
     expect(strip(page)).not.toContain('<YardMap');
     expect(page).not.toContain("import YardMap");
     expect(existsSync(join(import.meta.dir, 'YardMap.svelte'))).toBe(false);
+    // …and the page that drew it went with it (car 3).
+    expect(existsSync(join(import.meta.dir, 'YardPage.svelte'))).toBe(false);
   });
 });
 

@@ -117,6 +117,10 @@ export type Step = {
   }[];
   completed_on: string | null;
   metadata: Record<string, unknown>;
+  /// The job's corrections that target this step, attached by the job
+  /// GET (design 4105b020); absent when there are none. Read only
+  /// through `steps/corrections.ts`, which the one marker draws from.
+  corrections?: unknown;
   notes?: string | null;
   /// Pointer to a child Job when this Step's work decomposes
   /// further. Structural column on the `steps` table; traversal

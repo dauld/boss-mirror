@@ -708,6 +708,72 @@ impl JobsRepository for PgJobs {
         Ok(job)
     }
 
+    async fn append_step_correction_at(
+        &self,
+        id: &JobId,
+        entry: &serde_json::Value,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<(Job, usize), JobsError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        // ONE statement is the atomicity, as in `merge_job_metadata_at`:
+        // the append happens against the row as it stands at write
+        // time, so two corrections landing together both survive. The
+        // CASEs fold a non-object metadata and a non-list under the key
+        // to empty, the rule `corrections::appended` states in Rust.
+        let row = sqlx::query_as::<_, JobRow>(
+            r#"
+            UPDATE jobs SET
+                metadata = (CASE WHEN jsonb_typeof(metadata) = 'object'
+                                 THEN metadata ELSE '{}'::jsonb END)
+                           || jsonb_build_object(
+                                'corrections',
+                                (CASE WHEN jsonb_typeof(metadata -> 'corrections') = 'array'
+                                      THEN metadata -> 'corrections' ELSE '[]'::jsonb END)
+                                || jsonb_build_array($2::jsonb)),
+                updated_at = $3
+            WHERE id = $1
+            RETURNING id, kind, workflow_version, subject_kind, subject_id, title, owner_id,
+                      status, priority, opened_on, opened_at, due_on, closed_on, metadata, tags, partition
+            "#,
+        )
+        .bind(*id.inner().as_uuid())
+        .bind(entry.clone())
+        .bind(stamp.timestamp)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        let Some(row) = row else {
+            return Err(JobsError::NotFound(*id));
+        };
+        let job = row_to_job(row);
+        // Our entry is the last one: RETURNING is the row as THIS
+        // update left it, under its row lock.
+        let index = crate::corrections::list(&job.metadata)
+            .len()
+            .saturating_sub(1);
+        let updated = stamp.event(
+            crate::events::JOB_UPDATED,
+            serde_json::to_value(&job).unwrap_or_default(),
+        );
+        let corrected = stamp.event(
+            crate::events::STEP_CORRECTED,
+            crate::corrections::corrected_payload(&id.to_string(), entry, index),
+        );
+        for event in [&updated, &corrected] {
+            boss_events::outbox::record_event_in_tx(&mut tx, event)
+                .await
+                .map_err(JobsError::Storage)?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok((job, index))
+    }
+
     async fn list_estate_nodes(&self) -> Result<Vec<crate::port::EstateNode>, JobsError> {
         let rows = sqlx::query_as::<_, EstateNodeRow>(
             r#"

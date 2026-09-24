@@ -80,6 +80,12 @@ pub const STEP_SIGNED_OFF: &str = "jobs.step.signed_off";
 /// the listed stamps no longer attest the current content and the
 /// named roles must re-sign before the step can complete.
 pub const STEP_STAMPS_INVALIDATED: &str = "jobs.step.stamps_invalidated";
+/// A correction was appended beside a completed or skipped step
+/// (`corrections`, design 4105b020): payload `{job_id, step_id, index,
+/// correction}`. The fact of the correction; the job's row state rides
+/// the sibling JOB_UPDATED in the same transaction, which is what the
+/// rebuild replays, so the rebuild ignores this marker.
+pub const STEP_CORRECTED: &str = "jobs.step.corrected";
 pub const JOB_CLOSED: &str = "jobs.job.closed";
 /// A quarantine pass found an ACTIVE Workflow that fails the viability
 /// lint and retired it. Boot no longer emits this: it checks and logs

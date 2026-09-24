@@ -638,9 +638,11 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                     "step_id": step_id.to_string(),
                     "step_status": status_word(old.status),
                     "refused_fields": frozen,
-                    "hint": "a completed step is a record of what happened. To correct or \
-                             annotate it, write to the parent job's metadata \
-                             (PATCH /api/jobs/{id}/metadata) instead.",
+                    // Names the corrections door (design 4105b020):
+                    // this hint was the only guidance a correcting
+                    // author got, and pointing at free-form job
+                    // metadata is where 25 invented key names came from.
+                    "hint": crate::corrections::TERMINAL_STEP_HINT,
                 })),
             )
                 .into_response();
@@ -1394,9 +1396,9 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
 ///
 /// A terminal step is refused with the PUT's own 409 shape (job
 /// 903e6b90: the caller is TOLD, never 204'd into believing a frozen
-/// write landed), and the hint points at the job metadata merge — the
-/// door that works, because a completed step is a record of what
-/// happened. Unlike the PUT there is no idempotent-re-send carve-out:
+/// write landed), and the hint names the doors that work, because a
+/// completed step is a record of what happened: the corrections door
+/// for a correction, the job metadata merge for an annotation. Unlike the PUT there is no idempotent-re-send carve-out:
 /// nothing redelivers through this route, and a no-op "change" to a
 /// terminal step still has a better answer the message names.
 ///
@@ -1487,9 +1489,7 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
                     "step_id": step_id.to_string(),
                     "step_status": status,
                     "refused_fields": ["metadata"],
-                    "hint": "a completed step is a record of what happened. To correct or \
-                             annotate it, write to the parent job's metadata \
-                             (PATCH /api/jobs/{id}/metadata) instead.",
+                    "hint": crate::corrections::TERMINAL_STEP_HINT,
                 })),
             )
                 .into_response();
@@ -1539,6 +1539,126 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
     }
 
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// `POST /api/jobs/{id}/steps/{step_id}/corrections` — append a
+/// correction beside a completed or skipped step (design 4105b020,
+/// backlog 56727f95). The ONLY writer of the job's reserved
+/// `corrections` list; the rules are `crate::corrections`'.
+///
+/// Body: `{field, reads, should_read, why}`, or `{withdraws, why}` to
+/// withdraw an earlier entry of this step by appending. 201 with
+/// `{index, correction}`. Refuses: an open step (409 — it is still
+/// editable), and with 422 a missing key, a `field` the step does not
+/// hold, a `reads` excerpt not in that field's stored text, and a
+/// withdrawal that names no live entry of this step. The step itself
+/// and every event it produced are untouched; the entry is signed with
+/// the caller and stamped with the write's time.
+///
+/// Policy: the job metadata merge's gate — `(Update, job)` plus the
+/// scope check — because the write lands in the job's metadata.
+pub(super) async fn post_step_correction<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    Path((id, step_id_str)): Path<(String, String)>,
+    CurrentUser(user): CurrentUser,
+    Json(req): Json<crate::corrections::CorrectionRequest>,
+) -> Response {
+    let job_id = match super::jobs::resolve_path_job_id(&state, &id).await {
+        Ok(job_id) => job_id,
+        Err(refusal) => return refusal,
+    };
+    let step_id = match parse_step_id(&step_id_str) {
+        Some(id) => id,
+        None => return (StatusCode::BAD_REQUEST, "invalid step id").into_response(),
+    };
+    let job = match state.jobs.get_job(&job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => return (StatusCode::NOT_FOUND, "job not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let scope = match state
+        .policy
+        .check(&user, Action::Update, Resource::job())
+        .await
+    {
+        Ok(Decision::Deny { reason }) => return (StatusCode::FORBIDDEN, reason).into_response(),
+        Ok(Decision::Allow { scope }) => scope,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("policy check failed: {e}"),
+            )
+                .into_response();
+        }
+    };
+    if !scope_matches(&user, &scope, &job) {
+        return (StatusCode::FORBIDDEN, "job is outside your scope").into_response();
+    }
+    let step = match state.jobs.get_step(&step_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => return (StatusCode::NOT_FOUND, "step not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    // Same containment rule as the claim and merge routes.
+    if step.job_id != job_id {
+        return (StatusCode::NOT_FOUND, "step not on this job").into_response();
+    }
+
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let stamp = state
+        .publisher
+        .stamp_with_actor(actor.clone())
+        .await
+        .with_partition(job.partition);
+    let step_id_text = step_id.to_string();
+    let entry = match crate::corrections::entry_for(
+        crate::corrections::Target {
+            step_id: &step_id_text,
+            terminal: matches!(step.status, StepStatus::Completed | StepStatus::Skipped),
+            status: status_word(step.status),
+            metadata: &step.metadata,
+        },
+        crate::corrections::list(&job.metadata),
+        &req,
+        &actor.to_string(),
+        &stamp.timestamp.to_rfc3339(),
+    ) {
+        Ok(entry) => entry,
+        Err(refusal) => {
+            let code = if refusal.is_conflict() {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::UNPROCESSABLE_ENTITY
+            };
+            return (
+                code,
+                Json(serde_json::json!({
+                    "error": refusal.message(),
+                    "step_id": step_id_text,
+                    "step_status": status_word(step.status),
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match state
+        .jobs
+        .append_step_correction_at(&job_id, &entry, &stamp)
+        .await
+    {
+        Ok((_, index)) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({ "index": index, "correction": entry })),
+        )
+            .into_response(),
+        Err(crate::port::JobsError::NotFound(_)) => {
+            (StatusCode::NOT_FOUND, "job not found").into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 #[derive(Deserialize)]

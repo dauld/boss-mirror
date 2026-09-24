@@ -25,7 +25,7 @@
   } from './conductorActivity';
   import type { JobLite } from '../yard/yard';
 
-  // The Yard's cadence (YardPage.svelte): a 10s poll. Depth-style
+  // The Yard's cadence (FloorDeck.svelte): a 10s poll. Depth-style
   // aggregates a single event does not unambiguously update, so we
   // re-fetch rather than stream.
   const POLL_MS = 10_000;

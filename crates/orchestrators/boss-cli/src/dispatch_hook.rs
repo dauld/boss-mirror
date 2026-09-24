@@ -264,7 +264,6 @@ pub(crate) async fn from_hook_at(
     session: Option<&str>,
     actor: &str,
     owner: &str,
-    worktree: &str,
     host: &str,
     definitions: Option<&Path>,
 ) -> Result<Outcome> {
@@ -365,7 +364,6 @@ pub(crate) async fn from_hook_at(
                 false,
                 actor,
                 owner,
-                worktree,
                 host,
                 BriefSource::Handed { prompt, session },
             )
@@ -402,16 +400,6 @@ pub async fn run(session: String) -> Result<()> {
     let actor = crate::identity::sign(&reqwest::Method::POST, "/api/jobs")?;
     let owner = crate::owner::for_filing_at(&base).await;
     let host = crate::prove::host();
-    let worktree = input
-        .get("cwd")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.display().to_string())
-        })
-        .unwrap_or_default();
     // `session-start.sh` wrote this at the one moment Claude Code
     // reads the definitions directory (backlog e1c4dc93); unset, the
     // door knows nothing about the session and refuses nothing.
@@ -427,7 +415,6 @@ pub async fn run(session: String) -> Result<()> {
         session.as_deref(),
         &actor,
         &owner,
-        &worktree,
         &host,
         definitions.as_deref(),
     )
@@ -738,7 +725,6 @@ mod wire_tests {
             session,
             "emp-david",
             "emp-david",
-            "/work/boss/.claude/worktrees/agent-x",
             "boss-dev-0",
             definitions,
         )

@@ -16,7 +16,7 @@
 // `/api/stations/load`, rate from `/api/stations/flow`), the receiving
 // platforms from the inbound rows `receiving.ts` already parsed and
 // classified. The pages that own those reads hand them up, the way
-// YardPage hands its Scene up for the other six territories — one read
+// FloorDeck hands its Scene up for the other six territories — one read
 // of a region on the page, never two.
 //
 // A NUMBER NOBODY COULD TAKE IS UNKNOWN, NEVER NOUGHT. A station whose
@@ -260,8 +260,9 @@ export function platformLayout(
   platforms: ReadonlyArray<Platform>,
 ): Readonly<{ placed: ReadonlyArray<PlacedPlatform>; hidden: number; note: NoteAt }> {
   // The room the region's contents may use — head off the top, edge
-  // and MACHINERY STRIP off the bottom. One definition, shared with
-  // `interiorLayout` (backlog 3a916816): this divided the same canvas
+  // and MACHINERY STRIP off the bottom. One definition, once shared
+  // with the wagon plates' `interiorLayout` (backlog 3a916816; deleted,
+  // fe77a1d2 car 3): this divided the same canvas
   // without the strip's term, so a platform row and a machine glyph
   // could be placed in the same pixels.
   const box = contentsBox(t, PLATFORM_H);

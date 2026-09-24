@@ -1,9 +1,9 @@
 // WHAT A REGION CONTAINS, AND WHERE IT SITS IN THE REGION'S RECT.
 //
-// This module SELECTS and PLACES: which stations a region covers,
-// which wagons are standing in it, and where each plate goes inside
-// the rect it is handed. One definition per number — it derives no
-// count and invents no state.
+// This module SELECTS and MEASURES: which stations a region covers,
+// and the room inside the rect it is handed that a region's contents
+// may use. One definition per number — it derives no count and
+// invents no state.
 //
 // THERE IS NO CAMERA HERE ANY MORE (David, 2026-09-20; backlog
 // ca37478f). Until today a click walked the SVG's viewBox from the
@@ -16,7 +16,7 @@
 // the route decides which. The interpolation is DELETED rather than
 // left unused, and this file is named for what it does now.
 //
-// `interiorLayout` takes the rect to lay out INSIDE, which is the only
+// `contentsBox` takes the rect to lay out INSIDE, which is the only
 // thing the swap changed here: a slot on the world line before, a
 // region's whole canvas (region-canvas.ts) now.
 //
@@ -25,8 +25,8 @@
 
 import { REGION_NAMES, type RegionName } from './regions';
 import { MACHINERY_STRIP_H } from './world-machines';
-import { territoryOf, type Territory } from './world';
-import type { Scene, Station, Wagon } from './yard-floor';
+import type { Territory } from './world';
+import type { Station } from './yard-floor';
 
 // ---------------------------------------------------------------------
 // Which territory a wagon is standing in.
@@ -86,32 +86,17 @@ export function hasInterior(region: string): boolean {
   return (INTERIOR_REGIONS as ReadonlyArray<string>).includes(region);
 }
 
-/** The wagons standing in a territory, in the order the floor stands
- *  them: by station, then by slot — so a wagon keeps its place between
- *  polls and a move is a move, not a reshuffle. */
-export function interiorWagons(scene: Scene, region: string): ReadonlyArray<Wagon> {
-  if (!hasInterior(region)) return [];
-  const stations = Object.keys(STATION_REGION) as ReadonlyArray<Station>;
-  const order = new Map(stations.map((s, i) => [s, i] as const));
-  return scene.wagons
-    .filter((w) => regionOfStation(w.station) === region)
-    .slice()
-    .sort((a, b) => (order.get(a.station)! - order.get(b.station)!) || a.slot - b.slot || a.id.localeCompare(b.id));
-}
-
 // ---------------------------------------------------------------------
-// Where the plates go inside the outline.
+// The room inside the outline.
+//
+// The wagon plates that were laid out here — `interiorWagons`, the
+// `Placed` grid and `interiorLayout` — are deleted (design fe77a1d2,
+// car 3): the region map draws its slice of the floor itself
+// (floor-slices.ts, RegionFloor.svelte) and nothing read the plates
+// any more. What stays is the room the queue boards' platforms are
+// laid out in (world-interior.ts `platformLayout`).
 // ---------------------------------------------------------------------
 
-/** A wagon plate, placed in world coordinates. */
-export type Placed = Readonly<{ wagon: Wagon; x: number; y: number; w: number; h: number }>;
-
-/** The grid: plates wide enough for an eleven-character nameplate at
- *  9px mono (the width YardMap gives a wagon), laid left to right then
- *  down, under the territory's own count and trend block. */
-const PLATE_W = 62;
-const PLATE_H = 18;
-const GAP = 4;
 /** Clear of the compact header a ZOOMED territory prints — its name,
  *  its count over its bound, its state and its why on two lines. The
  *  full count/trend/why block the world draws at rest is not drawn
@@ -120,9 +105,10 @@ const GAP = 4;
 const INTERIOR_HEAD = 64;
 const EDGE = 8;
 
-/** THE ROOM A REGION'S CONTENTS MAY USE — one definition, read by both
- *  layouts that divide a region's rect (CLAUDE.md 9a; backlog
- *  3a916816). The bottom of every territory belongs to its machinery
+/** THE ROOM A REGION'S CONTENTS MAY USE — one definition, read by the
+ *  layout that divides a region's rect (CLAUDE.md 9a; backlog
+ *  3a916816; there were two until the wagon plates were deleted,
+ *  fe77a1d2 car 3). The bottom of every territory belongs to its machinery
  *  (car 5), and the height of that strip is read from the strip's own
  *  definition rather than copied.
  *
@@ -134,8 +120,8 @@ const EDGE = 8;
  *  `platformLayout` divided this same canvas WITHOUT the strip's term
  *  and did not import its height at all, so a platform row and a
  *  machine glyph could be placed in the same pixels — and on the world
- *  line's 200-high territory they were. Both callers read this now, so
- *  the two cannot disagree about where the bottom is. */
+ *  line's 200-high territory they were. It reads this now, so no
+ *  layout can disagree with the strip about where the bottom is. */
 export function contentsBox(
   t: Territory,
   rowH: number,
@@ -161,25 +147,4 @@ const NOTE_GAP = 4;
 
 export function overflowNoteAt(box: Readonly<{ x: number; y: number; w: number }>): NoteAt {
   return { x: box.x + box.w, y: box.y - NOTE_GAP };
-}
-
-/** Lay the wagons out inside the territory. What does not fit is
- *  COUNTED, never dropped silently — the yard's own "+N" idiom, so a
- *  full region reads as full rather than as a tidy one. */
-export function interiorLayout(
-  t: Territory,
-  wagons: ReadonlyArray<Wagon>,
-): Readonly<{ placed: ReadonlyArray<Placed>; hidden: number; note: NoteAt }> {
-  const box = contentsBox(t, PLATE_H);
-  const cols = Math.max(1, Math.floor((box.w + GAP) / (PLATE_W + GAP)));
-  const rows = Math.max(1, Math.floor((box.h + GAP) / (PLATE_H + GAP)));
-  const capacity = cols * rows;
-  const placed = wagons.slice(0, capacity).map((wagon, i): Placed => ({
-    wagon,
-    x: box.x + (i % cols) * (PLATE_W + GAP),
-    y: box.y + Math.floor(i / cols) * (PLATE_H + GAP),
-    w: PLATE_W,
-    h: PLATE_H,
-  }));
-  return { placed, hidden: Math.max(0, wagons.length - placed.length), note: overflowNoteAt(box) };
 }

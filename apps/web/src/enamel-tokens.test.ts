@@ -107,6 +107,12 @@ describe('the Enamel tokens are the decided values', () => {
     ['--on-clear', '#FFFFFF'],
     ['--on-busy', '#0E1B2E'], // busy's plate is read under ink
     ['--on-troubled', '#FFFFFF'],
+    // the step lifecycle's plates: ready solid blue, completed solid ink
+    // (pending is a dashed frame, so it has no ground of its own)
+    ['--ready', '#0F6E9F'],
+    ['--on-ready', '#FFFFFF'],
+    ['--completed', '#0E1B2E'],
+    ['--on-completed', '#FFFFFF'],
     ['--radius', '4px'],
     ['--radius-field', '3px'],
     ['--frame', '2px'],
@@ -175,10 +181,17 @@ describe('every word the palette carries is legible (AA, 4.5:1)', () => {
     // a primary button, a nav badge: white on the action blue
     ['--void', '--signal'],
     ['--on-band', '--band'],
+    // the chrome bar's quieter words — tabs, the time label — on the band,
+    // and on a tab's hover ground
+    ['--on-band-dim', '--band'],
+    ['--on-band-dim', '--band-raised', '--band'],
+    ['--on-band', '--band-raised', '--band'],
     // the plates always carry their word
     ['--on-clear', '--clear'],
     ['--on-busy', '--busy'],
     ['--on-troubled', '--troubled'],
+    ['--on-ready', '--ready'],
+    ['--on-completed', '--completed'],
     // a chip: its text on its own wash, on a card
     ['--text', '--wash', '--ink'],
     ['--warn', '--wash', '--ink'],
@@ -200,6 +213,121 @@ describe('every word the palette carries is legible (AA, 4.5:1)', () => {
       expect(on(fg, bg, under)).toBeGreaterThanOrEqual(AA);
     });
   }
+});
+
+/** Every rule outside :root, as selector -> declarations. A selector list
+ *  is split, so `.plate-ready, .step-status-ready { ... }` answers for both.
+ *  Rules nested in @media are read too; nothing below cares which. */
+const rules: ReadonlyMap<string, ReadonlyMap<string, string>> = (() => {
+  const outside = uncommented.replace(ROOT_BLOCK, (m) => m.replace(/[^\n]/g, ' '));
+  const map = new Map<string, Map<string, string>>();
+  for (const m of outside.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const decls = new Map(
+      [...(m[2] ?? '').matchAll(/([a-z-]+)\s*:\s*([^;]+);?/g)].map(
+        (d) => [d[1] ?? '', (d[2] ?? '').trim()] as const,
+      ),
+    );
+    for (const sel of (m[1] ?? '').split(',').map((s) => s.trim())) {
+      map.set(sel, new Map([...(map.get(sel) ?? []), ...decls]));
+    }
+  }
+  return map;
+})();
+
+const decl = (selector: string, property: string): string | undefined =>
+  rules.get(selector)?.get(property);
+
+/** States are solid PLATES that always carry their word (the fold's
+ *  "Its parts are Enamel", backlog 7eb59678 car 2). Before this car every
+ *  state pill in the shared chrome was a word tinted on a 4% wash — the
+ *  "tinted pills" the round-2 board drew as Transit and David did not
+ *  choose. */
+describe('states are solid plates that carry their word', () => {
+  // [the rule, its ground token, the token its word is set in]. Completed
+  // is a step's state only, so only .step-status-completed wears it.
+  const SOLID: ReadonlyArray<readonly [string, string, string]> = [
+    ['.plate-clear', '--clear', '--on-clear'],
+    ['.plate-busy', '--busy', '--on-busy'],
+    ['.plate-troubled', '--troubled', '--on-troubled'],
+    ['.plate-ready', '--ready', '--on-ready'],
+    ['.step-status-completed', '--completed', '--on-completed'],
+  ];
+
+  for (const [rule, ground, word] of SOLID) {
+    it(`${rule} is ${ground} under ${word}`, () => {
+      expect(decl(rule, 'background')).toBe(`var(${ground})`);
+      expect(decl(rule, 'color')).toBe(`var(${word})`);
+    });
+  }
+
+  it('pending is a dashed frame with no ground — the plate not yet filled', () => {
+    expect(decl('.step-status-pending', 'background')).toBe('transparent');
+    expect(decl('.step-status-pending', 'border-style')).toBe('dashed');
+  });
+
+  it('skipped is that frame gone quiet and struck — a plate never to be filled', () => {
+    expect(decl('.step-status-skipped', 'background')).toBe('transparent');
+    expect(decl('.step-status-skipped', 'border-style')).toBe('dashed');
+    expect(decl('.step-status-skipped', 'text-decoration')).toBe('line-through');
+  });
+
+  it('every plate names its word in caps, the way a sign does', () => {
+    expect(decl('.plate', 'text-transform')).toBe('uppercase');
+    expect(decl('.plate', 'white-space')).toBe('nowrap');
+  });
+
+  // A step's status IS a state, so its span is a plate: one rule each, not
+  // a second palette. [the StepStatus word, the rule it shares]
+  const STEP: ReadonlyArray<readonly [string, string]> = [
+    ['ready', '.plate-ready'],
+    ['active', '.plate-busy'],
+    // the legacy three-class set still renders on unmigrated rows
+    ['done', '.step-status-completed'],
+    ['waived', '.step-status-skipped'],
+  ];
+
+  it('.step-status is a plate', () => {
+    expect(rules.get('.step-status')).toEqual(rules.get('.plate'));
+  });
+  for (const [status, rule] of STEP) {
+    it(`a ${status} step wears ${rule}`, () => {
+      expect(rules.get(rule)).toBeDefined();
+      expect(rules.get(`.step-status-${status}`)).toEqual(rules.get(rule));
+    });
+  }
+
+  it('every plate a component names is defined here, and no tinted tone survives', () => {
+    const glob = new Bun.Glob('**/*.svelte');
+    const roots = [import.meta.dir, join(import.meta.dir, '../../../libs/web-kit/src')];
+    const used = new Set<string>();
+    const tinted: string[] = [];
+    for (const root of roots) {
+      for (const file of glob.scanSync(root)) {
+        const src = readFileSync(join(root, file), 'utf8');
+        // `plate plate-x` in a class list, or a `class:plate-x` directive —
+        // not the map's own `plate-tag`, a platform's name on its sign.
+        for (const m of src.matchAll(/(?:\bplate |class:)plate-([a-z]+)\b/g)) used.add(m[1] ?? '');
+        if (/\bchip-tone-/.test(src)) tinted.push(file);
+      }
+    }
+    expect(used.size).toBeGreaterThan(0);
+    expect([...used].filter((p) => !rules.has(`.plate-${p}`))).toEqual([]);
+    expect(tinted).toEqual([]);
+  });
+});
+
+describe('the chrome bar is an enamel band', () => {
+  const bar = readFileSync(
+    join(import.meta.dir, '../../../libs/web-kit/src/PerspectiveTabs.svelte'),
+    'utf8',
+  );
+  const block = (selector: string): string =>
+    bar.match(new RegExp(`\\n\\s*${selector.replace(/\./g, '\\.')}\\s*\\{([^}]*)\\}`))?.[1] ?? '';
+
+  it('is night ink under white words', () => {
+    expect(block('.perspective-tabs')).toMatch(/background:\s*var\(--band\);/);
+    expect(block('.perspective-tabs')).toMatch(/color:\s*var\(--on-band\);/);
+  });
 });
 
 describe('styles.css states a colour only in its token blocks', () => {

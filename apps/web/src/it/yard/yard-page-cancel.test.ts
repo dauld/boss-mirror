@@ -11,7 +11,7 @@ import { join } from 'node:path';
 // appear: a button copied into the in-transit block, a hand-built
 // PATCH body, a role string retyped.
 describe('the yard page offers cancel only through the rule', () => {
-  const src = readFileSync(join(import.meta.dir, 'YardPage.svelte'), 'utf8');
+  const src = readFileSync(join(import.meta.dir, 'FloorDeck.svelte'), 'utf8');
   // Comments discuss the rule freely; only executable code is pinned.
   const code = src
     .replace(/<!--[\s\S]*?-->/g, '')

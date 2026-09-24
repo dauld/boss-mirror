@@ -76,6 +76,15 @@
   /* --- Enamel bands: headers and table heads, white on night ink. --- */
   --band: var(--fog);
   --on-band: #FFFFFF;
+  /* The chrome bar is the widest band (backlog 7eb59678 car 2), and it
+     carries words quieter than a heading — the tabs you are not on, the
+     time's label — plus a hover ground and a frame for its two ghost
+     buttons. All are white let into the ink, so they stay one family with
+     the band: dim words 9.8:1 on it (7.9:1 on the hover ground), the rule
+     3.8:1 as a control edge. */
+  --on-band-dim: rgba(255, 255, 255, 0.74);
+  --band-raised: rgba(255, 255, 255, 0.10);
+  --band-rule: rgba(255, 255, 255, 0.40);
 
   /* --- Keyboard focus: an amber ring, the one amber outside a state. --- */
   --focus: #D9A400;
@@ -86,6 +95,11 @@
   --clear: #0B6B4F;     --on-clear: #FFFFFF;
   --busy: #F2C230;      --on-busy: var(--fog);
   --troubled: #C8283D;  --on-troubled: #FFFFFF;
+  /* A step's lifecycle wears plates too (the fold: "pending dashed, ready
+     solid blue, completed solid ink"). Pending has no ground — it is the
+     frame of a plate not yet filled — so it needs no token of its own. */
+  --ready: var(--signal);  --on-ready: #FFFFFF;
+  --completed: var(--fog); --on-completed: #FFFFFF;
 
   /* --- A state's WORDS on the ground: the ~400 call sites that colour
      text, a rule or a rail by state. Clear and troubled read on white as
@@ -959,6 +973,63 @@ a:hover { color: var(--fog); }
 }
 .chip-muted { background: transparent; color: var(--text-faint); }
 .chip-warn { background: var(--wash); color: var(--warn); border-color: var(--warn); }
+
+/* =============================================================================
+   States are plates
+   --------------------------------------------------------------------------
+   Enamel's states are solid PLATES that always carry their word (the fold,
+   "Its parts are Enamel"; backlog 7eb59678 car 2), so no state is ever
+   read by colour alone, and a plate never needs a legend. A .chip is a TAG
+   — a kind, a label, a count — and stays a quiet framed word; a state is
+   a plate. Until this car every state pill in the shared chrome was the
+   chip with a tinted word on a 4% wash: the Transit board's tinted pills,
+   the one David did not choose.
+
+   Cut like a pressed sign: squared to the chip's 3px, set in the
+   instrument face in tracked caps, and framed in its own ground, so a
+   filled plate and pending's dashed frame are the same size on a row.
+   The frame is the whole of pending — the plate not yet filled — which is
+   why it is dashed ink rather than a pale fill, and why skipped (a plate
+   that will never be filled) is the same frame gone quiet and struck.
+
+   A step's status IS one of these states (boss-core StepStatus: pending ->
+   ready -> active -> completed, + skipped), so .step-status-<s> is grouped
+   with the plate it wears here rather than painted a second time; the
+   legacy `done` / `waived` words still render on unmigrated rows.
+   enamel-tokens.test.ts pins every pairing. */
+.plate,
+.step-status {
+  display: inline-block;
+  padding: 1px 7px 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-field);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 17px;
+  letter-spacing: var(--ls-label);
+  text-transform: uppercase;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+.plate-clear { background: var(--clear); color: var(--on-clear); border-color: var(--clear); }
+.plate-busy,
+.step-status-active { background: var(--busy); color: var(--on-busy); border-color: var(--busy); }
+.plate-troubled { background: var(--troubled); color: var(--on-troubled); border-color: var(--troubled); }
+.plate-ready,
+.step-status-ready { background: var(--ready); color: var(--on-ready); border-color: var(--ready); }
+/* The three lifecycle-only plates: nothing but a step's status wears them
+   yet, so they have no .plate-* name of their own until something does
+   (a-new-style-has-a-caller). */
+.step-status-completed,
+.step-status-done { background: var(--completed); color: var(--on-completed); border-color: var(--completed); }
+.step-status-pending { background: transparent; color: var(--fog); border-color: var(--border-strong); border-style: dashed; }
+.step-status-skipped,
+.step-status-waived { background: transparent; color: var(--static); border-color: var(--static); border-style: dashed; text-decoration: line-through; }
+/* Not a state: a value with no signal to give (StatusChip's `muted` —
+   a subject kind, a `normal` priority). A plain frame, so it cannot be
+   mistaken for pending's dashed one. */
+.plate-quiet { background: transparent; color: var(--static); border-color: var(--hairline); }
 
 /* --- Device detail page --- */
 .breadcrumb {
@@ -2636,24 +2707,8 @@ button.manual-tree-node {
 .step-surface { padding: 12px 0; }
 .step-surface-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
 .step-surface-header h3 { margin: 0; font-size: 15px; flex: 1; }
-.step-status { font-size: 11px; font-weight: 500; }
-/* Step lifecycle — five states across three stages (JobKind v2).
-   Stage 1: dim (pending) / signal (ready). Stage 2: accent for active.
-   Stage 3: ok for completed, muted struck-through for skipped.
-   The legacy three-class set (`pending` / `done` / `waived`)
-   survives so unmigrated rows still render with their historical
-   colors. See `boss-core::job::StepStatus` doc for the state
-   diagram. */
-/* Stage 1 — pre-execution */
-.step-status-pending { color: var(--text-dim); }
-.step-status-ready { color: var(--signal); font-weight: 600; }
-/* Stage 2 — in-flight */
-.step-status-active { color: var(--accent); }
-/* Stage 3 — terminal */
-.step-status-done,
-.step-status-completed { color: var(--ok); }
-.step-status-waived,
-.step-status-skipped { color: var(--text-dim); text-decoration: line-through; }
+/* .step-status and its five states are plates — see "States are plates"
+   above, where each is grouped with the plate it wears. */
 .step-kind-label { font-size: 10px; text-transform: uppercase; color: var(--text-dim); }
 
 /* Repair/Inspection two-column layout */
@@ -3115,13 +3170,8 @@ button.manual-tree-node {
 .ni-btn-remove { color: var(--err); border-color: var(--err); }
 .ni-actions { display: flex; gap: 8px; margin-top: 16px; }
 
-/* --- StatusChip tones (@boss/web-kit/ui/StatusChip.svelte) --- */
-/* The closed five-tone set for the generic chip; pairs with the
-   base .chip rule above. Domain chips (chip-cert-*, chip-opp-*,
-   …) predate this and migrate here as their pages get touched
-   (chip-stock-*, chip-emp-* and chip-stage-* already have). */
-.chip-tone-ok     { background: var(--wash); color: var(--ok); border-color: var(--ok); }
-.chip-tone-warn   { background: var(--wash); color: var(--warn); border-color: var(--warn); }
-.chip-tone-err    { background: var(--wash); color: var(--err); border-color: var(--err); }
-.chip-tone-muted  { background: transparent; color: var(--text-faint); }
-.chip-tone-active { background: var(--wash); color: var(--signal); border-color: var(--signal); }
+/* --- StatusChip (@boss/web-kit/ui/StatusChip.svelte) renders the plates
+   defined under "States are plates"; its five tinted .chip-tone-* rules
+   retired with backlog 7eb59678 car 2. Domain chips (chip-cert-*,
+   chip-opp-*, …) predate it and move onto StatusChip as their pages are
+   audited (page-audit's styled step). */

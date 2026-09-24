@@ -1,15 +1,21 @@
 <script lang="ts">
-  // The train yard — the IT department's front door (departure-
-  // board.md Q1, David's call: guest-visible, the IT app's landing).
-  // A queue lens in the departure-board idiom, drawn as a rail yard
+  // THE FLOOR DECK — the working half of a yard floor, under the
+  // region's own map at /it/yard/<region> (design fe77a1d2, car 3).
+  // It was the Train Yard page (YardPage.svelte), the IT department's
+  // front door (departure-board.md Q1) drawn as a rail yard
   // (the-yard-is-a-floor-you-can-follow, approved 2026-09-08): every
   // change is a wagon you can follow from the approach siding to the
   // arrivals yard; every machine on the line says what it is doing and
   // why it is not; the departure board under the map lists where each
   // wagon is; clicking anything selects it and the entity panel shows
-  // its facts and the verbs that apply. Every row is a Job the
-  // conductor writes; nothing here is new state. Reads are
-  // audit-readonly-safe by construction.
+  // its facts and the verbs that apply. Car 2 moved the map out — the
+  // region map above draws that region's slice of the floor — which
+  // left the page a header over a deck, mounted in exactly one place.
+  // So it is a component now, named for what it is, and the page is
+  // gone: MapPage mounts it, and every route is unchanged (/it/yard
+  // still opens on the track). Every row is a Job the conductor
+  // writes; nothing here is new state. Reads are audit-readonly-safe
+  // by construction.
   //
   // ONE write (backlog 7a24caf3): the cancel button stamps
   // `cancel_requested` on a troubled, not-yet-merged train through the
@@ -107,42 +113,35 @@
   import type { Remote } from '../../data/remote';
   import PacketCard from '@boss/web-kit/ui/PacketCard.svelte';
   import PacketModal, { type PacketJob } from '@boss/web-kit/ui/PacketModal.svelte';
-  import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import { navigate } from '@boss/web-kit/nav';
 
-  // THE FLOOR THIS PAGE OPENS ON (design 0524fc95, car 2). /it is the
-  // MAP now — the region cards read from /api/yard/regions
-  // (MapPage.svelte) — and each yard card opens this page at
-  // /it/yard/<region>, focused on that region's panel: the floor IS
-  // this page, nothing split out, every panel one click deeper.
-  // `focus` is the map's name for the region; regions.ts maps it to
-  // the selection the entity deck opens on, and an unknown name falls
-  // back to the track, as the bare page always has.
+  // THE FLOOR THE DECK OPENS ON (design 0524fc95, car 2). `focus` is
+  // the map's name for the region; regions.ts maps it to the selection
+  // the entity deck opens on, and an unknown name falls back to the
+  // track, as the bare /it/yard always has.
   //
-  // CAR 3 (design d2154293): this page is also mounted UNDER the
-  // zoomed world, by MapPage, at /it/yard/<region>. `embedded` drops
-  // the page header, because the world above already carries one, and
-  // that is ALL it drops — everything the floor shows, this page still
-  // shows. `onfloor` hands the scene up so the zoomed territory's
-  // interior is drawn from the reads this page already makes, rather
-  // than a second copy of them.
+  // `onfloor` hands the scene up (design d2154293, car 3) so the region
+  // map above draws its slice from the reads this deck already makes,
+  // rather than a second copy of them.
   //
-  // DESIGN fe77a1d2, CAR 2: this page draws NO map. The region map
+  // DESIGN fe77a1d2, CAR 2: the deck draws NO map. The region map
   // above it draws that region's slice of the floor, clickable, so the
   // whole-floor YardMap that stood here — every region's wagons again,
   // under a map already showing this region's — is deleted.
   // `onselection` hands the selection up with the one function that
   // changes it, so a click on the region map opens the same entity
   // panel, and loads the same packet, a click here always did.
+  //
+  // CAR 3: no header, and no prop to switch one on. The page this was
+  // drew one only when mounted bare, and nothing mounted it bare any
+  // more; the map page's own header is the one above the deck.
   let {
     focus = 'track',
-    embedded = false,
     onfloor = (_scene: Scene | null) => {},
     onselection = (_s: FloorSelection) => {},
   }: Readonly<{
     focus?: string;
-    embedded?: boolean;
     onfloor?: (scene: Scene | null) => void;
     onselection?: (s: FloorSelection) => void;
   }> = $props();
@@ -217,8 +216,8 @@
 
   // THE FLOOR: the pure scene both the map and the board draw.
   const floor = $derived<Scene | null>(yard ? sceneOf(yard, statusData, nowMs, feeds) : null);
-  // Handed up to whoever mounted this page (car 3: the world above, so
-  // the zoomed territory's interior draws the SAME wagons this floor
+  // Handed up to the map page (d2154293 car 3, then fe77a1d2 car 2: the
+  // region map above draws its slice from the SAME wagons this floor
   // does, from one read rather than a second copy of it).
   $effect(() => {
     onfloor(floor);
@@ -288,10 +287,10 @@
   const shasMatch = (a: string, b: string): boolean => a.startsWith(b) || b.startsWith(a);
 
   // THE SELECTION — one string the map, the board and the alerts all
-  // speak. The floor's region by default; the track when the page is
-  // opened bare: the thing most often worth watching. The initial
-  // value is all `focus` decides — App.svelte keys this page on the
-  // region, so a card-to-card move remounts it rather than fighting
+  // speak. The floor's region by default; the track at a bare
+  // /it/yard: the thing most often worth watching. The initial
+  // value is all `focus` decides — MapPage keys the deck on the
+  // region, so a region-to-region move remounts it rather than fighting
   // a selection the operator has since made.
   // svelte-ignore state_referenced_locally
   let selected = $state<string>(floorSelection(focus));
@@ -602,14 +601,6 @@
 </script>
 
 <div class="theme-exec yard-root">
-  {#if !embedded}
-    <PageHeader
-      eyebrow="IT · Forge line"
-      title="The train yard"
-      subtitle="Gated → parked → boarded → departed → arrived → proven — every change is a wagon you can follow from the approach siding to the arrivals yard"
-    />
-  {/if}
-
   {#if loading}
     <div class="yard-empty">Reading the yard…</div>
   {:else if !yard || !floor}

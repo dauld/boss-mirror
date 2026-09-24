@@ -1640,6 +1640,107 @@ pub(crate) fn agent_run_patch(env: Option<String>) -> Result<Option<Value>> {
     Ok(Some(json!({ AGENT_RUN_KEY: id })))
 }
 
+/// The key a run's gate records the worktree it was launched from
+/// under — and the key the landing rule carries onto the run's
+/// `building` evidence (backlog a3355e14).
+pub(crate) const WORKTREE_KEY: &str = "worktree";
+
+/// The run's edge, plus the worktree this gate was launched from.
+///
+/// WHY (backlog a3355e14). The run packet recorded `boss dispatch`'s
+/// own cwd as its `worktree` — the DISPATCHER's session, `/work/boss`,
+/// a property of a different run. The builder's worktree is known to
+/// exactly one party: the gate it launches, from inside it. So it rides
+/// here, on a run-stamped gate only (a hand gate has no run to say it
+/// of), and the green carries it onto the run.
+pub(crate) fn with_worktree(patch: Option<Value>, toplevel: Option<String>) -> Option<Value> {
+    let mut patch = patch?;
+    if let (Some(map), Some(wt)) = (
+        patch.as_object_mut(),
+        toplevel
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty()),
+    ) {
+        map.insert(WORKTREE_KEY.to_string(), json!(wt));
+    }
+    Some(patch)
+}
+
+/// This checkout's top level, as git reports it — the worktree `boss
+/// gate` runs in. `None` when git cannot say.
+fn launch_toplevel() -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// What a green frees, read off the gate-run's own record: the run it
+/// names (a full id, the landing rule's shape), the worktree it was
+/// launched from, and the branch. `None` unless all of the first two
+/// are there — a hand gate, or one stamped before the worktree was.
+pub(crate) fn green_frees(job: &Value) -> Option<(String, PathBuf, String)> {
+    let md = job.get("metadata")?;
+    let run = md
+        .get(AGENT_RUN_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|r| r.len() == 36 && uuid::Uuid::try_parse(r).is_ok())?;
+    let worktree = md
+        .get(WORKTREE_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|w| !w.is_empty())?;
+    let branch = md
+        .get("branch")
+        .and_then(Value::as_str)
+        .unwrap_or("(branch unrecorded)");
+    Some((run.to_string(), PathBuf::from(worktree), branch.to_string()))
+}
+
+/// THE GREEN FREES THE RUN'S SCRATCH TARGET (backlog a3355e14). The
+/// waiter is the one party on the dev pod that sees the green — the
+/// scratch is an emptyDir no other pod can reach, so the dispatcher's
+/// green handler cannot — and the gate-run names the run and the
+/// worktree. So the builder's cargo target (tens of GB) goes here, and
+/// the record rides the run as `scratch_target`, the same key and
+/// guards `boss dispatch --report` uses ([`crate::scratch_target`]).
+/// Best effort, like every stamp this verb writes: the verdict is the
+/// deliverable, and a target left behind is the hourly reclaim's.
+async fn free_at_green(http: &reqwest::Client, job: &Value, now: chrono::DateTime<chrono::Utc>) {
+    let Some((run, worktree, branch)) = green_frees(job) else {
+        return;
+    };
+    let short = &run[..8];
+    let settled = tokio::task::spawn_blocking(move || {
+        let (root, seed) = crate::scratch_target::roots_from_env();
+        crate::scratch_target::settle_at_green(&worktree, &branch, &root, &seed, now)
+    })
+    .await;
+    let Ok((said, record)) = settled else {
+        eprintln!(
+            "boss gate: run {short}'s scratch target pass did not finish — the hourly reclaim takes it"
+        );
+        return;
+    };
+    println!("boss gate: run {short} {said}");
+    if let Err(e) = api(
+        http,
+        reqwest::Method::PATCH,
+        &format!("/api/jobs/{run}/metadata"),
+        Some(json!({ "scratch_target": record })),
+    )
+    .await
+    {
+        eprintln!(
+            "boss gate: WARNING — run {short}'s scratch_target could not be recorded on the \
+             packet ({e:#}); the line above is the only copy"
+        );
+    }
+}
+
 /// The HOLD a gate carries: `--hold <reason>` stamps `hold: <reason>`
 /// on the gate-run so its green reads HELD (a brake deliberately on)
 /// rather than stranded (a green someone forgot) — in `boss orient`,
@@ -2709,6 +2810,10 @@ pub async fn run(
     // malformed export is refused here rather than stamped and skipped
     // an hour later in a journal nobody reads.
     let agent_run = agent_run_patch(std::env::var(AGENT_RUN_ENV).ok())?;
+    // With the worktree it is launched from, read once, here, before
+    // anything moves (a3355e14).
+    let toplevel = agent_run.is_some().then(launch_toplevel).flatten();
+    let agent_run = with_worktree(agent_run, toplevel);
     if let Some(w) = no_run_warning(!park.is_empty(), agent_run.as_ref()) {
         eprintln!("{w}");
     }
@@ -3788,6 +3893,9 @@ async fn wait_for_verdict(
             if let Some(note) = job.get("metadata").and_then(boss_jobs::flake::green_note) {
                 println!("{note}");
             }
+            // A run's green frees the run's worktree target, here, at
+            // the one place on the pod the green is seen (a3355e14).
+            free_at_green(http, &job, wall_now()).await;
             return Ok(());
         }
         // The packet is silent. Before sleeping again, find out whether
@@ -7424,6 +7532,55 @@ mod agent_run_tests {
             None,
             "and a run without a park intent is not this defect either"
         );
+    }
+
+    const RUN: &str = "5b1d2c3e-0000-4000-8000-000000000001";
+
+    /// A run's gate stamps the worktree it was launched from beside
+    /// the run's edge (backlog a3355e14) — the one party that knows
+    /// where the run was built. A hand gate names no run and stamps no
+    /// worktree; a toplevel git could not read stamps none.
+    #[test]
+    fn a_runs_gate_stamps_the_worktree_it_was_launched_from() {
+        let wt = "/work/boss/.claude/worktrees/agent-a9";
+        assert_eq!(
+            with_worktree(agent_run_patch(Some(RUN.into())).unwrap(), Some(wt.into())),
+            Some(json!({ "agent_run": RUN, "worktree": wt }))
+        );
+        assert_eq!(with_worktree(None, Some(wt.into())), None, "a hand gate");
+        assert_eq!(
+            with_worktree(
+                agent_run_patch(Some(RUN.into())).unwrap(),
+                Some("  ".into())
+            ),
+            Some(json!({ "agent_run": RUN }))
+        );
+        assert_eq!(
+            with_worktree(agent_run_patch(Some(RUN.into())).unwrap(), None),
+            Some(json!({ "agent_run": RUN }))
+        );
+        assert_eq!(WORKTREE_KEY, "worktree");
+    }
+
+    /// What the waiter frees on its green is read off the GATE-RUN — the
+    /// run's edge and the stamped worktree — never off this process's
+    /// cwd. Either missing, nothing is freed.
+    #[test]
+    fn the_green_frees_what_the_gate_run_names_and_nothing_else() {
+        let wt = "/work/boss/.claude/worktrees/agent-a9";
+        let job = json!({ "metadata": { "agent_run": RUN, "worktree": wt, "branch": "fix/x" } });
+        assert_eq!(
+            green_frees(&job),
+            Some((RUN.to_string(), PathBuf::from(wt), "fix/x".to_string()))
+        );
+        for md in [
+            json!({ "worktree": wt, "branch": "fix/x" }),
+            json!({ "agent_run": RUN, "branch": "fix/x" }),
+            json!({ "agent_run": RUN, "worktree": "", "branch": "fix/x" }),
+            json!({ "agent_run": "5b1d2c3e", "worktree": wt, "branch": "fix/x" }),
+        ] {
+            assert_eq!(green_frees(&json!({ "metadata": md })), None, "{md}");
+        }
     }
 
     /// A prefix, a branch, or anything the landing handler would skip

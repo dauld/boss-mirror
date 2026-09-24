@@ -131,3 +131,98 @@ async fn merging_into_a_missing_job_is_not_found() {
         .unwrap_err();
     assert!(matches!(err, JobsError::NotFound(_)), "got: {err}");
 }
+
+/// The Pg half of `append_step_correction_at` (design 4105b020): the
+/// append is one jsonb UPDATE, so the rule `corrections::appended`
+/// states in Rust is pinned against the real SQL — the list grows at
+/// the tail, other keys survive, a jsonb-null metadata and a non-list
+/// under the key both fold to an empty list first, and the two events
+/// ride the write's own transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_correction_appends_at_the_tail_and_records_both_events() {
+    let db = TestDb::new().await;
+    let repo = boss_jobs::PgJobs::new(db.pool.clone());
+    let j = job(
+        "00000000-0000-0000-0000-00000000c0a1",
+        serde_json::json!({ "area": "boss-jobs" }),
+    );
+    repo.create_job(&j).await.unwrap();
+
+    let first = serde_json::json!({ "step": "s-1", "field": "evidence", "reads": "a" });
+    let second = serde_json::json!({ "step": "s-1", "field": "evidence", "reads": "b" });
+    let (_, i0) = repo
+        .append_step_correction_at(&j.id, &first, &stamp())
+        .await
+        .unwrap();
+    let (after, i1) = repo
+        .append_step_correction_at(&j.id, &second, &stamp())
+        .await
+        .unwrap();
+    assert_eq!((i0, i1), (0, 1));
+    assert_eq!(after.metadata["area"], "boss-jobs");
+    assert_eq!(
+        after.metadata["corrections"],
+        serde_json::json!([first, second])
+    );
+    let stored = repo.get_job(&j.id).await.unwrap().unwrap();
+    assert_eq!(stored.metadata["corrections"][1]["reads"], "b");
+
+    let (payload,): (serde_json::Value,) = sqlx::query_as(
+        "SELECT payload FROM event_outbox WHERE kind = 'jobs.step.corrected' ORDER BY timestamp DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(payload["index"], 1);
+    assert_eq!(payload["step_id"], "s-1");
+    assert_eq!(payload["correction"]["reads"], "b");
+    let (updated,): (serde_json::Value,) = sqlx::query_as(
+        "SELECT payload FROM event_outbox WHERE kind = 'jobs.job.updated' ORDER BY timestamp DESC LIMIT 1",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(updated["metadata"]["corrections"][1]["reads"], "b");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_correction_folds_a_null_metadata_and_a_non_list_key_to_an_empty_list() {
+    let db = TestDb::new().await;
+    let repo = boss_jobs::PgJobs::new(db.pool.clone());
+    let entry = serde_json::json!({ "step": "s", "field": "f" });
+
+    let bare = job(
+        "00000000-0000-0000-0000-00000000c0a2",
+        serde_json::Value::Null,
+    );
+    repo.create_job(&bare).await.unwrap();
+    let (after, i) = repo
+        .append_step_correction_at(&bare.id, &entry, &stamp())
+        .await
+        .unwrap();
+    assert_eq!(i, 0);
+    assert_eq!(
+        after.metadata,
+        serde_json::json!({ "corrections": [entry] })
+    );
+
+    let odd = job(
+        "00000000-0000-0000-0000-00000000c0a3",
+        serde_json::json!({ "corrections": "an author's own note" }),
+    );
+    repo.create_job(&odd).await.unwrap();
+    let (after, i) = repo
+        .append_step_correction_at(&odd.id, &entry, &stamp())
+        .await
+        .unwrap();
+    assert_eq!(i, 0);
+    assert_eq!(after.metadata["corrections"], serde_json::json!([entry]));
+
+    let missing =
+        JobId::from_uuid(Uuid::parse_str("00000000-0000-0000-0000-00000000c0ff").unwrap());
+    let err = repo
+        .append_step_correction_at(&missing, &entry, &stamp())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, JobsError::NotFound(_)), "got: {err}");
+}

@@ -13,7 +13,11 @@
 #
 # ONE STEP, AND ONLY THAT ONE. The green completes the run's `building`
 # with `result = gated` (`done_metadata` fills absent keys only) and
-# the gate-run's id and branch as evidence under `gate_run`. That opens
+# the gate-run's id and branch as evidence under `gate_run` — and the
+# worktree the gate was launched from, which `boss gate` stamps beside
+# the edge (backlog a3355e14), so the run records where it was built.
+# The rule does NOT free that worktree's cargo target: the scratch is
+# pod-private, so the gate's own waiter frees it on the pod. That opens
 # `reported`, which the rule never touches: it holds the builder's
 # handback, and a summary a rule invents is not the builder's, so the
 # report is written by the operator who read it today and by the runner

@@ -1601,6 +1601,21 @@ impl JobsCompleteLinkedStep {
         if let Some(step_id) = ctx.event_payload.get("step_id").and_then(|v| v.as_str()) {
             evidence["step"] = json!(step_id);
         }
+        // WHERE IT WAS BUILT (backlog a3355e14). `boss gate` stamps the
+        // worktree it was launched from beside a run's `agent_run` edge,
+        // because the gate is the only party that knows it: the run
+        // packet used to record the DISPATCHER's cwd, a property of a
+        // different session. Written only when the closing packet
+        // carries one, like `step` above — an absent stamp is absent
+        // here too, never a guessed path.
+        if let Some(wt) = closing_meta
+            .get("worktree")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            evidence["worktree"] = json!(wt);
+        }
         Shipped {
             car: closing_id.to_string(),
             branch: branch.unwrap_or("(no branch recorded)").to_string(),
@@ -3328,6 +3343,79 @@ mod tests {
         assert!(matches!(err, HandlerError::Permanent(_)), "{err:?}");
         let why = format!("{err:?}");
         assert!(why.contains("step") && why.contains("job"), "{why}");
+    }
+
+    const GATE: &str = "77777777-7777-7777-7777-777777777777";
+
+    /// A gate-run closed green, carrying what `boss gate` stamps at
+    /// launch: the run's edge, the branch, and — when it has one —
+    /// the worktree it was launched from.
+    fn green_gate(metadata: serde_json::Value) -> serde_json::Value {
+        json!({
+            "id": GATE,
+            "kind": "gate-run",
+            "title": "gate: fix/x",
+            "status": "closed",
+            "subject": { "subject_kind": "custom", "id": "bosspipeline" },
+            "metadata": metadata,
+            "steps": [],
+        })
+    }
+
+    fn landing_args() -> Vec<(String, Value)> {
+        vec![
+            ("link".to_string(), Value::String("agent_run".into())),
+            ("steps".to_string(), Value::String("building".into())),
+            ("evidence_key".to_string(), Value::String("gate_run".into())),
+            (
+                "done_metadata".to_string(),
+                Value::String(r#"{"result": "gated"}"#.into()),
+            ),
+        ]
+    }
+
+    /// THE BUILDER'S WORKTREE RIDES THE GREEN (backlog a3355e14). The
+    /// run packet used to record the DISPATCHER's cwd as its worktree;
+    /// the only party that knows the builder's is the gate it
+    /// launched, which stamps it. The landing carries that stamp onto
+    /// the run's `building` evidence, so the run finally says where it
+    /// was built — and a gate that stamped none says nothing, not an
+    /// invented path.
+    #[tokio::test]
+    async fn the_green_carries_the_gates_worktree_stamp_onto_the_run() {
+        let wt = "/work/boss/.claude/worktrees/agent-a9";
+        let (base, puts, _patches) = mock_jobs(vec![
+            green_gate(json!({ "agent_run": RUN, "branch": "fix/x", "worktree": wt })),
+            run("ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
+        let marker = json!({ "id": GATE, "kind": "gate-run", "outcome": "completed",
+                             "closed_on": "2026-09-24", "parent_step_id": null });
+        h.invoke(&landing_args(), &ctx(marker.clone()))
+            .await
+            .expect("runs");
+        let puts = puts.lock().unwrap().clone();
+        assert_eq!(puts.len(), 1, "{puts:?}");
+        let (step_id, body) = &puts[0];
+        assert_eq!(step_id, "r-building");
+        assert_eq!(body["metadata"]["result"], "gated");
+        assert_eq!(body["metadata"]["gate_run"]["branch"], "fix/x");
+        assert_eq!(body["metadata"]["gate_run"]["worktree"], wt);
+
+        let (base, puts, _patches) = mock_jobs(vec![
+            green_gate(json!({ "agent_run": RUN, "branch": "fix/x" })),
+            run("ready"),
+        ])
+        .await;
+        let h = JobsCompleteLinkedStep::with_client(reqwest::Client::new(), base, test_owner());
+        h.invoke(&landing_args(), &ctx(marker)).await.expect("runs");
+        let puts = puts.lock().unwrap().clone();
+        let gate_run = &puts[0].1["metadata"]["gate_run"];
+        assert!(
+            gate_run.get("worktree").is_none(),
+            "no stamp, no key: {gate_run}"
+        );
     }
 
     /// The default is the JOB metadata — every rule authored before v7

@@ -104,9 +104,13 @@
 #
 # The metadata schema names what `boss dispatch` writes: `packet` (the
 # step's job), `step` (its slug), `agent` (the actor id), `model`,
-# `budget_usd`, `effort`, `worktree`, `host`, and what later hands add —
+# `budget_usd`, `effort`, `host`, and what later hands add —
 # `gate_run` and `car` (by the landing rule's evidence), `spend_usd` and
 # `tokens` (by the report). Only the dispatch-time keys are required.
+# `worktree` is no longer written at dispatch (backlog a3355e14): it was
+# the DISPATCHER's cwd, not the builder's. The builder's worktree is
+# stamped by its gate and lands as `building`'s `gate_run.worktree`;
+# the top-level property stays for the packets filed before.
 # ---------------------------------------------------------------------------
 
 [[workflow]]
