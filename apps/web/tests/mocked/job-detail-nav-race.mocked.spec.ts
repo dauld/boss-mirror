@@ -53,7 +53,7 @@ test('a fast A→B navigation never renders A under B\'s URL', async ({ page }) 
   }, B);
 
   // B renders.
-  await expect(page.locator('h1')).toContainText('Packet B', { timeout: 10_000 });
+  await expect(page.locator('h1')).toContainText('Packet B');
 
   // …and KEEPS rendering after A's stale answer finally arrives. This
   // is the assertion that fails without the ticket check: A's slow

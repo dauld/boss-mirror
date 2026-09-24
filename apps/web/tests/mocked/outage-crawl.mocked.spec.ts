@@ -252,7 +252,7 @@ async function crawl(page: Page, routes: ReadonlyArray<string>, until: Await): P
       try {
         reads.inFlight.clear();
         reads.issued = 0;
-        await page.goto(route, { waitUntil: 'commit', timeout: 20_000 });
+        await page.goto(route, { waitUntil: 'commit' });
         await expect(page.locator('.app-shell')).toBeVisible({ timeout: 20_000 });
         shell = true;
       } catch {

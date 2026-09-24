@@ -156,7 +156,7 @@ test.describe('the unauthenticated state is reachable and its copy is true', () 
 
     await page.goto(`/ux/jobs/${JOB_ID}`);
 
-    await page.waitForURL(/\/login\?next=/, { timeout: 10_000 });
+    await page.waitForURL(/\/login\?next=/);
     const next = new URL(page.url()).searchParams.get('next');
     expect(next).toBe(`/ux/jobs/${JOB_ID}`);
   });

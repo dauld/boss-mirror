@@ -86,7 +86,7 @@ test.describe('route smoke — every surface renders without a runtime crash', (
           // 'commit' (not 'load'/'domcontentloaded'): for a client-routed
           // SPA we only need the navigation to commit; the real readiness
           // signal is the AppShell painting, asserted next.
-          await page.goto(r, { waitUntil: 'commit', timeout: 20_000 });
+          await page.goto(r, { waitUntil: 'commit' });
           await expect(page.locator('.app-shell')).toBeVisible({ timeout: 20_000 });
           shellOk = true;
         } catch (e) {
@@ -125,8 +125,8 @@ test.describe('route smoke — every surface renders without a runtime crash', (
     const errors: string[] = [];
     page.on('pageerror', (e) => errors.push(e.message));
 
-    await page.goto(`/it/registry/authoring/${JOB_ID}`, { timeout: 20_000 });
-    await expect(page.locator('.app-shell')).toBeVisible({ timeout: 10_000 });
+    await page.goto(`/it/registry/authoring/${JOB_ID}`);
+    await expect(page.locator('.app-shell')).toBeVisible();
     // Wait for the lazy graph + the step-authoring surface (which mounts
     // StepDagEditor) to render the seeded spec.
     await page.waitForTimeout(2_000);

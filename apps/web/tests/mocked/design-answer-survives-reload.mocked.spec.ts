@@ -140,7 +140,7 @@ test('a same-kind reload of the packet keeps the typed answer', async ({ page })
   const before = streamHits;
   release();
   // Several reloads land — each one a new step object of the same kind.
-  await expect.poll(() => streamHits, { timeout: 10_000 }).toBeGreaterThan(before + 3);
+  await expect.poll(() => streamHits).toBeGreaterThan(before + 3);
 
   await expect(page.locator('.step-review-design textarea').first()).toHaveValue(ANSWER);
   expect(errs, `page threw: ${errs.join(' | ')}`).toEqual([]);

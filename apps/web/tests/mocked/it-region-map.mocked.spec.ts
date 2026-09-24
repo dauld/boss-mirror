@@ -441,8 +441,10 @@ const ONE_ACTOR_SESSIONS = {
   ],
 };
 
-/** One builder run on the first session, building an item. */
-const ONE_RUN = {
+/** One builder run on the first session, building an item. Built when
+ * the read is answered, not when this file loads, so its age is ten
+ * minutes however long the worker has been running (backlog de205627). */
+const oneRun = () => ({
   total: 1,
   data: [
     { id: 'fa4014f2-1794-4268-9881-f4e616f7d0ad', kind: 'agent-run', status: 'open',
@@ -454,7 +456,7 @@ const ONE_RUN = {
         opened_at: new Date(Date.now() - 10 * 60_000).toISOString() },
       steps: [{ spec_slug: 'building', title: 'Building', status: 'active' }] },
   ],
-};
+});
 
 // THE SHOP FLOOR AS ACTORS (design 62de32ae, decision 8; car E on
 // c3105b2a): one lamp per session and per run, labelled and aged, under
@@ -465,7 +467,7 @@ test('the shop floor draws its actors — a lamp per session and per run, under 
   const json = (r: Route, b: unknown) =>
     r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
   await page.route(/\/api\/jobs\?kind=work-session/, (r) => json(r, ONE_ACTOR_SESSIONS));
-  await page.route(/\/api\/jobs\?kind=agent-run/, (r) => json(r, ONE_RUN));
+  await page.route(/\/api\/jobs\?kind=agent-run/, (r) => json(r, oneRun()));
 
   await page.goto('/it/yard/shop-floor');
   const map = page.locator(regionMap('shop-floor'));

@@ -29,12 +29,12 @@ test('+ New rule names the durable paths and creates nothing', async ({ page }) 
 
   await mountPage(page, '/it/registry/rules');
   await Promise.all([
-    page.waitForURL(/\/it\/registry\/rules\/new$/, { timeout: 10_000 }),
+    page.waitForURL(/\/it\/registry\/rules\/new$/),
     page.getByRole('link', { name: '+ New rule' }).first().click(),
   ]);
 
   const main = page.locator('.catalog');
-  await expect(main).toContainText('infra/dispatcher/rules/', { timeout: 10_000 });
+  await expect(main).toContainText('infra/dispatcher/rules/');
   await expect(main).toContainText('seeds/rules.toml');
   await expect(main).toContainText(/retire/i);
 
