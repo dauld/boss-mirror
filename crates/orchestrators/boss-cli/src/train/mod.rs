@@ -88,6 +88,7 @@ mod boarding;
 mod cars;
 mod conductor;
 mod consist;
+mod dock_regate;
 mod entry;
 mod forge;
 mod jobs_api;

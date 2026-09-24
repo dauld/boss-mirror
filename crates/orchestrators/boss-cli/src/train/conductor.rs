@@ -1156,6 +1156,27 @@ impl Conductor {
         .map(|o| stdout_str(&o).trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| short.to_string());
+        let title = t.get("title").and_then(Value::as_str).unwrap_or("PR train");
+        self.launch_gate(
+            branch,
+            &sha,
+            crate::gate::Requester::Train,
+            crate::train_gate::packet_marks(tid, title),
+        )
+        .await
+    }
+
+    /// File a gate-run for `branch@sha`, stamp `marks` on it, and create
+    /// its Job — the train's gate, and since backlog 969a1092 the dock's
+    /// re-gate of a car main moved under. One launch path, so the two
+    /// cannot differ in how a gate is admitted, filed or run.
+    async fn launch_gate(
+        &self,
+        branch: &str,
+        sha: &str,
+        who: crate::gate::Requester,
+        marks: Value,
+    ) -> Result<String> {
         let manifest_text =
             std::fs::read_to_string(&self.cfg.gate_manifest).with_context(|| {
                 format!(
@@ -1167,9 +1188,9 @@ impl Conductor {
         let ns = self.cfg.gate_namespace.as_str();
         let max = crate::gate::max_concurrent(&self.http).await?;
         let live = crate::gate::running_gates(ns)?;
-        // The train is admitted AT the bound (48f7aba1): the one
-        // predicate `boss gate` also consults, with the train's answer.
-        if !crate::gate::admits(live.len(), max, crate::gate::Requester::Train) {
+        // The train is admitted AT the bound (48f7aba1), a car's re-gate
+        // below it: the one predicate `boss gate` also consults.
+        if !crate::gate::admits(live.len(), max, who) {
             bail!(
                 "the cluster is at its gate bound ({} running of {max}: {})",
                 live.len(),
@@ -1183,7 +1204,7 @@ impl Conductor {
                 "/api/jobs",
                 Some(crate::gate::gate_run_body(
                     branch,
-                    &sha,
+                    sha,
                     &self.cfg.gate_manifest,
                     None,
                     &owner,
@@ -1194,16 +1215,15 @@ impl Conductor {
             .as_ref()
             .and_then(|c| c.get("data").unwrap_or(c).get("id"))
             .and_then(Value::as_str)
-            .context("the jobs API returned no id for the train's gate-run")?
+            .with_context(|| format!("the jobs API returned no id for {branch}'s gate-run"))?
             .to_string();
-        let title = t.get("title").and_then(Value::as_str).unwrap_or("PR train");
         self.api(
             Method::PATCH,
             &format!("/api/jobs/{run_id}/metadata"),
-            Some(crate::train_gate::packet_marks(tid, title)),
+            Some(marks),
         )
         .await
-        .context("marking the gate-run as the train's")?;
+        .with_context(|| format!("marking gate-run {} for {branch}", id8(&run_id)))?;
         let job = crate::gate::render_job(&manifest_text, branch, &run_id, "--auto")?;
         let mut child = crate::gate::kubectl(ns)
             .args(["create", "-f", "-"])
@@ -1223,7 +1243,7 @@ impl Conductor {
         let out = child.wait_with_output()?;
         if !out.status.success() {
             bail!(
-                "kubectl create failed for the train gate ({}): {}",
+                "kubectl create failed for the gate of {}: {}",
                 branch,
                 String::from_utf8_lossy(&out.stderr).trim()
             );
@@ -2704,12 +2724,33 @@ impl Conductor {
             // just published is judged on what actually landed there
             // rather than on what was offered.
             let boards = fork_head(&self.cfg.clone, &branch)?;
-            if let Some(reason) = receipt_skip_reason(&j, boards.as_deref()) {
+            // THE DOCK'S RE-GATE (backlog 969a1092) owns two of the holds
+            // below: a receipt the DOCK outran — it replayed the branch
+            // onto main, and the re-gate's green has not refreshed the
+            // car yet — and a car whose receipt still vouches for its
+            // head but whose files main has since moved into. Every other
+            // car passes through both untouched.
+            let hold = match receipt_skip_reason(&j, boards.as_deref()) {
+                Some(reason) => Some(
+                    match boards.as_deref().and_then(|b| dock_regate::pending(&j, b)) {
+                        Some(stamp) => self.regate_in_flight(&j, &jid, &branch, stamp).await,
+                        None => (reason, None),
+                    },
+                ),
+                None => match boards.as_deref() {
+                    Some(head) => self.base_hold(&j, &jid, &branch, head).await,
+                    None => None,
+                },
+            };
+            if let Some((reason, stamp)) = hold {
                 log(format!("{}: {reason} — leaving behind", id8(&jid)));
                 left_behind.push(json!({"car_id_short": id8(&jid), "reason": reason.as_str()}));
                 if !self.cfg.dry {
-                    self.merge_job_metadata(&jid, vec![("skip_reason", json!(reason))])
-                        .await?;
+                    let mut kv = vec![("skip_reason", json!(reason))];
+                    if let Some(stamp) = stamp {
+                        kv.push((dock_regate::BASE_REGATE, stamp));
+                    }
+                    self.merge_job_metadata(&jid, kv).await?;
                 }
                 continue;
             }
@@ -2757,6 +2798,228 @@ impl Conductor {
             }
             EdgeOutcome::Hold(h) => Some(h),
         }
+    }
+
+    /// Does main's movement since this car's gate hold it back? `None` =
+    /// board it; otherwise the skip reason and, when this pass launched or
+    /// refused a re-gate, the `base_regate` stamp to record (backlog
+    /// 969a1092 — the rule and the bound are `dock_regate`'s).
+    ///
+    /// INFALLIBLE BY SIGNATURE, for `edge_hold`'s reason: this runs inside
+    /// the loop that boards every train, and a base git cannot read is not
+    /// a finding about the car. It boards, and the journal says why.
+    async fn base_hold(
+        &self,
+        car: &Value,
+        jid: &str,
+        branch: &str,
+        head: &str,
+    ) -> Option<(String, Option<Value>)> {
+        let reading = match dock_regate::read_base(&self.cfg.clone, head) {
+            Ok(r) => r,
+            Err(e) => {
+                log(format!(
+                    "{}: could not read its base against main ({e:#}) — boarding as gated; the \
+                     train gate still judges the assembled tree",
+                    id8(jid)
+                ));
+                return None;
+            }
+        };
+        let stamp = dock_regate::RegateStamp::of(car);
+        match dock_regate::judge(reading.as_ref(), stamp.as_ref()) {
+            dock_regate::DockBase::Current => None,
+            dock_regate::DockBase::Untouched { main_changed } => {
+                log(format!(
+                    "{}: behind main, but none of the {main_changed} path(s) main changed since \
+                     its gate touch it — boards as gated",
+                    id8(jid)
+                ));
+                None
+            }
+            // Already re-gated for this main: the bound. The only way here
+            // is a refused replay — a launched one moved the branch and is
+            // read by `regate_in_flight` instead.
+            dock_regate::DockBase::Touched {
+                launch: false,
+                touched,
+            } => {
+                let stamp = stamp.unwrap_or_default();
+                let reason = if stamp.refused.is_empty() {
+                    format!(
+                        "already re-gated once for main {} (gate-run {}) and still behind it with \
+                         {} path(s) touched — the dock re-gates it again when main moves",
+                        &stamp.main[..8.min(stamp.main.len())],
+                        id8(&stamp.gate_run),
+                        touched.len()
+                    )
+                } else {
+                    dock_regate::refused_reason(jid, &stamp)
+                };
+                Some((reason, None))
+            }
+            dock_regate::DockBase::Touched {
+                launch: true,
+                touched,
+            } => {
+                let reading = reading?;
+                self.launch_base_regate(car, jid, branch, &reading, &touched)
+                    .await
+            }
+        }
+    }
+
+    /// Replay the car onto current main and file its re-gate — the
+    /// `boss gate --rebase --park-*` a builder would run, run by the dock.
+    /// `None` = the MEANS failed and the car boards as gated.
+    async fn launch_base_regate(
+        &self,
+        car: &Value,
+        jid: &str,
+        branch: &str,
+        reading: &dock_regate::BaseReading,
+        touched: &[String],
+    ) -> Option<(String, Option<Value>)> {
+        let stamp = dock_regate::RegateStamp {
+            base: reading.base.clone(),
+            ..dock_regate::RegateStamp::for_main(&reading.main, touched)
+        };
+        if self.cfg.dry {
+            log(format!(
+                "DRY: {}: main moved into {} of its path(s) since its gate — would replay it onto \
+                 main and re-gate it",
+                id8(jid),
+                touched.len()
+            ));
+            return Some((dock_regate::busy_reason("dry run", reading, touched), None));
+        }
+        // A SLOT, AND THE MEANS TO USE IT, BEFORE THE BRANCH MOVES. A
+        // replayed branch no longer matches its receipt, so a car moved
+        // and then not gated is a car that cannot board — check first.
+        let ns = self.cfg.gate_namespace.as_str();
+        let slot: Result<(usize, usize)> = async {
+            std::fs::metadata(&self.cfg.gate_manifest).with_context(|| {
+                format!("no gate runner manifest at {}", self.cfg.gate_manifest)
+            })?;
+            let max = crate::gate::max_concurrent(&self.http).await?;
+            Ok((crate::gate::running_gates(ns)?.len(), max))
+        }
+        .await;
+        match slot {
+            Ok((live, max)) if crate::gate::admits(live, max, crate::gate::Requester::Car) => {}
+            Ok((live, max)) => {
+                let why = format!("{live} gate(s) running of {max}");
+                return Some((dock_regate::busy_reason(&why, reading, touched), None));
+            }
+            Err(e) => {
+                log(format!(
+                    "{}: main moved into its files, but no gate can be launched ({e:#}) — \
+                     boarding as gated; the train gate still judges the assembled tree",
+                    id8(jid)
+                ));
+                return None;
+            }
+        }
+        let rebased = match crate::freshness::rebase_onto_main(Path::new(&self.cfg.clone), branch) {
+            Ok(r) => r,
+            Err(e) if dock_regate::replay_refused(&e) => {
+                let refused = format!("{e:#}");
+                let stamp = dock_regate::RegateStamp {
+                    refused: refused.lines().next().unwrap_or_default().to_string(),
+                    ..stamp
+                };
+                return Some((
+                    dock_regate::refused_reason(jid, &stamp),
+                    Some(stamp.to_value(Utc::now())),
+                ));
+            }
+            Err(e) => {
+                log(format!(
+                    "{}: main moved into its files, but replaying it failed ({e:#}) — boarding \
+                     as gated; the train gate still judges the assembled tree",
+                    id8(jid)
+                ));
+                return None;
+            }
+        };
+        let stamp = dock_regate::RegateStamp {
+            head: rebased.new_head.clone(),
+            ..stamp
+        };
+        log(format!(
+            "{}: main moved into {} of its path(s) since its gate — replayed {} -> {} onto main {}",
+            id8(jid),
+            touched.len(),
+            &rebased.old_head[..8.min(rebased.old_head.len())],
+            &rebased.new_head[..8.min(rebased.new_head.len())],
+            &reading.main[..8.min(reading.main.len())],
+        ));
+        Some(self.file_regate(car, jid, branch, stamp).await)
+    }
+
+    /// File the gate-run for a replayed car and say what happened — the
+    /// half of a launch that is retried when it fails, because the branch
+    /// has already moved.
+    async fn file_regate(
+        &self,
+        car: &Value,
+        jid: &str,
+        branch: &str,
+        stamp: dock_regate::RegateStamp,
+    ) -> (String, Option<Value>) {
+        let marks = dock_regate::marks(car, jid, &stamp.main);
+        match self
+            .launch_gate(branch, &stamp.head, crate::gate::Requester::Car, marks)
+            .await
+        {
+            Ok(run) => {
+                let stamp = dock_regate::RegateStamp {
+                    gate_run: run,
+                    ..stamp
+                };
+                (
+                    dock_regate::launched_reason(&stamp),
+                    Some(stamp.to_value(Utc::now())),
+                )
+            }
+            Err(e) => (
+                dock_regate::unfiled_reason(&stamp, &format!("{e:#}")),
+                Some(stamp.to_value(Utc::now())),
+            ),
+        }
+    }
+
+    /// A car the dock replayed, whose receipt has not caught up: where its
+    /// re-gate stands, and the gate-run filed if the launch never got that
+    /// far. Always a hold — the car's receipt does not vouch for its head.
+    async fn regate_in_flight(
+        &self,
+        car: &Value,
+        jid: &str,
+        branch: &str,
+        stamp: dock_regate::RegateStamp,
+    ) -> (String, Option<Value>) {
+        if stamp.gate_run.is_empty() {
+            if self.cfg.dry {
+                let r =
+                    dock_regate::in_flight_reason(jid, &stamp, &dock_regate::InFlight::FileGate);
+                return (r, None);
+            }
+            return self.file_regate(car, jid, branch, stamp).await;
+        }
+        let verdict = match self.get_job(&stamp.gate_run).await {
+            Ok(run) => boss_jobs::flake::verdict(&run).map(str::to_string),
+            Err(e) => {
+                log(format!(
+                    "{}: could not read its re-gate {} ({e:#}) — reading it as still running",
+                    id8(jid),
+                    id8(&stamp.gate_run)
+                ));
+                None
+            }
+        };
+        let standing = dock_regate::in_flight(&stamp, verdict.as_deref());
+        (dock_regate::in_flight_reason(jid, &stamp, &standing), None)
     }
 
     async fn open_train_job(&self, train_branch: &str, window: &str) -> Result<Option<Value>> {
@@ -5101,5 +5364,121 @@ mod tests {
             "the rerail original was never a car, so only its record can \
              reach it — leaked forever without this: {deleted:?}"
         );
+    }
+
+    // -- the dock's re-gate on current main (backlog 969a1092) -------------
+
+    /// A car branch cut from the fixture's main, carrying one file at
+    /// `path`, published to both remotes — its head.
+    fn park_car(clone: &std::path::Path, branch: &str, path: &str) -> String {
+        git_ok(clone, &["checkout", "-q", "-b", branch, "main"]);
+        let file = clone.join(path);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&file, branch).expect("write");
+        git_ok(clone, &["add", "-A"]);
+        git_ok(clone, &["commit", "-qm", branch]);
+        git_ok(clone, &["push", "-q", "origin", branch]);
+        git_ok(clone, &["push", "-q", "fork", branch]);
+        git_ok(clone, &["checkout", "-q", "main"]);
+        rev(clone, branch)
+    }
+
+    /// Main lands a change at `path` — car F, in the measured case.
+    fn land_on_main(clone: &std::path::Path, path: &str) {
+        let file = clone.join(path);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&file, "landed").expect("write");
+        git_ok(clone, &["add", "-A"]);
+        git_ok(clone, &["commit", "-qm", "a car lands"]);
+        git_ok(clone, &["push", "-q", "origin", "main"]);
+    }
+
+    /// The head the FORGE carries for `branch` — what a moved branch
+    /// would show, read from the bare remote itself.
+    fn forge_branch(clone: &std::path::Path, branch: &str) -> String {
+        let origin = clone.parent().expect("root").join("origin.git");
+        rev(&origin, &format!("refs/heads/{branch}"))
+    }
+
+    fn dock_conductor(clone: &std::path::Path) -> Conductor {
+        let mut c = cleanup_conductor(
+            "forgejo",
+            Box::new(FakeForge {
+                deleted: std::sync::Arc::default(),
+                fail_deletes: false,
+            }),
+        );
+        c.cfg.clone = clone.display().to_string();
+        c
+    }
+
+    /// Car G's shape on a real clone: parked on an old main, main lands a
+    /// change BESIDE its file, and the dock owes it a re-gate. Here the
+    /// means to gate are absent (no runner manifest, as on a box with no
+    /// cluster), so the car BOARDS AS GATED — and, the half that matters
+    /// most, its branch has not moved: a replay the dock could not follow
+    /// with a gate would leave a car no receipt vouches for.
+    #[tokio::test]
+    async fn a_touched_car_with_no_means_to_regate_boards_and_its_branch_stays_put() {
+        let (_g, clone) = clone_fixture("dock-no-means");
+        let head = park_car(&clone, "feat/g", "apps/web/src/it/yard/phone-strip.ts");
+        land_on_main(&clone, "apps/web/src/it/yard/regions.ts");
+        let c = dock_conductor(&clone);
+        let car = json!({"id": "car-g", "metadata": {"branch": "feat/g", "summary": "G"}});
+        assert_eq!(
+            c.base_hold(&car, "car-g-000", "feat/g", &head).await,
+            None,
+            "a failure of the means must never freeze a landing"
+        );
+        assert_eq!(forge_branch(&clone, "feat/g"), head, "nothing was replayed");
+    }
+
+    /// The bound, end to end: a car already re-gated for the main it would
+    /// board on is held on the recorded answer and nothing is launched —
+    /// here the refused replay, whose reason names the repair.
+    #[tokio::test]
+    async fn a_car_already_regated_for_this_main_is_held_without_a_second_launch() {
+        let (_g, clone) = clone_fixture("dock-bound");
+        let head = park_car(&clone, "feat/g", "apps/web/src/it/yard/phone-strip.ts");
+        land_on_main(&clone, "apps/web/src/it/yard/regions.ts");
+        let main = rev(&clone, "origin/main");
+        let stamp = dock_regate::RegateStamp {
+            refused: "boss gate --rebase: REFUSED — hit a conflict in: x".into(),
+            ..dock_regate::RegateStamp::for_main(&main, &[])
+        };
+        let car = json!({"id": "car-g", "metadata": {
+            "branch": "feat/g",
+            dock_regate::BASE_REGATE: stamp.to_value(Utc::now()),
+        }});
+        let c = dock_conductor(&clone);
+        let (reason, write) = c
+            .base_hold(&car, "car-g-000", "feat/g", &head)
+            .await
+            .expect("held");
+        assert!(reason.contains("boss rerail car-g-00"), "{reason}");
+        assert!(write.is_none(), "the recorded answer is not rewritten");
+        assert_eq!(forge_branch(&clone, "feat/g"), head);
+    }
+
+    /// A car main moved nowhere near, and a car on current main, board
+    /// exactly as before this rule existed.
+    #[tokio::test]
+    async fn an_untouched_or_current_car_boards_as_before() {
+        let (_g, clone) = clone_fixture("dock-untouched");
+        let far = park_car(&clone, "feat/far", "infra/lint/a-lint.sh");
+        land_on_main(&clone, "apps/web/src/it/yard/regions.ts");
+        let fresh = park_car(&clone, "feat/fresh", "apps/web/src/it/yard/phone-strip.ts");
+        let c = dock_conductor(&clone);
+        let car = |b: &str| json!({"id": b, "metadata": {"branch": b}});
+        assert_eq!(
+            c.base_hold(&car("feat/far"), "far", "feat/far", &far).await,
+            None
+        );
+        assert_eq!(
+            c.base_hold(&car("feat/fresh"), "fresh", "feat/fresh", &fresh)
+                .await,
+            None
+        );
+        assert_eq!(forge_branch(&clone, "feat/far"), far);
     }
 }
