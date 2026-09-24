@@ -45,6 +45,7 @@
   import { REGION_CANVAS, regionCanvas } from './region-canvas';
   import { asFloorRegion, regionFloorView } from './floor-slices';
   import RegionFloor from './RegionFloor.svelte';
+  import { drawnNote } from './region-page';
   import { hasPlatforms, platformLayout, type Deck, type Platform } from './world-interior';
   import { machineTitle, machineryLabel, machineryStrip } from './world-machines';
   import type { Territory } from './world';
@@ -100,6 +101,12 @@
    *  region canvas for everything else (and while the floor is read). */
   const canvas = $derived<Territory>(view === null ? rect : { ...rect, w: view.width, h: view.height });
   const machinery = $derived(machineryStrip(canvas, r?.machines ?? []));
+  /** What the platforms stand beyond the head's count, SAID (design
+   *  62de32ae, decision 5): marshalling's head counts each packet once,
+   *  only while it is marshalling's, and its stations draw their full
+   *  depths — 517 standings under a head of 280, with nothing to say
+   *  why, was the contradiction the review measured. */
+  const drawn = $derived(deck !== null && deck.kind === 'ready' ? drawnNote(r, deck.platforms) : null);
 
   // The head is a region-scale block now, not a compact one squeezed
   // into a slot: the count, the state, the trend and the why all fit,
@@ -140,6 +147,7 @@
     {#if r}<span class="region-trend">{r.trend.metric} · {trendText(r.trend)}</span>{/if}
   </div>
   <div class="region-why" class:err={troubled}>{why}</div>
+  {#if drawn}<div class="region-drawn" data-drawn={region}>{drawn}</div>{/if}
 
   <svg
     viewBox="0 0 {canvas.w} {canvas.h}"
@@ -319,6 +327,8 @@
   .region-why { font-family: var(--font-mono); font-size: 12px;
     color: var(--map-muted); margin-top: var(--s2); }
   .region-why.err { color: var(--map-bad-ink); }
+  .region-drawn { font-family: var(--font-mono); font-size: 11px; color: var(--map-muted);
+    margin-top: 4px; }
   .lamp-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block;
     background: var(--map-rule-strong); }
   .lamp-dot.ok { background: var(--map-ok-edge); }

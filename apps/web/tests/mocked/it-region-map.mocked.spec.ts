@@ -26,7 +26,7 @@
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { TERRITORIES } from '../../src/it/yard/world';
-import { YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
+import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 
 const trend = (metric: string, unit: string) => ({
   metric, unit, current: 1, previous: 1, samples: 3, previous_samples: 3,
@@ -241,6 +241,13 @@ test("marshalling's own map draws a platform per station — its packets, its bo
   // not look alike.
   await expect(over.locator('text.rate')).not.toHaveClass(/unknown/);
 
+  // THE HEAD AGAINST THE DRAWING (design 62de32ae, decision 5): the
+  // stations stand 32 while the head counts none of them as
+  // marshalling's, and the map SAYS so rather than contradicting itself.
+  await expect(page.locator('[data-drawn="marshalling"]')).toContainText(
+    'the platforms stand 32 — the head counts 0: a packet stands at every station it matches',
+  );
+
   // The board itself is mounted under the region map: the page that
   // used to live at /it/operate/marshalling, minus its page header.
   await expect(page.locator('.my-root')).toBeVisible();
@@ -418,4 +425,82 @@ test('a region the layout does not know leaves the WORLD on screen, never a map 
   await page.goto('/it/yard/atlantis');
   await expect(page.locator(WORLD_SVG).locator('.territory')).toHaveCount(TERRITORIES.length);
   await expect(page.locator('section[aria-label$="region map"]')).toHaveCount(0);
+});
+
+// ---------------------------------------------------------------------
+// A REGION OWNS ITS PAGE (design 62de32ae, decision 7).
+// ---------------------------------------------------------------------
+//
+// The review of 2026-09-24 (finding 8): the view swapped and the page
+// around it did not. Every region's heading read "The IT world", the
+// world's summary sat between the region map and its floor, the
+// garage's departure board listed dock cars, and "No alerts — every
+// machine is working or idle by design" stood under a troubled shed.
+
+const dockRail = (from: string, to: string, over: Record<string, unknown> = {}) => ({
+  from, to, crossing: 'a packet crossed', state: 'clear', why: 'nothing waiting',
+  rate: { metric: 'crossings', unit: 'per day', current: 5, previous: 4, samples: 5, previous_samples: 4 },
+  last_crossed: null, waiting: 0, holds: [],
+  machine: { name: 'auto-park-on-gate-green', kind: 'dispatcher-rule', last_fired: '2026-09-19T04:53:00Z',
+    silent_for_minutes: 7, expected_every_minutes: null, silent: false, why: '' },
+  ...over,
+});
+
+test('a region page is headed by the region, with the way back and its own rails in place of the world summary', async ({ page }) => {
+  await mocks(page);
+  await page.route(YARD_BORDERS, (r) =>
+    r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        window_hours: 24,
+        now: '2026-09-19T05:00:00Z',
+        borders: [
+          dockRail('gates', 'dock', { waiting: 6 }),
+          dockRail('dock', 'track', { state: 'troubled', why: 'the boarding rule is silent' }),
+          dockRail('track', 'arrivals'),
+        ],
+      }),
+    }));
+  await page.goto('/it/yard/dock');
+
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('IT · Dock');
+  await expect(page.getByRole('heading', { name: 'The IT world' })).toHaveCount(0);
+  const crumbs = page.locator('nav.crumbs');
+  await expect(crumbs).toContainText('The IT world');
+  await expect(crumbs.locator('[aria-current="page"]')).toContainText('Dock');
+
+  // The dock's rails, in then out — not the world's crossings total.
+  const rails = page.locator('.region-rails[data-rails="dock"] .rail-line');
+  await expect(rails).toHaveCount(2);
+  await expect(rails.nth(0)).toHaveText('in from gates · 5/day · 6 waiting · auto-park-on-gate-green · fired 7m ago');
+  await expect(rails.nth(1)).toContainText('out to track · 5/day · nothing waiting');
+  await expect(rails.nth(1)).toContainText('troubled — the boarding rule is silent');
+  await expect(page.getByText(/crossings in 24h/)).toHaveCount(0);
+
+  // The departure board is the dock's, titled for it.
+  const board = page.locator('.head[data-board="dock"]');
+  await expect(board).toContainText('Departure board · dock');
+  await expect(board).toContainText('2 in flight · 0 landed');
+
+  // The breadcrumb is the way back, as a link.
+  await crumbs.getByRole('link', { name: 'The IT world' }).click();
+  await expect(page).toHaveURL(/\/it$/);
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('The IT world');
+});
+
+test("a quiet alerts strip under a troubled region does not call the region's machines fine", async ({ page }) => {
+  await mocks(page);
+  const troubled = {
+    ...REGIONS,
+    regions: REGIONS.regions.map((r) =>
+      r.name === 'shed' ? { ...r, state: 'troubled', why: '2 landed cars of ours owe a proof' } : r),
+  };
+  await page.route(YARD_REGIONS, (r) =>
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(troubled) }));
+  await page.goto('/it/yard/shed');
+
+  const strip = page.locator('.yard-alerts[data-alerts="shed"]');
+  await expect(strip).toContainText("No machine alerts in the shed — its troubled state above is the region's own reading");
+  await expect(strip).not.toContainText('every machine here is working');
 });
