@@ -44,6 +44,20 @@
 
   let loadState: State = $state<State>({ kind: 'loading' });
 
+  // What the live stream is doing, said in one line (backlog 260879f5,
+  // page audit 65a273d5). A dead stream used to look exactly like a
+  // quiet log: the server swallowed a failed read and held the
+  // connection open, and the page acted only on CLOSED, falling to the
+  // poll without a word. The server now sends `event: failed` naming the
+  // error and ends; each state below paints its own line.
+  type LiveState =
+    | { kind: 'off' }
+    | { kind: 'connecting' }
+    | { kind: 'live' }
+    | { kind: 'reconnecting' }
+    | { kind: 'polling'; reason: string };
+  let liveState = $state<LiveState>({ kind: 'off' });
+
   // Size and growth (168b3f25). David, 2026-09-02: "We need size and
   // growth stats on audit log to make sure it isn't growing
   // unsustainably." Read once on mount from /api/events/stats and
@@ -235,23 +249,51 @@
       // Snapshot mode — explicit reload only via the user
       // tapping the filter inputs (which retriggers this $effect).
       // No interval timer.
+      liveState = { kind: 'off' };
       return () => {
         cancelled = true;
       };
     }
 
     // Live mode — SSE pushes new rows as they land. Browser's
-    // EventSource auto-reconnects on transient blips. On a hard
-    // failure (route 404 on older deploys) onerror fires with
-    // CLOSED state; fall back to a 5s snapshot poll.
+    // EventSource auto-reconnects when an open stream ends. Two
+    // failures stop it for good, and both fall back to a 5s snapshot
+    // poll with a line saying so: a refused request (onerror with
+    // CLOSED — a non-200, a route 404 on an older deploy) and the
+    // server's own `failed` frame, which the page answers by closing
+    // the stream so the browser does not re-anchor past the gap.
     const params = new URLSearchParams();
     if (src) params.set('source', src);
     if (knd) params.set('kind', knd);
     if (act) params.set('actor', act);
     let es: EventSource | null = null;
     let pollFallbackId: number | null = null;
+    function fallBackToPoll(reason: string): void {
+      es?.close();
+      es = null;
+      if (cancelled) return;
+      liveState = { kind: 'polling', reason };
+      if (pollFallbackId === null) {
+        pollFallbackId = window.setInterval(fetchSnapshot, SNAPSHOT_RELOAD_MS);
+      }
+    }
+    liveState = { kind: 'connecting' };
     try {
       es = new EventSource(`/api/events/stream?${params.toString()}`);
+      es.onopen = () => {
+        if (!cancelled) liveState = { kind: 'live' };
+      };
+      es.addEventListener('failed', (ev) => {
+        const data = (ev as MessageEvent<string>).data;
+        let reason = 'the server reported a failed read and gave no reason';
+        try {
+          const body = JSON.parse(data) as { error?: unknown };
+          if (typeof body.error === 'string' && body.error) reason = body.error;
+        } catch {
+          if (data) reason = data;
+        }
+        fallBackToPoll(reason);
+      });
       es.onmessage = (ev) => {
         if (cancelled) return;
         try {
@@ -275,16 +317,17 @@
         }
       };
       es.onerror = () => {
-        if (es && es.readyState === EventSource.CLOSED) {
-          es.close();
-          es = null;
-          if (pollFallbackId === null) {
-            pollFallbackId = window.setInterval(fetchSnapshot, SNAPSHOT_RELOAD_MS);
-          }
+        if (!es) return;
+        if (es.readyState === EventSource.CLOSED) {
+          // The browser hands an EventSource neither the status nor
+          // the body of a refused request, so the line cannot say why.
+          fallBackToPoll('the server refused it (the browser does not say why)');
+        } else if (!cancelled) {
+          liveState = { kind: 'reconnecting' };
         }
       };
-    } catch {
-      pollFallbackId = window.setInterval(fetchSnapshot, SNAPSHOT_RELOAD_MS);
+    } catch (e) {
+      fallBackToPoll(e instanceof Error ? e.message : String(e));
     }
 
     return () => {
@@ -490,6 +533,19 @@
   </Section>
 
   <Section title="Stream" wide>
+      {#if liveState.kind !== 'off'}
+        <p class="events-live events-live-{liveState.kind}" role="status">
+          {#if liveState.kind === 'connecting'}
+            Live stream connecting…
+          {:else if liveState.kind === 'live'}
+            Live stream connected. New rows appear at the top as they land.
+          {:else if liveState.kind === 'reconnecting'}
+            Live stream lost; the browser is reconnecting. Rows that land before it is back will not stream — reload to read them.
+          {:else}
+            Live stream down: {liveState.reason}. Re-reading the tail every 5 s.
+          {/if}
+        </p>
+      {/if}
       {#if loadState.kind === 'loading'}
         <p class="empty">Loading…</p>
       {:else if loadState.kind === 'error'}
@@ -580,6 +636,16 @@
   .events-auto span {
     font-size: 13px;
     color: inherit;
+  }
+  .events-live {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: var(--static);
+  }
+  .events-live-reconnecting,
+  .events-live-polling {
+    color: inherit;
+    font-weight: 500;
   }
   .events-freshness {
     font-size: 12px;

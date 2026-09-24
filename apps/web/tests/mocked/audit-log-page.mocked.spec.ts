@@ -15,7 +15,6 @@
 // rewrite it — a gap cannot close without this file saying so:
 //   34ea2ae0  the live stream and the export ignore the provenance lens
 //   4630ebc0  a refused export replaces the app with the raw response
-//   260879f5  a dead or reconnecting stream paints nothing
 //   c3e4edcc  no failure line carries the shared `.load-failed` marker
 //   91b41817  the page has two names; the row toggle is mouse-only
 //
@@ -24,13 +23,14 @@
 // ends the connection, so a mocked stream can deliver N frames and then
 // either END (the browser schedules a reconnect after `retry`) or FAIL
 // (a non-200 status: readyState CLOSED, no reconnect). Both are pinned
-// below. What a mocked browser cannot produce is the server-side failure
-// gap 260879f5 names — tail_http.rs's `Err(_) => continue` keeps the
-// connection OPEN and silent — because a held-open route never completes
-// and a fulfilled one always ends. The client half of that gap (nothing
-// on the page distinguishes live, reconnecting, polling and dead) IS
-// pinned: the failing stream falls back to the poll with no line saying
-// so.
+// below. Gap 260879f5 was a third shape a mocked browser could NOT make:
+// tail_http.rs answered a failed read with `Err(_) => continue`, holding
+// the connection open and silent. Since 2026-09-24 the server sends one
+// `event: failed` frame naming the error and ENDS the stream — a whole
+// body, which a mock can fulfil — so that shape is pinned here too, and
+// its server half in crates/core/boss-events/tests/tail_http.rs. Each
+// shape now paints its own line: connecting, reconnecting, and down
+// (with the server's words when it gave any), then the 5s poll.
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage } from './_helpers';
@@ -138,6 +138,8 @@ const TABS: ReadonlyArray<{ label: string; path: string; catalogued: boolean }> 
 ];
 
 const stream = (page: Page) => page.locator('.events-table tbody tr.events-row');
+/// The one line that says what the live stream is doing (260879f5).
+const liveLine = (page: Page) => page.locator('.events-live');
 
 test.describe('/it/operate/audit — the page and its names', () => {
   test('the header, the three sections, and the two names the page goes by', async ({ page }) => {
@@ -438,23 +440,100 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
     await expect(page.getByLabel('Live (SSE)')).toBeChecked();
   });
 
-  test('a failing stream falls back to the 5s poll and nothing on the page says so (260879f5)', async ({ page }) => {
+  test('a refused stream falls back to the 5s poll and the page says so (260879f5)', async ({ page }) => {
     await installAuditReads(page);
     const seen = watch(page);
     await page.route(STREAM, (r) => r.fulfill({ status: 500, contentType: 'text/plain', body: 'stream down' }));
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     await expect(stream(page)).toHaveCount(3);
     await expect.poll(() => seen.stream.length).toBe(1);
+    // The browser hands an EventSource no status and no body, so the
+    // line says the stream was refused and that it cannot say why —
+    // true, where a guessed cause would not be.
+    await expect(liveLine(page)).toHaveText(
+      'Live stream down: the server refused it (the browser does not say why). Re-reading the tail every 5 s.',
+    );
     const tailsAtMount = seen.tail.length;
     // The fallback poll is SNAPSHOT_RELOAD_MS = 5000.
     await expect.poll(() => seen.tail.length, { timeout: 12_000 }).toBeGreaterThan(tailsAtMount);
     // The failed stream is not retried: a non-200 answer CLOSES an
     // EventSource.
     expect(seen.stream.length).toBe(1);
-    // No line names the stream's state — live, reconnecting, polling or
-    // dead all paint the same.
-    await expect(page.getByText(/reconnect|polling|offline|disconnected|stream (is )?(down|closed|dead|lost)/i)).toHaveCount(0);
+    // Gap c3e4edcc is still open: this failure line, like the page's
+    // other two, does not carry the shared marker.
     await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+  });
+
+  test('a stream whose server read failed says why, is closed, and the page polls (260879f5)', async ({ page }) => {
+    // The server's side of the gap: a failed read of audit_log is one
+    // `event: failed` frame naming the error, then the end of the body.
+    // `retry: 100` makes the browser reconnect at once if the page left
+    // the EventSource open, so a page that ignored the frame would show
+    // up as more stream requests.
+    await installAuditReads(page);
+    const seen = watch(page);
+    const error = 'reading rows past the stream\'s cursor: error returned from database: relation "audit_log" does not exist';
+    await page.route(STREAM, (r) =>
+      r.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+        body: `retry: 100\nevent: failed\ndata: ${JSON.stringify({ error })}\n\n`,
+      }),
+    );
+    await mountPage(page, PATH, { titleMatch: /Audit Log/ });
+    await expect(liveLine(page)).toHaveText(`Live stream down: ${error}. Re-reading the tail every 5 s.`);
+    const tailsAtFailure = seen.tail.length;
+    await expect.poll(() => seen.tail.length, { timeout: 12_000 }).toBeGreaterThan(tailsAtFailure);
+    // Closed on the frame, so the browser never reconnects.
+    expect(seen.stream.length).toBe(1);
+    // The frame is not a row.
+    await expect(stream(page)).toHaveCount(3);
+  });
+
+  test('a stream still connecting says so (260879f5)', async ({ page }) => {
+    await installAuditReads(page);
+    // Held: the response never starts, so the EventSource never opens.
+    // Released as an abort at the end, so the request is answered by
+    // the mock rather than leaking to the dev-server.
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    await page.route(STREAM, async (r) => {
+      await held;
+      await r.abort().catch(() => {});
+    });
+    await mountPage(page, PATH, { titleMatch: /Audit Log/ });
+    await expect(stream(page)).toHaveCount(3);
+    await expect(liveLine(page)).toHaveText('Live stream connecting…');
+    release();
+  });
+
+  test('a stream that ended says it is reconnecting, and what that costs (260879f5)', async ({ page }) => {
+    await installAuditReads(page);
+    const seen = watch(page);
+    // An open stream whose body ends: the browser schedules a reconnect
+    // after `retry`, long enough here that the test sees the wait. The
+    // server re-anchors a new connection at the log's newest row, so
+    // rows that land in the gap never stream — the line says so.
+    await page.route(STREAM, (r) =>
+      r.fulfill({
+        status: 200,
+        headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+        body: 'retry: 3600000\n\n',
+      }),
+    );
+    await mountPage(page, PATH, { titleMatch: /Audit Log/ });
+    await expect(liveLine(page)).toHaveText(
+      'Live stream lost; the browser is reconnecting. Rows that land before it is back will not stream — reload to read them.',
+    );
+    expect(seen.stream.length).toBe(1);
+  });
+
+  test('unticking Live (SSE) paints no stream line', async ({ page }) => {
+    await installAuditReads(page);
+    await mountPage(page, PATH, { titleMatch: /Audit Log/ });
+    await expect(liveLine(page)).toHaveCount(1);
+    await page.getByLabel('Live (SSE)').uncheck();
+    await expect(liveLine(page)).toHaveCount(0);
   });
 
   test('unticking Live (SSE) reads one snapshot and opens no stream', async ({ page }) => {

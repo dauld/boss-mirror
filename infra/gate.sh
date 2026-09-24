@@ -538,11 +538,11 @@ require_headroom "to start"
 #            the source can see which rule files it reads; the derivation
 #            below finds literals, not format strings.
 #     examples/<tenant>/seeds/* -> boss-jobs for workflows.toml (its
-#            seed_loader parses BOTH tenants' bundles through the
+#            seed_loader parses the brewery's bundle through the
 #            viability lint), boss-sim for tenant.toml (seven of its
 #            shape-driven unit tests load that exact file),
 #            boss-policy-client for policy_rules.toml (its loader's unit
-#            tests parse both tenants' grants), and
+#            tests parse the brewery's grants), and
 #            boss-<tenant>-engine for anything in the bundle — four of
 #            the brewery's TOMLs are `include_str!`d into that crate, so
 #            they are compile input, and its layer-1 lint test reads the
@@ -1009,9 +1009,9 @@ scope_self_test() {
     # case up, and it was missed for the same reason: the rule was
     # written for infra/platform/workflows and the tenant's equivalent
     # never got a line beside it (backlog b59efe54). boss-jobs parses
-    # both tenants' workflows.toml through the viability lint
-    # (`round_trips_brewery_seed_bundle`,
-    # `round_trips_used_device_shop_seed_bundle`), and the tenant's own
+    # the brewery's workflows.toml through the viability lint
+    # (`round_trips_brewery_seed_bundle`; the used-device-shop twin
+    # retired with that tenant, backlog a8991c86), and the tenant's own
     # engine parses it again in its layer-1 lint test — so a bundle-only
     # car that scoped to no crate ran neither, and a broken predicate or
     # a missing terminal would have gated GREEN on its way to the live
@@ -1032,7 +1032,7 @@ scope_self_test() {
     _case "the rest of a tenant bundle implies its engine" "boss-brewery-engine" \
         "examples/brewery/seeds/vendors.toml"
     # policy_rules.toml is parsed by boss-policy-client's own unit tests
-    # (`brewery_seed_parses`, `used_device_shop_seed_parses`) — the
+    # (`brewery_seed_parses`) — the
     # privilege model every write passes through, so a malformed grant
     # must not reach the seed with nothing compiled against it.
     _case "a tenant policy bundle implies the policy loader" "boss-brewery-engine boss-policy-client" \

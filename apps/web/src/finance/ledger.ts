@@ -320,6 +320,18 @@ export async function loadPeriods(): Promise<PeriodsRead> {
   return { read, periods: body ?? [] };
 }
 
+/// The journal entry a financial fact posted, for /ux/finance?fact=
+/// (entity-href's `fact` kind; backlog 2ab44d55). `entryId` null is "this
+/// fact posted no entry" only when `read` is ok.
+export async function loadEntryIdForFact(
+  factId: string,
+): Promise<Readonly<{ read: ReadState; entryId: string | null }>> {
+  const { read, body } = await readJson<LedgerEntry[]>(
+    `${API_BASE}/entries?fact_id=${encodeURIComponent(factId)}&limit=1`,
+  );
+  return { read, entryId: body?.[0]?.id ?? null };
+}
+
 export async function loadAccounts(): Promise<Account[]> {
   const body = await getJson<Account[]>(`${API_BASE}/accounts`);
   return body ?? [];
@@ -362,58 +374,6 @@ export async function loadEntriesForAccount(
 export function loadEntryDetail(entryId: string | null): Promise<LedgerEntryDetail | null> {
   if (!entryId) return Promise.resolve(null);
   return getJson<LedgerEntryDetail>(`${API_BASE}/entries/${entryId}`);
-}
-
-// ---------------------------------------------------------------------------
-// IT-panel activity projections (bank settlements, payroll runs, tax filings)
-// ---------------------------------------------------------------------------
-
-export type BankSettlement = {
-  id: string;
-  invoice_id: string;
-  received_on: string;
-  expected_settle_on: string;
-  settled_on: string | null;
-  amount_cents: number;
-  bank_provider: string;
-  payment_method: 'ach' | 'wire' | 'check' | 'card';
-  status: 'pending' | 'settled' | 'returned';
-};
-
-export type PayrollRun = {
-  id: string;
-  run_date: string;
-  period_start: string;
-  period_end: string;
-  gross_cents: number;
-  employer_tax_cents: number;
-  withheld_cents: number;
-  net_cents: number;
-  employee_count: number;
-  provider: string;
-  status: 'draft' | 'submitted' | 'posted';
-};
-
-export async function loadBankSettlements(limit: number): Promise<BankSettlement[]> {
-  const body = await getJson<BankSettlement[]>(
-    `${API_BASE}/bank-settlements?limit=${limit}`,
-  );
-  return body ?? [];
-}
-
-export async function loadPayrollRuns(limit: number): Promise<PayrollRun[]> {
-  const body = await getJson<PayrollRun[]>(
-    `${API_BASE}/payroll-runs?limit=${limit}`,
-  );
-  return body ?? [];
-}
-
-export async function loadTaxFilings(
-  status: 'accrued' | 'filed' | 'paid' | null,
-): Promise<TaxFiling[]> {
-  const qs = status ? `?status=${status}` : '';
-  const body = await getJson<TaxFiling[]>(`${API_BASE}/tax-filings${qs}`);
-  return body ?? [];
 }
 
 /// Lookup the single journal entry produced by a projection row.

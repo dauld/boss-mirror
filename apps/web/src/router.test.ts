@@ -198,6 +198,47 @@ describe('products list search from the query string', () => {
   });
 });
 
+// /ux/finance's tab, entry and fact ride in the query (backlog
+// 2ab44d55): NewJournalEntryPage lands on ?entry=<id> after a post, and
+// the route must hand that to the page rather than drop it.
+describe('finance view from the query string', () => {
+  const at = (search: string) => {
+    (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
+      location: { search, pathname: '/ux/finance' },
+    };
+    return parseRoute('/ux/finance');
+  };
+
+  test('a posted entry is carried through, onto the Trial Balance', () => {
+    expect(at('?entry=ent-1')).toEqual({
+      kind: 'finance',
+      view: { tab: 'trial-balance', entry: 'ent-1', fact: '' },
+    });
+  });
+
+  test('a fact and a tab are carried through', () => {
+    expect(at('?fact=f-1')).toEqual({
+      kind: 'finance',
+      view: { tab: 'trial-balance', entry: '', fact: 'f-1' },
+    });
+    expect(at('?tab=invoices')).toEqual({
+      kind: 'finance',
+      view: { tab: 'invoices', entry: '', fact: '' },
+    });
+  });
+
+  test('a bare /ux/finance is the Overview', () => {
+    expect(at('')).toEqual({ kind: 'finance', view: { tab: 'overview', entry: '', fact: '' } });
+  });
+
+  test('an invoice page does not read the finance query', () => {
+    expect(at('?entry=ent-1') && parseRoute('/ux/finance/inv-1')).toEqual({
+      kind: 'invoice',
+      invoiceId: 'inv-1',
+    });
+  });
+});
+
 describe('global search results route', () => {
   test('/search carries the query through', () => {
     (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {

@@ -749,7 +749,9 @@ pub struct StreamQuery {
 /// (source, kind, actor) match the tail endpoint's shape.
 ///
 /// Server-side polls the audit_log every 2s for `id > last_seen`,
-/// dedupes by id, pushes each new row as one SSE `data` frame.
+/// dedupes by id, pushes each new row as one SSE `data` frame. A read
+/// that fails sends one `event: failed` frame, `{"error": "..."}`, and
+/// ends the stream — silence means a quiet log and nothing else.
 /// Same auth gate as `tail` — operator/auditor tier or ceo/cto
 /// role. Per the SSE policy doc (docs/design/sse-policy.md) this
 /// view is "every event matters" → SSE-push, since the 5s poll
@@ -778,16 +780,37 @@ async fn stream(
     let kind_filter = q.kind;
     let actor_filter = q.actor;
 
+    // A failed read of the log is ONE named frame, and then the stream
+    // ends (backlog 260879f5, page audit 65a273d5). It used to be
+    // `Err(_) => continue`: the connection stayed open, keep-alives
+    // kept flowing and no frame ever came, which to the page is exactly
+    // a log where nothing is happening. Named `failed` rather than
+    // sent as a plain `data:` frame so the page's row handler never
+    // reads it as a row; ended rather than retried so a reconnect is
+    // the page's decision, made in words it can show.
+    fn read_failed(read: &str, e: &sqlx::Error) -> Result<SseEvent, Infallible> {
+        let body = serde_json::json!({ "error": format!("{read}: {e}") });
+        Ok(SseEvent::default().event("failed").data(body.to_string()))
+    }
+
     let stream = async_stream::stream! {
         // First: anchor the cursor at the current MAX(id). The
         // operator gets rows arriving AFTER they connect, not a
         // history dump (the tail endpoint is the right tool for
         // history). MAX is constant-time on the audit_log_id_pk
-        // index.
-        let mut cursor: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM audit_log")
+        // index. A failed anchor used to read as cursor 0, so a read
+        // that recovered on the next tick replayed the whole log as
+        // if it were landing now.
+        let anchor = sqlx::query_scalar("SELECT COALESCE(MAX(id), 0) FROM audit_log")
             .fetch_one(pool.as_ref())
-            .await
-            .unwrap_or(0);
+            .await;
+        let mut cursor: i64 = match anchor {
+            Ok(id) => id,
+            Err(e) => {
+                yield read_failed("anchoring the stream at the log's newest row", &e);
+                return;
+            }
+        };
 
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         tick.set_missed_tick_behavior(
@@ -836,7 +859,10 @@ async fn stream(
             }
             let rows = match q.fetch_all(pool.as_ref()).await {
                 Ok(r) => r,
-                Err(_) => continue,
+                Err(e) => {
+                    yield read_failed("reading rows past the stream's cursor", &e);
+                    return;
+                }
             };
             for row in rows {
                 cursor = row.id;

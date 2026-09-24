@@ -254,7 +254,7 @@ pub fn load_workflows(path: impl AsRef<Path>) -> Result<Vec<WorkflowSpec>, SeedL
 
 /// Same as [`load_workflows`] but stamps every spec with
 /// `owning_team = default_owner` (typically the tenant id, e.g.
-/// `"brewery"` or `"used-device-shop"`).
+/// `"brewery"`).
 ///
 /// A DIRECTORY is a bundle too: every `*.toml` file in it, read in
 /// filename order, each holding exactly ONE `[[workflow]]` whose
@@ -1669,83 +1669,6 @@ title_template = "Open"
                 "`{kind}` fermentation-start should carry an honest duration"
             );
         }
-    }
-
-    #[test]
-    fn round_trips_used_device_shop_seed_bundle() {
-        // Sibling smoke test for the used-device-shop tenant: this
-        // file is the data form of the tenant's 10 Workflows.
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("..")
-            .join("examples/used-device-shop/seeds/workflows.toml");
-        let specs = load_workflows_with_owning_team(&path, "used-device-shop").unwrap();
-        let kinds: Vec<&str> = specs.iter().map(|s| s.kind.as_str()).collect();
-        // Two batches:
-        // - The ten Workflows explicitly named in step 4 of the
-        //   retirement doc.
-        // - The fourteen Workflows lifted from
-        //   `crates/boss-jobs/src/seed_kinds.rs` per
-        //   `docs/design/platform-vs-tenant-jobkinds.md` so the
-        //   tenant TOML carries the full catalog before step 7's
-        //   engine swap drops the seed_kinds.rs duplicates.
-        for required in &[
-            // Step 4 batch
-            "device-intake",
-            "refurb-used",
-            "field-service",
-            "sale",
-            "support-incident",
-            "support-rma",
-            "support-sla-renewal",
-            "service-agreement",
-            "decommission",
-            "training-session",
-            // Tier-2 batch (lifted from seed_kinds.rs)
-            "refurb-oem-new",
-            "receiving",
-            "shipping",
-            "installation",
-            "preventive-maintenance-visit",
-            "certification",
-            "demo",
-            "account-onboarding",
-            "contract-renewal",
-            "collections",
-            "vendor-payment",
-            "purchase",
-            "listing",
-            "campaign",
-            "marketing-motion",
-            "marketing-project",
-            "marketing-request",
-            "onboarding",
-            "offboarding",
-            "hiring",
-            "vendor-onboarding",
-            "vendor-negotiation",
-            "rfq",
-            "vendor-catalog-refresh",
-            "vendor-contract-renewal",
-            "ad-hoc",
-        ] {
-            assert!(
-                kinds.contains(required),
-                "expected `{required}` in used-device-shop Workflows; got {kinds:?}"
-            );
-        }
-        assert!(specs.iter().all(|s| s.owning_team == "used-device-shop"));
-        // Every spec must lint clean against the StepType registry —
-        // catches typos in step.kind (would slip past the loader since
-        // unknown kinds parse fine but mis-route at runtime) and the
-        // side-effect-binding-needs-metadata-defaults contract.
-        let registry = crate::step_registry::StepRegistry::v1();
-        let errs = crate::workflow_lint::validate_all(&specs, &registry);
-        assert!(
-            errs.is_empty(),
-            "used-device-shop Workflows failed Workflow lint: {errs:#?}"
-        );
     }
 
     /// A directory is a bundle: every `*.toml` in it, in file-name

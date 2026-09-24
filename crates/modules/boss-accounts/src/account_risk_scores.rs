@@ -118,15 +118,18 @@ async fn list_risk_scores(
 ) -> Response {
     // Security gate: account risk scores include financial + churn
     // signals. Only roles with broad account access (exec / VP /
-    // manager) see the cross-account watchlist; everyone else gets an
-    // empty list so the panel
-    // degrades cleanly rather than 403-ing.
+    // manager) see the cross-account watchlist; everyone else is
+    // REFUSED. This used to answer `200 {accounts: []}` "so the panel
+    // degrades cleanly", and /watchlist painted it as "No accounts
+    // match those filters." — a denial read as nothing at risk, the
+    // false-empty class (backlog 3f0cdca8; page audit 08b0c4f8 GAP 5,
+    // 2026-09-23). A refusal the page can name is the clean degrade.
     if !is_trusted_or_broad(&user) {
-        return Json(RiskScoreList {
-            accounts: Vec::new(),
-            total_scored: 0,
-        })
-        .into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            "account risk scores are shown only to roles with broad account access",
+        )
+            .into_response();
     }
     let limit = params.limit.clamp(1, 200);
     match read_latest_predictions(&state.pool).await {

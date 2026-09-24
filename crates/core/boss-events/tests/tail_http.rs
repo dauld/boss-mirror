@@ -757,3 +757,126 @@ async fn stream_pushes_rows_landing_after_connect_that_match_its_filter() {
     assert_eq!(pushed["source"], "jobs");
     assert_eq!(pushed["kind"], "job.step.updated");
 }
+
+/// The next SSE event off a live stream as `(event, data)` — `event`
+/// is `message` when the frame names none, the SSE default — or `None`
+/// when the stream ENDS. Keep-alive comments are skipped. Unlike
+/// [`next_data`], the end of the stream is an answer here, not a
+/// panic: a stream whose read failed is expected to say so and end.
+async fn next_event<S>(frames: &mut S, wait: std::time::Duration) -> Option<(String, String)>
+where
+    S: futures::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Unpin,
+{
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let chunk = tokio::time::timeout_at(deadline, frames.next())
+            .await
+            .unwrap_or_else(|_| panic!("a frame or the end of the stream within {wait:?}"))?;
+        let bytes = chunk.expect("a frame, not a body error");
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        for event in text.split("\n\n") {
+            let field = |name: &str| {
+                event
+                    .lines()
+                    .find_map(|l| l.strip_prefix(name))
+                    .map(|v| v.trim().to_string())
+            };
+            if let Some(data) = field("data:") {
+                let name = field("event:").unwrap_or_else(|| "message".into());
+                return Some((name, data));
+            }
+        }
+    }
+}
+
+/// Make every later read of `audit_log` on this test's own database
+/// fail the way a lost table, a revoked grant or a dropped connection
+/// would: the query errors. The database is the test's alone (TestDb
+/// copies a template per test), so nothing else sees it.
+async fn break_the_log(db: &TestDb) {
+    sqlx::query("ALTER TABLE audit_log RENAME TO audit_log_gone")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+}
+
+// A dead stream must not look like a quiet log (backlog 260879f5, page
+// audit 65a273d5). The poll loop answered a failed read with
+// `Err(_) => continue`: the connection stayed OPEN, keep-alives kept
+// flowing, and no frame ever came — to the page, exactly the shape of
+// a log where nothing is happening. A failed read now sends ONE frame,
+// `event: failed`, naming the error, and ENDS the stream, so the page
+// can say the stream is down and why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_read_is_a_named_frame_and_the_stream_ends() {
+    let db = TestDb::new().await;
+    let app: Router = audit_tail_router(db.pool.clone());
+    let resp = app
+        .oneshot(get_req("/api/events/stream", &operator_user()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut frames = resp.into_body().into_data_stream();
+
+    // The first poll anchors the cursor and runs the immediate first
+    // tick against a healthy log: nothing to send, and no failure.
+    // Only frames and the end are observable, so the wait is the proof
+    // the anchor ran (the stream is lazy — it reads nothing unpolled).
+    let quiet = tokio::time::timeout(
+        std::time::Duration::from_millis(700),
+        next_event(&mut frames, std::time::Duration::from_secs(60)),
+    )
+    .await;
+    assert!(
+        quiet.is_err(),
+        "a healthy, quiet log sends nothing: {quiet:?}"
+    );
+
+    break_the_log(&db).await;
+    let (event, data) = next_event(&mut frames, std::time::Duration::from_secs(10))
+        .await
+        .expect("a failed read is a frame, not an ended or silent stream");
+    assert_eq!(
+        event, "failed",
+        "the frame is named, so no row parser eats it: {data}"
+    );
+    let body: serde_json::Value = serde_json::from_str(&data).expect("the frame is JSON");
+    let error = body["error"].as_str().expect("the frame carries `error`");
+    assert!(
+        error.contains("audit_log"),
+        "the frame names what failed, in the database's own words: {error}"
+    );
+    assert_eq!(
+        next_event(&mut frames, std::time::Duration::from_secs(10)).await,
+        None,
+        "after the failure the stream ENDS; it does not go on answering silence"
+    );
+}
+
+// The anchor read had the same swallow in a worse shape:
+// `.unwrap_or(0)` turned a failed `MAX(id)` into cursor 0, so a read
+// that recovered on the next tick replayed the log from its first row,
+// 500 at a time, as if they were landing now. The anchor's failure is
+// the same named frame, and the stream ends before any tick.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_anchor_is_a_named_frame_not_a_replay_from_row_zero() {
+    let db = TestDb::new().await;
+    break_the_log(&db).await;
+    let app: Router = audit_tail_router(db.pool.clone());
+    let resp = app
+        .oneshot(get_req("/api/events/stream", &operator_user()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let mut frames = resp.into_body().into_data_stream();
+    let (event, data) = next_event(&mut frames, std::time::Duration::from_secs(10))
+        .await
+        .expect("a failed anchor is a frame");
+    assert_eq!(event, "failed", "{data}");
+    assert!(data.contains("audit_log"), "{data}");
+    assert_eq!(
+        next_event(&mut frames, std::time::Duration::from_secs(10)).await,
+        None,
+        "a stream with no anchor ends"
+    );
+}

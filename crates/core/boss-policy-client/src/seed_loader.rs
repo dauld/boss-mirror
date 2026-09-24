@@ -328,49 +328,4 @@ mod tenant_seed_tests {
             assert!(ids.insert(r.id.clone()), "duplicate id `{}`", r.id);
         }
     }
-
-    #[test]
-    fn used_device_shop_seed_parses() {
-        let path = repo_root().join("examples/used-device-shop/seeds/policy_rules.toml");
-        let rules = load_policy_rules(&path)
-            .unwrap_or_else(|e| panic!("used-device-shop policy_rules.toml: {e:#}"));
-        assert!(rules.len() > 80, "expected >80 rules, got {}", rules.len());
-        let roles: std::collections::HashSet<&str> =
-            rules.iter().map(|r| r.role.as_str()).collect();
-        // Every role from the deleted default_rules tenant matrix
-        // should be back.
-        for must in [
-            "ceo",
-            "coo",
-            "cfo",
-            "cto",
-            "vp-sales",
-            "sales-mgr",
-            "sales-rep",
-            "service-mgr",
-            "service-tech",
-            "refurb-supervisor",
-            "refurb-tech",
-            "qa-lead",
-            "qa-tech",
-            "warehouse-mgr",
-            "warehouse-clerk",
-            "parts-buyer",
-            "controller",
-            "ap-specialist",
-            "hr-generalist",
-            "recruiter",
-            "support-specialist",
-            "it-manager",
-        ] {
-            assert!(
-                roles.contains(must),
-                "used-device-shop seed missing role `{must}`"
-            );
-        }
-        let mut ids = std::collections::HashSet::new();
-        for r in &rules {
-            assert!(ids.insert(r.id.clone()), "duplicate id `{}`", r.id);
-        }
-    }
 }

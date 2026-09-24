@@ -344,7 +344,13 @@
     {:else if route.kind === 'support'}
       <SupportPage />
     {:else if route.kind === 'finance'}
-      <FinancePage />
+      <!-- Keyed on the route, so a navigation to /ux/finance?… while the
+           page is up (the sidebar's Finance link, a ledger-entry link)
+           mounts what the link names; the page's own tab clicks
+           replaceState and never re-parse the route (2ab44d55). -->
+      {#key route}
+        <FinancePage view={route.view} />
+      {/key}
     {:else if route.kind === 'newInvoice'}
       <NewInvoicePage />
     {:else if route.kind === 'newJournalEntry'}

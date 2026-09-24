@@ -112,8 +112,6 @@ describe('no role row declares a Work list — nothing reads one', () => {
   const seeds: ReadonlyArray<[string, () => Promise<ReadonlyArray<Seeded>>]> = [
     ['brewery', async () =>
       (await Bun.file(new URL('../../../../examples/brewery/seeds/classes.json', import.meta.url)).json()) as Seeded[]],
-    ['used-device-shop', async () =>
-      (Bun.TOML.parse(await Bun.file(new URL('../../../../examples/used-device-shop/seeds/classes.toml', import.meta.url)).text()) as { class: Seeded[] }).class],
   ];
   for (const [tenant, load] of seeds) {
     test(`${tenant}: no role row carries metadata.work`, async () => {

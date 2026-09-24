@@ -85,3 +85,7 @@ required-features = ["postgres"]
 [[test]]
 name = "list_accounts_envelope"
 required-features = ["postgres"]
+
+[[test]]
+name = "risk_scores_denial"
+required-features = ["postgres"]

@@ -5,6 +5,8 @@
 // Phase 2 expands to every route the React app knows about.
 // URLs stay identical so deep-links work across the flip.
 
+import { readFinanceView, type FinanceView } from './finance/financeQuery';
+
 export type Route =
   | { kind: 'home' }
   | { kind: 'login' }
@@ -69,7 +71,10 @@ export type Route =
   /// filtered view survives a reload and can be linked (1c2db4c2).
   | { kind: 'products'; q: string }
   | { kind: 'product'; productSku: string }
-  | { kind: 'finance' }
+  /// The tab, and the entry or fact a link opened, read back off the
+  /// query so a posted entry is shown and a tab survives back and
+  /// reload (2ab44d55).
+  | { kind: 'finance'; view: FinanceView }
   | { kind: 'newInvoice' }
   | { kind: 'newJournalEntry' }
   | { kind: 'invoice'; invoiceId: string }
@@ -270,7 +275,7 @@ export function parseRoute(pathname: string): Route {
   const prodM = p.match(/^\/products\/(.+)$/);
   if (prodM) return { kind: 'product', productSku: decodeURIComponent(prodM[1]!) };
 
-  if (p === '/finance') return { kind: 'finance' };
+  if (p === '/finance') return { kind: 'finance', view: readFinanceView(window.location.search) };
   if (p === '/finance/new') return { kind: 'newInvoice' };
   if (p === '/finance/journal-entries/new') return { kind: 'newJournalEntry' };
   // Wildcard MUST come after every specific `/finance/X` case above —

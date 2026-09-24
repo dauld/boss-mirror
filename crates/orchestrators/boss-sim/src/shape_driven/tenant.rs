@@ -984,54 +984,6 @@ mod tests {
         }
     }
 
-    /// Sibling test for the used-device-shop tenant. Step 5 of the
-    /// HumanWorker generator retirement ships this file as
-    /// the data form of the rates the legacy generators encoded.
-    #[test]
-    fn parses_used_device_shop_tenant_toml() {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("..")
-            .join("examples/used-device-shop/seeds/tenant.toml");
-        let cfg = TenantConfig::load(&path).unwrap_or_else(|e| {
-            panic!("failed to parse {}: {e}", path.display());
-        });
-        assert_eq!(cfg.meta.tenant_id, "used-device-shop");
-        assert_eq!(cfg.meta.display_name, "Used Device Shop");
-        // Every Workflow from the step-4 workflows.toml batch must
-        // have a matching [job_rates.*] block here, otherwise the
-        // shape-driven engine has nothing to fire for that kind.
-        for required in &[
-            "device-intake",
-            "refurb-used",
-            "field-service",
-            "sale",
-            "support-incident",
-            "support-rma",
-            "support-sla-renewal",
-            "service-agreement",
-            "decommission",
-            "training-session",
-        ] {
-            assert!(
-                cfg.job_rates.contains_key(*required),
-                "expected [job_rates.{required}] in used-device-shop tenant.toml"
-            );
-        }
-        // Subject birth rates wired so the shape-driven engine can
-        // grow the population over the sim window.
-        assert!(cfg.subject_rates.contains_key("account"));
-        assert!(cfg.subject_rates.contains_key("asset"));
-        // Counterparty + periodic + batch coverage — the audit-side
-        // closes the financial loop the brewery runs the same way.
-        assert!(cfg.counterparty.contains_key("bank-ach"));
-        assert!(cfg.counterparty.contains_key("ar-aging"));
-        assert!(cfg.counterparty.contains_key("warranty-expiry-nudge"));
-        assert!(cfg.batch.contains_key("payroll"));
-        assert!(cfg.batch.contains_key("sales-tax"));
-    }
-
     #[test]
     fn shock_target_matches_kind_and_subject_id() {
         let exact = ShockTarget {

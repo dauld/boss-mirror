@@ -124,11 +124,38 @@ agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "m
 # so the author now decides those and asks only the five classes named.
 # Pinned with page-audit's sites by
 # the_author_decides_from_the_company_frame.rs.
-metadata_defaults = { procedure = "File the design-doc that answers this item: `boss design <title> --markdown-file <file> --question 'Qn|title|proposal' ... --answers <this packet>`. The verb writes the design's id here as design_id and completes this step; the founder's design-review opens on it, asking for that design at /it/design.\n\nDECIDE WHAT THE FRAME DECIDES; ASK ONLY WHAT IT CANNOT (backlog 4f71e608). A --question goes to David, and David, 2026-09-24: \"I do sort of think you are pushing too many questions to me that you could answer on your own. Remember we are building a company, run by one person plus agents, that is going to run a hosting business based on its open source release.\" That frame, he said, is the common-sense guide to our audits' gap analysis and to clearing out, then cleaning up, the demo tenant's leftover pieces. And: \"I can always provide feedback later too as our software is designed for making low cost changes.\" So every choice that frame answers — one person plus agents; a hosting business on the open-source release; our instance runs only the modules it uses and the rest stay for the example tenants; the demo tenant's leftovers cleared out, then cleaned up — is DECIDED in the markdown with its reason, and recorded on this item as `decided_<date>` (`boss job patch <this packet> <file.json>` with the object {\"decided_2026-09-24\": \"<the decision> — because <the reason>\"}, the date read from `date -u +%F`, never typed). Only strategy or priority trade-offs, trust and security boundaries, credentials, money, and brand or voice may ride as a --question. With none left, file with --no-questions — a doc that records decisions rather than asking for them — and David corrects any of them later through the ordinary cheap-change path." }
+metadata_defaults = { procedure = "File the design-doc that answers this item: `boss design <title> --markdown-file <file> --question 'Qn|title|proposal' ... --answers <this packet>`. The verb writes the design's id here as design_id and completes this step; the founder's design-review opens on it, asking for that design at /it/design. ALREADY ANSWERED (backlog 2d3cbeb2): when a design that already exists answers this item, file no second one — complete this step with `boss step complete <this packet> --step draft-design --field design_id=<that design's FULL id> --field disposition=duplicate`. The item closes on its duplicate terminal naming that design, and no review opens, because the decision it would ask for belongs to that design.\n\nDECIDE WHAT THE FRAME DECIDES; ASK ONLY WHAT IT CANNOT (backlog 4f71e608). A --question goes to David, and David, 2026-09-24: \"I do sort of think you are pushing too many questions to me that you could answer on your own. Remember we are building a company, run by one person plus agents, that is going to run a hosting business based on its open source release.\" That frame, he said, is the common-sense guide to our audits' gap analysis and to clearing out, then cleaning up, the demo tenant's leftover pieces. And: \"I can always provide feedback later too as our software is designed for making low cost changes.\" So every choice that frame answers — one person plus agents; a hosting business on the open-source release; our instance runs only the modules it uses and the rest stay for the example tenants; the demo tenant's leftovers cleared out, then cleaned up — is DECIDED in the markdown with its reason, and recorded on this item as `decided_<date>` (`boss job patch <this packet> <file.json>` with the object {\"decided_2026-09-24\": \"<the decision> — because <the reason>\"}, the date read from `date -u +%F`, never typed). Only strategy or priority trade-offs, trust and security boundaries, credentials, money, and brand or voice may ride as a --question. With none left, file with --no-questions — a doc that records decisions rather than asking for them — and David corrects any of them later through the ordinary cheap-change path." }
 [[workflow.step.fields]]
 name = "design_id"
 field_type = "string"
 required = true
+# A DRAFT MAY FIND THE QUESTION ALREADY ANSWERED (backlog 2d3cbeb2,
+# 2026-09-23). The draft-design analyst on f5c1e556 (run 0bb07052)
+# found design bffc0aba already answering it, and the step had no
+# honest exit: `design_id` is required, and completing it with the old
+# design's id opened `design-review` — an empty Decide for David whose
+# closing rule (the design's own decision) had fired long ago and
+# would never fire again. So the item sat here with `duplicate_of`
+# annotations and no terminal. Same shape as `build`'s and `measure`'s
+# disposition (6c114a23, 2802ba8c): OPTIONAL, enum-checked at
+# completion, read by the `duplicate` terminal below, and read
+# NEGATIVELY by `design-review`, so a draft that filed a design carries
+# none and opens the review exactly as before. `design_id` stays
+# required: on a duplicate it names the design that covers the item.
+#
+# TWO VALUES, AND `filed` IS THE ORDINARY ONE. A one-value type is not
+# an enum to the validator (step_registry.rs `validate_field_type`
+# reads a type as an enum only when it contains `|`, and accepts any
+# other unknown spec), so `duplicate` alone would take `dup` or
+# `duplciate` in silence — and a misspelled refusal lands on the review,
+# the empty decision this exists to refuse. `filed` names the ordinary
+# draft; `boss design --answers` writes no disposition, which is Absent
+# and lands in the same place. No `stale`: this step's `design_id` is
+# required, and a claim that died is `build`'s or `measure`'s call.
+[[workflow.step.fields]]
+name = "disposition"
+field_type = "duplicate|filed"
+required = false
 
 [[workflow.step]]
 title = "design-review"
@@ -140,8 +167,12 @@ title = "design-review"
 # and proposed from this step, then the packet, then the triage step
 # that routed here.
 kind = "answer-question"
-# Only once there is a design to decide — see `draft-design` above.
-ready_when = "steps.draft-design.done"
+# Only once there is a design to decide — see `draft-design` above —
+# and NOT when the draft named a design that already answers the item
+# (2d3cbeb2): that decision belongs to the other design, and nothing
+# would ever complete a second copy of it here. Stated negatively so an
+# ordinary draft, whose disposition is Absent, still opens the review.
+ready_when = "steps.draft-design.done AND NOT (steps.draft-design.metadata.disposition = \"duplicate\")"
 title_template = "Decide the design"
 # Declared once — see `triage` above (f5ebd2e1 car 1). The projected
 # `authority_role` is what routes this to the platform-admin holder
@@ -242,7 +273,12 @@ kind = "outcome"
 # time: a Pending step is skipped only when EVERY step it references is
 # terminal, the same mechanism af28e250 used to keep `build` alive
 # across the review.
-ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"duplicate\") OR (steps.build.done AND steps.build.metadata.disposition = \"duplicate\") OR (steps.measure.done AND steps.measure.metadata.disposition = \"duplicate\")"
+#
+# A FOURTH ARM, for a draft that found the question already answered
+# (2d3cbeb2) — see `disposition` on `draft-design`. `closed` needs no
+# matching edit: with the review skipped, `build` skips, and `closed`'s
+# every disjunct reads a step that never completed.
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"duplicate\") OR (steps.build.done AND steps.build.metadata.disposition = \"duplicate\") OR (steps.measure.done AND steps.measure.metadata.disposition = \"duplicate\") OR (steps.draft-design.done AND steps.draft-design.metadata.disposition = \"duplicate\")"
 title_template = "Closed as a duplicate"
 metadata_defaults = { outcome_kind = "withdrawn" }
 terminal = { outcome = "duplicate" }

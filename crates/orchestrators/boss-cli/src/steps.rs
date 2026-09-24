@@ -1327,6 +1327,41 @@ pub(crate) fn design_link_check(packet_id: &str, design: &Value) -> Result<(), S
     }
 }
 
+/// A `draft-design` completed with `disposition = duplicate` names a
+/// design that ALREADY answers the item (backlog 2d3cbeb2), so it is
+/// judged the other way round from [`design_link_check`]: the design
+/// need not answer this packet — it usually answers another one, which
+/// is what makes this packet a duplicate — but it must be a design, and
+/// it must not be this packet's own answer.
+pub(crate) fn covering_design_check(packet_id: &str, design: &Value) -> Result<(), String> {
+    let short = &packet_id[..8.min(packet_id.len())];
+    let design_short = design
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|i| i[..8.min(i.len())].to_string())
+        .unwrap_or_else(|| "?".into());
+    let kind = design
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("(no kind)");
+    if kind != "design-doc" {
+        return Err(format!(
+            "{design_short} is a {kind}, not a design-doc. A duplicate names the DESIGN \
+             that already answers {short}, in `design_id`, and every reader of the \
+             closed item will read it as one."
+        ));
+    }
+    if crate::design::answers_edge(design) == Some(packet_id) {
+        return Err(format!(
+            "design {design_short} answers {short} itself — it is its answer, not a \
+             duplicate of it. Closing on `duplicate` would withdraw the item while its own \
+             design waits on a review this skips. Complete the step without a disposition \
+             and the review opens."
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn complete(
     wire: &Wire,
     packet_ref: &str,
@@ -1359,8 +1394,13 @@ pub(crate) async fn complete(
         let packet_id = crate::envelope::job_id(&packet)
             .context("the packet has no id")?
             .to_string();
-        design_link_check(&packet_id, &design)
-            .map_err(|e| anyhow!("{} `{slug}`: {e}", short(&packet)))?;
+        // A duplicate names a design that answers something ELSE, so the
+        // link check would refuse the one honest exit (2d3cbeb2).
+        let check = match writes.get("disposition").and_then(Value::as_str) {
+            Some("duplicate") => covering_design_check,
+            _ => design_link_check,
+        };
+        check(&packet_id, &design).map_err(|e| anyhow!("{} `{slug}`: {e}", short(&packet)))?;
     }
     // Merged, not replaced — the step keeps its `procedure`, its
     // `agent` block and its audience — and the MERGED document is what
@@ -3388,5 +3428,50 @@ mod design_link_tests {
     fn the_matching_pair_is_accepted() {
         design_link_check(PACKET, &design(DESIGN, Some(PACKET)))
             .expect("a design that answers this packet links fine");
+    }
+
+    fn design_doc(id: &str, answers: Option<&str>) -> Value {
+        let mut d = design(id, answers);
+        d["kind"] = json!("design-doc");
+        d
+    }
+
+    /// A DUPLICATE NAMES A DESIGN THAT ANSWERS SOMETHING ELSE, and that
+    /// is the whole point of it (backlog 2d3cbeb2): f5c1e556 is covered
+    /// by bffc0aba, which answers another item. The link check above
+    /// refuses exactly that pairing, so without this the procedure's
+    /// own door would refuse the honest exit and leave the item where
+    /// it sat. A design with no edge at all may cover it too — older
+    /// designs were filed before `--answers` existed.
+    #[test]
+    fn a_duplicate_may_name_a_design_that_answers_another_packet() {
+        covering_design_check(PACKET, &design_doc(DESIGN, Some(OTHER)))
+            .expect("a design answering another item can cover this one");
+        covering_design_check(PACKET, &design_doc(DESIGN, None))
+            .expect("so can one that names no item");
+    }
+
+    /// But a design that answers THIS packet is its answer, not a
+    /// duplicate of it: closing on `duplicate` would withdraw the item
+    /// while its own design waits for a review that was just skipped.
+    #[test]
+    fn a_duplicate_of_its_own_answer_is_refused() {
+        let err = covering_design_check(PACKET, &design_doc(DESIGN, Some(PACKET)))
+            .expect_err("the packet's own design is not a duplicate of it");
+        assert!(err.contains("its answer"), "{err}");
+        assert!(err.contains("without a disposition"), "{err}");
+    }
+
+    /// And the id must be a DESIGN — `design_id` is the field it lands
+    /// in, and a backlog-item id there would read as a design to every
+    /// reader of the closed item.
+    #[test]
+    fn a_duplicate_naming_a_packet_that_is_not_a_design_is_refused() {
+        let mut not_a_design = design(OTHER, None);
+        not_a_design["kind"] = json!("backlog-item");
+        let err = covering_design_check(PACKET, &not_a_design)
+            .expect_err("a backlog-item is not a design");
+        assert!(err.contains("backlog-item"), "{err}");
+        assert!(err.contains("design-doc"), "{err}");
     }
 }
