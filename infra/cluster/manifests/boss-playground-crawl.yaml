@@ -97,15 +97,20 @@ spec:
             # The chore wrapper and the two helpers it resolves next to
             # itself, plus the transport-retry curl the step helper finds
             # the same way. The boss image is where the Dockerfile COPYs
-            # them (a_chore_records_ok_and_failed.rs pins that).
+            # them (a_chore_records_ok_and_failed.rs pins that). The
+            # curl helper sources lib/curl-through-a-roll.sh from beside
+            # itself and refuses without it, so lib/ comes too, which is
+            # what -r is for (backlog c51967b5; a_chore_write_is_sent_once.rs).
             - name: tools
               image: 10.20.0.15:3000/david/boss:latest
               command:
                 - cp
+                - -r
                 - /usr/local/bin/boss-chore.sh
                 - /usr/local/bin/boss-maintenance-wrap.sh
                 - /usr/local/bin/boss-step.sh
                 - /usr/local/bin/boss-api-curl.sh
+                - /usr/local/bin/lib
                 - /tools/
               securityContext:
                 allowPrivilegeEscalation: false

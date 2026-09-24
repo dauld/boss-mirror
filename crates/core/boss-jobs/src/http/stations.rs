@@ -57,6 +57,38 @@ pub(super) async fn active_rows<R: JobsRepository, B: EventBus>(
     }
 }
 
+/// The open packets `scope` reaches, each with its steps RESOLVED
+/// against its kind's ACTIVE row — the one set every reader that
+/// counts a station's members evaluates the predicate over. The load
+/// and the yard's marshalling read (which the regions map and the
+/// borders both take) each listed and resolved their own copy until
+/// 2026-09-23, and the yard's copy never resolved: the agent station
+/// read 213 in the load and 170 on the map (backlog 6c06ef65). One
+/// definition, so the two cannot disagree again (CLAUDE.md §9a).
+///
+/// A step read that fails is an error, never an empty step list: a
+/// packet with no steps matches no step clause, so it would drop out
+/// of the count instead of failing the read.
+pub(super) async fn resolved_open_packets<R: JobsRepository, B: EventBus>(
+    state: &JobsApiState<R, B>,
+    scope: crate::port::JobScope,
+    active: &BTreeMap<String, crate::registry::WorkflowSpec>,
+) -> Result<Vec<(boss_core::job::Job, Vec<boss_core::job::Step>)>, crate::port::JobsError> {
+    let filter = JobFilter {
+        status: Some(JobStatus::Open),
+        scope,
+        ..Default::default()
+    };
+    let (jobs, _total) = state.jobs.list_jobs(&filter, MAX_LIMIT, 0).await?;
+    let mut packets = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        let steps = state.jobs.list_steps(&job.id).await?;
+        let steps = crate::agent_spec::resolved_steps(&steps, active.get(&job.kind));
+        packets.push((job, steps));
+    }
+    Ok(packets)
+}
+
 fn station_err_response(err: StationError) -> Response {
     match err {
         StationError::NotFound(msg) => (StatusCode::NOT_FOUND, msg).into_response(),
@@ -274,15 +306,6 @@ pub(super) async fn stations_load<R: JobsRepository + 'static, B: EventBus + 'st
     };
 
     let scope = job_scope_from_predicate(&user, &predicate);
-    let filter = JobFilter {
-        status: Some(JobStatus::Open),
-        scope,
-        ..Default::default()
-    };
-    let (jobs, _total) = match state.jobs.list_jobs(&filter, MAX_LIMIT, 0).await {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
     // The ACTIVE protocol per kind, read ONCE — the second half of the
     // omission question `station_reach` answers, and the row each
     // packet's agent block resolves against (backlog 51aef4dd), so the
@@ -292,12 +315,10 @@ pub(super) async fn stations_load<R: JobsRepository + 'static, B: EventBus + 'st
     // Fetched ONCE and shared. Every constraint station matches on a
     // step, so per-station fetching would re-read the same rows 55
     // times.
-    let mut packets = Vec::with_capacity(jobs.len());
-    for job in jobs {
-        let steps = state.jobs.list_steps(&job.id).await.unwrap_or_default();
-        let steps = crate::agent_spec::resolved_steps(&steps, active.get(&job.kind));
-        packets.push((job, steps));
-    }
+    let packets = match resolved_open_packets(&state, scope, &active).await {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
 
     let today = boss_clock_client::now_from(&state.clock).await.date_naive();
     let mut rows: Vec<serde_json::Value> = Vec::with_capacity(stations.len());

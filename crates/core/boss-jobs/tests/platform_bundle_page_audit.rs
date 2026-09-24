@@ -140,6 +140,38 @@ fn the_agents_steps_are_platform_admin_tasks_and_the_founder_decides() {
     assert_eq!(decision.field_type, "approved|changes-requested");
 }
 
+/// `changes-requested` is a ROUTE here, not a pause: `revise` needs the
+/// review DONE. The sign-off surface completes a Request changes only
+/// where the step says so, and until this key existed a founder's
+/// change request on /ux/parts, /ux/products and /ux/vendors was saved
+/// and never reached `revise` (backlog da322e8f, 2026-09-23). Pinned on
+/// the materialised step, because the surface reads the packet's step
+/// metadata, not the Workflow row.
+#[test]
+fn the_review_declares_that_requesting_changes_completes_it() {
+    let wf = bundled("page-audit");
+    assert_eq!(
+        step(&wf, "review").metadata_defaults["changes_requested_completes"],
+        json!(true)
+    );
+    let steps = materialize_steps(
+        &wf,
+        &Subject::new("custom", "/ux/parts"),
+        JobId::new(),
+        &json!({ "route": "/ux/parts", "department": "operations" }),
+        StepId::new,
+    );
+    let review = steps
+        .iter()
+        .find(|s| s.spec_slug.as_deref() == Some("review"))
+        .expect("`review` materialised");
+    assert_eq!(
+        review.metadata.get("changes_requested_completes"),
+        Some(&json!(true)),
+        "the packet's review step carries the declaration the surface reads"
+    );
+}
+
 /// The constraint protocol-retro learned three times over: the reviewer
 /// cannot be handed an empty packet, because `test` cannot complete
 /// without `sign_off_context`, and `review` waits on `test`.

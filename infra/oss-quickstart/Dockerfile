@@ -385,6 +385,10 @@ COPY infra/oss-quickstart/tenant-modules.sh /usr/local/bin/tenant-modules.sh
 # crates/core/boss-testing/tests/a_chore_records_ok_and_failed.rs pins
 # the pairing; the gate never builds the image.
 COPY infra/boss-maintenance-wrap.sh infra/boss-step.sh infra/boss-api-curl.sh infra/boss-chore.sh /usr/local/bin/
+# boss-api-curl.sh sources the one roll wait from lib/ beside itself and
+# refuses without it (backlog c51967b5);
+# crates/core/boss-testing/tests/a_chore_write_is_sent_once.rs pins it.
+COPY infra/lib/curl-through-a-roll.sh /usr/local/bin/lib/curl-through-a-roll.sh
 # The platform's conservation-invariant sweep and the helper it sources,
 # for the hourly boss-conservation-invariants CronJob (H12, backlog
 # 236529aa) — the brewery's own sweep rides in with `COPY examples`

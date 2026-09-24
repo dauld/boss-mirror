@@ -531,17 +531,13 @@ async fn marshalling_stations<R: JobsRepository + 'static, B: EventBus + 'static
 ) -> Option<Vec<StationReading>> {
     let reg = state.stations.as_ref()?;
     let specs = effective_stations(state.as_ref(), reg).await.ok()?;
-    let filter = JobFilter {
-        status: Some(JobStatus::Open),
-        scope,
-        ..Default::default()
-    };
-    let (jobs, _) = state.jobs.list_jobs(&filter, MAX_LIMIT, 0).await.ok()?;
-    let mut packets = Vec::with_capacity(jobs.len());
-    for job in jobs {
-        let steps = state.jobs.list_steps(&job.id).await.ok()?;
-        packets.push((job, steps));
-    }
+    // The SAME member set the load and the queue count, resolved
+    // against each kind's active row — this read listed steps raw until
+    // backlog 6c06ef65, so the map drew the agent station 43 short.
+    let active = super::stations::active_rows(state.as_ref()).await;
+    let packets = super::stations::resolved_open_packets(state.as_ref(), scope, &active)
+        .await
+        .ok()?;
     // The flow cube over two windows: the previous window's counts are
     // the wider read minus the narrower. Wall clock, as the flow
     // surface reads it — the window has to be the instant the log's

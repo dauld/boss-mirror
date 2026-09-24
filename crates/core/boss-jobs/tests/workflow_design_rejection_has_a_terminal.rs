@@ -115,6 +115,21 @@ fn no_decision_but_approved_reaches_publish_and_every_one_of_them_terminates() {
     }
 }
 
+/// The test above reaches `not-published` by COMPLETING `approve` with
+/// changes-requested — and until 2026-09-23 no surface did that: the
+/// sign-off plugin records Request changes and leaves the step open, so
+/// the path this protocol promises was unreachable through the one
+/// surface a human decides on (backlog da322e8f, found on page-audit).
+/// The step declares it, and the plugin reads the declaration.
+#[test]
+fn the_approve_step_declares_that_requesting_changes_completes_it() {
+    let spec = spec();
+    assert_eq!(
+        spec.steps[idx(&spec, "approve")].metadata_defaults["changes_requested_completes"],
+        serde_json::json!(true)
+    );
+}
+
 /// An ABSENT decision must fall to the terminal, never to publish.
 ///
 /// This is why the terminal is stated as the NEGATIVE of `approved`

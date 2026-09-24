@@ -208,13 +208,18 @@ spec:
                   # observer with exit 127 — no kubernetes-nodes
                   # observation landed, and the estate ALARM correctly
                   # raised on the silence. A container that cannot source
-                  # the shared helper inlines its contract instead: retry
-                  # only transport-level curl exits (6/7/28/35/52/55/56 —
-                  # DNS/refused/timeout/TLS/empty/send/recv) under a 150s
-                  # deadline (well under the 15-min schedule), so a deploy
-                  # roll reads as a wait, not an Error pod. An HTTP answer
-                  # is a real result and returns as curl wrote it. Kept
-                  # byte-faithful to infra/boss-api-curl.sh.
+                  # the shared helper inlines its contract instead: re-send
+                  # only curl exits 6 and 7 (DNS, refused — the request
+                  # never left) under a 150s deadline (well under the
+                  # 15-min schedule), so a deploy roll reads as a wait, not
+                  # an Error pod. Any other exit may follow a request the
+                  # server received, and this POSTs the observation and
+                  # PUTs steps, so it is surfaced, never re-sent (backlog
+                  # c51967b5: it re-sent 28/35/52/55/56 too until
+                  # 2026-09-23). An HTTP answer is a real result and
+                  # returns as curl wrote it. The exit list is
+                  # infra/lib/curl-through-a-roll.sh's, pinned equal to it
+                  # by a_chore_write_is_sent_once.rs.
                   api_curl() {
                     local deadline=150 start delay=5 rc out now left sleep_for
                     start=$(date +%s)
@@ -222,7 +227,7 @@ spec:
                       rc=0; out=$(curl "$@") || rc=$?
                       case "$rc" in
                         0) printf '%s' "$out"; return 0 ;;
-                        6|7|28|35|52|55|56) ;;
+                        6|7) ;;
                         *) return "$rc" ;;
                       esac
                       now=$(date +%s); left=$((deadline - (now - start)))
@@ -404,7 +409,7 @@ spec:
                   # message. The response body rides the same capture as
                   # the status code (body, newline, code) instead of a
                   # tempfile.
-                  # api_curl (inlined above) retries transport errors
+                  # api_curl (inlined above) re-sends a refused connect
                   # for up to 150s (25e518c0): a deploy roll takes the
                   # API away for ~45s and must read as a wait, not an
                   # Error pod. The capture-and-speak contract below is

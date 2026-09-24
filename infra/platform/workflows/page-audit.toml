@@ -174,7 +174,17 @@ title_template = "Review the gap list and the page's words"
 # founder decides here. The markers carry none for the other reason:
 # the machine completes them.
 audience = { role = "platform-admin" }
-metadata_defaults = { procedure = "A HUMAN READS THIS STEP AND NOTHING ELSE. It arrives carrying `context_md` — the gap list with its filed ids, the controls inventory with its counts, and every string the page shows — written by the `test` step before this became ready.\n\nDECIDE TWO THINGS. (1) Is the gap list complete — is there something this department needs from this page that `measure` did not see? Name it in `comment`; it becomes a filed item. (2) Are the WORDS right — headings, labels, buttons, empty states, refusals? Edit them in `comment`, verbatim, old → new. Specs and styling are not yours to review (design 0e07ce64, resolution `review`).\n\n`approved` records the page as behaviour-pinned; `styled` then defers the visual pass to the redesign and the packet closes `audited`. `changes-requested` routes to `revise`, where the agent applies exactly the edits in `comment` and files anything larger.\n\nIF YOU ARE LOOKING AT THIS STEP AND IT IS EMPTY, that is a defect in the `test` step's completion, not the audit: the content is on measure / file / test; read it there, and say so." }
+#
+# `changes_requested_completes = true` (backlog da322e8f, 2026-09-23):
+# `changes-requested` is a ROUTE here — `revise` needs this step DONE —
+# and the sign-off surface records a Request changes WITHOUT completing
+# unless the step declares otherwise, which is right for a sign-off
+# that pauses for revision and wrong for this one. Three founder change
+# requests (/ux/parts, /ux/products, /ux/vendors) sat recorded and
+# unrouted until the operator completed them by hand. The pin
+# `a_routed_changes_request_completes_its_sign_off` holds every such
+# route to this declaration.
+metadata_defaults = { changes_requested_completes = true, procedure = "A HUMAN READS THIS STEP AND NOTHING ELSE. It arrives carrying `context_md` — the gap list with its filed ids, the controls inventory with its counts, and every string the page shows — written by the `test` step before this became ready.\n\nDECIDE TWO THINGS. (1) Is the gap list complete — is there something this department needs from this page that `measure` did not see? Name it in `comment`; it becomes a filed item. (2) Are the WORDS right — headings, labels, buttons, empty states, refusals? Edit them in `comment`, verbatim, old → new. Specs and styling are not yours to review (design 0e07ce64, resolution `review`).\n\n`approved` records the page as behaviour-pinned; `styled` then defers the visual pass to the redesign and the packet closes `audited`. `changes-requested` routes to `revise`, where the agent applies exactly the edits in `comment` and files anything larger.\n\nIF YOU ARE LOOKING AT THIS STEP AND IT IS EMPTY, that is a defect in the `test` step's completion, not the audit: the content is on measure / file / test; read it there, and say so." }
 fields = [{ name = "decision", field_type = "approved|changes-requested", required = true }]
 
 [[workflow.step]]

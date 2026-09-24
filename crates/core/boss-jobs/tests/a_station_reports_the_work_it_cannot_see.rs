@@ -304,6 +304,70 @@ async fn the_agent_queue_lists_a_packet_pinned_before_its_block() {
     assert_eq!(queue["data"][0]["id"], id.as_str(), "{queue:#}");
 }
 
+/// Every object anywhere in `v` whose `key` is `value` — the yard's
+/// reads nest a station several levels down, and this file asks only
+/// whether the station is drawn and what it says, not where.
+fn find_all<'a>(
+    v: &'a serde_json::Value,
+    key: &str,
+    value: &str,
+    out: &mut Vec<&'a serde_json::Value>,
+) {
+    match v {
+        serde_json::Value::Object(m) => {
+            if m.get(key).and_then(|x| x.as_str()) == Some(value) {
+                out.push(v);
+            }
+            m.values().for_each(|x| find_all(x, key, value, out));
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| find_all(x, key, value, out)),
+        _ => {}
+    }
+}
+
+/// The yard's two readers count the SAME members. Measured 2026-09-23
+/// 23:40Z (backlog 6c06ef65): this station answered 213 in the load
+/// and its own queue, and 170 in `/api/yard/regions` and
+/// `/api/yard/borders`, because the map's marshalling read listed steps
+/// raw while the load and queue resolved them against the active row.
+/// One membership question, so one answer on every surface that draws
+/// it: the marshalling machine says one standing, and the border names
+/// the station holding one packet.
+#[tokio::test]
+async fn the_yard_regions_and_borders_count_a_packet_pinned_before_its_block() {
+    let h = harness();
+    let _ = a_packet_pinned_before_the_block(&h).await;
+    assert_eq!(
+        load_row(&h.app).await["depth"],
+        1,
+        "the control: the load counts it"
+    );
+
+    let regions = get_json(&h.app, "/api/yard/regions").await;
+    let mut machines = Vec::new();
+    find_all(&regions, "id", &format!("station:{STATION}"), &mut machines);
+    let [machine] = machines.as_slice() else {
+        panic!("one `station:{STATION}` machine on the regions map: {regions:#}");
+    };
+    let why = machine["why"].as_str().unwrap_or_default();
+    assert!(
+        why.starts_with("1 standing"),
+        "the regions map must count the member the load counts, read: {why:?}"
+    );
+
+    let borders = get_json(&h.app, "/api/yard/borders").await;
+    let mut holds = Vec::new();
+    find_all(&borders, "what", STATION, &mut holds);
+    assert!(
+        !holds.is_empty(),
+        "the borders must show `{STATION}` holding the member the load counts: {borders:#}"
+    );
+    for hold in holds {
+        let why = hold["why"].as_str().unwrap_or_default();
+        assert!(why.starts_with("1 packet standing"), "{hold:#}");
+    }
+}
+
 /// The claim door asks the SAME membership question when a claim names
 /// its station; answered from the packet's copy alone it would refuse
 /// "packet is not at this station" for a packet the queue just listed.

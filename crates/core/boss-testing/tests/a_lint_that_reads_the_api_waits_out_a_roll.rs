@@ -154,7 +154,8 @@ fn scripts_under(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// ONE DEFINITION. The door and the lints share the wait; a lint that
 /// grew its own copy would drift from the door's exit-code rule the way
-/// `infra/boss-api-curl.sh` already has (it re-sends 28, 52 and 56).
+/// `infra/boss-api-curl.sh` had (it re-sent 28, 52 and 56 until it
+/// sourced this one too, c51967b5 — pinned in a_chore_write_is_sent_once.rs).
 #[test]
 fn the_roll_wait_has_one_definition_and_the_door_sources_it() {
     let root = repo_root();

@@ -34,7 +34,9 @@
 // must be IN the shape), then the user's own stamp if their role is
 // required and unsigned, then the completion — skipped, with a plain
 // explanation, while other roles' signatures are still outstanding.
-// Request changes records without completing. NOTHING writes metadata
+// Request changes records without completing — unless the step's
+// protocol declares `changes_requested_completes = true`, when it takes
+// the Approve path (backlog da322e8f). NOTHING writes metadata
 // after a signature exists: on 2026-09-05 15:40 David signed, then
 // this surface re-saved his unchanged decision with a fresh
 // decided_at, and the completion answered 409 stale two seconds after
@@ -111,6 +113,19 @@
       const cur = (step.metadata || {})[f.name];
       fieldValues[f.name] = cur == null ? '' : String(cur);
     });
+
+    // Whether Request changes COMPLETES this step, read off the step's
+    // own metadata — the protocol's declaration, not this surface's
+    // guess (backlog da322e8f, 2026-09-23). An ordinary sign-off keeps
+    // its step open on changes-requested so the same approver can
+    // re-decide once the thing is revised. A protocol that ROUTES the
+    // decision — page-audit's `revise` is ready_when `steps.review.done
+    // AND decision = "changes-requested"` — needs the step done, and
+    // declares it with `changes_requested_completes = true` in the
+    // step's metadata_defaults. Undeclared, the old behaviour stands:
+    // three founder change requests sat recorded and unrouted until the
+    // operator completed them by hand, which is what this ends.
+    const changesRequestedCompletes = (step.metadata || {}).changes_requested_completes === true;
 
     const stampFor = (role) => stamps.find((s) => s && s.role === role);
     const outstanding = () => required.filter((r) => !stampFor(r) || stale.has(r));
@@ -285,7 +300,9 @@
           'button',
           {
             className: 'step-btn',
-            disabled: busy,
+            // A Request changes that completes meets the same
+            // required-at-done contract as Approve, so it waits too.
+            disabled: changesRequestedCompletes ? disabled : busy,
             onClick: () => decide('changes-requested'),
           },
           'Request changes',
@@ -490,7 +507,7 @@
           // server has just marked them stale, and so does the roster.
           stamps.forEach((st) => st && stale.add(st.role));
         }
-        if (d === 'changes-requested') {
+        if (d === 'changes-requested' && !changesRequestedCompletes) {
           if (typeof onUpdate === 'function') onUpdate();
           return;
         }

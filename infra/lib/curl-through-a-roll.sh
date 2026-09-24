@@ -41,8 +41,11 @@
 # definition anywhere under infra/ (CLAUDE.md §9a). The CLI's twin is
 # `train::waiting_out_a_roll` (crates/orchestrators/boss-cli), the same
 # rule over reqwest's own connect classification. infra/boss-api-curl.sh,
-# the cron chores' helper, is an older and DIFFERENT rule (it re-sends
-# 28, 52 and 56 too), not a copy of this one.
+# the cron chores' helper, sources it too since backlog c51967b5
+# (2026-09-23) — it had carried an older rule that re-sent 28, 52, 55
+# and 56 as well — and the estate observer, whose image carries none of
+# this repo, inlines the same two exits, pinned equal to the case arm
+# below by a_chore_write_is_sent_once.rs.
 #
 # Bash: it reads $SECONDS and uses `local`.
 

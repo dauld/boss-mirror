@@ -260,6 +260,50 @@ describe('sign-off v2', () => {
     expect((patches[0]!.body as Record<string, unknown>).decision).toBe('changes-requested');
     expect(calls.filter((x) => x.method === 'PUT').length).toBe(0);
   });
+
+  // Backlog da322e8f, measured 2026-09-23 23:20Z: page-audit routes a
+  // changes-requested review to `revise`, whose ready_when requires
+  // `steps.review.done`, and this surface never completed the review —
+  // three founder change requests (/ux/parts, /ux/products,
+  // /ux/vendors) sat recorded and went nowhere. The PROTOCOL now says
+  // which reading it means: a step whose metadata carries
+  // `changes_requested_completes: true` (a Workflow metadata_defaults
+  // key) completes on Request changes exactly as on Approve; every
+  // other sign-off keeps the record-and-stay-open behaviour above.
+  test('Request changes completes when the protocol declares it a route', async () => {
+    const { mount, calls } = loadBundle(() => ({}));
+    const step = publishStep();
+    (step.metadata as Record<string, unknown>).approved = 'true';
+    (step.metadata as Record<string, unknown>).changes_requested_completes = true;
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    buttonNamed(c, 'Request changes')!.fire('click');
+    await settled();
+    const patches = calls.filter((x) => x.method === 'PATCH');
+    expect(patches.length).toBe(1);
+    expect((patches[0]!.body as Record<string, unknown>).decision).toBe('changes-requested');
+    // Recorded first, completed second — the same order as Approve.
+    const puts = calls.filter((x) => x.method === 'PUT');
+    expect(puts.length).toBe(1);
+    expect(puts[0]!.url).toBe('/api/jobs/job-1/steps/step-1');
+    expect((puts[0]!.body as { status: string }).status).toBe('completed');
+    expect(calls.findIndex((x) => x.method === 'PATCH')).toBeLessThan(
+      calls.findIndex((x) => x.method === 'PUT'),
+    );
+    expect(allText(c)).toContain('Completed');
+  });
+
+  test('a completing Request changes waits on required fields like Approve does', () => {
+    const { mount } = loadBundle(() => ({}));
+    const step = publishStep();
+    (step.metadata as Record<string, unknown>).changes_requested_completes = true;
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    // `approved` is required-at-done and empty: a click that completes
+    // could only 400, so the button waits with the others.
+    expect(buttonNamed(c, 'Request changes')?.disabled).toBe(true);
+    expect(buttonNamed(c, 'Approve')?.disabled).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------

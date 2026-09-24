@@ -32,7 +32,13 @@ ready_when = "steps.validate.done"
 title_template = "Approve spec"
 authority_role = "workflow-approver"
 sign_offs_required = ["workflow-approver"]
-metadata_defaults = { authority_role = "workflow-approver" }
+# `changes_requested_completes`: `not-published` below promises that a
+# changes-requested decision ENDS this packet, which needs `approve`
+# done — and the sign-off surface leaves a Request changes open unless
+# the step declares otherwise, so that promise was unreachable through
+# the surface the approver decides on (backlog da322e8f, 2026-09-23,
+# found on page-audit's review).
+metadata_defaults = { authority_role = "workflow-approver", changes_requested_completes = true }
 
 [[workflow.step]]
 title = "publish"
