@@ -21,6 +21,7 @@ pub mod cadence;
 pub mod cadence_seed;
 pub mod calendar_hook;
 pub mod car;
+pub mod car_retire;
 pub mod channels;
 pub mod corrections;
 pub mod credentials;

@@ -275,3 +275,37 @@ ready_when = "steps.build.done AND job.metadata.settled = \"true\""
 title_template = "Settled — done, with nothing to merge"
 terminal = { outcome = "settled" }
 metadata_defaults = { outcome_kind = "completed" }
+
+# A LANDED TWIN (backlog 87f1c86a, 2026-09-24). A car whose commits rode
+# inside ANOTHER car that landed — car D replayed under car E, the two
+# device-shop cars inside the refurb car, all on train #634. None of the
+# three terminals above says that: `merged` needs this car's own merge
+# and proof, `abandoned` says the work did not land when it did, and
+# `settled` says there was nothing to merge when there was — it merged
+# elsewhere. With no terminal the four were held by hand, kept the dock
+# reading HELD 4 and the garage amber, and no verb could close them.
+#
+# `boss car retire <car> --carried-by <landed car | merge sha>` is the
+# one writer: it proves every commit of this car is carried by the named
+# carrier (by patch-id, or as a replay of the same authored commit that
+# the operator accepted with the files whose patch differs named), and
+# records the carrier and that proof in the two REQUIRED fields before
+# the marker readies this step — a terminal nobody can reach without
+# the evidence, rather than a note beside one. The item edge is not
+# followed: the arrival rule fires on `merged` only, so a twin's item
+# closes with its carrier's, or by its own triage.
+[[workflow.step]]
+title = "landed-twin"
+kind = "outcome"
+ready_when = "steps.build.done AND job.metadata.landed_twin = \"true\""
+title_template = "Retired — its commits landed inside another car"
+terminal = { outcome = "landed-twin" }
+metadata_defaults = { outcome_kind = "completed" }
+[[workflow.step.fields]]
+name = "carried_by"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "evidence"
+field_type = "string"
+required = true

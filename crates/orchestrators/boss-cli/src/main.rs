@@ -8,6 +8,7 @@ mod built_from;
 mod bundle_lineage;
 mod cadence;
 mod car;
+mod car_retire;
 mod census;
 mod channels;
 mod core_changes;
@@ -1039,6 +1040,46 @@ enum CarAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Close a car whose work another car carries, on the evidence.
+    ///
+    /// `--carried-by`: its commits landed inside another car. Every
+    /// commit is matched in the carrier (a landed car's branch, or the
+    /// merge sha that landed it) by patch-id, or as the same authored
+    /// commit replayed — which is accepted only with --accept-replay,
+    /// after the files whose patch differs are named. Closes through
+    /// ship-a-change's `landed-twin` terminal with the proof recorded.
+    ///
+    /// `--superseded-by`: another car replaced it, for the same item,
+    /// and its own work never landed. Closes through `abandoned`,
+    /// naming the successor.
+    ///
+    /// Either way the hold comes off and the car is read back closed.
+    /// WHY (backlog 87f1c86a): four landed twins sat held at the dock on
+    /// 2026-09-24 with no verb that could close them.
+    Retire {
+        /// The car: its branch, or 8+ characters of its id.
+        car: String,
+        /// The landed car that carries its commits (branch), or the
+        /// merge sha that landed them.
+        #[arg(
+            long,
+            required_unless_present = "superseded_by",
+            conflicts_with = "superseded_by"
+        )]
+        carried_by: Option<String>,
+        /// The car that replaces it (branch or id) — live or landed, and
+        /// naming the same item.
+        #[arg(long)]
+        superseded_by: Option<String>,
+        /// Accept commits carried as a REPLAY (same authored commit, a
+        /// different patch — a conflict resolved on the way). Recorded
+        /// in the evidence with who accepted it.
+        #[arg(long, requires = "carried_by")]
+        accept_replay: bool,
+        /// Judge and print, write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1636,6 +1677,22 @@ async fn main() -> Result<()> {
                     max_wait_hours,
                 };
                 car::waits_on(&given, &fields, clear, dry_run).await
+            }
+            CarAction::Retire {
+                car: given,
+                carried_by,
+                superseded_by,
+                accept_replay,
+                dry_run,
+            } => {
+                car_retire::retire(
+                    &given,
+                    carried_by.as_deref(),
+                    superseded_by.as_deref(),
+                    accept_replay,
+                    dry_run,
+                )
+                .await
             }
         },
         Commands::Workflow { action } => match action {
