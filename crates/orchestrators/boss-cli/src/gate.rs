@@ -888,6 +888,13 @@ pub struct ParkIntent {
     /// car as the declared `boards_after` job edge, which the conductor's
     /// boarding filter reads (`boss_jobs::car::BOARDS_AFTER`).
     pub boards_after: Option<String>,
+    /// Every OTHER item this car answers — `--park-also-answers`,
+    /// repeatable. Stamped as the list [`PARK_ALSO_ANSWERS`], which the
+    /// auto-park handler writes onto the car as the declared
+    /// `also_answers` edge; the arrival rule then closes each one as it
+    /// closes `backlog_item` (backlog a994f533). Rides BESIDE an item
+    /// answer, never as one.
+    pub also_answers: Vec<String>,
     pub probe: Option<String>,
     pub expect: Option<String>,
     pub proof_event: Option<String>,
@@ -942,7 +949,8 @@ pub use boss_jobs::car::{PARK_NO_ITEM, PARK_PARTIAL_ITEM};
 /// dispatcher handler in a crate this one cannot import, and a key that
 /// agreed by coincidence would be a hold nothing enforces (§9a).
 pub use boss_jobs::car::{
-    PARK_BACKLOG_ITEM, PARK_BOARDS_AFTER, PARK_EXCLUDES, PARK_SUMMARY, PARK_TEST, PARK_VERIFIED,
+    PARK_ALSO_ANSWERS, PARK_BACKLOG_ITEM, PARK_BOARDS_AFTER, PARK_EXCLUDES, PARK_SUMMARY,
+    PARK_TEST, PARK_VERIFIED,
 };
 
 impl ParkIntent {
@@ -957,6 +965,7 @@ impl ParkIntent {
             && self.no_item.is_none()
             && self.design.is_none()
             && self.boards_after.is_none()
+            && self.also_answers.is_empty()
             && self.probe.is_none()
             && self.expect.is_none()
             && self.proof_event.is_none()
@@ -1338,6 +1347,46 @@ impl ParkIntent {
                  car's id, or drop the flag."
             );
         }
+        self.require_also_answers_fit()
+    }
+
+    /// `--park-also-answers` beside the item answer (a994f533). Three
+    /// shapes are refused, each for a reason the arrival would otherwise
+    /// act on silently: beside `--park-no-item` the car says it answers
+    /// no item while closing one; a blank id passes the ref check as "no
+    /// claim to check" (migration 104) and records nothing; and the car's
+    /// own item listed again is either a repeat of the closing edge or,
+    /// against `--park-partial-item`, a contradiction of "leave it open".
+    fn require_also_answers_fit(&self) -> Result<()> {
+        if self.also_answers.is_empty() {
+            return Ok(());
+        }
+        if self.no_item.is_some() {
+            anyhow::bail!(
+                "--park-also-answers beside --park-no-item: the car would say it answers no \
+                 item while the arrival rule closes the ones listed. Name the item this car \
+                 builds with --park-backlog-item (or --park-partial-item) instead."
+            );
+        }
+        if self.also_answers.iter().any(|id| id.trim().is_empty()) {
+            anyhow::bail!(
+                "--park-also-answers names no item: a blank id passes the ref check as \
+                 \"no claim to check\" (migration 104) and records nothing. Give each \
+                 item's id."
+            );
+        }
+        let own = [&self.backlog_item, &self.partial_item];
+        if let Some(id) = self
+            .also_answers
+            .iter()
+            .find(|id| own.iter().any(|o| o.as_deref() == Some(id.as_str())))
+        {
+            anyhow::bail!(
+                "--park-also-answers {id} is already this car's own item: list only the \
+                 OTHER items it answers. Against --park-partial-item it would also close \
+                 the item that flag says to leave open."
+            );
+        }
         Ok(())
     }
 
@@ -1364,6 +1413,15 @@ impl ParkIntent {
         }
     }
 
+    /// The `--park-also-answers` twin of [`Self::set_named_ref`]: that
+    /// flag names several packets, so the one to replace is found by the
+    /// id TYPED rather than by the flag.
+    pub fn set_also_answer(&mut self, typed: &str, full: String) {
+        if let Some(slot) = self.also_answers.iter_mut().find(|id| id.as_str() == typed) {
+            *slot = full;
+        }
+    }
+
     pub fn named_refs(&self) -> Vec<(&'static str, &str)> {
         [
             ("--park-backlog-item", self.backlog_item.as_deref()),
@@ -1372,6 +1430,11 @@ impl ParkIntent {
             ("--park-after", self.boards_after.as_deref()),
         ]
         .into_iter()
+        .chain(
+            self.also_answers
+                .iter()
+                .map(|id| ("--park-also-answers", Some(id.as_str()))),
+        )
         .filter_map(|(f, v)| v.map(|v| (f, v)))
         .filter(|(_, v)| !v.trim().is_empty())
         .collect()
@@ -1408,6 +1471,9 @@ impl ParkIntent {
         if let Ok(w) = self.waits_on.update() {
             m.insert(PARK_WAITS_ON.to_string(), w);
         }
+        if !self.also_answers.is_empty() {
+            m.insert(PARK_ALSO_ANSWERS.to_string(), json!(self.also_answers));
+        }
         Value::Object(m)
     }
 
@@ -1429,6 +1495,7 @@ impl ParkIntent {
             PARK_EXPECT: Value::Null,
             PARK_PROOF_EVENT: Value::Null,
             PARK_WAITS_ON: Value::Null,
+            PARK_ALSO_ANSWERS: Value::Null,
         })
     }
 }
@@ -2643,7 +2710,7 @@ pub async fn run(
         // names the rest with their flags — the pure half the test
         // pins, the loop here only gathering the answers.
         let mut found: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut resolved: Vec<(&'static str, String)> = Vec::new();
+        let mut resolved: Vec<(&'static str, String, String)> = Vec::new();
         for (flag, id) in park.named_refs() {
             // `api` raises on every non-2xx; a 404 here is the answer,
             // not an error — the rest (unreachable, 5xx) still raise.
@@ -2673,7 +2740,7 @@ pub async fn run(
                         .and_then(Value::as_str)
                         && full != id
                     {
-                        resolved.push((flag, full.to_string()));
+                        resolved.push((flag, id.to_string(), full.to_string()));
                     }
                 }
                 Ok(None) => {}
@@ -2686,9 +2753,13 @@ pub async fn run(
             }
         }
         let missing = park.unresolvable(|id| found.contains(id));
-        for (flag, full) in &resolved {
-            println!("boss gate: {flag} resolved to {full}");
-            park.set_named_ref(flag, full.clone());
+        for (flag, typed, full) in &resolved {
+            println!("boss gate: {flag} {typed} resolved to {full}");
+            if *flag == "--park-also-answers" {
+                park.set_also_answer(typed, full.clone());
+            } else {
+                park.set_named_ref(flag, full.clone());
+            }
         }
         if !missing.is_empty() {
             let lines: Vec<String> = missing
@@ -4471,6 +4542,7 @@ mod tests {
             // only to keep this literal exhaustive.
             design: Some("0524fc95".into()),
             boards_after: Some("a1b2c3d4".into()),
+            also_answers: vec!["5994de6d".into()],
             probe: Some("true".into()),
             expect: Some("x".into()),
             proof_event: Some("a red train".into()),
@@ -5357,6 +5429,94 @@ mod tests {
     #[test]
     fn a_plain_gate_is_never_asked_which_item_it_fixes() {
         assert!(ParkIntent::default().require_item_answer().is_ok());
+    }
+
+    /// EVERY OTHER ITEM THE CAR ANSWERS (a994f533, the writer half).
+    /// Measured 2026-09-23: 5994de6d and cab50f4c were each dispatched
+    /// to a builder after their fixes had landed on cars that named a
+    /// DIFFERENT item, because a car could name only one. The arrival
+    /// rule closes each id in `also_answers` since #586; this flag is how
+    /// a builder says so. It rides BESIDE an item answer, never as one,
+    /// and it is stamped as a list the auto-park handler copies whole.
+    #[test]
+    fn also_answers_rides_beside_an_item_answer_and_stamps_a_list() {
+        let mut p = park_full();
+        p.also_answers = vec!["5994de6d".into(), "cab50f4c".into()];
+        assert!(!p.is_empty(), "a lone --park-also-answers is park intent");
+        let e = p.require_item_answer().unwrap_err().to_string();
+        assert!(
+            e.contains("--park-backlog-item"),
+            "never an answer on its own: {e}"
+        );
+        p.backlog_item = Some("d4698bc2".into());
+        p.require_item_answer().expect("beside the closing edge");
+        assert_eq!(
+            p.metadata_patch()[PARK_ALSO_ANSWERS],
+            json!(["5994de6d", "cab50f4c"])
+        );
+        assert_eq!(
+            p.named_refs(),
+            vec![
+                ("--park-backlog-item", "d4698bc2"),
+                ("--park-also-answers", "5994de6d"),
+                ("--park-also-answers", "cab50f4c"),
+            ],
+            "each listed id is resolved against the SoR like every other"
+        );
+        // Resolved by the id TYPED, since the flag names several.
+        p.set_also_answer("cab50f4c", "cab50f4c-0000-0000-0000-000000000000".into());
+        assert_eq!(
+            p.also_answers,
+            vec![
+                "5994de6d".to_string(),
+                "cab50f4c-0000-0000-0000-000000000000".to_string()
+            ]
+        );
+        let mut partial = park_full();
+        partial.partial_item = Some("e39a9d2a".into());
+        partial.also_answers = vec!["5994de6d".into()];
+        partial
+            .require_item_answer()
+            .expect("a piece of one item may answer another whole");
+        assert!(
+            ParkIntent::default()
+                .metadata_patch()
+                .get(PARK_ALSO_ANSWERS)
+                .is_none()
+        );
+    }
+
+    /// The three shapes `--park-also-answers` refuses: beside
+    /// `--park-no-item` (a car cannot answer no item and close one), a
+    /// blank id (the ref check reads `''` as no claim, so it would record
+    /// nothing), and the id already named as the car's own item (as the
+    /// closing edge it is a repeat; as the partial edge it contradicts
+    /// "leave this open").
+    #[test]
+    fn also_answers_refuses_no_item_a_blank_and_the_cars_own_item() {
+        let mut none = park_full();
+        none.no_item = Some("asked in conversation".into());
+        none.also_answers = vec!["5994de6d".into()];
+        let e = none.require_item_answer().unwrap_err().to_string();
+        assert!(e.contains("--park-no-item"), "{e}");
+
+        let mut blank = park_full();
+        blank.backlog_item = Some("d4698bc2".into());
+        blank.also_answers = vec![" ".into()];
+        let e = blank.require_item_answer().unwrap_err().to_string();
+        assert!(e.contains("--park-also-answers names no item"), "{e}");
+
+        for own in ["backlog", "partial"] {
+            let mut p = park_full();
+            if own == "backlog" {
+                p.backlog_item = Some("d4698bc2".into());
+            } else {
+                p.partial_item = Some("d4698bc2".into());
+            }
+            p.also_answers = vec!["d4698bc2".into()];
+            let e = p.require_item_answer().unwrap_err().to_string();
+            assert!(e.contains("already this car's"), "{own}: {e}");
+        }
     }
 
     /// ANSWER (1) — this car IS the item's build. Unchanged: the edge

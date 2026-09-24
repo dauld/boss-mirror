@@ -9,9 +9,13 @@
 // or rendered the module-disabled notice the live instance actually
 // shows — its manifest has `modules.calendar = false` (gap 7, 8ea82533).
 //
-// Two renders, because the live instance and the page disagree:
+// Two renders, because the live instance's manifest and the harness's
+// differ:
 //   State A — the calendar module off (the live instance, 2026-09-23):
-//             ModuleDisabled, one button.
+//             the page renders anyway. It was ModuleDisabled until gap 1
+//             (eff0c5e5, 2026-09-24) moved the route off the Release
+//             calendar row, which carries the module, onto its own
+//             always-on `schedule` row in Home.
 //   State B — the module on: MyCalendarPage, three buttons, one read,
 //             no writes, no links.
 //
@@ -101,44 +105,35 @@ const body = (page: Page) => page.locator('.catalog');
 const button = (page: Page, name: string) => page.getByRole('button', { name, exact: true });
 
 test.describe('/ux/calendar/me — State A, the calendar module off (the live instance)', () => {
+  // Gap 1 (eff0c5e5, fixed 2026-09-24): this spec pinned ModuleDisabled
+  // naming "Release calendar" here, because the route lit the
+  // `calendar` row and so answered to its module. It lights its own
+  // `schedule` row now — the row whose path it is, always-on, in Home —
+  // so the module being off changes nothing about this page.
   for (const [name, modules] of [
     ['a manifest listing no modules', MODULES_LIVE],
     ['a manifest with calendar = false', { calendar: false }],
   ] as const) {
-    test(`${name} renders ModuleDisabled, and its one button goes home and back`, async ({ page }) => {
+    test(`${name} still renders My schedule under Home, and reads its week once`, async ({ page }) => {
       const seen = watch(page);
       await installEmployeeSession(page);
       await installTenantManifest(page, modules);
-      await mountPage(page, PATH);
+      await page.route(RESERVATIONS, (r) => json(r, []));
+      await mountPage(page, PATH, { titleMatch: new RegExp(`^${EMP_ID} — week of Mon, Sep 21$`) });
 
-      const notice = page.locator('.module-disabled');
-      await expect(notice.locator('h1')).toHaveText('Not enabled for this tenant');
-      // Gap 1 / 8(b) (eff0c5e5, 7c196817): the route is gated by the
-      // Release calendar row, so the notice names it — not the "My
-      // schedule" row the reader clicked.
-      await expect(notice.locator('strong')).toHaveText(ROUTE_CATALOG.calendar.label);
-      await expect(notice.locator('strong')).toHaveText('Release calendar');
       expect(ROUTE_CATALOG.schedule.path).toBe(PATH);
-      await expect(notice).toContainText(
-        "The Release calendar module is turned off in this tenant's tenant.toml. The page exists in the platform — the active tenant just doesn't surface it.",
-      );
-      await expect(notice).toContainText(
-        'To enable: set calendar = true in examples/<tenant>/seeds/tenant.toml under [modules], redeploy, and the page comes back.',
-      );
-      // One control, no links; the page behind the gate never mounts.
-      await expect(notice.getByRole('button')).toHaveCount(1);
-      await expect(notice.locator('a')).toHaveCount(0);
-      await expect(page.locator('.week-controls')).toHaveCount(0);
-
-      await notice.getByRole('button', { name: 'Back to home' }).click();
-      await expect.poll(() => new URL(page.url()).pathname).toBe('/');
+      expect(ROUTE_CATALOG.schedule.module).toBeUndefined();
       await expect(page.locator('.module-disabled')).toHaveCount(0);
+      await expect(page.locator('.week-col-empty')).toHaveCount(7);
+      // The app tab is the schedule row's own app, not Production.
+      await expect(page.locator('.perspective-tabs [aria-current="page"]')).toHaveText('Home');
+      // Whichever sidebar row is lit, it is never the Release calendar's.
+      await expect(
+        page.locator('.shell-nav-item-active', { hasText: ROUTE_CATALOG.calendar.label }),
+      ).toHaveCount(0);
 
-      await page.goBack();
-      await expect.poll(() => new URL(page.url()).pathname).toBe(PATH);
-      await expect(page.locator('.module-disabled h1')).toHaveText('Not enabled for this tenant');
-
-      expect(seen.reads, 'the gated page never reads reservations').toHaveLength(0);
+      expect(await settledReads(page, () => seen.reads.length, 1)).toBe(1);
+      expect(readWindow(seen.reads[0])).toEqual({ resource_kind: 'employee', resource_id: EMP_ID, ...WEEK });
       expect(seen.writes.map((r) => `${r.method()} ${r.url()}`)).toEqual([]);
     });
   }

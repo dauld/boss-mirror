@@ -837,6 +837,41 @@ pub const PARK_PARTIAL_ITEM: &str = "park_partial_item";
 /// only the [`WAITS_ON`] fields given. The auto-park handler MERGES it
 /// onto the car's `waits_on` with [`merge_waits_on`], never replaces.
 pub const PARK_WAITS_ON: &str = "park_waits_on";
+/// `boss gate --park-also-answers` (backlog a994f533, the writer half):
+/// every OTHER item the car answers, as a JSON list of full ids. The
+/// auto-park handler copies it onto the car as [`ALSO_ANSWERS`] through
+/// [`also_answers`]. Until this existed the edge had a reader and no
+/// writer, so nothing a builder typed could set it.
+pub const PARK_ALSO_ANSWERS: &str = "park_also_answers";
+
+/// The `also_answers` edge a car carries, read off what the gate stamped
+/// under [`PARK_ALSO_ANSWERS`]: each id once, in the order given, blanks
+/// dropped. Anything but a list, or a list with no id in it, is omitted
+/// rather than written empty — the same absent-never-nulled contract as
+/// [`item_provenance`], so a re-gate that names none leaves a recorded
+/// list alone.
+pub fn also_answers(stamped: Option<&Value>) -> serde_json::Map<String, Value> {
+    let ids = stamped
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .fold(Vec::<&str>::new(), |mut seen, id| {
+                    if !seen.contains(&id) {
+                        seen.push(id);
+                    }
+                    seen
+                })
+        })
+        .unwrap_or_default();
+    let mut m = serde_json::Map::new();
+    if !ids.is_empty() {
+        m.insert(ALSO_ANSWERS.to_string(), json!(ids));
+    }
+    m
+}
 
 /// The item provenance a car carries beyond the closing edge: the item
 /// it is one piece of, or the reason it names none. Absent and blank
@@ -1574,6 +1609,27 @@ mod tests {
         assert_eq!(n[NO_ITEM_REASON], "David asked for this in conversation");
         assert_ne!(PARTIAL_ITEM, BACKLOG_ITEM);
         assert_ne!(NO_ITEM_REASON, BACKLOG_ITEM);
+    }
+
+    /// EVERY OTHER ITEM, AS STAMPED (a994f533, the writer half). The
+    /// gate stamps a list; the car gets the declared `also_answers` edge
+    /// with blanks dropped and repeats folded, and nothing at all when
+    /// the gate stated none — absent, never an empty list, so a re-gate
+    /// that names none leaves a recorded list alone.
+    #[test]
+    fn also_answers_carries_every_stated_id_once_and_nothing_else() {
+        assert!(also_answers(None).is_empty());
+        assert!(also_answers(Some(&json!([]))).is_empty());
+        assert!(also_answers(Some(&json!(["  ", ""]))).is_empty());
+        assert!(
+            also_answers(Some(&json!("5994de6d"))).is_empty(),
+            "a bare string is not the list the gate stamps"
+        );
+        let a = also_answers(Some(&json!(["5994de6d", " ", "cab50f4c", "5994de6d"])));
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[ALSO_ANSWERS], json!(["5994de6d", "cab50f4c"]));
+        assert_ne!(PARK_ALSO_ANSWERS, ALSO_ANSWERS);
+        assert_ne!(ALSO_ANSWERS, BACKLOG_ITEM);
     }
 
     #[test]

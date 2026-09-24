@@ -1044,26 +1044,64 @@ async fn sweep_orphans(admin_url: &str, now: u64) {
     if !sweeping {
         return;
     }
-    // Two shapes of litter, one query. `boss_tmpl_building_%` is a
-    // template whose schema load never finished; a COMPLETED template
-    // (`boss_tmpl_<fingerprint>`) matches neither pattern and is
-    // deliberately kept — it is the cache that makes the suite fast,
-    // it is content-addressed so it cannot go stale, and it costs one
-    // schema-sized database per schema version on the server.
+    let orphans = orphan_candidates(&mut admin, now).await;
+    drop_together(admin_url, orphans, false).await;
+}
+
+/// The databases a sweep at `now` would drop.
+///
+/// Two shapes of litter, one query. `boss_tmpl_building_%` is a
+/// template whose schema load never finished; a COMPLETED template
+/// (`boss_tmpl_<fingerprint>`) matches neither pattern and is
+/// deliberately kept — it is the cache that makes the suite fast, it is
+/// content-addressed so it cannot go stale, and it costs one
+/// schema-sized database per schema version on the server.
+///
+/// NOT ONE WHOSE DROP IS ALREADY IN FLIGHT (backlog 9469bc69,
+/// 2026-09-24). The sweep lock dies with the sweeper's connection, but
+/// its `DROP DATABASE` backends do not: a test binary that exits
+/// mid-sweep leaves them waiting on a slow forced checkpoint, connected
+/// to `postgres` and so invisible to the `pg_stat_activity` test. Every
+/// later sweeper issued the same drops again, until 77 of the server's
+/// 100 connections were 11 copies each of drops on 7 databases.
+///
+/// The in-flight drop is read from `pg_locks`, not from the query text
+/// in `pg_stat_activity`. `dropdb` takes an AccessExclusiveLock on the
+/// database object before it does anything else and holds it through
+/// the checkpoint to commit, and every drop queued behind it shows the
+/// same lock ungranted — so the granted drop and all its duplicates are
+/// there, as structure. The query text is a worse witness: it is
+/// `<insufficient privilege>` for another role's session, absent when
+/// `track_activities` is off, truncated at `track_activity_query_size`,
+/// and would have to be pattern-matched against a quoted name.
+/// AccessExclusive, not any lock: on a database object only a drop, a
+/// rename or a `SET TABLESPACE` move takes it, so a `COMMENT`, a
+/// template copy or a connect in progress does not hide litter, and a
+/// database a rename or a move is working on is not one to touch either.
+///
+/// The reaper's own `Release` drops need nothing further: each names a
+/// database only its owner releases, once, so they cannot duplicate one
+/// another; and a released drop still waiting when its process exits is
+/// excluded here like any other.
+async fn orphan_candidates(admin: &mut PgConnection, now: u64) -> Vec<String> {
     let candidates: Vec<String> = sqlx::query_scalar(
         "SELECT d.datname FROM pg_database d \
          WHERE (d.datname LIKE 'test\\_boss\\_%' OR d.datname LIKE 'boss\\_tmpl\\_building\\_%') \
-           AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname)",
+           AND NOT EXISTS (SELECT 1 FROM pg_stat_activity a WHERE a.datname = d.datname) \
+           AND NOT EXISTS (SELECT 1 FROM pg_locks l \
+                           WHERE l.locktype = 'object' \
+                             AND l.classid = 'pg_database'::regclass \
+                             AND l.objid = d.oid \
+                             AND l.mode = 'AccessExclusiveLock')",
     )
-    .fetch_all(&mut admin)
+    .fetch_all(&mut *admin)
     .await
     .unwrap_or_default();
 
-    let orphans: Vec<String> = candidates
+    candidates
         .into_iter()
         .filter(|n| is_orphan(n, now, ORPHAN_TTL_SECS))
-        .collect();
-    drop_together(admin_url, orphans, false).await;
+        .collect()
 }
 
 /// Serializes the orphan sweep across processes sharing a server. Not
@@ -1490,6 +1528,142 @@ mod production_guard {
     fn the_override_is_honoured_but_only_when_explicit() {
         assert_eq!(production_refusal(true, true), None);
         assert!(production_refusal(true, false).is_some());
+    }
+}
+
+/// A sweep must not drop a database whose drop is already in flight.
+///
+/// THE PILE-UP THIS PINS (backlog 9469bc69, 2026-09-24). A sweeper's
+/// advisory lock dies with its admin connection, and a short-lived test
+/// binary exits mid-sweep while its `DROP DATABASE` backends are still
+/// waiting on a slow forced checkpoint. The next process takes the lock,
+/// sees the same databases — they still exist, and the dropping
+/// backends are connected to `postgres`, not to them — and issues the
+/// same drops again. Measured on the dev pod's harness Postgres
+/// (the packet's `root_cause_2026_09_24`): 77 of 96 connections were
+/// `DROP DATABASE` on only 7 databases, 11 identical drops each, and
+/// every other test binary on the pod was refused with `too many
+/// clients already`.
+///
+/// Against a real server, because the defect is in what the catalog
+/// says while a drop waits. The drop is held in flight the cheap way —
+/// an open transaction holding a conflicting lock on the database
+/// (`COMMENT ON DATABASE` takes ShareUpdateExclusive) — so nothing here
+/// waits on a checkpoint, and the drop is cancelled rather than let run.
+#[cfg(test)]
+mod an_in_flight_drop {
+    use super::{
+        DEFAULT_ADMIN_URL, ORPHAN_TTL_SECS, orphan_candidates, production_refusal,
+        release_scratch_database, scratch_database_name, stamp_of,
+    };
+    use sqlx::postgres::PgConnectOptions;
+    use sqlx::{Connection, Executor, PgConnection};
+    use std::str::FromStr;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn a_database_whose_drop_is_in_flight_is_not_swept_again() {
+        let admin_url = std::env::var("BOSS_TEST_POSTGRES_ADMIN_URL")
+            .unwrap_or_else(|_| DEFAULT_ADMIN_URL.to_string());
+        let opts = PgConnectOptions::from_str(&admin_url).expect("parsing the admin URL");
+        let mut admin = PgConnection::connect_with(&opts)
+            .await
+            .expect("connecting to the admin database");
+        let has_boss_db: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'boss')")
+                .fetch_one(&mut admin)
+                .await
+                .expect("probing for a production database");
+        if let Some(reason) = production_refusal(
+            has_boss_db,
+            std::env::var(super::ALLOW_PRODUCTION_ENV).as_deref() == Ok("1"),
+        ) {
+            panic!("{reason}");
+        }
+
+        let name = scratch_database_name("inflight");
+        admin
+            .execute(format!(r#"CREATE DATABASE "{name}""#).as_str())
+            .await
+            .expect("creating the scratch database");
+        // A sweep that runs one TTL after the stamp: the name is litter.
+        let later = stamp_of(&name).expect("a stamped name") + ORPHAN_TTL_SECS + 1;
+
+        // Control: nobody touching it, so a sweep would take it.
+        assert!(
+            orphan_candidates(&mut admin, later).await.contains(&name),
+            "an aged database nobody holds is a sweep candidate: {name}"
+        );
+
+        // Hold a lock DROP DATABASE must wait behind, in an open
+        // transaction on a session connected to `postgres`.
+        let mut holder = PgConnection::connect_with(&opts)
+            .await
+            .expect("connecting the holder");
+        holder.execute("BEGIN").await.expect("BEGIN");
+        holder
+            .execute(format!(r#"COMMENT ON DATABASE "{name}" IS 'held by a test'"#).as_str())
+            .await
+            .expect("taking a lock on the database");
+        // A lock that is not a drop's does not hide it: the exclusion
+        // must key on the drop, or a connect-in-progress would too.
+        assert!(
+            orphan_candidates(&mut admin, later).await.contains(&name),
+            "a database merely locked by someone is still a candidate: {name}"
+        );
+
+        // The drop in flight — a sweeper that has since exited looks
+        // exactly like this to the server: a backend on `postgres`
+        // waiting on the database's lock.
+        let mut dropper = PgConnection::connect_with(&opts)
+            .await
+            .expect("connecting the dropper");
+        let dropper_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut dropper)
+            .await
+            .expect("the dropper's pid");
+        let drop_sql = format!(r#"DROP DATABASE IF EXISTS "{name}""#);
+        let in_flight = tokio::spawn(async move {
+            let _ = dropper.execute(drop_sql.as_str()).await;
+        });
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = $1 AND NOT granted)",
+            )
+            .bind(dropper_pid)
+            .fetch_one(&mut admin)
+            .await
+            .expect("reading pg_locks");
+            if waiting {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the drop of {name} never queued on its lock"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        let candidates = orphan_candidates(&mut admin, later).await;
+
+        // Clean up before judging, so a red leaves nothing waiting: the
+        // drop is cancelled, the lock released, and the database handed
+        // to the reaper, which drops it off this test's path.
+        let _ = sqlx::query("SELECT pg_cancel_backend($1)")
+            .bind(dropper_pid)
+            .execute(&mut admin)
+            .await;
+        let _ = tokio::time::timeout(Duration::from_secs(30), in_flight).await;
+        let _ = holder.execute("ROLLBACK").await;
+        let _ = holder.close().await;
+        release_scratch_database(&admin_url, &name);
+
+        assert!(
+            !candidates.contains(&name),
+            "{name} has a DROP DATABASE in flight, yet a second sweep would issue \
+             another — the pile-up that filled the server (backlog 9469bc69)"
+        );
     }
 }
 

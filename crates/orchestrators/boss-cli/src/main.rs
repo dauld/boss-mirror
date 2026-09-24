@@ -290,6 +290,18 @@ enum Commands {
         /// SOLO is still the solo rule's business, not this flag's.
         #[arg(long, value_name = "CAR")]
         park_after: Option<String>,
+        /// Auto-park: every OTHER item this change answers — repeatable,
+        /// one id each. Rides BESIDE --park-backlog-item (or
+        /// --park-partial-item / --park-design), never as the item
+        /// answer, and is refused beside --park-no-item, which names no
+        /// item for these to ride beside. Each listed item CLOSES when
+        /// the car lands, as the car's own item does.
+        ///
+        /// Measured 2026-09-23 (a994f533): 5994de6d and cab50f4c were
+        /// dispatched to builders after their fixes had landed on cars
+        /// naming a different item, because a car could name only one.
+        #[arg(long, value_name = "ITEM")]
+        park_also_answers: Vec<String>,
         /// Auto-park: the probe that proves this change in production,
         /// written now by the builder who knows what it does. Recorded
         /// on the car as `proof_probe` and RUN — by `boss prove <car>
@@ -1807,6 +1819,7 @@ async fn main() -> Result<()> {
             park_no_item,
             park_design,
             park_after,
+            park_also_answers,
             park_probe,
             park_probe_file,
             park_expect,
@@ -1839,6 +1852,7 @@ async fn main() -> Result<()> {
                 no_item: park_no_item,
                 design: park_design,
                 boards_after: park_after,
+                also_answers: park_also_answers,
                 probe: crate::prose::opt_text_or_file(
                     "--park-probe",
                     "--park-probe-file",

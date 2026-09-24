@@ -162,7 +162,11 @@ const SECTION_FOR_KIND: Readonly<Record<Route['kind'], string>> = {
   support: 'support',
   qa: 'qa',
   calendar: 'calendar',
-  myCalendar: 'calendar',
+  // /ux/calendar/me is the `schedule` row's own path (Home, "My
+  // schedule"). It lit `calendar` until 2026-09-24, so it highlighted
+  // Release calendar and was gated on the calendar module — off on the
+  // live instance, so the page was ModuleDisabled (eff0c5e5).
+  myCalendar: 'schedule',
   schedule: 'schedule',
   exec: 'exec',
   warehouse: 'warehouse',

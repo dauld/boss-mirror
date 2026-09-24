@@ -9,6 +9,13 @@
 // doesn't get a /shipping entry the tenant has turned off) and the
 // route-access matrix from `permissions.ts` (so audit-readonly is
 // never offered admin links).
+//
+// No entry lists `schedule`. "My schedule" is a Home row for every
+// role — AppShell's "Mine" group — and the role's Class row
+// (`metadata.surfaces`) is the only thing that hides it. Seven brewery
+// roles used to list it here as well, so they saw the row twice, and a
+// page audit read this map as the row's only gate (backlog c88fa303,
+// page audit 0e4fef17; David, 2026-09-24: "Let's put it in the Home app").
 
 import type { RouteName, Role } from './permissions';
 
@@ -28,7 +35,7 @@ export const WORK_BY_ROLE: Record<Role, ReadonlyArray<RouteName>> = {
 
   // ----- Service & refurb -----
   'service-mgr':       ['jobs', 'service', 'support'],
-  'service-tech':      ['service', 'jobs', 'schedule'],
+  'service-tech':      ['service', 'jobs'],
   // The refurb ROLES remain — they are real people on the device-shop
   // roster — but their surface does not. /ux/refurb was a device-shop
   // page in the shared shell that every other tenant saw as an empty
@@ -71,10 +78,10 @@ export const WORK_BY_ROLE: Record<Role, ReadonlyArray<RouteName>> = {
   // seasonal-release Workflows. Their day is steps + the
   // ingredient inventory.
   'head-brewer':   ['jobs', 'parts', 'qa'],
-  'senior-brewer': ['jobs', 'parts', 'schedule'],
+  'senior-brewer': ['jobs', 'parts'],
   brewer:          ['jobs', 'parts'],
   'cellar-tech':   ['jobs', 'parts'],
-  'shift-lead':    ['jobs', 'people', 'schedule'],
+  'shift-lead':    ['jobs', 'people'],
 
   // ----- Brewery: packaging (kegs, bottles, cans) -----
   'packaging-mgr':  ['jobs', 'warehouse', 'shipping'],
@@ -91,11 +98,11 @@ export const WORK_BY_ROLE: Record<Role, ReadonlyArray<RouteName>> = {
   'shipping-clerk':    ['shipping', 'warehouse'],
 
   // ----- Brewery: distribution (drivers) -----
-  'distribution-driver': ['shipping', 'schedule'],
+  'distribution-driver': ['shipping'],
 
   // ----- Brewery: maintenance -----
   // Equipment-preventive maintenance Workflow drives most of these tickets.
-  'maintenance-mgr': ['jobs', 'parts', 'schedule'],
+  'maintenance-mgr': ['jobs', 'parts'],
   electrician:       ['jobs', 'parts'],
   mechanic:          ['jobs', 'parts'],
 
@@ -112,8 +119,8 @@ export const WORK_BY_ROLE: Record<Role, ReadonlyArray<RouteName>> = {
   'brand-designer':       ['marketing-assets'],
 
   // ----- Brewery: taproom -----
-  bartender:        ['calendar', 'schedule'],
-  'taproom-server': ['calendar', 'schedule'],
+  bartender:        ['calendar'],
+  'taproom-server': ['calendar'],
 
   // ----- Brewery: finance -----
   bookkeeper:    ['finance', 'accounts', 'jobs'],

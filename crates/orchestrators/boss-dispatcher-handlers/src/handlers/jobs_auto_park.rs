@@ -335,10 +335,19 @@ fn auto_park_inputs(
         // the core keys nothing downstream follows. Read here so the
         // gate's `park_partial_item` / `park_no_item` cannot silently go
         // missing between the gate-run and the car.
-        item_provenance: car::item_provenance(
-            md.get(car::PARK_PARTIAL_ITEM).and_then(Value::as_str),
-            md.get(car::PARK_NO_ITEM).and_then(Value::as_str),
-        ),
+        //
+        // Every OTHER item the car answers (a994f533) rides in the same
+        // map, because it is the same kind of fact — what the car says
+        // about items beyond its one closing edge — and the map is what
+        // all three park paths already carry, so no path can drop it.
+        item_provenance: {
+            let mut p = car::item_provenance(
+                md.get(car::PARK_PARTIAL_ITEM).and_then(Value::as_str),
+                md.get(car::PARK_NO_ITEM).and_then(Value::as_str),
+            );
+            p.extend(car::also_answers(md.get(car::PARK_ALSO_ANSWERS)));
+            p
+        },
         // The ordering edge the gate's `--park-after` stamped. Blank is
         // no edge: the ref check reads `''` as "no claim to check", so a
         // blank written onto the car would be a constraint the dock
@@ -578,7 +587,7 @@ fn adopt_patch(car: &Value, inputs: &AutoParkInputs) -> Value {
 /// residue it removes.
 fn clear_stale_item_answer(car: &Value, inputs: &AutoParkInputs) -> serde_json::Map<String, Value> {
     let mut out = serde_json::Map::new();
-    if inputs.backlog_item.is_none() && inputs.item_provenance.is_empty() {
+    if inputs.backlog_item.is_none() && !states_a_non_closing_answer(inputs) {
         return out;
     }
     for key in [car::PARTIAL_ITEM, car::NO_ITEM_REASON] {
@@ -591,6 +600,17 @@ fn clear_stale_item_answer(car: &Value, inputs: &AutoParkInputs) -> serde_json::
         }
     }
     out
+}
+
+/// Did the gate state one of the two NON-closing item answers? Asked by
+/// key, not by the provenance map's emptiness, because the map also
+/// carries `also_answers` (a994f533) — which rides beside an answer and
+/// is never one itself, so a hand-edited gate-run carrying only that
+/// list must not read as an answer that clears or supersedes anything.
+fn states_a_non_closing_answer(inputs: &AutoParkInputs) -> bool {
+    [car::PARTIAL_ITEM, car::NO_ITEM_REASON]
+        .iter()
+        .any(|k| inputs.item_provenance.contains_key(*k))
 }
 
 /// PURE: the one case where an adopt OVERWRITES what the open recorded —
@@ -632,7 +652,7 @@ fn supersede(car: &Value, inputs: &AutoParkInputs) -> serde_json::Map<String, Va
     // and must never lose it. Belt and braces: the flags are mutually
     // exclusive at the gate, so this can only fire on a packet edited by
     // hand, where the closing edge is the safer thing to keep.
-    if inputs.backlog_item.is_some() || inputs.item_provenance.is_empty() {
+    if inputs.backlog_item.is_some() || !states_a_non_closing_answer(inputs) {
         return out;
     }
     let Some(open_edge) = car
@@ -1708,6 +1728,55 @@ mod tests {
             "David asked for this in conversation"
         );
         assert!(md.get(car::PARTIAL_ITEM).is_none());
+    }
+
+    /// EVERY OTHER ITEM THE CAR ANSWERS RIDES ONTO IT, BY ALL THREE PARK
+    /// PATHS (a994f533, the writer half). The arrival rule already closes
+    /// each id in `also_answers` (its `also_link`, landed in #586), but
+    /// nothing wrote the key: `boss gate --park-also-answers` stamps
+    /// `park_also_answers`, and this is the hop that carries it onto the
+    /// car — the file, the refresh and the adopt alike, or a car the
+    /// builder opened early would drop it (the reason the provenance is
+    /// carried by all three or by none).
+    #[test]
+    fn every_other_item_the_car_answers_rides_onto_it_by_every_path() {
+        let also = json!([
+            "5994de6d-0000-0000-0000-000000000000",
+            "cab50f4c-0000-0000-0000-000000000000"
+        ]);
+        let gr = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "park_backlog_item": "d4698bc2-0000-0000-0000-000000000000",
+            "park_also_answers": also,
+        }));
+        let got = auto_park_inputs(&gr, &green_step_meta()).expect("parks");
+        assert_eq!(
+            got.backlog_item.as_deref(),
+            Some("d4698bc2-0000-0000-0000-000000000000"),
+            "the primary edge is untouched"
+        );
+        let md = car_body_with_proof(&got, "emp-owner")["metadata"].clone();
+        assert_eq!(md[car::ALSO_ANSWERS], also, "filed: {md}");
+        let car = json!({ "id": "c", "metadata": { "branch": "feat/x" } });
+        let refreshed = refresh_patch(&car, &got, "note");
+        assert_eq!(refreshed[car::ALSO_ANSWERS], also, "refreshed: {refreshed}");
+        let adopted = adopt_patch(&car, &got);
+        assert_eq!(adopted[car::ALSO_ANSWERS], also, "adopted: {adopted}");
+
+        // Stated none: the key is absent everywhere, never nulled.
+        let plain = gate_run(json!({
+            "park_summary": "s", "park_excludes": "e", "park_test": "t", "park_verified": "v",
+            "park_backlog_item": "d4698bc2-0000-0000-0000-000000000000",
+        }));
+        let got = auto_park_inputs(&plain, &green_step_meta()).expect("parks");
+        let md = car_body_with_proof(&got, "emp-owner")["metadata"].clone();
+        assert!(md.get(car::ALSO_ANSWERS).is_none(), "{md}");
+        assert!(
+            refresh_patch(&car, &got, "n")
+                .get(car::ALSO_ANSWERS)
+                .is_none()
+        );
+        assert!(adopt_patch(&car, &got).get(car::ALSO_ANSWERS).is_none());
     }
 
     /// A car that IS an item's build is unchanged, and carries neither

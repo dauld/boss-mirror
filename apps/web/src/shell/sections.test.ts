@@ -149,6 +149,19 @@ describe('the module gate a route answers to', () => {
     expect(moduleForRoute({ kind: 'service' })).toEqual({ id: 'support', label: 'Service queue' });
   });
 
+  test('My schedule answers to its own row, not the Release calendar', () => {
+    // Backlog eff0c5e5 (page audit 0e4fef17, gap 1; David approved
+    // 2026-09-24): /ux/calendar/me IS the `schedule` row's path, but
+    // its kind lit the `calendar` row — so it highlighted Release
+    // calendar under Production and was gated on the calendar module,
+    // which the live instance has off, and every visit answered
+    // ModuleDisabled for a page whose own row is always-on in Home.
+    expect(ROUTE_CATALOG.schedule.path).toBe('/ux/calendar/me');
+    expect(sectionForRoute({ kind: 'myCalendar' })).toBe('schedule');
+    expect(appForRoute({ kind: 'myCalendar' })).toBe('home');
+    expect(moduleForRoute({ kind: 'myCalendar' })).toBeNull();
+  });
+
   test('a route requires exactly the module that hides its own nav row', () => {
     // The drift this refuses: the module that HIDES a sidebar row and
     // the module that gates the ROUTE behind it are one fact.
