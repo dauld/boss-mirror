@@ -553,7 +553,8 @@ require_headroom "to start"
 #            that can reject a broken predicate never ran on it. The
 #            tenant name is DERIVED from the directory, never listed — a
 #            brewery-only rule would have left the same hole for the
-#            used-device-shop bundle and its 36 kinds.
+#            used-device-shop bundle and its 36 kinds while it lived
+#            (retired 2026-09-24, backlog a8991c86), and for the next.
 #
 #   Anything else (infra/, apps/, .forgejo/) maps to no crate and is
 #       REPORTED rather than ignored. The lints already run repo-wide,
@@ -1021,11 +1022,14 @@ scope_self_test() {
     # required_roles to their own authority_role.
     _case "a tenant seed bundle still has a crate" "boss-brewery-engine boss-jobs boss-testing" \
         "examples/brewery/seeds/workflows.toml"
-    # Derived from the directory, not a list of tenants: the
-    # used-device-shop bundle declares 36 kinds and must be covered by
-    # the same line, without that line naming either tenant.
-    _case "the sibling tenant needs no line of its own" "boss-jobs boss-used-device-shop-engine" \
-        "examples/used-device-shop/seeds/workflows.toml"
+    # A RETIRED tenant's bundle implies what still parses its kind of
+    # file and nothing else: the engine name is still derived from the
+    # directory, and `live_crates` drops it once the crate is gone — the
+    # shape of the car that deleted the used-device shop's engine and
+    # bundle together (backlog a8991c86, car 7), whose own case here had
+    # demanded that engine. A -p for it would be one cargo refuses.
+    _case "a retired tenant's bundle implies no deleted engine" "boss-jobs" \
+        "examples/zz-retired/seeds/workflows.toml"
     # The rest of a bundle is its tenant engine's business: four of the
     # brewery's TOMLs are `include_str!`d into boss-brewery-engine, so
     # they are compile INPUT, and its e2e test reads the whole directory.
@@ -1057,7 +1061,7 @@ scope_self_test() {
     # rosters are read best-effort (`if let Ok(...)`) by the engines, so
     # a malformed one degrades rather than failing a test.
     _case "examples outside a seed bundle imply no crate" "" \
-        "examples/used-device-shop/DOMAIN.md" "examples/brewery/data/assets.json"
+        "examples/brewery/DOMAIN.md" "examples/brewery/data/assets.json"
     # Infra no crate READS. Both are real scripts, and that is the point:
     # "unmapped" has to be a fact about the tree, not a fact about which
     # paths nobody got round to listing.
@@ -1132,8 +1136,8 @@ scope_self_test() {
         "$(printf '%s\n' "${GATE_SCHEMA_READERS}" boss-expr | tr ' ' '\n' | sort -u | tr '\n' ' ' | sed 's/ $//')" \
         "infra/postgres/schema/141-x.sql" "crates/core/boss-expr/src/lib.rs"
     # The tenant-bundle rules DERIVE a crate name from the directory
-    # rather than listing the two tenants, which moves the thing that
-    # can rot: a third tenant whose engine crate is not
+    # rather than listing the tenants, which moves the thing that
+    # can rot: a new tenant whose engine crate is not
     # `boss-<dir>-engine` would make this map demand a `-p` cargo cannot
     # satisfy, and the gate would refuse with an impossible instruction.
     # So pin the derivation against the tree that defines it (CLAUDE.md
