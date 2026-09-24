@@ -114,7 +114,7 @@
       {#if loading && !data}
         <p class="empty">Loading income statement…</p>
       {:else if !data}
-        <p class="empty">Ledger unavailable.</p>
+        <p class="empty load-failed" role="alert">Ledger unavailable.</p>
       {:else}
         {@const d = data}
         <table class="tb-table">

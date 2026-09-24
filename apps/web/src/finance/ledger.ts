@@ -3,6 +3,7 @@
 
 import { formatMoney } from '@boss/web-kit/ui/money';
 import { appToday } from '@boss/web-kit/sim-clock';
+import { failedRead, failedWithReason, okRead, type ReadState } from '../data/readState';
 
 const API_BASE = '/api/ledger';
 
@@ -295,9 +296,28 @@ export function loadTrialBalance(asOf: string | null): Promise<TrialBalanceRespo
   return getJson<TrialBalanceResponse>(url);
 }
 
-export async function loadPeriods(): Promise<Period[]> {
-  const body = await getJson<Period[]>(`${API_BASE}/periods`);
-  return body ?? [];
+/// One GET whose failure is kept, reason and all. `getJson` answers
+/// null for a failure, which the statement tabs can tell from a body
+/// (a statement is never null); a LIST cannot, and folding its null
+/// into [] is how a ledger outage read "No periods yet." (backlog
+/// 1a2b67c9, page audit 3f964c57). Same shape as WarehousePage's read.
+async function readJson<T>(url: string): Promise<{ read: ReadState; body: T | null }> {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return { read: failedWithReason(r.status, await r.text()), body: null };
+    return { read: okRead, body: (await r.json()) as T };
+  } catch (e) {
+    return { read: failedRead(e instanceof Error ? e.message : String(e)), body: null };
+  }
+}
+
+/// The periods list and whether the read that built it worked — an
+/// empty `periods` means "no periods" only when `read` is ok.
+export type PeriodsRead = Readonly<{ read: ReadState; periods: ReadonlyArray<Period> }>;
+
+export async function loadPeriods(): Promise<PeriodsRead> {
+  const { read, body } = await readJson<Period[]>(`${API_BASE}/periods`);
+  return { read, periods: body ?? [] };
 }
 
 export async function loadAccounts(): Promise<Account[]> {
@@ -319,21 +339,24 @@ export type EntriesPage = Readonly<{
   /// available" from "we received exactly the cap" — an over-fetch by
   /// one row sharpens the signal (cap+1 → trim and mark capped).
   capped: boolean;
+  /// Whether the read worked. An empty `data` is "no entries for this
+  /// account" only when this is ok (backlog 1a2b67c9).
+  read: ReadState;
 }>;
 
 export async function loadEntriesForAccount(
   accountCode: string | null,
 ): Promise<EntriesPage> {
-  if (!accountCode) return { data: [], capped: false };
+  if (!accountCode) return { data: [], capped: false, read: okRead };
   const probe = ENTRIES_PER_ACCOUNT_CAP + 1;
-  const body = await getJson<LedgerEntry[]>(
+  const { read, body } = await readJson<LedgerEntry[]>(
     `${API_BASE}/entries?account_code=${accountCode}&limit=${probe}`,
   );
   const rows = body ?? [];
   if (rows.length > ENTRIES_PER_ACCOUNT_CAP) {
-    return { data: rows.slice(0, ENTRIES_PER_ACCOUNT_CAP), capped: true };
+    return { data: rows.slice(0, ENTRIES_PER_ACCOUNT_CAP), capped: true, read };
   }
-  return { data: rows, capped: false };
+  return { data: rows, capped: false, read };
 }
 
 export function loadEntryDetail(entryId: string | null): Promise<LedgerEntryDetail | null> {

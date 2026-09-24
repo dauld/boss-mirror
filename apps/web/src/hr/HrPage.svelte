@@ -11,10 +11,11 @@
   import Link from '@boss/web-kit/ui/Link.svelte';
   import { appNow } from '@boss/web-kit/sim-clock';
   import {
-    humanizeClassCode,
+    classLabel,
     type Department,
     type Employee,
   } from '../people/types';
+  import { classesFor } from '@boss/web-kit/session/classes.svelte';
   import { tenureYears, expiringCerts } from '../people/utils';
   import {
     workflowSurfaces,
@@ -93,6 +94,9 @@
     }
     return [...m.entries()].sort((a, b) => b[1].active - a[1].active);
   });
+  // Headcount rows are labelled from the department's Class display_name
+  // (backlog 8677728c: `operations` printed Operations for Operations / IT).
+  let departmentClasses = $derived(classesFor('employee', 'department'));
 
   // ------------------------------------------------------------
   // Workflows tab — HR workflows driven through the canonical
@@ -589,7 +593,7 @@
               <tbody>
                 {#each byDept as [dept, counts] (dept)}
                   <tr>
-                    <td>{humanizeClassCode(dept)}</td>
+                    <td>{classLabel(dept, departmentClasses)}</td>
                     <td class="num">{counts.active}</td>
                     <td class="num">{counts.onLeave || '—'}</td>
                     <td class="num">{counts.openReqs || '—'}</td>

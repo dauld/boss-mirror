@@ -114,13 +114,33 @@ impl JobsAutoPark {
         let Some(write) = car::triage_on_park(&item, car_id, branch) else {
             return;
         };
-        let url = format!(
-            "{}/api/jobs/{}/steps/{}",
-            self.base(),
-            item_id,
-            write.step_id
-        );
-        match write_json(&self.client, reqwest::Method::PUT, &url, &write.body, rule).await {
+        // The route through the step merge door, THEN a status-only PUT —
+        // a PUT carrying metadata replaces the step's stored keys
+        // wholesale, so the old read-then-PUT dropped anything written
+        // between the two (backlog e39a9d2a). Merge first: the step's
+        // required-at-done fields are validated on the flip.
+        let merged = write_json(
+            &self.client,
+            reqwest::Method::PATCH,
+            &format!("{}{}", self.base(), write.merge_path(item_id)),
+            &write.metadata,
+            rule,
+        )
+        .await;
+        let routed = match merged {
+            Ok(()) => {
+                write_json(
+                    &self.client,
+                    reqwest::Method::PUT,
+                    &format!("{}{}", self.base(), write.status_path(item_id)),
+                    &write.status_body,
+                    rule,
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        };
+        match routed {
             Ok(()) => tracing::info!(rule = %rule, car = %car_id, item = %item_id,
                 "routed the linked item to `build`: the car that names it IS its build"),
             Err(e) => tracing::warn!(rule = %rule, car = %car_id, item = %item_id,
@@ -2144,18 +2164,20 @@ mod park_routes_its_item_tests {
     const ITEM: &str = "5942f205-0f0e-4a51-9a31-2f8f3b0b7a11";
     const CAR_ID: &str = "9442139b-1616-4b8d-8a7a-d1e34ff96486";
 
+    /// Every step write the stand-in received, in arrival order:
+    /// `(method, step_id, body)`.
+    type StepLog = Arc<std::sync::Mutex<Vec<(&'static str, String, Value)>>>;
+
     /// Stand-in for jobs-api holding one un-triaged backlog item, and
-    /// recording every step PUT so the routing write can be read back.
-    /// `status` is the code the item GET answers with — 500 stands in
-    /// for an SoR that cannot be reached.
-    async fn mock_item(
-        item: Option<Value>,
-        status: axum::http::StatusCode,
-    ) -> (String, Arc<std::sync::Mutex<Vec<(String, Value)>>>) {
+    /// recording every step write — the merge-door PATCH and the step
+    /// PUT — so the routing writes can be read back in order. `status`
+    /// is the code the item GET answers with — 500 stands in for an SoR
+    /// that cannot be reached.
+    async fn mock_item(item: Option<Value>, status: axum::http::StatusCode) -> (String, StepLog) {
         use axum::{Json, Router, extract::Path, routing::get};
-        let puts: Arc<std::sync::Mutex<Vec<(String, Value)>>> =
-            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let puts: StepLog = Arc::new(std::sync::Mutex::new(Vec::new()));
         let put_log = puts.clone();
+        let patch_log = puts.clone();
         let app = Router::new()
             .route(
                 "/api/jobs/{id}",
@@ -2175,7 +2197,19 @@ mod park_routes_its_item_tests {
                     move |Path((_id, step_id)): Path<(String, String)>, Json(body): Json<Value>| {
                         let puts = put_log.clone();
                         async move {
-                            puts.lock().unwrap().push((step_id, body));
+                            puts.lock().unwrap().push(("PUT", step_id, body));
+                            Json(json!({ "ok": true }))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{step_id}/metadata",
+                axum::routing::patch(
+                    move |Path((_id, step_id)): Path<(String, String)>, Json(body): Json<Value>| {
+                        let log = patch_log.clone();
+                        async move {
+                            log.lock().unwrap().push(("PATCH", step_id, body));
                             Json(json!({ "ok": true }))
                         }
                     },
@@ -2216,17 +2250,22 @@ mod park_routes_its_item_tests {
         h.triage_linked_item(ITEM, CAR_ID, "fix/x", "jobs.auto-park")
             .await;
 
-        let puts = puts.lock().unwrap().clone();
-        assert_eq!(puts.len(), 1, "one routing write: {puts:?}");
-        let (step_id, body) = &puts[0];
-        assert_eq!(step_id, "s-triage");
-        assert_eq!(body["status"], "completed");
-        assert_eq!(body["metadata"]["disposition"], "build");
-        let evidence = body["metadata"]["evidence"].as_str().unwrap_or_default();
+        // TWO writes, merge first (backlog e39a9d2a): the route through
+        // the step merge door, then a PUT carrying the status alone — a
+        // PUT with metadata replaces the step's stored keys wholesale.
+        let writes = puts.lock().unwrap().clone();
+        assert_eq!(writes.len(), 2, "merge, then status: {writes:?}");
+        let (method, step_id, merged) = &writes[0];
+        assert_eq!((*method, step_id.as_str()), ("PATCH", "s-triage"));
+        assert_eq!(merged["disposition"], "build");
+        let evidence = merged["evidence"].as_str().unwrap_or_default();
         assert!(
             evidence.contains("9442139b") && evidence.contains("fix/x"),
             "the evidence names the car and its branch: {evidence}"
         );
+        let (method, step_id, put) = &writes[1];
+        assert_eq!((*method, step_id.as_str()), ("PUT", "s-triage"));
+        assert_eq!(put, &json!({"status": "completed"}));
     }
 
     /// IDEMPOTENT ON A RE-GATE. The refresh path runs this too, and an

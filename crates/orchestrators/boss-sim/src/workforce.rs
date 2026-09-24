@@ -698,19 +698,23 @@ impl Workforce {
                     }
                     spent.insert((emp.clone(), day), so_far + commitment);
                 }
-                self.claim(job_id, step_id, &emp, &metadata, now)?;
+                let claimed = self.claim(job_id, step_id, &emp, &metadata, now)?;
                 delta.claimed += 1;
                 // An assigned zero-duration step completes the same pass —
                 // no point holding it. (Structural markers complete
                 // elsewhere: triggers are resolved at materialization, and
                 // outcome / milestone are completed by the dispatcher's
                 // marker handler — none are ever assigned to a worker.)
+                // It completes from the metadata the CLAIM wrote, not the
+                // row read before it: the completion PUT replaces metadata
+                // wholesale, so the pre-claim copy cleared `started_at` by
+                // omission (backlog e39a9d2a).
                 if step_hours <= 0.0 {
                     self.complete(
                         job_id,
                         step_id,
                         kind,
-                        &metadata,
+                        &claimed,
                         &emp,
                         &sign_offs_required,
                         &authored_fields,
@@ -754,7 +758,9 @@ impl Workforce {
 
     /// Ready → Active. Stamps `started_at` so the completion gate can
     /// measure elapsed sim-time. Metadata is sent whole (PATCH-on-PUT
-    /// replaces it wholesale) so no existing keys are lost.
+    /// replaces it wholesale) so no existing keys are lost. Answers the
+    /// metadata it wrote, so a same-pass completion builds on the step
+    /// as it now stands rather than on the pre-claim read.
     fn claim(
         &self,
         job_id: &str,
@@ -762,7 +768,7 @@ impl Workforce {
         emp: &str,
         metadata: &Value,
         now: DateTime<Utc>,
-    ) -> Result<()> {
+    ) -> Result<Value> {
         let mut md = metadata.clone();
         if let Some(obj) = md.as_object_mut() {
             obj.insert("started_at".to_string(), json!(now.to_rfc3339()));
@@ -772,7 +778,8 @@ impl Workforce {
             "assignee_id": emp,
             "metadata": md,
         });
-        self.put_step(job_id, step_id, &body, emp)
+        self.put_step(job_id, step_id, &body, emp)?;
+        Ok(md)
     }
 
     /// Active → Completed, attributed to `emp`. For a demand-gate step,
@@ -1674,5 +1681,88 @@ mod tests {
         let mut empty = serde_json::Map::new();
         wf.fill_required_fields("not-a-kind", &mut empty, "step-2", now);
         assert!(empty.is_empty());
+    }
+
+    /// A stand-in jobs API on a loopback port: answers every request
+    /// `200 {}` and records `(method, path, body)` in arrival order.
+    fn recording_api() -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
+    ) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = log.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut parts = line.split_whitespace();
+                let method = parts.next().unwrap_or_default().to_string();
+                let path = parts.next().unwrap_or_default().to_string();
+                let mut len = 0usize;
+                loop {
+                    let mut h = String::new();
+                    reader.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; len];
+                reader.read_exact(&mut body).unwrap();
+                let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                seen.lock().unwrap().push((method, path, body));
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                      content-length: 2\r\nconnection: close\r\n\r\n{}",
+                );
+            }
+        });
+        (base, log)
+    }
+
+    /// A ZERO-DURATION STEP KEEPS ITS CLAIM STAMP (backlog e39a9d2a,
+    /// Stage 1). `work_step` claimed the step — a PUT whose metadata
+    /// added `started_at` — and then completed it in the same pass from
+    /// the metadata it had read BEFORE the claim. The step PUT replaces
+    /// metadata wholesale, so the completion cleared `started_at` by
+    /// omission, on every zero-duration step the sim ever worked.
+    #[test]
+    fn a_zero_duration_completion_carries_the_claims_started_at() {
+        let (base, log) = recording_api();
+        let wf = Workforce::new(
+            &base,
+            HashMap::from([("task".to_string(), 0.0)]),
+            HashMap::new(),
+        );
+        let row = json!({
+            "job_id": "job-1",
+            "step": { "id": "step-1", "kind": "task", "status": "ready",
+                      "assignee_id": "emp-aa-007", "metadata": { "brief": "b" } },
+        });
+        let delta = wf.work_step(&row, fixed_now()).unwrap();
+        assert_eq!((delta.claimed, delta.completed), (1, 1));
+
+        let writes = log.lock().unwrap().clone();
+        let puts: Vec<&Value> = writes
+            .iter()
+            .filter(|(m, p, _)| m == "PUT" && p == "/api/jobs/job-1/steps/step-1")
+            .map(|(_, _, b)| b)
+            .collect();
+        assert_eq!(puts.len(), 2, "claim, then complete: {writes:?}");
+        let started = puts[0]["metadata"]["started_at"].clone();
+        assert!(started.is_string(), "the claim stamps started_at");
+        assert_eq!(puts[1]["status"], "completed");
+        assert_eq!(
+            puts[1]["metadata"]["started_at"], started,
+            "the completion must not drop the claim's stamp"
+        );
+        assert_eq!(puts[1]["metadata"]["brief"], "b");
     }
 }

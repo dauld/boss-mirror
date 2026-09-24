@@ -13,7 +13,7 @@
   } from '../jobs/types';
   import type { SpecStep } from '../jobs/fork';
   import type { Employee } from '../people/types';
-  import { putStep } from './stepWrite';
+  import { saveStep } from './stepWrite';
   import { PROCEDURE_KEY } from './procedure';
   import {
     askRoutes,
@@ -193,46 +193,36 @@
     [...employees].sort((a, b) => (a.name ?? "").localeCompare(b.name ?? "")),
   );
 
-  function mergeMetadata(
-    existing: Record<string, unknown>,
-    d: string,
-  ): Record<string, unknown> {
-    const next = { ...existing };
-    if (d) next.due_on = d;
-    else delete next.due_on;
-    return next;
-  }
-
   async function persist(overrides: {
     status?: string;
     assignee_id?: string | null;
-    metadata?: Record<string, unknown>;
     notes?: string;
   }): Promise<void> {
     saving = true;
     writeError = null;
     try {
+      // Only the keys this surface owns go to the merge door — never a
+      // spread of the step's metadata (backlog e39a9d2a). A cleared due
+      // date is an explicit null, which the door deletes; it used to be
+      // cleared by OMISSION from a wholesale PUT.
       const body = {
-        ...step,
-        job_id: jobId,
         notes: overrides.notes ?? notes ?? undefined,
         status: overrides.status ?? step.status,
         assignee_id:
           overrides.assignee_id !== undefined
             ? overrides.assignee_id
             : assigneeId || null,
-        metadata:
-          overrides.metadata ?? {
-            ...mergeMetadata(step.metadata, dueOn),
-            // Only send fields the operator actually filled — an
-            // empty string is not an answer, and writing one would
-            // satisfy a required-field check with nothing in it.
-            ...Object.fromEntries(
-              Object.entries(fieldValues).filter(([, v]) => v.trim() !== ''),
-            ),
-          },
+        metadata: {
+          ...(dueOnDirty ? { due_on: dueOn || null } : {}),
+          // Only send fields the operator actually filled — an
+          // empty string is not an answer, and writing one would
+          // satisfy a required-field check with nothing in it.
+          ...Object.fromEntries(
+            Object.entries(fieldValues).filter(([, v]) => v.trim() !== ''),
+          ),
+        },
       };
-      const res = await putStep(jobId, step.id, body);
+      const res = await saveStep(jobId, step.id, body);
       if (res.kind === 'failed') {
         writeError = res.error;
         return;

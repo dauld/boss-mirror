@@ -257,21 +257,34 @@ impl PackagingAllocate {
             job_id,
             step_id
         );
+        self.write_step(reqwest::Method::PUT, &url, body, rule)
+            .await
+    }
+
+    /// One step write — the PUT, or the merge door's PATCH — refused
+    /// loudly on a non-2xx, naming the method, the url and the answer.
+    async fn write_step(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: JsonValue,
+        rule: &str,
+    ) -> Result<(), HandlerError> {
         let resp = self
             .client
-            .put(&url)
+            .request(method.clone(), url)
             .header("content-type", "application/json")
             .header("x-boss-user", dispatcher_actor_header(rule))
             .header("x-sim-origin", sim_origin_value())
             .json(&body)
             .send()
             .await
-            .map_err(|e| HandlerError::Downstream(format!("PUT {url}: {e}")))?;
+            .map_err(|e| HandlerError::Downstream(format!("{method} {url}: {e}")))?;
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             return Err(HandlerError::Downstream(format!(
-                "PUT {url} returned {status}: {text}"
+                "{method} {url} returned {status}: {text}"
             )));
         }
         Ok(())
@@ -402,7 +415,7 @@ impl Handler for PackagingAllocate {
             );
         }
 
-        let kegs = allocate_batch(batch_bbl, &formats, &default_kegs);
+        let allocated = allocate_batch(batch_bbl, &formats, &default_kegs);
 
         // Write the packaged formats' quantities + stamp per-format outcomes.
         let steps = job
@@ -410,9 +423,7 @@ impl Handler for PackagingAllocate {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let mut own_md = ev.metadata.clone();
-        for (fmt, &alloc) in formats.iter().zip(&kegs) {
-            let packaged = alloc > 0;
+        for (fmt, &alloc) in formats.iter().zip(&allocated) {
             // Write the allocated qty onto every format's produce step — the
             // packaged split, INCLUDING a 0 for a skipped format. products.produce
             // reads these quantities to spread the batch's WIP across the formats
@@ -429,28 +440,61 @@ impl Handler for PackagingAllocate {
                 &ctx.rule_name,
             )
             .await?;
-            // Fork label: seed `fork_keys[sku]` (a short predicate-safe key
-            // like `half`), else the SKU itself.
-            let key = fork_keys
-                .and_then(|m| m.get(fmt.sku.as_str()))
-                .and_then(|v| v.as_str())
-                .unwrap_or(fmt.sku.as_str());
-            own_md.insert(
-                format!("outcome_{key}"),
-                json!(if packaged { "package" } else { "skip" }),
-            );
         }
 
-        // Complete this step, carrying its metadata forward + the outcomes
-        // (PATCH-on-PUT replaces top-level metadata wholesale).
-        self.put_step(
+        // Complete this step: the outcomes through the step merge door,
+        // THEN a status-only PUT (backlog e39a9d2a). This was one PUT
+        // whose metadata was the triggering EVENT's copy plus the
+        // outcomes; the PUT replaces metadata wholesale, so anything
+        // written to the step since `step.ready` fired was dropped by
+        // omission. Merge first: the fork reads the outcomes on the flip.
+        let url = format!(
+            "{}/api/jobs/{}/steps/{}",
+            self.jobs_base.trim_end_matches('/'),
             ev.job_id,
-            ev.step_id,
-            json!({ "status": "completed", "metadata": own_md }),
+            ev.step_id
+        );
+        self.write_step(
+            reqwest::Method::PATCH,
+            &format!("{url}/metadata"),
+            JsonValue::Object(outcomes(&formats, &allocated, fork_keys)),
+            &ctx.rule_name,
+        )
+        .await?;
+        self.write_step(
+            reqwest::Method::PUT,
+            &url,
+            json!({ "status": "completed" }),
             &ctx.rule_name,
         )
         .await
     }
+}
+
+/// PURE: the per-format fork outcomes the allocation step records —
+/// `outcome_<key>` = `package` or `skip` — and nothing else, because
+/// they ride the step merge door, which keeps every key it is not sent.
+/// The key is the seeded `fork_keys[sku]` (a short predicate-safe label
+/// like `half`), else the SKU itself.
+fn outcomes(
+    formats: &[FormatNeed],
+    allocated: &[i64],
+    fork_keys: Option<&JsonValue>,
+) -> serde_json::Map<String, JsonValue> {
+    formats
+        .iter()
+        .zip(allocated)
+        .map(|(fmt, &alloc)| {
+            let key = fork_keys
+                .and_then(|m| m.get(fmt.sku.as_str()))
+                .and_then(|v| v.as_str())
+                .unwrap_or(fmt.sku.as_str());
+            (
+                format!("outcome_{key}"),
+                json!(if alloc > 0 { "package" } else { "skip" }),
+            )
+        })
+        .collect()
 }
 
 fn string_array(md: &serde_json::Map<String, JsonValue>, key: &str) -> Vec<String> {
@@ -492,6 +536,25 @@ mod tests {
             target_kegs: target,
             effective_kegs: effective,
         }
+    }
+
+    /// THE COMPLETION MERGES THE OUTCOMES AND NOTHING ELSE (backlog
+    /// e39a9d2a, Stage 1). The allocation step was completed with a PUT
+    /// whose metadata was the TRIGGERING EVENT's copy plus the outcomes —
+    /// stale by construction, and the PUT replaces metadata wholesale, so
+    /// any key written to the step after `step.ready` fired was dropped
+    /// by omission. The outcomes now go through the step merge door and
+    /// the PUT carries the status alone, so the body holds only the keys
+    /// this handler decided.
+    #[test]
+    fn the_outcomes_are_the_only_keys_the_completion_writes() {
+        let formats = vec![fmt("SKU-A", HALF, 500, 0), fmt("SKU-B", SIXTEL, 500, 900)];
+        let fork_keys = json!({"SKU-A": "half"});
+        let out = outcomes(&formats, &[316, 0], Some(&fork_keys));
+        assert_eq!(
+            JsonValue::Object(out),
+            json!({"outcome_half": "package", "outcome_SKU-B": "skip"})
+        );
     }
 
     #[test]

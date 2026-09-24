@@ -4,7 +4,7 @@
 // must carry whatever the server said about why.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { WRITE_RETRY, describeWriteFailure, putStep, writeStep } from './stepWrite';
+import { WRITE_RETRY, describeWriteFailure, putStep, saveStep, writeStep } from './stepWrite';
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -161,6 +161,81 @@ describe('writeStep — deploy-roll retry (packet 04cc82ab)', () => {
     const res = await writeStep('/api/x', { method: 'POST' }, noWait);
     expect(res.kind).toBe('failed');
     expect(calls).toBe(1);
+  });
+});
+
+describe('saveStep — the two doors (backlog e39a9d2a)', () => {
+  type Seen = { url: string; method: string; body: unknown };
+  function recordAll(status = 200): Seen[] {
+    const seen: Seen[] = [];
+    stubFetch(async (url, init) => {
+      seen.push({
+        url,
+        method: String(init?.method),
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      });
+      return new Response('{}', { status });
+    });
+    return seen;
+  }
+
+  test('metadata rides the merge door FIRST, then a PUT carrying no metadata', async () => {
+    const seen = recordAll();
+    const res = await saveStep('job-1', 'step-9', {
+      status: 'completed',
+      notes: 'n',
+      metadata: { carrier: 'ups' },
+    });
+    expect(res.kind).toBe('ok');
+    expect(seen.map((s) => [s.method, s.url])).toEqual([
+      ['PATCH', '/api/jobs/job-1/steps/step-9/metadata'],
+      ['PUT', '/api/jobs/job-1/steps/step-9'],
+    ]);
+    expect(seen.map((s) => s.body)).toEqual([
+      { carrier: 'ups' },
+      { status: 'completed', notes: 'n' },
+    ]);
+  });
+
+  // THE DEFECT. A surface built its body as `{...step.metadata, key: x
+  // || undefined}`; JSON drops an undefined key, and the PUT replaced
+  // metadata wholesale, so an emptied field was cleared by OMISSION —
+  // the class the step PUT is about to refuse. Through the merge door
+  // an emptied field is an explicit null, which the door deletes.
+  test('a field emptied to undefined is sent as an explicit null, never omitted', async () => {
+    const seen = recordAll();
+    await saveStep('job-1', 'step-9', { metadata: { due_on: undefined, kept: 'x' } });
+    expect(seen.map((s) => s.body)).toEqual([{ due_on: null, kept: 'x' }]);
+  });
+
+  test('no metadata sends no merge; metadata alone sends no PUT', async () => {
+    let seen = recordAll();
+    await saveStep('job-1', 'step-9', { status: 'active' });
+    expect(seen.map((s) => s.method)).toEqual(['PUT']);
+    seen = recordAll();
+    await saveStep('job-1', 'step-9', { metadata: {}, status: 'active' });
+    expect(seen.map((s) => s.method)).toEqual(['PUT']);
+    seen = recordAll();
+    await saveStep('job-1', 'step-9', { metadata: { a: 1 } });
+    expect(seen.map((s) => s.method)).toEqual(['PATCH']);
+  });
+
+  test('a refused merge stops the chain — the status never flips on top of it', async () => {
+    const seen = recordAll(400);
+    const res = await saveStep('job-1', 'step-9', { status: 'completed', metadata: { a: 1 } });
+    expect(res.kind).toBe('failed');
+    expect(seen.map((s) => s.method)).toEqual(['PATCH']);
+  });
+
+  test('the merge is retried across a deploy roll, like the PUT it replaces', async () => {
+    let calls = 0;
+    stubFetch(async () => {
+      calls += 1;
+      return calls < 2 ? new Response('rolling', { status: 503 }) : new Response('{}');
+    });
+    const res = await saveStep('job-1', 'step-9', { metadata: { a: 1 } }, noWait);
+    expect(res.kind).toBe('ok');
+    expect(calls).toBe(2);
   });
 });
 

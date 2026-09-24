@@ -46,7 +46,7 @@
     {#if loading && !data}
       <p class="empty">Loading runoff projection…</p>
     {:else if !data}
-      <p class="empty">Runoff projection unavailable.</p>
+      <p class="empty load-failed" role="alert">Runoff projection unavailable.</p>
     {:else}
       {@const d = data}
       <p class="muted" style="margin:0 0 12px; font-size:13px">

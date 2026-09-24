@@ -210,7 +210,7 @@
         {#if loading && !data}
           <p class="empty">Loading cash flow…</p>
         {:else if !data}
-          <p class="empty">Ledger unavailable.</p>
+          <p class="empty load-failed" role="alert">Ledger unavailable.</p>
         {:else}
           {@const d = data}
           {#if !d.reconciled}
@@ -353,7 +353,7 @@
         {#if directLoading && !directData}
           <p class="empty">Loading cash flow…</p>
         {:else if !directData}
-          <p class="empty">Ledger unavailable.</p>
+          <p class="empty load-failed" role="alert">Ledger unavailable.</p>
         {:else}
           {@const d = directData}
           {#if !d.reconciled}

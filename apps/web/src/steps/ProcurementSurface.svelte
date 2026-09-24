@@ -1,6 +1,6 @@
 <script lang="ts">
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
-  import { putStep } from './stepWrite';
+  import { saveStep } from './stepWrite';
   import { formatMoney } from '@boss/web-kit/ui/money';
   // Procurement step surface — place a purchase order with a
   // vendor. The ingredient-restock Workflow opens with this step
@@ -84,17 +84,17 @@
     saving = true;
     writeError = null;
     try {
+      // The key this surface owns, through the merge door; an emptied
+      // date is sent as null and deleted, where it used to be cleared by
+      // omission from a wholesale PUT (backlog e39a9d2a).
       const body = {
-        ...step,
-        job_id: jobId,
         notes: notes || undefined,
         status: status ?? step.status,
         metadata: {
-          ...step.metadata,
           expected_date: expectedDate || undefined,
         },
       };
-      const res = await putStep(jobId, step.id, body);
+      const res = await saveStep(jobId, step.id, body);
       if (res.kind === 'failed') {
         writeError = res.error;
         return;

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
-  import { putStep } from './stepWrite';
+  import { saveStep } from './stepWrite';
   // Shipment step surface — wholesale-keg-order's last tier and
   // the equipment-preventive-maintenance depot-return path. Captures carrier +
   // tracking + ETA so the wholesale-courier counterparty's scan
@@ -76,13 +76,13 @@
     saving = true;
     writeError = null;
     try {
+      // The keys this surface owns, through the merge door; an emptied
+      // date is sent as null and deleted, where it used to be cleared by
+      // omission from a wholesale PUT (backlog e39a9d2a).
       const body = {
-        ...step,
-        job_id: jobId,
         notes: notes || undefined,
         status: status ?? step.status,
         metadata: {
-          ...step.metadata,
           carrier,
           tracking_number: trackingNumber,
           shipped_date: shippedDate || undefined,
@@ -90,7 +90,7 @@
           delivered_date: deliveredDate || undefined,
         },
       };
-      const res = await putStep(jobId, step.id, body);
+      const res = await saveStep(jobId, step.id, body);
       if (res.kind === 'failed') {
         writeError = res.error;
         return;

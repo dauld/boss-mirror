@@ -78,7 +78,7 @@
 {#if loading && !summary}
   <p class="empty">Loading finance summary…</p>
 {:else if !summary}
-  <p class="empty">Finance summary unavailable.</p>
+  <p class="empty load-failed" role="alert">Finance summary unavailable.</p>
 {:else}
   {@const s = summary}
   {@const arTotalCount = s.ar_aging.reduce((acc, b) => acc + b.count, 0)}
@@ -141,7 +141,7 @@
       {#if apLoading && !ap}
         <p class="empty">Loading AP aging…</p>
       {:else if !ap}
-        <p class="empty">AP aging unavailable.</p>
+        <p class="empty load-failed" role="alert">AP aging unavailable.</p>
       {:else}
         {@const apData = ap}
         <table class="data-table">

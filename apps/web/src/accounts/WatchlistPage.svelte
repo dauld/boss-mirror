@@ -9,6 +9,8 @@
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import type { Account } from './types';
   import { fetchAccountsPage } from './api';
+  import { loadClasses, classesFor } from '@boss/web-kit/session/classes.svelte';
+  import { tierAdmits, tierBuckets, type TierFilter } from './tiers';
 
   type RiskFactors = {
     days_since_last_invoice: number | null;
@@ -32,7 +34,6 @@
     | 'open_ticket_count'
     | 'days_since_last_note';
   type SortDir = 'asc' | 'desc';
-  type Tier = 'all' | 'platinum' | 'gold' | 'silver';
   type Bucket = 'all' | 'high' | 'mid' | 'low';
 
   type LoadState =
@@ -44,7 +45,7 @@
   let accounts = $state<Account[]>([]);
 
   let query = $state('');
-  let tier = $state<Tier>('all');
+  let tier = $state<TierFilter>({ kind: 'all' });
   let bucket = $state<Bucket>('all');
   let sortKey = $state<SortKey>('score');
   let sortDir = $state<SortDir>('desc');
@@ -113,8 +114,7 @@
   let filtered = $derived(
     rows.filter((r) => {
       const account = accountById.get(r.account_id);
-      const accountTier = account?.tier;
-      if (tier !== 'all' && accountTier !== tier) return false;
+      if (!tierAdmits(tier, account ? account.tier : undefined)) return false;
       if (bucket !== 'all' && scoreTone(r.score) !== bucket) return false;
       if (query) {
         const q = query.toLowerCase();
@@ -154,6 +154,26 @@
       }
     });
   });
+
+  // The Tier buttons come from the (account, tier) Classes, plus No
+  // tier when an account has none (backlog 1be37454; page audit
+  // 08b0c4f8 GAP 11). A hand-written Platinum / Gold / Silver trio hid
+  // any tier a tenant added, and left the untiered account reachable
+  // only under All. Counted over the scored rows whose account the
+  // directory returned — a row it did not return has an unknown tier,
+  // not an absent one, so it counts under All alone.
+  $effect(() => {
+    void loadClasses('account');
+  });
+  let tierButtons = $derived(
+    tierBuckets(
+      rows.flatMap((r) => {
+        const a = accountById.get(r.account_id);
+        return a ? [a.tier] : [];
+      }),
+      classesFor('account', 'tier'),
+    ),
+  );
 
   function bucketCount(b: Exclude<Bucket, 'all'>): number {
     return rows.filter((r) => scoreTone(r.score) === b).length;
@@ -213,18 +233,17 @@
         </FilterGroup>
 
         <FilterGroup label="Tier">
-            <FilterButton active={tier === 'all'} onclick={() => (tier = 'all')}>
+            <FilterButton active={tier.kind === 'all'} onclick={() => (tier = { kind: 'all' })}>
               All
             </FilterButton>
-            <FilterButton active={tier === 'platinum'} onclick={() => (tier = 'platinum')}>
-              Platinum
-            </FilterButton>
-            <FilterButton active={tier === 'gold'} onclick={() => (tier = 'gold')}>
-              Gold
-            </FilterButton>
-            <FilterButton active={tier === 'silver'} onclick={() => (tier = 'silver')}>
-              Silver
-            </FilterButton>
+            {#each tierButtons as b (b.code ?? '')}
+              <FilterButton
+                active={tier.kind === 'code' && tier.code === b.code}
+                onclick={() => (tier = { kind: 'code', code: b.code })}
+              >
+                {b.label} ({b.count})
+              </FilterButton>
+            {/each}
         </FilterGroup>
       </aside>
 

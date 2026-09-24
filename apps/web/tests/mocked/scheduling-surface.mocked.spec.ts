@@ -55,17 +55,24 @@ async function mountScheduling(
     putBodies.push(body);
     return json(r, { ...step, ...body });
   });
+  // The step merge door: the surface's metadata goes here, before the
+  // PUT, and the PUT carries none (backlog e39a9d2a).
+  const mergeBodies: Record<string, unknown>[] = [];
+  await page.route(new RegExp(`/api/jobs/${JOB_ID}/steps/s1/metadata$`), (r) => {
+    mergeBodies.push(JSON.parse(r.request().postData() ?? '{}') as Record<string, unknown>);
+    return json(r, step);
+  });
   await page.goto(`/ux/jobs/${JOB_ID}`);
   const surface = page.locator('.step-scheduling');
   await expect(surface).toBeVisible();
   // The roster populates the assignee select; wait for it so the
   // selectOption below is not racing the fetch.
   await expect(surface.locator('select option', { hasText: 'Robin' })).toHaveCount(1);
-  return { surface, putBodies };
+  return { surface, putBodies, mergeBodies };
 }
 
 test('Schedule stays disabled until when, a positive duration and an assignee are all set, and names what is missing', async ({ page }) => {
-  const { surface, putBodies } = await mountScheduling(page, {});
+  const { surface, putBodies, mergeBodies } = await mountScheduling(page, {});
   const schedule = surface.getByRole('button', { name: 'Schedule' });
   const missing = surface.locator('.step-schedule-missing');
 
@@ -97,9 +104,14 @@ test('Schedule stays disabled until when, a positive duration and an assignee ar
   const body = putBodies[0];
   expect(body['status']).toBe('active');
   expect(body['assignee_id']).toBe(EMP2.id);
-  const meta = body['metadata'] as Record<string, unknown>;
+  expect(body['metadata']).toBeUndefined();
+  expect(mergeBodies.length).toBe(1);
+  const meta = mergeBodies[0];
   expect(meta['scheduled_at']).toBe('2026-09-25T09:00');
   expect(meta['duration_minutes']).toBe(90);
+  // The emptied location is an explicit null the door deletes — not a
+  // key left out of a wholesale PUT.
+  expect(meta['location']).toBeNull();
 });
 
 test('a step that already carries all three opens with Schedule enabled and no missing line', async ({ page }) => {

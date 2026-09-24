@@ -1,7 +1,7 @@
 <script lang="ts">
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
   import { appToday } from '@boss/web-kit/sim-clock';
-  import { putStep } from './stepWrite';
+  import { saveStep } from './stepWrite';
   // Receiving step surface — three-way match for inbound goods
   // (PO line + actual qty received + over/short delta). The
   // ingredient-restock Workflow opens with a procurement step
@@ -109,19 +109,19 @@
         ...it,
         received_qty: it.received_qty ?? it.qty,
       }));
+      // The keys this surface owns, through the merge door; emptied
+      // notes are sent as null and deleted, where they used to be
+      // cleared by omission from a wholesale PUT (backlog e39a9d2a).
       const body = {
-        ...step,
-        job_id: jobId,
         notes: notes || undefined,
         status: status ?? step.status,
         metadata: {
-          ...step.metadata,
           expected_items: finalized,
           received_date: receivedDate,
           discrepancy_notes: discrepancyNotes || undefined,
         },
       };
-      const res = await putStep(jobId, step.id, body);
+      const res = await saveStep(jobId, step.id, body);
       if (res.kind === 'failed') {
         writeError = res.error;
         return;

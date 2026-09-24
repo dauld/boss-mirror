@@ -1,6 +1,6 @@
 <script lang="ts">
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
-  import { putStep } from './stepWrite';
+  import { saveStep } from './stepWrite';
   // Production-consume step surface — drains raw ingredients
   // consumed by a brewing batch. The brewer confirms the
   // ingredients_consumed list (typically pre-populated by the
@@ -74,18 +74,18 @@
     saving = true;
     writeError = null;
     try {
+      // The keys this surface owns, through the merge door; an emptied
+      // batch id is sent as null and deleted, where it used to be
+      // cleared by omission from a wholesale PUT (backlog e39a9d2a).
       const body = {
-        ...step,
-        job_id: jobId,
         notes: notes || undefined,
         status: status ?? step.status,
         metadata: {
-          ...step.metadata,
           ingredients_consumed: draws,
           batch_id: batchId || undefined,
         },
       };
-      const res = await putStep(jobId, step.id, body);
+      const res = await saveStep(jobId, step.id, body);
       if (res.kind === 'failed') {
         writeError = res.error;
         return;

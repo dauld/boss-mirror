@@ -32,13 +32,20 @@
     type TrialBalanceRow,
   } from './ledger';
   import { session } from '@boss/web-kit/session/session.svelte';
+  import { listView, okRead, type ReadState } from '../data/readState';
   import AccountDrillDown from './AccountDrillDown.svelte';
 
   let asOf = $state('');
   let tb = $state<TrialBalanceResponse | null>(null);
   let tbLoading = $state(true);
-  let periods = $state<Period[]>([]);
+  let periods = $state<ReadonlyArray<Period>>([]);
+  let periodsRead = $state<ReadState>(okRead);
   let periodsLoading = $state(true);
+  /// A failed periods read is checked before the row count, so an
+  /// outage cannot paint "No periods yet." (backlog 1a2b67c9).
+  let periodsView = $derived(
+    listView([{ source: 'ledger periods', state: periodsRead }], periods.length),
+  );
   let selectedAccount = $state<string | null>(null);
   let selectedEntryId = $state<string | null>(null);
   let tbTick = $state(0);
@@ -70,9 +77,10 @@
     let cancelled = false;
     periodsLoading = true;
     (async () => {
-      const rows = await loadPeriods();
+      const res = await loadPeriods();
       if (!cancelled) {
-        periods = rows;
+        periods = res.periods;
+        periodsRead = res.read;
         periodsLoading = false;
       }
     })();
@@ -193,7 +201,7 @@
       {#if tbLoading && !tb}
         <p class="empty">Loading trial balance…</p>
       {:else if !tb}
-        <p class="empty">Ledger unavailable.</p>
+        <p class="empty load-failed" role="alert">Ledger unavailable.</p>
       {:else}
         {@const visibleRows = tb.rows.filter((r) => r.debit_total_cents > 0 || r.credit_total_cents > 0)}
         <table class="tb-table">
@@ -271,7 +279,11 @@
       </div>
       {#if periodsLoading}
         <p class="empty">Loading periods…</p>
-      {:else if periods.length === 0}
+      {:else if periodsView.kind === 'failed'}
+        <p class="empty load-failed" role="alert">
+          Couldn't load {periodsView.source} — {periodsView.error}
+        </p>
+      {:else if periodsView.kind === 'empty'}
         <p class="empty">No periods yet.</p>
       {:else}
         <table class="tb-periods">

@@ -13,7 +13,7 @@
   import Section from '@boss/web-kit/ui/Section.svelte';
   import { session } from '@boss/web-kit/session/session.svelte';
   import { appToday } from '@boss/web-kit/sim-clock';
-  import { describeWriteFailure, putStep } from './stepWrite';
+  import { describeWriteFailure, putStep, saveStep } from './stepWrite';
 
   type StepData = {
     id: string;
@@ -106,23 +106,23 @@
     saving = true;
     writeError = null;
     try {
-      const body: Record<string, unknown> = {
-        ...step,
-        job_id: jobId,
+      const required = step.sign_offs_required ?? [];
+      const completing = newStatus === 'completed' && required.length > 0;
+      // The keys this surface owns, through the merge door; an emptied
+      // field is sent as null and deleted, where it used to be cleared
+      // by omission from a wholesale PUT (backlog e39a9d2a).
+      const body = {
+        ...(newStatus && !completing ? { status: newStatus } : {}),
         metadata: {
-          ...step.metadata,
           overall_result: result || undefined,
           inspector_notes: notes || undefined,
         },
       };
-      const required = step.sign_offs_required ?? [];
-      const completing = newStatus === 'completed' && required.length > 0;
-      if (newStatus && !completing) body.status = newStatus;
       // Metadata first, then stamps attesting the final shape, then
       // the status flip. Server gates the completion. Every leg is
       // checked — a refused write aborts the chain and renders inline
       // instead of stamping/completing on top of it (packet cc9d7fc6).
-      const wrote = await putStep(jobId, step.id, body);
+      const wrote = await saveStep(jobId, step.id, body);
       if (wrote.kind === 'failed') {
         writeError = wrote.error;
         return;

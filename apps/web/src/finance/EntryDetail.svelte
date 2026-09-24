@@ -70,7 +70,7 @@
 {#if loading && !entry}
   <p class="empty">Loading entry…</p>
 {:else if !entry}
-  <p class="empty">Entry unavailable.</p>
+  <p class="empty load-failed" role="alert">Entry unavailable.</p>
 {:else}
   {@const e = entry}
   <div class="tb-entry-detail">

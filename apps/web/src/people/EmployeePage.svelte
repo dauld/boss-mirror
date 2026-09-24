@@ -11,9 +11,10 @@
   import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import FileAttachments from '../content/FileAttachments.svelte';
   import CalendarFeedSection from './CalendarFeedSection.svelte';
-  import { employmentTone, humanizeClassCode, type Employee } from './types';
+  import { classLabel, employmentTone, type Employee } from './types';
   import { directReports, tenureYears } from './utils';
   import { href } from '../router';
+  import { classesFor } from '@boss/web-kit/session/classes.svelte';
 
   let { empId } = $props<{ empId: string }>();
 
@@ -24,6 +25,12 @@
   /// successful lookup gets to make (packet 3fba9c35).
   let loadFailed = $state<string | null>(null);
   let loading = $state(true);
+
+  // Department and role labels are the registry's display_name, not a
+  // title-cased code (backlog 8677728c, after 8a331c9b fixed the roster:
+  // `operations` printed Operations where its Class says Operations / IT).
+  let departmentClasses = $derived(classesFor('employee', 'department'));
+  let roleClasses = $derived(classesFor('employee', 'role'));
 
   $effect(() => {
     const id = empId;
@@ -132,11 +139,11 @@
     <header class="detail-hero">
       <div>
         <div class="detail-eyebrow">
-          <EntityLink kind="employee" id={e.id} /> · {humanizeClassCode(e.department)} ·
+          <EntityLink kind="employee" id={e.id} /> · {classLabel(e.department, departmentClasses)} ·
           <StatusChip value={e.status ?? 'unknown'} tone={employmentTone(e.status)} />
         </div>
         <h1 class="detail-title">{e.name}</h1>
-        <div class="detail-tagline">{humanizeClassCode(e.role)} · {e.email}</div>
+        <div class="detail-tagline">{classLabel(e.role, roleClasses)} · {e.email}</div>
         <div class="detail-meta">
           <Meta label="Tenure">{tenure.toFixed(1)} years</Meta>
           <Meta label="Skill level">
@@ -180,7 +187,7 @@
                   <Link to={entityHref('employee', m.id)}>
                     {m.name}
                   </Link>
-                  <span style="color:var(--static)"> · {humanizeClassCode(m.role)}</span>
+                  <span style="color:var(--static)"> · {classLabel(m.role, roleClasses)}</span>
                 </li>
               {/each}
             </ol>
@@ -203,7 +210,7 @@
                     <td>
                       <EntityLink kind="employee" id={r.id} label={r.name} mono={false} />
                     </td>
-                    <td class="prose-cell">{humanizeClassCode(r.role)}</td>
+                    <td class="prose-cell">{classLabel(r.role, roleClasses)}</td>
                     <td class="num">{tenureYears(r).toFixed(1)}y</td>
                   </tr>
                 {/each}

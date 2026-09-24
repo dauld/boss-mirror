@@ -62,7 +62,7 @@
 {#if loading && !data}
   <p class="empty">Loading tax liability…</p>
 {:else if !data}
-  <p class="empty">Tax liability unavailable.</p>
+  <p class="empty load-failed" role="alert">Tax liability unavailable.</p>
 {:else}
   {@const d = data}
   {@const totalLiabilityCents = d.liabilities.reduce((s, r) => s + r.balance_cents, 0)}

@@ -2,9 +2,10 @@
   // Recursive node for the org-chart tree view. Renders one
   // employee as a card and nests their direct reports below.
   import Link from '@boss/web-kit/ui/Link.svelte';
-  import { humanizeClassCode, type Employee } from './types';
+  import { classLabel, type Employee } from './types';
   import { href } from '../router';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
+  import { classesFor } from '@boss/web-kit/session/classes.svelte';
 
   type Props = {
     employee: Employee;
@@ -15,6 +16,8 @@
   let { employee, childrenByManager, depth = 0 }: Props = $props();
 
   let directs = $derived(childrenByManager.get(employee.id) ?? []);
+  // The role line reads the registry's display_name (backlog 8677728c).
+  let roleClasses = $derived(classesFor('employee', 'role'));
 </script>
 
 <div class="org-node" style:--depth={depth}>
@@ -22,7 +25,7 @@
     <Link to={entityHref('employee', employee.id)}>
       {employee.name}
     </Link>
-    <div class="org-role">{humanizeClassCode(employee.role)}</div>
+    <div class="org-role">{classLabel(employee.role, roleClasses)}</div>
     {#if directs.length > 0}
       <div class="org-meta">
         {directs.length} report{directs.length === 1 ? '' : 's'}

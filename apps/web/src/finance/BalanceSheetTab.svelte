@@ -107,7 +107,7 @@
       {#if loading && !data}
         <p class="empty">Loading balance sheet…</p>
       {:else if !data}
-        <p class="empty">Ledger unavailable.</p>
+        <p class="empty load-failed" role="alert">Ledger unavailable.</p>
       {:else}
         {@const d = data}
         {#if !d.balanced}

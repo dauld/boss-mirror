@@ -116,6 +116,21 @@ export async function installAuthoringMocks(page: Page): Promise<void> {
     return json(r, step ?? {});
   });
 
+  // 7b) Step merge door — top-level keys merged in, a null deletes
+  //     (backlog e39a9d2a: step surfaces write metadata here, then PUT
+  //     the status alone).
+  await page.route(new RegExp(`/api/jobs/${JOB_ID}/steps/[^/]+/metadata$`), (r) => {
+    const m = r.request().url().match(/\/steps\/([^/?]+)\/metadata/);
+    const step = steps.find((s) => s.id === m?.[1]);
+    if (step) {
+      const patch = JSON.parse(r.request().postData() ?? '{}') as Record<string, unknown>;
+      step.metadata = Object.fromEntries(
+        Object.entries({ ...step.metadata, ...patch }).filter(([, v]) => v !== null),
+      );
+    }
+    return json(r, step ?? {});
+  });
+
   // 8) Sign-off stamp.
   await page.route(new RegExp(`/api/jobs/${JOB_ID}/steps/[^/]+/sign-offs$`), (r) => json(r, { ok: true }));
 }

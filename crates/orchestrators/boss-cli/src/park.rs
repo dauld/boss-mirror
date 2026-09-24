@@ -270,14 +270,31 @@ pub(crate) async fn route_linked_item(
     let Some(write) = triage_on_park(&item, car_id, branch) else {
         return;
     };
-    match crate::gate::api(
+    // The route through the step merge door, THEN a status-only PUT — a
+    // PUT carrying metadata replaces the step's stored keys wholesale, so
+    // the old read-then-PUT dropped anything written between the two
+    // (backlog e39a9d2a). Merge first: the step's required-at-done fields
+    // are validated on the flip.
+    let routed = match crate::gate::api(
         http,
-        reqwest::Method::PUT,
-        &format!("/api/jobs/{item_id}/steps/{}", write.step_id),
-        Some(write.body),
+        reqwest::Method::PATCH,
+        &write.merge_path(item_id),
+        Some(write.metadata.clone()),
     )
     .await
     {
+        Ok(_) => {
+            crate::gate::api(
+                http,
+                reqwest::Method::PUT,
+                &write.status_path(item_id),
+                Some(write.status_body),
+            )
+            .await
+        }
+        Err(e) => Err(e),
+    };
+    match routed {
         Ok(_) => println!("{}", routed_line(verb, &item)),
         Err(e) => println!(
             "boss {verb}: could not route {} to `build` ({e}) — \

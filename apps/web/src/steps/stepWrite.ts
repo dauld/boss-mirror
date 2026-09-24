@@ -70,6 +70,11 @@ const realSleep = (ms: number): Promise<void> =>
 export type WriteOpts = {
   policy?: RetryPolicy;
   sleep?: (ms: number) => Promise<void>;
+  /// Resend through an ambiguous failure even though the METHOD is not
+  /// on the idempotent list. Set only by a caller that knows its call
+  /// is: [`saveStep`]'s merge PATCH sets the same keys to the same
+  /// values however many times it lands.
+  idempotent?: boolean;
 };
 
 /// Whether a method may be resent after an AMBIGUOUS failure — one
@@ -100,7 +105,7 @@ export async function writeStep(
 ): Promise<StepWriteResult> {
   const policy = opts?.policy ?? WRITE_RETRY;
   const sleep = opts?.sleep ?? realSleep;
-  const idempotent = isIdempotent(init.method);
+  const idempotent = opts?.idempotent ?? isIdempotent(init.method);
 
   for (let attempt = 1; ; attempt += 1) {
     let result: StepWriteResult;
@@ -141,7 +146,66 @@ export async function writeStep(
   }
 }
 
-/// The standard step PUT (PATCH semantics server-side).
+/// A step write that carries METADATA, through the two doors (backlog
+/// e39a9d2a, Stage 1): the metadata keys through the step merge door
+/// (`PATCH …/steps/{id}/metadata`), then everything else — status,
+/// notes, assignee — through the step PUT, which then carries no
+/// metadata at all.
+///
+/// WHY NOT ONE PUT. The step PUT replaces `metadata` wholesale. The
+/// surfaces built it as `{...step.metadata, key: x || undefined}`, and
+/// JSON drops an undefined key, so emptying a field cleared it BY
+/// OMISSION — and anything written to the step since the surface read
+/// it (a claim, a hook's stamp) was dropped the same way, silently. The
+/// merge door changes only the keys it is sent, in one transaction
+/// against the row as it stands. So: send only the keys the surface
+/// owns, never a spread of the step's metadata; an emptied field goes
+/// as an explicit `null`, which the door deletes.
+///
+/// Merge FIRST: the step's required-at-done fields are validated when
+/// it flips to completed, so they must already be there. A refused
+/// merge stops the chain — no status flips on top of a write the
+/// server rejected. An empty metadata object sends no merge, and a
+/// body with nothing but metadata sends no PUT.
+export async function saveStep(
+  jobId: string,
+  stepId: string,
+  body: Readonly<{ metadata?: Readonly<Record<string, unknown>> } & Record<string, unknown>>,
+  opts?: WriteOpts,
+): Promise<StepWriteResult> {
+  const { metadata, ...rest } = body;
+  const patch = Object.fromEntries(
+    Object.entries(metadata ?? {}).map(([k, v]) => [k, v === undefined ? null : v]),
+  );
+  let result: StepWriteResult | null = null;
+  if (Object.keys(patch).length > 0) {
+    result = await writeStep(
+      `/api/jobs/${jobId}/steps/${stepId}/metadata`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      },
+      { ...opts, idempotent: true },
+    );
+    if (result.kind === 'failed') return result;
+  }
+  if (result === null || Object.keys(rest).length > 0) {
+    return writeStep(
+      `/api/jobs/${jobId}/steps/${stepId}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(rest),
+      },
+      opts,
+    );
+  }
+  return result;
+}
+
+/// The standard step PUT (PATCH semantics server-side). A body that
+/// carries `metadata` belongs in [`saveStep`] instead.
 export function putStep(
   jobId: string,
   stepId: string,

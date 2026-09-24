@@ -11,7 +11,7 @@
 
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
   import type { Employee } from '../people/types';
-  import { putStep } from './stepWrite';
+  import { saveStep } from './stepWrite';
 
   type StepData = {
     id: string;
@@ -95,21 +95,21 @@
     saving = true;
     writeError = null;
     try {
+      // The keys this surface owns, through the merge door; an emptied
+      // field is sent as null and deleted, where it used to be cleared
+      // by omission from a wholesale PUT (backlog e39a9d2a).
       const body = {
-        ...step,
-        job_id: jobId,
         notes: notes || undefined,
         status: status ?? step.status,
         assignee_id: assigneeId || null,
         metadata: {
-          ...step.metadata,
           location: location || undefined,
           scheduled_at: scheduledAt || undefined,
           duration_minutes:
             typeof durationMinutes === 'number' ? durationMinutes : undefined,
         },
       };
-      const res = await putStep(jobId, step.id, body);
+      const res = await saveStep(jobId, step.id, body);
       if (res.kind === 'failed') {
         writeError = res.error;
         return;

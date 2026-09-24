@@ -5,7 +5,7 @@
   import { session } from '@boss/web-kit/session/session.svelte';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
   import { needsPresence, performPresenceCeremony } from './presence';
-  import { describeWriteFailure, putStep } from './stepWrite';
+  import { describeWriteFailure, putStep, saveStep } from './stepWrite';
 
   type StepData = {
     id: string;
@@ -47,15 +47,14 @@
     saving = true;
     signError = '';
     try {
-      const body: Record<string, unknown> = {
-        ...step,
-        job_id: jobId,
-        // v2: both approve and reject COMPLETE the step. The reject
-        // decision lives in metadata.decision; downstream routing is
-        // predicate-driven server-side (no client-set 'blocked').
-        status: step.status,
+      // v2: both approve and reject COMPLETE the step. The reject
+      // decision lives in metadata.decision; downstream routing is
+      // predicate-driven server-side (no client-set 'blocked'). The
+      // decision is metadata alone, through the merge door: an emptied
+      // comment is sent as null and deleted, where it used to be
+      // cleared by omission from a wholesale PUT (backlog e39a9d2a).
+      const body = {
         metadata: {
-          ...step.metadata,
           decision: d,
           decided_at: appNow().toISOString(),
           comment: comment || undefined,
@@ -66,7 +65,7 @@
       // Each leg is checked: a refused decision aborts the chain —
       // stamping and completing a step whose decision the server
       // rejected is how phantom approvals happen (packet cc9d7fc6).
-      const decided = await putStep(jobId, step.id, body);
+      const decided = await saveStep(jobId, step.id, body);
       if (decided.kind === 'failed') {
         signError = decided.error;
         return;

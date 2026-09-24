@@ -205,15 +205,17 @@ impl StepWrite {
         }
     }
 
-    /// The step merge door on `car_id` — the FIRST write.
-    pub fn merge_path(&self, car_id: &str) -> String {
-        format!("/api/jobs/{car_id}/steps/{}/metadata", self.step_id)
+    /// The step merge door on `job_id` — the FIRST write. The job is the
+    /// car for its own steps, and the linked item for
+    /// [`triage_on_park`]'s.
+    pub fn merge_path(&self, job_id: &str) -> String {
+        format!("/api/jobs/{job_id}/steps/{}/metadata", self.step_id)
     }
 
-    /// The step PUT on `car_id` — the SECOND write, carrying
+    /// The step PUT on `job_id` — the SECOND write, carrying
     /// [`StepWrite::status_body`].
-    pub fn status_path(&self, car_id: &str) -> String {
-        format!("/api/jobs/{car_id}/steps/{}", self.step_id)
+    pub fn status_path(&self, job_id: &str) -> String {
+        format!("/api/jobs/{job_id}/steps/{}", self.step_id)
     }
 }
 
@@ -1298,22 +1300,19 @@ pub const TRIAGE_SLUG: &str = "triage";
 /// The disposition a parked car states: this car is the item's build.
 pub const DISPOSITION_BUILD: &str = "build";
 
-/// The step write a park owes the item its car links — the step to
-/// complete and the body to PUT. The HTTP stays with each caller
-/// (`boss park` and the dispatcher's auto-park handler); the DECISION
-/// lives here once.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TriageWrite {
-    /// The id of the item's routing step.
-    pub step_id: String,
-    /// `PUT /api/jobs/{item}/steps/{step_id}` body: completed, with the
-    /// disposition and the evidence merged onto whatever the step
-    /// already carried.
-    pub body: Value,
-}
-
 /// PURE: the triage write parking this car owes the item it links — or
-/// `None` when there is nothing for a park to state.
+/// `None` when there is nothing for a park to state. The HTTP stays with
+/// each caller (`boss park`, `boss car open` and the dispatcher's
+/// auto-park handler); the DECISION lives here once.
+///
+/// THE SAME TWO WRITES AS EVERY OTHER CAR WRITE — a [`StepWrite`],
+/// addressed through the ITEM's id: the route through the step merge
+/// door, then a status-only PUT (backlog e39a9d2a, Stage 1). This was
+/// one PUT of `{status, metadata}` whose metadata was the step's as the
+/// park had READ it plus the two route keys; the PUT replaces metadata
+/// wholesale, so a key written between that read and the PUT was dropped
+/// by omission. The merge body holds the route alone, because the merge
+/// keeps what the step already carries.
 ///
 /// WHY A PARK DECIDES THE ROUTE. `--park-backlog-item <id>` says "this
 /// car is that item's build". But the item's `build` step only OPENS
@@ -1340,7 +1339,7 @@ pub struct TriageWrite {
 /// with no routing step, and a kind outside `TRIAGEABLE_KINDS` all
 /// answer `None` — so a re-gate, a refresh or a redelivery writes
 /// nothing, and no human's disposition is ever overwritten.
-pub fn triage_on_park(item: &Value, car_id: &str, branch: &str) -> Option<TriageWrite> {
+pub fn triage_on_park(item: &Value, car_id: &str, branch: &str) -> Option<StepWrite> {
     let kind = item.get("kind").and_then(Value::as_str)?;
     if !TRIAGEABLE_KINDS.contains(&kind) {
         return None;
@@ -1358,27 +1357,24 @@ pub fn triage_on_park(item: &Value, car_id: &str, branch: &str) -> Option<Triage
     ) {
         return None;
     }
-    let mut metadata = match step.get("metadata").cloned() {
-        Some(Value::Object(m)) => m,
-        _ => serde_json::Map::new(),
-    };
     // Belt to the status guard's braces: a disposition already written
     // is a decision already made, whatever the step's status says.
-    if metadata.contains_key("disposition") {
+    if step
+        .get("metadata")
+        .and_then(|m| m.get("disposition"))
+        .is_some()
+    {
         return None;
     }
-    let step_id = step.get("id").and_then(Value::as_str)?.to_string();
-    metadata.insert("disposition".to_string(), json!(DISPOSITION_BUILD));
-    metadata.insert(
-        "evidence".to_string(),
-        json!(park_triage_evidence(car_id, branch)),
-    );
-    Some(TriageWrite {
+    let step_id = step.get("id").and_then(Value::as_str)?;
+    Some(StepWrite::completing(
         step_id,
-        // PATCH-on-PUT replaces top-level `metadata` wholesale, so the
-        // step's existing keys ride along rather than being wiped.
-        body: json!({ "status": "completed", "metadata": Value::Object(metadata) }),
-    })
+        TRIAGE_SLUG,
+        json!({
+            "disposition": DISPOSITION_BUILD,
+            "evidence": park_triage_evidence(car_id, branch),
+        }),
+    ))
 }
 
 /// The `evidence` the routing step records at done, naming WHAT made
@@ -2160,16 +2156,54 @@ mod park_triage_tests {
         let w = triage_on_park(&untriaged_item(), CAR_ID, BRANCH)
             .expect("an un-triaged item gets the route its car states");
         assert_eq!(w.step_id, "s-triage");
-        assert_eq!(w.body["status"], "completed");
-        assert_eq!(w.body["metadata"]["disposition"], DISPOSITION_BUILD);
-        let evidence = w.body["metadata"]["evidence"].as_str().unwrap_or_default();
+        assert_eq!(w.status_body, json!({"status": "completed"}));
+        assert_eq!(w.metadata["disposition"], DISPOSITION_BUILD);
+        let evidence = w.metadata["evidence"].as_str().unwrap_or_default();
         assert!(
             evidence.contains("9442139b") && evidence.contains(BRANCH),
             "the evidence names the car and its branch: {evidence}"
         );
-        // PUT replaces `metadata` wholesale, so what the step already
-        // carried has to ride along.
-        assert_eq!(w.body["metadata"]["context_md"], "filed by a builder");
+    }
+
+    /// THE ROUTE RIDES THE MERGE DOOR (backlog e39a9d2a, Stage 1). This
+    /// was one PUT of `{status, metadata}` whose metadata was the step's
+    /// metadata AS THE PARK READ IT plus the two route keys. The step PUT
+    /// replaces metadata wholesale, so any key written between that read
+    /// and the PUT — a claim's lease, a person's note — was dropped by
+    /// omission, silently. Now the two keys go through
+    /// `PATCH …/steps/{id}/metadata`, one transaction against the row as
+    /// it stands, and the PUT carries the status and nothing to drop. The
+    /// step's own keys are therefore NOT in the body: the merge keeps
+    /// them where they are, and a body that re-sent them would re-send a
+    /// stale copy.
+    #[test]
+    fn the_park_route_merges_its_keys_and_puts_only_the_status() {
+        for item in [untriaged_item(), untriaged_feedback()] {
+            let w = triage_on_park(&item, CAR_ID, BRANCH).expect("an un-triaged packet routes");
+            assert_eq!(
+                w.status_body,
+                json!({"status": "completed"}),
+                "the PUT must carry the status alone"
+            );
+            let keys: Vec<&str> = w
+                .metadata
+                .as_object()
+                .map(|m| m.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            assert_eq!(
+                keys,
+                ["disposition", "evidence"],
+                "the merge body carries the route and nothing read off the step"
+            );
+            assert_eq!(
+                w.merge_path("item-1"),
+                format!("/api/jobs/item-1/steps/{}/metadata", w.step_id)
+            );
+            assert_eq!(
+                w.status_path("item-1"),
+                format!("/api/jobs/item-1/steps/{}", w.step_id)
+            );
+        }
     }
 
     /// The idempotence that makes this safe to run on every re-gate and
@@ -2232,17 +2266,12 @@ mod park_triage_tests {
         let w = triage_on_park(&untriaged_feedback(), CAR_ID, BRANCH)
             .expect("un-triaged feedback gets the route its car states");
         assert_eq!(w.step_id, "s-triage");
-        assert_eq!(w.body["status"], "completed");
-        assert_eq!(w.body["metadata"]["disposition"], DISPOSITION_BUILD);
-        let evidence = w.body["metadata"]["evidence"].as_str().unwrap_or_default();
+        assert_eq!(w.status_body, json!({"status": "completed"}));
+        assert_eq!(w.metadata["disposition"], DISPOSITION_BUILD);
+        let evidence = w.metadata["evidence"].as_str().unwrap_or_default();
         assert!(
             evidence.contains(CAR_ID) && evidence.contains(BRANCH),
             "the evidence names the car and its branch: {evidence}"
-        );
-        // The filer's own words ride along with the route.
-        assert_eq!(
-            w.body["metadata"]["finding"],
-            "a page for the codebase stats"
         );
     }
 

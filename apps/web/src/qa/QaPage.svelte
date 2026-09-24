@@ -9,7 +9,8 @@
   import Section from '@boss/web-kit/ui/Section.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
   import { expiringCerts } from '../people/utils';
-  import { humanizeClassCode, type Employee } from '../people/types';
+  import { classLabel, type Employee } from '../people/types';
+  import { classesFor } from '@boss/web-kit/session/classes.svelte';
   import {
     workflowSurfaces,
     type WorkflowSpec,
@@ -138,6 +139,8 @@
       (e) => e.role === 'lab-tech' || e.role === 'head-brewer',
     ),
   );
+  // Each role cell reads its Class display_name (backlog 8677728c).
+  let roleClasses = $derived(classesFor('employee', 'role'));
 
   // Latest 8 QA jobs in flight (qaKinds-driven feed).
   let recentQaJobs = $derived(
@@ -288,7 +291,7 @@
                     {e.name}
                   </Link>
                 </td>
-                <td>{humanizeClassCode(e.role)}</td>
+                <td>{classLabel(e.role, roleClasses)}</td>
                 <td>{e.location}</td>
                 <td class="num">{e.certifications?.length ?? 0}</td>
               </tr>

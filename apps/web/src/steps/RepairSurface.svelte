@@ -14,7 +14,7 @@
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import { formatMoney } from '@boss/web-kit/ui/money';
-  import { putStep } from './stepWrite';
+  import { saveStep } from './stepWrite';
 
   type StepData = {
     id: string;
@@ -131,18 +131,18 @@
     saving = true;
     writeError = null;
     try {
-      const body: Record<string, unknown> = {
-        ...step,
-        job_id: jobId,
+      // The keys this surface owns, through the merge door; an emptied
+      // field is sent as null and deleted, where it used to be cleared
+      // by omission from a wholesale PUT (backlog e39a9d2a).
+      const body = {
+        ...(newStatus ? { status: newStatus } : {}),
         metadata: {
-          ...step.metadata,
           labor_hours: laborHours,
           work_notes: workNotes || undefined,
           failure_mode_code: failureCode || undefined,
         },
       };
-      if (newStatus) body.status = newStatus;
-      const res = await putStep(jobId, step.id, body);
+      const res = await saveStep(jobId, step.id, body);
       if (res.kind === 'failed') {
         writeError = res.error;
         return;

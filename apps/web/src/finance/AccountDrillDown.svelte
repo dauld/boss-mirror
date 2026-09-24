@@ -11,6 +11,7 @@
     type LedgerEntry,
   } from './ledger';
   import EntryDetail from './EntryDetail.svelte';
+  import { listView, okRead, type ReadState } from '../data/readState';
 
   type Props = {
     accountCode: string;
@@ -23,7 +24,17 @@
 
   let entries = $state<ReadonlyArray<LedgerEntry>>([]);
   let capped = $state(false);
+  let entriesRead = $state<ReadState>(okRead);
   let loading = $state(true);
+  /// A failed entries read is checked before the row count, so an
+  /// outage cannot paint "No entries for this account." (backlog
+  /// 1a2b67c9).
+  let entriesView = $derived(
+    listView(
+      [{ source: `ledger entries for ${accountCode}`, state: entriesRead }],
+      entries.length,
+    ),
+  );
 
   $effect(() => {
     const code = accountCode;
@@ -34,6 +45,7 @@
       if (!cancelled) {
         entries = page.data;
         capped = page.capped;
+        entriesRead = page.read;
         loading = false;
       }
     })();
@@ -55,7 +67,11 @@
     {/if}
     {#if loading}
       <p class="empty">Loading entries…</p>
-    {:else if entries.length === 0}
+    {:else if entriesView.kind === 'failed'}
+      <p class="empty load-failed" role="alert">
+        Couldn't load {entriesView.source} — {entriesView.error}
+      </p>
+    {:else if entriesView.kind === 'empty'}
       <p class="empty">No entries for this account.</p>
     {:else}
       <table class="tb-entries">
