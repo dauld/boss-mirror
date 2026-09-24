@@ -54,10 +54,27 @@ export type Border = Readonly<{
   /** `null` when the read that would answer it failed — never 0. */
   waiting: number | null;
   holds: ReadonlyArray<Hold>;
+  /** Every waiting packet, by whom it waits on — summing to `waiting`,
+   *  `null` exactly when `waiting` is (car M1, design 31bade8f decision
+   *  8). The pile on the moving map is shaded off this, never off the
+   *  holds' words. */
+  holds_by_class: HoldsByClass | null;
+  /** Is work crossing this rail — the SERVER's judgement from the
+   *  rail's own mean gap. `null` is "cannot tell", never either answer. */
+  flowing: boolean | null;
+  /** RFC3339: the record's last crossing when `flowing` is false — what
+   *  a "held for" clock counts from. `null` while flowing, and when
+   *  nothing crossed in the whole read. */
+  held_since: string | null;
+  /** The rule `flowing` was judged by, in words. */
+  flowing_why: string;
   machine: Machine;
   state: RegionState;
   why: string;
 }>;
+
+/** Whom a border's waiting packets wait on (`boss_jobs::borders::HoldsByClass`). */
+export type HoldsByClass = Readonly<{ machine: number; person: number; unknown: number; stuck: number }>;
 
 export type Borders = Readonly<{
   window_hours: number;
@@ -104,6 +121,16 @@ function parseMachine(raw: unknown): Machine {
   };
 }
 
+/** The classes, or null — for a missing block, and for one with any
+ *  class that is not a count: a half-read pile is not shaded. */
+function parseClasses(raw: unknown): HoldsByClass | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const [machine, person, unknown, stuck] = [o.machine, o.person, o.unknown, o.stuck].map(numberOrNull);
+  if (machine == null || person == null || unknown == null || stuck == null) return null;
+  return { machine, person, unknown, stuck };
+}
+
 function parseBorder(raw: unknown): Border {
   const o = asObject(raw, 'border');
   const state = String(o.state ?? '');
@@ -122,6 +149,10 @@ function parseBorder(raw: unknown): Border {
       const held = asObject(h, 'hold');
       return { what: String(held.what ?? ''), why: String(held.why ?? '') };
     }),
+    holds_by_class: parseClasses(o.holds_by_class),
+    flowing: boolOrNull(o.flowing),
+    held_since: stringOrNull(o.held_since),
+    flowing_why: String(o.flowing_why ?? ''),
     machine: parseMachine(o.machine),
     state: state as RegionState,
     why: String(o.why ?? ''),

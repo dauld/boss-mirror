@@ -14,6 +14,7 @@
   import { loadManifest, manifest, reflectTenantOnDocument } from '@boss/web-kit/session/manifest.svelte';
   import { loadStepTypeRegistry } from './steps/surfaceRegistry.svelte';
   import { loadClasses } from '@boss/web-kit/session/classes.svelte';
+  import { flights, loadFlights } from '@boss/web-kit/session/flights.svelte';
   import { loadDepartments, departments } from '@boss/web-kit/session/departments.svelte';
   import AppShell from './shell/AppShell.svelte';
   import UpdateBar from './shell/UpdateBar.svelte';
@@ -185,6 +186,11 @@
   onMount(() => {
     loadSession();
     loadManifest();
+    // THE VIEWER'S FLIGHTS (design c4c2a607). The gateway inlines them
+    // into index.html, so a page it served already knows; a page it did
+    // not (the dev server, a gateway whose flights read failed) asks the
+    // same endpoint once. A failed read leaves every flight off.
+    if (flights.on === null) void loadFlights();
     loadStepTypeRegistry();
     loadClasses('employee');
     loadDepartments();

@@ -48,7 +48,8 @@
 //! A sibling on the same event has its own rule file (its own `why`,
 //! its own retirement), its own redelivery budget (a failed close
 //! never NAKs a raise), and reads the shared decisions from the
-//! raiser (`hard_finding_keys`, `PERSIST_N`) rather than restating
+//! raiser (`unrecovered_keys` — its hard keys, plus a door half dark
+//! again inside its band, e6406701 — and `PERSIST_N`) rather than restating
 //! them. Nothing in this module names a finding class: the raiser's
 //! vocabulary is the recovery vocabulary.
 //!
@@ -88,7 +89,7 @@ use super::common::{
     RECOVERED_AT, Retraction, api_client, get_json, recovery_note, relapse_patch, retraction,
     rows_or_refuse, write_json,
 };
-use super::estate_alarm::{DEDUP_PAGE, PERSIST_N, hard_finding_keys};
+use super::estate_alarm::{DEDUP_PAGE, PERSIST_N, unrecovered_keys};
 
 /// Stamped on the triage completion this handler writes, so
 /// `estate_alarm::settled_recently` can tell a machine clear from a
@@ -220,7 +221,7 @@ pub(super) fn recovered(
             }
             if since
                 .iter()
-                .any(|(r, _)| hard_finding_keys(payload(r)).contains(key))
+                .any(|(r, _)| unrecovered_keys(payload(r)).contains(key))
             {
                 return None;
             }
@@ -369,7 +370,7 @@ impl Handler for EstateRecover {
         }
         // A finding the triggering comparison still carries cannot be
         // absent from the newest N — no series read needed to know.
-        let present = hard_finding_keys(comparison);
+        let present = unrecovered_keys(comparison);
         let is_present = |a: &Value| finding_key(a).is_some_and(|k| present.contains(k));
 
         // Best-effort writes: every alarm that could close does, and
@@ -585,6 +586,60 @@ mod tests {
 
     const KEY: &str = "unit_unhealthy:boss-gcp/boss-codebase-metrics.service";
     const UNIT: &str = "boss-codebase-metrics.service";
+
+    /// One recorded `door` comparison row (backlog e6406701): host-less,
+    /// the halves dark past their band under `door_dark`, the ones
+    /// inside it under `door_dimming`.
+    fn door_row(dark: &[&str], dimming: &[&str], observed: DateTime<Utc>) -> Value {
+        let entry = |id: &&str| json!({"id": id, "door": "dev-ssh", "half": "lan"});
+        json!({
+            "event_id": "e", "timestamp": observed.to_rfc3339(), "source": "jobs",
+            "kind": "jobs.estate.compared",
+            "payload": {
+                "scope": "door",
+                "observed_at": observed.to_rfc3339(),
+                "findings": {
+                    "door_dark": dark.iter().map(entry).collect::<Vec<_>>(),
+                    "door_dimming": dimming.iter().map(entry).collect::<Vec<_>>(),
+                },
+            }
+        })
+    }
+
+    #[test]
+    fn a_door_that_answers_again_closes_its_alarm() {
+        // The withdraw half of the door watch: the alarm names no host
+        // because the door series' rows carry none, so it matches them.
+        const DOOR: &str = "door_dark:dev-ssh/lan";
+        let open = [alarm("d00r", DOOR, "door", None, "open")];
+        let clean = [
+            door_row(&[], &[], at(15)),
+            door_row(&[], &[], at(10)),
+            door_row(&[], &[], at(5)),
+            door_row(&["dev-ssh/lan"], &[], at(-5)),
+        ];
+        let out = recovered(&open, &clean, "door", None, 3);
+        assert_eq!(out.len(), 1, "a door answering three times is recovered");
+        assert_eq!(out[0].key, DOOR);
+
+        // Still dark in any of the three: not recovered.
+        let still = [
+            door_row(&[], &[], at(15)),
+            door_row(&["dev-ssh/lan"], &[], at(10)),
+            door_row(&[], &[], at(5)),
+        ];
+        assert!(recovered(&open, &still, "door", None, 3).is_empty());
+
+        // Dark again but inside the band is not answering: a door that
+        // opened once and went dark again must not close its alarm on
+        // three dimming readings and re-raise a quarter-hour later.
+        let dimming = [
+            door_row(&[], &["dev-ssh/lan"], at(15)),
+            door_row(&[], &["dev-ssh/lan"], at(10)),
+            door_row(&[], &["dev-ssh/lan"], at(5)),
+        ];
+        assert!(recovered(&open, &dimming, "door", None, 3).is_empty());
+    }
 
     #[test]
     fn a_finding_absent_n_times_after_the_raise_closes_its_alarm() {

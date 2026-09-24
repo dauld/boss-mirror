@@ -1,0 +1,907 @@
+//! A parked car whose files main moved under is re-gated on current main
+//! before it may board (backlog 969a1092).
+//!
+//! WHY THE DOCK AND NOT THE TRAIN. A gate judges a branch's tree in
+//! isolation, so its green vouches for the car on the main it was cut
+//! from. When main moves before the car boards, the first thing that ever
+//! tests the car against what landed in between is the TRAIN gate — and
+//! it runs only after a consist is assembled, PR'd and CI'd, so a clash
+//! it finds costs a whole train. Measured 2026-09-24: IT map car G
+//! (`feat/it-phone-strip-map`) was gated on bb6f4f18; car F
+//! (`feat/it-map-hud-frame-one-row-per-third`) landed as a9028721 and
+//! changed `apps/web/src/it/yard/regions.ts`, the Regions type G's test
+//! builds; train 17:17 (f7bd1e9d) went red on the web typecheck. G was
+//! rebuilt on a9028721 as `-2`; car E landed as d013ec41 and changed the
+//! same type again; train 18:31 (02801b05) went red the same way. Both
+//! were cancelled by hand, and each held the track while it was red.
+//!
+//! THE RULE, computed from git alone — the car's changed files, and the
+//! files main changed since the car's gated base:
+//!
+//!   - the SAME PATH on both sides always touches;
+//!   - Rust widens to the CRATE (`crates/<tier>/<name>/`): a crate is one
+//!     compile unit, so a change anywhere in it can break the car's build;
+//!   - TypeScript/Svelte widens to the file's DIRECTORY, the unit the web
+//!     app co-locates a component, its types and its test in (CLAUDE.md
+//!     §TypeScript): G's `phone-strip.test.ts` imports `regions.ts` from
+//!     beside it, and that is the edge that broke;
+//!   - but a LEAF main changed — a `*.test.*`/`*.spec.*` file, or a Rust
+//!     integration test directly under a crate's `tests/` — touches only
+//!     its own path. Nothing imports a test file, and without this cut
+//!     the rule re-gated 81 of the 138 cars that landed on 2026-09-24
+//!     rather than 47: most of the difference was one shared mocked-spec
+//!     directory and `boss-testing`'s shell-test binaries, each touched by
+//!     nearly every train.
+//!
+//! What it does NOT see, said so a reader does not assume it: a change to
+//! a crate the car's crate DEPENDS on, a web module imported from another
+//! directory, and a test main ADDED against code the car changes. The
+//! train gate still judges every assembled tree; this rule only moves the
+//! commonest clash out of it and onto a single car.
+//!
+//! THE BOUND. At most one re-gate per car per main move: the launch is
+//! stamped on the car (`base_regate.main`) and a car already re-gated for
+//! the main it would board on is never re-gated for it again. A car whose
+//! files main did not touch boards exactly as before, however far behind.
+//!
+//! THE REPAIR IS THE ONE THAT ALREADY EXISTS. The car's branch is replayed
+//! onto current main by `freshness::rebase_onto_main` (the `boss gate
+//! --rebase` door), and a gate-run is filed for the new head carrying a
+//! park intent. Its green reaches the auto-park handler, which finds the
+//! car still at the dock and refreshes it in place — `ParkAction::Refresh`
+//! in `jobs_auto_park.rs`, the path CLAUDE.md §Doors names as the repair
+//! for a moved branch. Nothing here copies a receipt.
+//!
+//! AND IT MUST NEVER FREEZE A LANDING (the ordering edge's rule, in
+//! `boarding.rs`). An unreadable base, an unreachable cluster, a push the
+//! forge refused — every way the MEANS fail boards the car as gated,
+//! loudly, because the train gate still stands behind it. Only an answer
+//! about the CAR holds it: main moved into its files, a gate slot is busy
+//! this window, or its replay onto main conflicts.
+
+use super::*;
+
+/// The job-metadata key that records a dock re-gate on the car. One
+/// object, replaced whole on every write.
+pub(crate) const BASE_REGATE: &str = "base_regate";
+
+/// The gate-run key that says the dock filed this run, and for which car
+/// and main — so a reader of the gate lane can tell it from a builder's.
+pub(crate) const DOCK_REGATE: &str = "dock_regate";
+
+/// How many of the touching paths ride in a skip reason (a chip) and in
+/// the stamp (the record). The count is always exact.
+const REASON_SAMPLE: usize = 4;
+const STAMP_SAMPLE: usize = 20;
+
+/// What a car's re-gate on current main is keyed on: the unit a change to
+/// `path` can reach. A trailing `/` names a directory, so a unit can never
+/// collide with a file of the same name.
+pub(crate) fn neighbourhood(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.first() == Some(&"crates") && parts.len() >= 4 {
+        return format!("{}/", parts[..3].join("/"));
+    }
+    if is_script(path)
+        && let Some((dir, _)) = path.rsplit_once('/')
+    {
+        return format!("{dir}/");
+    }
+    path.to_string()
+}
+
+/// A TypeScript, JavaScript or Svelte file — the web's module shapes.
+fn is_script(path: &str) -> bool {
+    matches!(
+        path.rsplit('/')
+            .next()
+            .and_then(|name| name.rsplit_once('.'))
+            .map(|(_, ext)| ext),
+        Some("ts" | "tsx" | "js" | "mjs" | "cjs" | "svelte")
+    )
+}
+
+/// A file nothing imports: a web test or spec, or a Rust integration test
+/// directly under a crate's `tests/` (a helper under `tests/common/` is
+/// imported by its siblings, so it is not a leaf).
+pub(crate) fn is_leaf(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.first() == Some(&"crates") && parts.len() == 5 && parts[3] == "tests" {
+        return true;
+    }
+    is_script(path)
+        && parts.last().is_some_and(|name| {
+            name.rsplit_once('.')
+                .is_some_and(|(stem, _)| stem.ends_with(".test") || stem.ends_with(".spec"))
+        })
+}
+
+/// PURE: the paths main changed that touch the car — sorted, each once.
+/// Empty means main moved nowhere near it, and the car boards as gated.
+pub(crate) fn touched_by_main(car_files: &[String], main_files: &[String]) -> Vec<String> {
+    let reach: BTreeSet<String> = car_files
+        .iter()
+        .flat_map(|f| [f.clone(), neighbourhood(f)])
+        .collect();
+    main_files
+        .iter()
+        .filter(|m| {
+            reach.contains(m.as_str()) || (!is_leaf(m) && reach.contains(&neighbourhood(m)))
+        })
+        .cloned()
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect()
+}
+
+/// Where a car's boarding head stands against `origin/main`, read from
+/// the conductor's clone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BaseReading {
+    /// `origin/main` now.
+    pub main: String,
+    /// The car's gated base: `merge-base(origin/main, head)`.
+    pub base: String,
+    /// What the car changed since its base.
+    pub car_files: Vec<String>,
+    /// What main changed since the car's base.
+    pub main_files: Vec<String>,
+}
+
+/// Read a car's base out of the clone. `Ok(None)` is CURRENT — main is an
+/// ancestor of the head, so the gate already tested this tree. Every
+/// failure is an error the caller boards through, never a finding.
+pub(crate) fn read_base(clone: &str, head: &str) -> Result<Option<BaseReading>> {
+    let line = |args: &[&str]| -> Result<String> {
+        let mut full = vec!["git", "-C", clone];
+        full.extend_from_slice(args);
+        Ok(stdout_str(&sh(&full)?).trim().to_string())
+    };
+    let main = line(&["rev-parse", "--verify", "origin/main"])?;
+    let ancestor = sh_unchecked(&[
+        "git",
+        "-C",
+        clone,
+        "merge-base",
+        "--is-ancestor",
+        &main,
+        head,
+    ])?;
+    match crate::freshness::base_from_is_ancestor_code(ancestor.status.code()) {
+        crate::freshness::Base::Current => return Ok(None),
+        crate::freshness::Base::Behind => {}
+        crate::freshness::Base::Unanswered => {
+            bail!(
+                "git merge-base --is-ancestor gave no answer for {}",
+                &head[..8.min(head.len())]
+            )
+        }
+    }
+    let base = line(&["merge-base", &main, head])?;
+    let files = |to: &str| -> Result<Vec<String>> {
+        Ok(line(&["diff", "--name-only", &base, to])?
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    };
+    Ok(Some(BaseReading {
+        car_files: files(head)?,
+        main_files: files(&main)?,
+        main,
+        base,
+    }))
+}
+
+/// A dock re-gate as the car records it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RegateStamp {
+    /// The `origin/main` it was launched for — the bound's key.
+    pub main: String,
+    /// The base the car had been gated on.
+    pub base: String,
+    /// The head the car was replayed to; empty when the replay was refused.
+    pub head: String,
+    /// The gate-run filed for `head`; empty until one is filed.
+    pub gate_run: String,
+    /// Why the replay was refused; empty otherwise.
+    pub refused: String,
+    /// The paths main changed that touched the car (a sample).
+    pub touched: Vec<String>,
+    /// How many there were.
+    pub touched_count: usize,
+}
+
+impl RegateStamp {
+    /// A fresh stamp for a launch against `main`.
+    pub(crate) fn for_main(main: &str, touched: &[String]) -> Self {
+        RegateStamp {
+            main: main.to_string(),
+            touched: touched.iter().take(STAMP_SAMPLE).cloned().collect(),
+            touched_count: touched.len(),
+            ..Default::default()
+        }
+    }
+
+    /// The stamp a car carries, or `None` when it carries none a reader
+    /// can key on (no `main`).
+    pub(crate) fn of(car: &Value) -> Option<Self> {
+        let s = car.pointer(&format!("/metadata/{BASE_REGATE}"))?;
+        let text = |k: &str| {
+            s.get(k)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let main = text("main");
+        if main.is_empty() {
+            return None;
+        }
+        let touched: Vec<String> = s
+            .get("touched")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(RegateStamp {
+            main,
+            base: text("base"),
+            head: text("head"),
+            gate_run: text("gate_run"),
+            refused: text("refused"),
+            touched_count: s
+                .get("touched_count")
+                .and_then(Value::as_u64)
+                .map_or(touched.len(), |n| n as usize),
+            touched,
+        })
+    }
+
+    pub(crate) fn to_value(&self, at: DateTime<Utc>) -> Value {
+        json!({
+            "main": self.main,
+            "base": self.base,
+            "head": self.head,
+            "gate_run": self.gate_run,
+            "refused": self.refused,
+            "touched": self.touched,
+            "touched_count": self.touched_count,
+            "at": at.to_rfc3339(),
+            "why": "backlog 969a1092: main moved into this car's files after its gate",
+        })
+    }
+}
+
+/// What the dock does about a car whose receipt vouches for the head it
+/// would board.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DockBase {
+    /// Main is an ancestor of the head: the gate tested this tree.
+    Current,
+    /// Behind, but main changed nothing that touches the car: board.
+    Untouched { main_changed: usize },
+    /// Behind, and main moved into the car: hold it. `launch` is whether
+    /// a re-gate is owed — false when one was already launched for this
+    /// main (the bound).
+    Touched { touched: Vec<String>, launch: bool },
+}
+
+/// PURE: the dock's judgement of a car's base. `None` reading = current.
+pub(crate) fn judge(reading: Option<&BaseReading>, stamp: Option<&RegateStamp>) -> DockBase {
+    let Some(r) = reading else {
+        return DockBase::Current;
+    };
+    let touched = touched_by_main(&r.car_files, &r.main_files);
+    if touched.is_empty() {
+        return DockBase::Untouched {
+            main_changed: r.main_files.len(),
+        };
+    }
+    DockBase::Touched {
+        touched,
+        launch: stamp.is_none_or(|s| s.main != r.main),
+    }
+}
+
+/// A dock re-gate whose replayed head is the head this car would board —
+/// the branch moved because the DOCK moved it, and the receipt has not
+/// caught up yet.
+pub(crate) fn pending(car: &Value, boards: &str) -> Option<RegateStamp> {
+    RegateStamp::of(car).filter(|s| !s.head.is_empty() && s.head == boards)
+}
+
+/// Where a pending re-gate stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InFlight {
+    /// The branch was replayed and no gate-run was filed — file it.
+    FileGate,
+    /// The gate-run has no verdict yet.
+    Running,
+    /// Green, yet the car still does not vouch for the head: the refresh
+    /// never landed.
+    GreenNotCopied,
+    /// Red or lost: the car breaks on current main.
+    Failed(String),
+}
+
+/// PURE: a pending re-gate's standing, from the gate-run's verdict.
+pub(crate) fn in_flight(stamp: &RegateStamp, verdict: Option<&str>) -> InFlight {
+    if stamp.gate_run.is_empty() {
+        return InFlight::FileGate;
+    }
+    match verdict {
+        None => InFlight::Running,
+        Some("green") => InFlight::GreenNotCopied,
+        Some(v) => InFlight::Failed(v.to_string()),
+    }
+}
+
+/// The gate-run metadata a dock re-gate carries: a park intent, so its
+/// green refreshes the parked car (`ParkAction::Refresh` keys on
+/// `park_summary` alone), and the mark that says the dock filed it.
+///
+/// ONLY THE SUMMARY, and the car's own. The refresh writes each park
+/// field it is given as `regate_*` beside the receipt and leaves the rest
+/// alone (absent, never nulled), so restating the builder's test and
+/// verified lines under the dock's name would put words in their mouth.
+/// No item answer either: the car already carries its edge, and the
+/// refresh re-routes an item only when one is given.
+pub(crate) fn marks(car: &Value, car_id: &str, main: &str) -> Value {
+    let summary = ["regate_summary", "summary"]
+        .iter()
+        .find_map(|k| {
+            car.pointer(&format!("/metadata/{k}"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or("re-gated on current main by the dock (backlog 969a1092)");
+    json!({
+        car::PARK_SUMMARY: summary,
+        DOCK_REGATE: {"car": car_id, "main": main},
+    })
+}
+
+/// Was a replay onto main REFUSED for a reason about the car (a conflict,
+/// or every commit already landed) rather than failed on the way? The
+/// first holds the car; the second boards it. Read off the refusal
+/// `rebase_onto_main` builds, whose two car-shaped answers both say
+/// `REFUSED`, and pinned by `a_replay_refusal_is_told_from_a_failure`.
+pub(crate) fn replay_refused(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| c.to_string().contains("REFUSED"))
+}
+
+fn short(s: &str) -> &str {
+    &s[..8.min(s.len())]
+}
+
+fn sample(touched: &[String], count: usize) -> String {
+    let shown: Vec<&str> = touched
+        .iter()
+        .take(REASON_SAMPLE)
+        .map(String::as_str)
+        .collect();
+    let more = count.saturating_sub(shown.len());
+    if more == 0 {
+        shown.join(", ")
+    } else {
+        format!("{} (+{more} more)", shown.join(", "))
+    }
+}
+
+/// The skip reason for a car the dock just re-gated.
+pub(crate) fn launched_reason(stamp: &RegateStamp) -> String {
+    format!(
+        "re-gating on current main before it boards — gated on {}, and main {} has since changed \
+         {} path(s) beside this car's: {}. Replayed to {}; gate-run {} carries its park intent, \
+         and its green refreshes this car in place (backlog 969a1092)",
+        short(&stamp.base),
+        short(&stamp.main),
+        stamp.touched_count,
+        sample(&stamp.touched, stamp.touched_count),
+        short(&stamp.head),
+        short(&stamp.gate_run),
+    )
+}
+
+/// The skip reason while a gate slot is not free this window.
+pub(crate) fn busy_reason(why: &str, reading: &BaseReading, touched: &[String]) -> String {
+    format!(
+        "waiting for a gate slot to re-gate on current main ({why}) — main {} has changed {} \
+         path(s) beside this car's since its gated base {}: {}",
+        short(&reading.main),
+        touched.len(),
+        short(&reading.base),
+        sample(touched, touched.len()),
+    )
+}
+
+/// The skip reason for a car whose replay onto main was refused.
+pub(crate) fn refused_reason(car_id: &str, stamp: &RegateStamp) -> String {
+    format!(
+        "held: main {} moved into this car's files ({}), and replaying it onto that main was \
+         refused — {}. `boss rerail {}` resolves it by hand",
+        short(&stamp.main),
+        sample(&stamp.touched, stamp.touched_count),
+        stamp.refused,
+        short(car_id),
+    )
+}
+
+/// The skip reason for a replayed car whose gate-run could not be filed.
+pub(crate) fn unfiled_reason(stamp: &RegateStamp, why: &str) -> String {
+    format!(
+        "replayed onto main {} as {} to re-gate it, but the gate-run could not be filed ({why}) \
+         — the next window files it",
+        short(&stamp.main),
+        short(&stamp.head),
+    )
+}
+
+/// The skip reason for a pending re-gate, by where it stands.
+pub(crate) fn in_flight_reason(car_id: &str, stamp: &RegateStamp, standing: &InFlight) -> String {
+    match standing {
+        InFlight::FileGate => unfiled_reason(stamp, "not filed yet"),
+        InFlight::Running => format!(
+            "re-gating on current main as gate-run {} (replayed to {} on main {}) — boards once \
+             its green refreshes this car",
+            short(&stamp.gate_run),
+            short(&stamp.head),
+            short(&stamp.main),
+        ),
+        InFlight::GreenNotCopied => format!(
+            "re-gate gate-run {} is green on {}, but its receipt never reached this car — `boss \
+             rerail {} --finish` copies it",
+            short(&stamp.gate_run),
+            short(&stamp.head),
+            short(car_id),
+        ),
+        InFlight::Failed(verdict) => format!(
+            "the re-gate on current main went {verdict} (gate-run {}, head {} on main {}): this \
+             car breaks on the main it would land on. Its builder repairs it and re-gates with \
+             --park-*, which refreshes this car",
+            short(&stamp.gate_run),
+            short(&stamp.head),
+            short(&stamp.main),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Car G's own diff, read from its branch on 2026-09-24 (the same
+    /// eleven paths on all three of its attempts).
+    const CAR_G: &[&str] = &[
+        "apps/web/src/it/yard/MapPage.svelte",
+        "apps/web/src/it/yard/PhoneStrip.svelte",
+        "apps/web/src/it/yard/phone-strip.test.ts",
+        "apps/web/src/it/yard/phone-strip.ts",
+        "apps/web/src/styles.css",
+        "apps/web/tests/mocked/it-phone.mocked.spec.ts",
+        "libs/web-kit/src/FeedbackControl.svelte",
+        "libs/web-kit/src/GlobalSearch.svelte",
+        "libs/web-kit/src/PerspectiveTabs.svelte",
+        "libs/web-kit/src/ui/phone.test.ts",
+        "libs/web-kit/src/ui/phone.ts",
+    ];
+
+    /// What main changed between G's base (bb6f4f18) and the main train
+    /// 17:17 assembled on (a9028721) — car F's train, fourteen of the
+    /// fifty paths `git diff --name-only bb6f4f18 a9028721` prints: every
+    /// yard path, and a sample of the rest.
+    const MAIN_AFTER_F: &[&str] = &[
+        "apps/simulator/src/styles.css",
+        "apps/web/src/enamel-tokens.test.ts",
+        "apps/web/src/it/yard/HudFrame.svelte",
+        "apps/web/src/it/yard/MapPage.svelte",
+        "apps/web/src/it/yard/borders.test.ts",
+        "apps/web/src/it/yard/borders.ts",
+        "apps/web/src/it/yard/hud.test.ts",
+        "apps/web/src/it/yard/hud.ts",
+        "apps/web/src/it/yard/map-palette.test.ts",
+        "apps/web/src/it/yard/regions.ts",
+        "apps/web/src/styles.css",
+        "apps/web/tests/mocked/it-map.mocked.spec.ts",
+        "crates/core/boss-jobs/src/regions.rs",
+        "infra/lint/a-colour-is-a-token.sh",
+    ];
+
+    /// What main changed between G-2's base (a9028721) and the main train
+    /// 18:31 assembled on (d013ec41) — car E's train: ten of its 182
+    /// paths, the yard ones among them.
+    const MAIN_AFTER_E: &[&str] = &[
+        "apps/web/src/it/yard/DepartureBoard.svelte",
+        "apps/web/src/it/yard/HudFrame.svelte",
+        "apps/web/src/it/yard/MapPage.svelte",
+        "apps/web/src/it/yard/PlantStrip.svelte",
+        "apps/web/src/it/yard/regions.test.ts",
+        "apps/web/src/it/yard/regions.ts",
+        "apps/web/src/it/yard/shop-floor.test.ts",
+        "apps/web/src/it/yard/shop-floor.ts",
+        "apps/web/tests/mocked/it-region-map.mocked.spec.ts",
+        "crates/core/boss-jobs/src/regions.rs",
+    ];
+
+    /// THE MEASURED CASE, first leg. G was gated before F landed; F
+    /// changed the Regions type in the directory G's test imports from,
+    /// and train 17:17 went red on it. The dock must have held G.
+    #[test]
+    fn car_g_behind_car_f_is_touched_by_the_regions_type_it_imports() {
+        let t = touched_by_main(&paths(CAR_G), &paths(MAIN_AFTER_F));
+        assert!(
+            t.contains(&"apps/web/src/it/yard/regions.ts".to_string()),
+            "the Regions type G's test builds sits beside it: {t:?}"
+        );
+        assert!(
+            t.contains(&"apps/web/src/it/yard/MapPage.svelte".to_string()),
+            "and both cars edited the same page: {t:?}"
+        );
+        for leaf in [
+            "apps/web/src/it/yard/borders.test.ts",
+            "apps/web/src/it/yard/hud.test.ts",
+            "apps/web/tests/mocked/it-map.mocked.spec.ts",
+        ] {
+            assert!(
+                !t.contains(&leaf.to_string()),
+                "nothing imports a test, so {leaf} touches only itself: {t:?}"
+            );
+        }
+        assert!(
+            !t.iter()
+                .any(|p| p.starts_with("crates/") || p.starts_with("infra/")),
+            "a Rust crate and a lint G never went near do not touch it: {t:?}"
+        );
+    }
+
+    /// THE MEASURED CASE, second leg: G rebuilt on F's main as `-2`, then
+    /// E landed and changed the same type again (train 18:31).
+    #[test]
+    fn car_g2_behind_car_e_is_touched_again() {
+        let t = touched_by_main(&paths(CAR_G), &paths(MAIN_AFTER_E));
+        assert!(t.contains(&"apps/web/src/it/yard/regions.ts".to_string()));
+        assert!(
+            !t.contains(&"apps/web/src/it/yard/regions.test.ts".to_string()),
+            "E's own test is a leaf: {t:?}"
+        );
+    }
+
+    /// A car whose files main did not touch boards exactly as today,
+    /// however far behind it is.
+    #[test]
+    fn a_car_main_moved_nowhere_near_is_untouched() {
+        let car = paths(&[
+            "crates/modules/boss-ledger/src/rules.rs",
+            "infra/lint/a-colour-is-a-token.sh.baseline",
+        ]);
+        assert!(touched_by_main(&car, &paths(MAIN_AFTER_F)).is_empty());
+        let reading = BaseReading {
+            main: "a9028721".into(),
+            base: "bb6f4f18".into(),
+            car_files: car,
+            main_files: paths(MAIN_AFTER_F),
+        };
+        assert_eq!(
+            judge(Some(&reading), None),
+            DockBase::Untouched {
+                main_changed: MAIN_AFTER_F.len()
+            }
+        );
+    }
+
+    /// Rust widens to the crate — one compile unit — but a sibling
+    /// integration test is its own binary and touches only itself, while
+    /// a helper those tests share is not a leaf.
+    #[test]
+    fn rust_widens_to_the_crate_but_not_to_a_sibling_test_binary() {
+        let car = paths(&["crates/core/boss-jobs/src/car.rs"]);
+        assert_eq!(
+            touched_by_main(&car, &paths(&["crates/core/boss-jobs/src/regions.rs"])),
+            paths(&["crates/core/boss-jobs/src/regions.rs"])
+        );
+        assert_eq!(
+            touched_by_main(
+                &car,
+                &paths(&["crates/core/boss-jobs/seeds/step_types.toml"])
+            ),
+            paths(&["crates/core/boss-jobs/seeds/step_types.toml"]),
+            "include_str! seeds are part of the crate"
+        );
+        assert!(
+            touched_by_main(
+                &car,
+                &paths(&["crates/core/boss-jobs/tests/yard_regions_http.rs"])
+            )
+            .is_empty()
+        );
+        assert!(
+            !touched_by_main(&car, &paths(&["crates/core/boss-jobs/tests/common/mod.rs"]))
+                .is_empty(),
+            "a shared test helper is imported, so it is not a leaf"
+        );
+        let car_test = paths(&["crates/core/boss-jobs/tests/yard_regions_http.rs"]);
+        assert!(
+            !touched_by_main(&car_test, &paths(&["crates/core/boss-jobs/src/regions.rs"]))
+                .is_empty(),
+            "a car's own test is reached by the crate it tests — train #244's shape"
+        );
+        assert!(
+            touched_by_main(&car, &paths(&["crates/core/boss-events/src/lib.rs"])).is_empty(),
+            "another crate is out of reach (said in the module doc)"
+        );
+    }
+
+    /// A non-script file widens nowhere: the same path or nothing.
+    #[test]
+    fn a_non_script_file_touches_only_its_own_path() {
+        let car = paths(&["apps/web/src/styles.css", "infra/lint/x.sh"]);
+        assert!(touched_by_main(&car, &paths(&["apps/web/src/App.svelte"])).is_empty());
+        assert!(touched_by_main(&car, &paths(&["infra/lint/y.sh"])).is_empty());
+        assert_eq!(
+            touched_by_main(&car, &paths(&["infra/lint/x.sh"])),
+            paths(&["infra/lint/x.sh"])
+        );
+    }
+
+    #[test]
+    fn a_directory_unit_never_collides_with_a_file_of_its_name() {
+        assert_eq!(neighbourhood("apps/web/src/x.ts"), "apps/web/src/");
+        assert_eq!(
+            neighbourhood("crates/core/boss-jobs/src/a.rs"),
+            "crates/core/boss-jobs/"
+        );
+        assert_eq!(neighbourhood("Cargo.lock"), "Cargo.lock");
+        assert_eq!(neighbourhood("crates/Cargo.toml"), "crates/Cargo.toml");
+        assert!(is_leaf("apps/web/src/it/yard/regions.test.ts"));
+        assert!(is_leaf("apps/web/tests/mocked/it-map.mocked.spec.ts"));
+        assert!(!is_leaf("apps/web/tests/mocked/_mockApi.ts"));
+        assert!(!is_leaf("apps/web/src/it/yard/regions.ts"));
+    }
+
+    fn reading_g_after_f() -> BaseReading {
+        BaseReading {
+            main: "a9028721aaaa".into(),
+            base: "bb6f4f18bbbb".into(),
+            car_files: paths(CAR_G),
+            main_files: paths(MAIN_AFTER_F),
+        }
+    }
+
+    /// THE BOUND: one re-gate per car per main move. A car already
+    /// re-gated for the main it would board on is held, never re-gated
+    /// again; a main that moved again owes it one more.
+    #[test]
+    fn a_car_is_regated_at_most_once_per_main_move() {
+        let r = reading_g_after_f();
+        match judge(Some(&r), None) {
+            DockBase::Touched { launch, .. } => assert!(launch, "first sight owes a re-gate"),
+            other => panic!("G behind F must be touched: {other:?}"),
+        }
+        let same_main = RegateStamp::for_main("a9028721aaaa", &[]);
+        match judge(Some(&r), Some(&same_main)) {
+            DockBase::Touched { launch, .. } => {
+                assert!(!launch, "already re-gated for this main — never twice")
+            }
+            other => panic!("{other:?}"),
+        }
+        let older_main = RegateStamp::for_main("bb6f4f18bbbb", &[]);
+        match judge(Some(&r), Some(&older_main)) {
+            DockBase::Touched { launch, .. } => assert!(launch, "main moved again"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(judge(None, Some(&same_main)), DockBase::Current);
+    }
+
+    /// The stamp round-trips through the car's metadata, and a car with
+    /// no stamp — or one with no `main` to key on — has none.
+    #[test]
+    fn the_stamp_round_trips_through_the_car() {
+        let at: DateTime<Utc> = "2026-09-24T17:20:00Z".parse().unwrap();
+        let touched = paths(&["apps/web/src/it/yard/regions.ts"; 25]);
+        let s = RegateStamp {
+            base: "bb6f4f18".into(),
+            head: "cafef00d1234".into(),
+            gate_run: "run-1".into(),
+            ..RegateStamp::for_main("a9028721", &touched)
+        };
+        assert_eq!(
+            s.touched.len(),
+            STAMP_SAMPLE,
+            "a sample rides, not the list"
+        );
+        assert_eq!(s.touched_count, 25, "the count is exact");
+        let car = json!({"metadata": {BASE_REGATE: s.to_value(at)}});
+        assert_eq!(RegateStamp::of(&car), Some(s.clone()));
+        assert_eq!(pending(&car, "cafef00d1234"), Some(s));
+        assert_eq!(pending(&car, "somethingelse"), None, "not the dock's head");
+        assert_eq!(RegateStamp::of(&json!({"metadata": {}})), None);
+        assert_eq!(
+            RegateStamp::of(&json!({"metadata": {BASE_REGATE: {"head": "x"}}})),
+            None
+        );
+    }
+
+    /// A refused replay stamps no head, so it is never mistaken for a
+    /// pending re-gate.
+    #[test]
+    fn a_refused_replay_is_not_pending() {
+        let s = RegateStamp {
+            refused: "conflict in apps/web/src/it/yard/MapPage.svelte".into(),
+            ..RegateStamp::for_main("a9028721", &[])
+        };
+        let at: DateTime<Utc> = "2026-09-24T17:20:00Z".parse().unwrap();
+        let car = json!({"metadata": {BASE_REGATE: s.to_value(at)}});
+        assert_eq!(pending(&car, ""), None);
+    }
+
+    #[test]
+    fn a_pending_regate_reads_its_gate_run() {
+        let unfiled = RegateStamp {
+            head: "h".into(),
+            ..RegateStamp::for_main("m", &[])
+        };
+        assert_eq!(in_flight(&unfiled, None), InFlight::FileGate);
+        let filed = RegateStamp {
+            gate_run: "run-1".into(),
+            ..unfiled
+        };
+        assert_eq!(in_flight(&filed, None), InFlight::Running);
+        assert_eq!(in_flight(&filed, Some("green")), InFlight::GreenNotCopied);
+        assert_eq!(
+            in_flight(&filed, Some("failed")),
+            InFlight::Failed("failed".into())
+        );
+        assert_eq!(
+            in_flight(&filed, Some("lost")),
+            InFlight::Failed("lost".into())
+        );
+    }
+
+    /// The gate-run a dock re-gate files carries a park intent the
+    /// auto-park handler reads (`park_summary` is the key its refresh
+    /// keys on), in the car's own words, and nothing else of the
+    /// builder's.
+    #[test]
+    fn the_regate_carries_the_cars_own_summary_as_its_park_intent() {
+        let car = json!({"metadata": {"summary": "the phone strip", "branch": "feat/x"}});
+        let m = marks(&car, "car-1", "a9028721");
+        assert_eq!(m[car::PARK_SUMMARY], "the phone strip");
+        assert_eq!(m[DOCK_REGATE]["car"], "car-1");
+        assert_eq!(m[DOCK_REGATE]["main"], "a9028721");
+        for k in [
+            car::PARK_TEST,
+            car::PARK_VERIFIED,
+            car::PARK_EXCLUDES,
+            car::PARK_BACKLOG_ITEM,
+            car::PARK_PROBE,
+        ] {
+            assert!(m.get(k).is_none(), "{k} is the builder's to state");
+        }
+        let rebuilt = json!({"metadata": {"summary": "old", "regate_summary": "rebuilt"}});
+        assert_eq!(marks(&rebuilt, "c", "m")[car::PARK_SUMMARY], "rebuilt");
+        assert!(
+            !marks(&json!({}), "c", "m")[car::PARK_SUMMARY]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "a car with no summary still gets an intent the handler reads"
+        );
+    }
+
+    /// The two car-shaped refusals `rebase_onto_main` builds hold the car;
+    /// anything else is a failure of the means and boards it.
+    #[test]
+    fn a_replay_refusal_is_told_from_a_failure() {
+        let conflict = anyhow!(
+            "boss gate --rebase: REFUSED — replaying abcd1234 onto origin/main@a9028721 hit a \
+             conflict in: apps/web/src/it/yard/MapPage.svelte. Nothing was pushed"
+        );
+        assert!(replay_refused(&conflict));
+        let landed = anyhow!(
+            "boss gate --rebase: REFUSED — feat/x is already landed: every commit it carries"
+        );
+        assert!(replay_refused(&landed));
+        for failure in [
+            anyhow!("boss gate --rebase: the rebase was NOT applied — feat/x on the forge"),
+            anyhow!("fetching main and the branch: fatal: could not read Username"),
+        ] {
+            assert!(!replay_refused(&failure), "{failure}");
+        }
+    }
+
+    /// Every reason names what an operator acts on: the gate-run, the
+    /// heads, and the paths.
+    #[test]
+    fn the_reasons_name_the_run_the_heads_and_the_paths() {
+        let s = RegateStamp {
+            base: "bb6f4f18bbbb".into(),
+            head: "cafef00d1234".into(),
+            gate_run: "0badc0de5678".into(),
+            ..RegateStamp::for_main(
+                "a9028721aaaa",
+                &touched_by_main(&paths(CAR_G), &paths(MAIN_AFTER_F)),
+            )
+        };
+        let line = launched_reason(&s);
+        for want in [
+            "bb6f4f18",
+            "a9028721",
+            "cafef00d",
+            "0badc0de",
+            "MapPage.svelte",
+            "(+2 more)",
+        ] {
+            assert!(line.contains(want), "{want}: {line}");
+        }
+        let red = in_flight_reason("car-1234567", &s, &InFlight::Failed("failed".into()));
+        assert!(
+            red.contains("went failed") && red.contains("--park-"),
+            "{red}"
+        );
+        let green = in_flight_reason("car-1234567", &s, &InFlight::GreenNotCopied);
+        assert!(green.contains("boss rerail car-1234 --finish"), "{green}");
+        let refused = refused_reason(
+            "car-1234567",
+            &RegateStamp {
+                refused: "conflict in MapPage.svelte".into(),
+                ..s
+            },
+        );
+        assert!(
+            refused.contains("conflict in MapPage.svelte") && refused.contains("boss rerail"),
+            "{refused}"
+        );
+    }
+
+    /// The reader, against a real clone: a car cut before main moved is
+    /// read with both file lists from its base; a car on current main is
+    /// current.
+    #[test]
+    fn the_base_is_read_from_the_clone() {
+        let (_g, clone) = super::super::test_support::clone_fixture("dock-regate");
+        let c = clone.to_str().expect("utf8");
+        let git = |args: &[&str]| super::super::test_support::git_ok(&clone, args);
+        let base = super::super::test_support::rev(&clone, "main");
+        // The car: its own file, cut from main.
+        git(&["checkout", "-q", "-b", "feat/car"]);
+        std::fs::create_dir_all(clone.join("apps/web/src/it/yard")).expect("mkdir");
+        std::fs::write(clone.join("apps/web/src/it/yard/phone-strip.ts"), "car").expect("w");
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "car"]);
+        let car_head = super::super::test_support::rev(&clone, "feat/car");
+        git(&["checkout", "-q", "main"]);
+        // Current: main is still its base.
+        git(&["fetch", "-q", "origin"]);
+        assert_eq!(read_base(c, &car_head).expect("reads"), None);
+        // Main moves beside it.
+        std::fs::create_dir_all(clone.join("apps/web/src/it/yard")).expect("mkdir");
+        std::fs::write(clone.join("apps/web/src/it/yard/regions.ts"), "main").expect("w");
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "car F lands"]);
+        git(&["push", "-q", "origin", "main"]);
+        git(&["fetch", "-q", "origin"]);
+        let r = read_base(c, &car_head)
+            .expect("reads")
+            .expect("behind main now");
+        assert_eq!(r.base, base);
+        assert_eq!(r.main, super::super::test_support::rev(&clone, "main"));
+        assert_eq!(r.car_files, paths(&["apps/web/src/it/yard/phone-strip.ts"]));
+        assert_eq!(r.main_files, paths(&["apps/web/src/it/yard/regions.ts"]));
+        assert!(matches!(
+            judge(Some(&r), None),
+            DockBase::Touched { launch: true, .. }
+        ));
+        // An unreadable head is an error the caller boards through.
+        assert!(read_base(c, "0000000000000000000000000000000000000000").is_err());
+    }
+}

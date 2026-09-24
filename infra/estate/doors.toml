@@ -1,0 +1,53 @@
+# infra/estate/doors.toml — THE DOORS INTO THE ESTATE, and how long each
+# may be dark before it is an alarm (backlog e6406701).
+#
+# WHY THIS FILE EXISTS. Incident 55d001b0: both of the dev pod's ssh
+# doors — the LAN VIP and dev.algedonic.dev — were dark for ~36 hours
+# from 2026-09-22T23:23Z, and a person found it. The pod's postStart
+# judges the door once, as sshd starts ('ssh door: sshd started on :22'
+# / 'CLOSED …'), but nothing read that line and nothing probed :22
+# afterwards: readiness ignores the door, no alarm existed, and
+# `boss orient` had no line for it. And a door judged only from inside
+# the pod is judged by its patient (CLAUDE.md §Diagnosis: an arm that
+# needs the patient is not an arm).
+#
+# WHO READS IT. infra/estate/observe-door.sh, run on the forge by the
+# cluster watchdog's unit every five minutes — a LAN host outside the
+# cluster that owes the pod nothing. It probes each half below, keeps
+# when a half first went dark, and posts one `door` observation through
+# the estate door. `estate.compare` judges each dark half against the
+# band declared here, `estate.alarm` files ONE urgent packet per half
+# dark past it, `estate.recover` closes it once the half answers again,
+# and `boss orient` prints a DOOR line from the same comparison.
+#
+# THE HALVES:
+#   lan    — address:port on the LAN. Open when a TCP connect succeeds
+#            AND ssh-keyscan is offered a host key: a port that accepts
+#            and then says nothing is not a door.
+#   public — the public name. Open when it resolves. (The name is a
+#            proxied CNAME to the tunnel, whose origin is the same
+#            Service, so a dark LAN half is a dark public door too;
+#            this half is what says the NAME still exists.)
+#
+# EACH VALUE LIVES ONCE ELSEWHERE TOO, so each is pinned rather than
+# trusted (CLAUDE.md §9a): `lan` equals the MetalLB address of Service
+# boss-dev-ssh in infra/cluster/manifests/boss-dev.yaml, and `public` is
+# the hostname infra/cluster/tunnel-origins.toml routes to that Service
+# — both held by crates/core/boss-testing/tests/the_door_is_watched_from_outside_the_pod.rs.
+# The band lives only here.
+#
+# THE BAND — 15 minutes: three of the observer's five-minute readings,
+# the estate loop's own calibration ("one flapped reading is weather;
+# N in a row is a condition", PERSIST_N in estate_alarm.rs). A pod roll
+# restarts sshd inside a minute; a door dark for a quarter of an hour
+# is not a roll. The band IS the persistence: the alarm files on the
+# first comparison past it rather than waiting three more.
+#
+# ONE key per line, `key = "value"` — the observer reads this file with
+# the shell, the rule estate.toml and roles.toml already live under.
+
+[[door]]
+id = "dev-ssh"
+lan = "10.20.0.35:22"
+public = "dev.algedonic.dev"
+dark_band_minutes = "15"

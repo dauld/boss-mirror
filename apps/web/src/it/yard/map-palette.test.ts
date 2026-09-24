@@ -25,6 +25,9 @@ const MAP_FILES = [
   'RegionFloor.svelte',
   // The HUD frame above the map (design 00774ca8): the same palette.
   'HudFrame.svelte',
+  // The motion layer over the world (design 31bade8f, car M2): its canvas
+  // reads the same tokens rather than naming a colour of its own.
+  'MotionLayer.svelte',
 ] as const;
 
 /** The grammar round 2 swaps: grounds, text, rules, the accent, and

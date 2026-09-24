@@ -52,6 +52,10 @@ const border = (over: Partial<Border> = {}): Border => ({
   last_crossed: '2026-09-19T11:00:00+00:00',
   waiting: 2,
   holds: [{ what: 'fix/a', why: 'parked, waiting for the boarding depth' }],
+  holds_by_class: { machine: 2, person: 0, unknown: 0, stuck: 0 },
+  flowing: true,
+  held_since: null,
+  flowing_why: 'last crossed 1h ago, inside 4× its mean gap',
   machine: machine(),
   state: 'troubled',
   why: '2 packets waiting and train-board-on-dock-depth silent for 180m',
@@ -100,6 +104,30 @@ describe('parseBorders — the payload, once', () => {
     expect(b.machine.silent).toBeNull();
     expect(b.last_crossed).toBeNull();
     expect(b.holds).toEqual([]);
+  });
+
+  // Car M1 (design 31bade8f decision 8): the server judges whether a
+  // rail flows, since when it has been held, and whom each waiting
+  // packet waits on. The client reads the four fields and judges none.
+  it('reads the motion fields as the server judged them, null staying null', () => {
+    const wire = { ...border(), holds_by_class: { machine: 1, person: 0, unknown: 0, stuck: 1 },
+      flowing: false, held_since: '2026-09-19T08:00:00+00:00', flowing_why: 'quiet 3h > 4 mean gaps' };
+    const b = parseBorders({ window_hours: 24, now: '', borders: [wire] }).borders[0]!;
+    expect(b.flowing).toBe(false);
+    expect(b.held_since).toBe('2026-09-19T08:00:00+00:00');
+    expect(b.flowing_why).toBe('quiet 3h > 4 mean gaps');
+    expect(b.holds_by_class).toEqual({ machine: 1, person: 0, unknown: 0, stuck: 1 });
+
+    const unread = parseBorders({ window_hours: 24, now: '', borders: [{ ...wire, flowing: null, held_since: null,
+      holds_by_class: null, waiting: null }] }).borders[0]!;
+    expect(unread.flowing).toBeNull();
+    expect(unread.held_since).toBeNull();
+    expect(unread.holds_by_class).toBeNull();
+    // An older server that sends none of them: cannot tell, never "flowing".
+    const { flowing: _f, held_since: _h, holds_by_class: _c, flowing_why: _w, ...old } = wire;
+    const older = parseBorders({ window_hours: 24, now: '', borders: [old] }).borders[0]!;
+    expect(older.flowing).toBeNull();
+    expect(older.holds_by_class).toBeNull();
   });
 
   it('refuses a payload without borders — a wrong server is not an empty map', () => {

@@ -151,6 +151,39 @@ subjects:
     name: estate-observer
     namespace: boss
 ---
+# AND THE DEV NAMESPACE'S EVENTS (backlog 48d8a3f3): a kubelet eviction
+# is stated as an `Evicted` Event that Kubernetes keeps for an hour, and
+# nothing the system of record can read held it — so car 6b23d135's
+# "the next ephemeral-storage pressure on w-1 evicts a gate pod, not
+# boss-dev" could never be observed. Namespaced, read-only, events only:
+# the observer can see that a pod was evicted, not touch anything. Event
+# names are generated per occurrence, so no resourceNames can narrow it
+# further; the namespace is the scope, and it is the one the dev pod and
+# every gate runner live in.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: estate-observer-dev-events
+  namespace: boss-dev
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: estate-observer-dev-events
+  namespace: boss-dev
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: estate-observer-dev-events
+subjects:
+  - kind: ServiceAccount
+    name: estate-observer
+    namespace: boss
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -673,6 +706,124 @@ spec:
                         "$JOBS_API/api/jobs/$run/steps/$step") || scode="curl $?"
                       echo "run $run: $seen — building ended died -> $scode"
                     done <"$WORK/dead-hosts.tsv"
+                  fi
+                  # AN EVICTION IS RECORDED WHERE THE RECORD CAN READ IT
+                  # (backlog 48d8a3f3). Car 6b23d135 claims the next
+                  # ephemeral-storage pressure on w-1 evicts a gate pod
+                  # and not boss-dev, and nothing a proof can read held an
+                  # eviction: the kubelet states one as an `Evicted` Event
+                  # that Kubernetes keeps for an HOUR, and as a Failed pod
+                  # that a Job's TTL or a reaper removes. The forge has no
+                  # kubeconfig and the jobs API owns no view of the
+                  # cluster, so the car sat `ours` in the shed with no
+                  # `--seen` check that could ever find its event. This
+                  # observer has kubectl AND a signed write, so it carries
+                  # each eviction across — the third fact it carries after
+                  # a dead gate runner and a dead dev pod.
+                  #
+                  # WHAT IS READ: the dev namespace's Events (the
+                  # read-only Role above) and the dev pods already read
+                  # for the dead-host pass. An Event gives the node and
+                  # the time; the pod gives the priority class, which no
+                  # Event carries. A pod still listed as Evicted after its
+                  # Event expired is an eviction too, dated from its
+                  # DisruptionTarget condition. A pod already gone leaves
+                  # its priority null — unknown, never guessed.
+                  #
+                  # WHAT IS WRITTEN: one observation, scope
+                  # `kubernetes-evictions`, only on a pass that sees an
+                  # eviction the record does not hold yet, with the new
+                  # evictions grouped under the node each happened on
+                  # (the door refuses an observation naming no node). ONE
+                  # KEY PER EVICTION, the pod's uid — a pod is evicted at
+                  # most once — checked against the newest recorded
+                  # evictions, so the four passes an Event lives through
+                  # record it once. A separate scope, not a field on the
+                  # node observation, so the reader's 50-row page is fifty
+                  # passes that SAW an eviction rather than twelve hours
+                  # of every pass: a `--seen` check reads it for as long
+                  # as the car waits. Read it with
+                  # GET /api/estate/observations?scope=kubernetes-evictions.
+                  #
+                  # BEST-EFFORT, after every duty above. A refused events
+                  # read still records what the pod objects say; a record
+                  # that cannot be read back posts NOTHING, out loud,
+                  # because a duplicate is not guessed at and the next
+                  # pass (an Event lives an hour, a pod longer) tries
+                  # again.
+                  if ! kubectl get events -n "$DEV_NS" --field-selector reason=Evicted -o json >"$WORK/evicted-events.json" 2>"$WORK/evicted-events.err" \
+                      || [ "$(jq -r '.items | type' "$WORK/evicted-events.json" 2>/dev/null)" != array ]; then
+                    echo "evicted events unread in $DEV_NS — only evicted pods still listed can be recorded this pass: $(cat "$WORK/evicted-events.err")"
+                    echo '{"items":[]}' >"$WORK/evicted-events.json"
+                  fi
+                  if [ "$(jq -r '.items | type' "$WORK/dev-pods.json" 2>/dev/null)" = array ]; then
+                    cp "$WORK/dev-pods.json" "$WORK/evict-pods.json"
+                  else
+                    echo '{"items":[]}' >"$WORK/evict-pods.json"
+                  fi
+                  jq -c -n --slurpfile ev "$WORK/evicted-events.json" --slurpfile pods "$WORK/evict-pods.json" --arg ns "$DEV_NS" '
+                    def nz: if . == "" then null else . end;
+                    def prio($p): { priority_class: ($p.spec.priorityClassName // null), priority: ($p.spec.priority // null) };
+                    ($pods[0].items // []) as $items
+                    | (reduce $items[] as $p ({}; if ($p.metadata.uid // "") != "" then .[$p.metadata.uid] = $p else . end)) as $by_uid
+                    | (reduce $items[] as $p ({}; .[$p.metadata.name // ""] = $p)) as $by_name
+                    | [ ( ($ev[0].items // [])[]
+                          | select(.reason == "Evicted" and ((.involvedObject.kind // "Pod") == "Pod"))
+                          | .involvedObject as $o
+                          | (if ($o.uid // "") != "" then $by_uid[$o.uid] else $by_name[$o.name // ""] end) as $p
+                          | { key: (($o.uid | nz) // "\($o.namespace // $ns)/\($o.name)"),
+                              pod: $o.name, namespace: ($o.namespace // $ns), pod_uid: ($o.uid | nz),
+                              node: ((.source.host | nz) // (.reportingInstance | nz) // $p.spec.nodeName // null),
+                              reason: .reason, message: (.message // null),
+                              at: (.lastTimestamp // .eventTime // .firstTimestamp // .metadata.creationTimestamp // null),
+                              source: "event" }
+                            + (if $p == null then { priority_class: null, priority: null } else prio($p) end) ),
+                        ( $items[]
+                          | select(.status.reason == "Evicted")
+                          | { key: ((.metadata.uid | nz) // "\(.metadata.namespace // $ns)/\(.metadata.name)"),
+                              pod: .metadata.name, namespace: (.metadata.namespace // $ns), pod_uid: (.metadata.uid | nz),
+                              node: (.spec.nodeName // null),
+                              reason: .status.reason, message: (.status.message // null),
+                              at: ([ (.status.conditions // [])[] | select(.type == "DisruptionTarget") | .lastTransitionTime ] | .[0] // null),
+                              source: "pod" }
+                            + prio(.) ) ]
+                    | reduce .[] as $e ({ out: [], seen: {} };
+                        if .seen[$e.key] then . else .out += [$e] | .seen[$e.key] = true end)
+                    | .out' >"$WORK/evictions.json" \
+                    || { echo "evicted events or pods did not parse — no eviction can be recorded this pass"; echo '[]' >"$WORK/evictions.json"; }
+                  listed=$(jq -r 'length' "$WORK/evictions.json" 2>/dev/null) || listed=0
+                  if [ "${listed:-0}" = 0 ]; then
+                    echo "evictions: none listed in $DEV_NS"
+                  elif ! api_curl -sf -H "x-boss-user: $OBSERVER_USER" \
+                      "$JOBS_API/api/estate/observations?scope=kubernetes-evictions&limit=50" >"$WORK/recorded-evictions.json" 2>"$WORK/recorded-evictions.err" \
+                      || [ "$(jq -r '.data | type' "$WORK/recorded-evictions.json" 2>/dev/null)" != array ]; then
+                    echo "evictions: $listed listed in $DEV_NS, not recorded this pass — what the record already holds could not be read ($(cat "$WORK/recorded-evictions.err")); a duplicate is not guessed at, the next pass tries again"
+                  else
+                    jq -r '"evictions: recorded read \(.data | length) of \(.total)" + (if (.data | length) < .total then " — judging against the rows read only" else "" end)' "$WORK/recorded-evictions.json"
+                    jq -c --slurpfile rec "$WORK/recorded-evictions.json" '
+                      [ $rec[0].data[] | (.payload.nodes // [])[] | (.evictions // [])[] | .key ] as $have
+                      | map(select(.key as $k | any($have[]; . == $k) | not))' \
+                      "$WORK/evictions.json" >"$WORK/new-evictions.json" \
+                      || { echo "evictions: the recorded read did not parse — not recorded this pass"; echo '[]' >"$WORK/new-evictions.json"; }
+                    fresh=$(jq -r 'length' "$WORK/new-evictions.json" 2>/dev/null) || fresh=0
+                    if [ "${fresh:-0}" = 0 ]; then
+                      echo "evictions: $listed listed in $DEV_NS, all already recorded"
+                    else
+                      jq -r '.[] | "  evicted: \(.namespace)/\(.pod) on \(.node // "an unnamed node") at \(.at // "an unknown time"), priority \(.priority // "unknown") (\(.priority_class // "no class")) — \(.message // .reason)"' \
+                        "$WORK/new-evictions.json"
+                      jq -n --slurpfile new "$WORK/new-evictions.json" '{
+                        observed_at: (now | todate),
+                        observer: "boss-estate-observe",
+                        scope: "kubernetes-evictions",
+                        nodes: ($new[0] | group_by(.node) | map({ id: .[0].node, evictions: . }))
+                      }' >"$WORK/evictions-observation.json"
+                      ecode=$(api_curl -s -o /dev/null -w '%{http_code}' -X POST \
+                        -H "content-type: application/json" \
+                        -H "x-boss-user: $OBSERVER_USER" \
+                        --data-binary @"$WORK/evictions-observation.json" \
+                        "$JOBS_API/api/estate/observation") || ecode="curl $?"
+                      echo "evictions: $fresh new in $DEV_NS recorded -> $ecode"
+                    fi
                   fi
               env:
                 - name: JOBS_API

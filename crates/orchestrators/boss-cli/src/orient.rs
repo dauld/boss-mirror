@@ -1594,6 +1594,20 @@ pub async fn run(all: bool) -> Result<()> {
         println!("{line}");
     }
 
+    // THE DOOR — the dev pod's ssh door as the record last judged it,
+    // from the forge's observation of it (backlog e6406701; incident
+    // 55d001b0: both doors dark ~36h and a person found it). Beside
+    // REPORTING TO because it, too, is about the session's own ground:
+    // the door into the pod this verb usually runs in.
+    let door = crate::gate::api(&http, reqwest::Method::GET, crate::door::READ, None)
+        .await
+        .and_then(rows)
+        .map(|r| r.into_iter().next())
+        .map_err(|e| e.to_string());
+    for line in crate::door::lines(&door, boss_clock_client::wall_now()) {
+        println!("{line}");
+    }
+
     // THE REGIONS — the map's numbers, from the server's one definition
     // (design 0524fc95). A server without the read (older than this
     // verb) says so and the approach still prints; the lanes below are

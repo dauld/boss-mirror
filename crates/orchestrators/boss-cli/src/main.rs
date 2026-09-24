@@ -21,6 +21,7 @@ mod dispatch_hook;
 mod dock_preview;
 mod doctor;
 mod documents;
+mod door;
 mod envelope;
 mod estate;
 mod freshness;

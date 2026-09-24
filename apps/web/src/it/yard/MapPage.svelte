@@ -125,6 +125,10 @@
   let regions = $state<Remote<Regions>>({ kind: 'loading' });
   let borders = $state<Remote<Borders>>({ kind: 'loading' });
   let readAt = $state<number | null>(null);
+  /** When the rails were last read WELL — the moving map's held clocks
+   *  count on from it, and it greys past three missed reads (design
+   *  31bade8f decision 6). */
+  let bordersAt = $state<number | null>(null);
   /** The newest regions read that succeeded, and when — the HUD's
    *  "last good HH:MMZ" when a later read fails (design 00774ca8
    *  decision 5). Its VALUES are never drawn once a newer read failed. */
@@ -140,6 +144,7 @@
       regions = r;
       borders = b;
       readAt = Date.now();
+      if (b.kind === 'ready') bordersAt = readAt;
       if (r.kind === 'ready') lastGood = { at: readAt, data: r.data };
     }
     void tick();
@@ -218,7 +223,8 @@
     {:else}
       <WorldMap
         regions={regions.data}
-        borders={borders.kind === 'ready' ? borders.data : null} />
+        borders={borders.kind === 'ready' ? borders.data : null}
+        {bordersAt} />
       <!-- THE PLANT along the world's edge (design 62de32ae, decision
            11): the host runners serve every region, so they stand under
            the territories rather than in one of them. -->

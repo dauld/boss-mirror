@@ -44,6 +44,10 @@ const border = (from: string, to: string, over: Partial<Border> = {}): Border =>
   last_crossed: null,
   waiting: 0,
   holds: [],
+  holds_by_class: { machine: 0, person: 0, unknown: 0, stuck: 0 },
+  flowing: true,
+  held_since: null,
+  flowing_why: '',
   machine: {
     name: 'auto-park-on-gate-green',
     kind: 'dispatcher-rule',

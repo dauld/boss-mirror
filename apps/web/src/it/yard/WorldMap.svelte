@@ -76,6 +76,23 @@
     type TerritoryText,
   } from './world';
   import { machineTitle, machineryLabel, machineryStrip } from './world-machines';
+  import { flightOn } from '@boss/web-kit/session/flights.svelte';
+  import { MediaQuery } from 'svelte/reactivity';
+  import MotionLayer from './MotionLayer.svelte';
+  import {
+    COMPRESSIONS,
+    DEFAULT_COMPRESSION,
+    REPLAY_TEXT,
+    compressionText,
+    emitPerSec,
+    heldMs,
+    heldText,
+    motionRateText,
+    pathPoints,
+    railStill,
+    staleFor,
+    walk,
+  } from './world-motion';
 
   type Props = Readonly<{
     regions: Regions;
@@ -83,8 +100,47 @@
      *  rails still DRAW — the layout is the map — but every number on
      *  them then reads unknown rather than zero (car 2). */
     borders?: Borders | null;
+    /** When (this page's clock, ms) the rails were last read WELL — the
+     *  moving map's held clocks count on from it, and it greys past
+     *  three missed reads. */
+    bordersAt?: number | null;
   }>;
-  let { regions, borders = null }: Props = $props();
+  let { regions, borders = null, bordersAt = null }: Props = $props();
+
+  // THE MAP MOVES — behind its flight (design 31bade8f, car M2; flight
+  // design c4c2a607). Off, and for every viewer the flight does not
+  // list, the map below is exactly the map it was: no canvas, no bar,
+  // the CSS traffic dashes. On, the MotionLayer canvas replays each
+  // rail's measured rate over it, the piles stand at the rails' heads,
+  // a rail the server judges still stops and says for how long, and
+  // nothing decorative moves — no dashes, no blinking lamps.
+  const motion = $derived(flightOn('it-map-motion'));
+  /** ×600 by default, and stated (Q1, decided 2026-09-24). */
+  let compression = $state<number>(DEFAULT_COMPRESSION);
+  /** The reader's reduced-motion setting, and the page's own toggle
+   *  over it (decision 9). */
+  const prefersReduced = new MediaQuery('(prefers-reduced-motion: reduce)');
+  let reducedChoice = $state<boolean | null>(null);
+  const reduced = $derived(reducedChoice ?? prefersReduced.current);
+  /** This page's clock, for the held clocks and the missed-read check:
+   *  a tick a second, and the clocks it drives move once a minute under
+   *  reduced motion. Only while the flight is on. */
+  let nowMs = $state(Date.now());
+  $effect(() => {
+    if (!motion) return;
+    const t = setInterval(() => (nowMs = Date.now()), 1_000);
+    return () => clearInterval(t);
+  });
+  const clockNow = $derived(reduced ? Math.floor(nowMs / 60_000) * 60_000 : nowMs);
+  const staleSecs = $derived(motion ? staleFor(bordersAt, nowMs) : null);
+  /** Each rail's run, for the "●=k" its tokens stand for. */
+  const railLength = (d: string): number => walk(pathPoints(d)).length;
+  const rateOnRail = (row: Border | undefined, d: string): string =>
+    motionRateText(row, emitPerSec(row?.rate.current ?? null, compression > 0 ? compression : DEFAULT_COMPRESSION, railLength(d)));
+  const heldOnRail = (row: Border | undefined): string =>
+    row === undefined || bordersAt === null
+      ? ''
+      : heldText(row, railStill(row), heldMs(row, borders?.now ?? '', bordersAt, clockNow));
 
   const key = (from: string, to: string): string => `${from}→${to}`;
   const byBorder = $derived(new Map((borders?.borders ?? []).map((b) => [key(b.from, b.to), b] as const)));
@@ -101,8 +157,11 @@
   const rails = BORDERS.flatMap((b) => {
     const from = territoryOf(b.from);
     const to = territoryOf(b.to);
-    return from && to ? [{ key: key(b.from, b.to), from: b.from, to: b.to, rail: railOf(from, to) }] : [];
+    return from && to ? [{ key: key(b.from, b.to), from: b.from, to: b.to, at: from, rail: railOf(from, to) }] : [];
   });
+  /** The rails as the motion layer walks them: the path and the
+   *  territory whose corner the pile stands in. */
+  const motionRails = rails.map((r) => ({ key: r.key, rail: r.rail, from: r.at }));
 
   /** The crossing whose panel is open under the map, by its key; null
    *  when none is. A second click on the same rail closes it. */
@@ -192,7 +251,9 @@
   }
 </script>
 
-<section class="yard" aria-label="the IT world map">
+<!-- The world itself, one SVG — rendered alone with the flight off, and
+     under the motion layer with it on, so off is the map it always was. -->
+{#snippet world()}
   <svg
     viewBox="0 0 {WORLD.width} {WORLD.height}"
     role="img"
@@ -207,7 +268,11 @@
       <!-- THE RAIL IS AS WIDE AS ITS RATE (decision 6) — logarithmic,
            a hairline when nothing crossed, and an unmeasured rate its
            own dotted band, never the empty one. -->
-      <path d={r.rail.d} class="rail" data-rail={r.key} data-state={stateOfBorder(row)} data-width={w} style="stroke-width: {w}" />
+      <!-- On the moving map the rail also carries the server's stillness
+           (design 31bade8f decision 4): a held rail is drawn in trouble
+           red whatever its state, because stillness is the stall. -->
+      <path d={r.rail.d} class="rail" data-rail={r.key} data-state={stateOfBorder(row)} data-width={w}
+        data-still={motion ? (railStill(row) ?? 'moving') : undefined} style="stroke-width: {w}" />
       <!-- the traffic itself: dashes running along the rail in the
            direction of travel, their pace from the measured rate -->
       <path
@@ -346,8 +411,15 @@
              the rail is troubled -->
         <rect x={r.rail.mid.x - bw / 2} y={r.rail.mid.y - 7} width={bw} height="14" rx="7" class="token {state}" />
         <text x={r.rail.mid.x} y={r.rail.mid.y + 3} text-anchor="middle" class="token-count">{tokenText(row)}</text>
-        <!-- and the rate -->
-        <text x={at.rate.x} y={at.rate.y} text-anchor={at.anchor} class="tiny rate">{railRate(row)}</text>
+        <!-- and the rate — on the moving map with what one token stands
+             for (●=k) or "0 vs 4/d" when nothing arrives, and a still
+             rail's held clock under it: the one moving thing left on it -->
+        <text x={at.rate.x} y={at.rate.y} text-anchor={at.anchor} class="tiny rate"
+          >{motion ? rateOnRail(row, r.rail.d) : railRate(row)}</text>
+        {#if motion && heldOnRail(row) !== ''}
+          <text x={at.rate.x} y={at.rate.y + 12} text-anchor={at.anchor} class="tiny held" data-held={r.key}
+            >{heldOnRail(row)}</text>
+        {/if}
       </g>
     {/each}
 
@@ -360,6 +432,39 @@
         >no rail drawn for: {unmappedBorders.join(', ')}</text>
     {/if}
   </svg>
+{/snippet}
+
+<section class="yard" class:motion class:reduced={motion && reduced} aria-label="the IT world map">
+  {#if motion}
+    <!-- THE MOTION, STATED (decision 2): the compression and what a
+         token is are always on screen, beside the controls — pause, ×60,
+         ×600, ×3600 — and the page's own reduced-motion toggle. -->
+    <div class="motion-bar" role="group" aria-label="the map's motion" data-motion-bar>
+      <span class="motion-label">time</span>
+      <span class="motion-speeds">
+        {#each COMPRESSIONS as c (c)}
+          <button type="button" aria-pressed={compression === c} onclick={() => (compression = c)}
+            >{c === 0 ? 'pause' : `×${c}`}</button>
+        {/each}
+      </span>
+      <span class="motion-said" data-compression={compression}>{compressionText(compression)}</span>
+      <label class="motion-reduced"
+        ><input type="checkbox" checked={reduced} onchange={(e) => (reducedChoice = e.currentTarget.checked)} /> reduced
+        motion</label>
+      <span class="motion-note">{reduced ? `${REPLAY_TEXT} — drawn as static density` : REPLAY_TEXT}</span>
+      {#if staleSecs !== null}
+        <!-- A frozen map must never keep moving as if it were live. -->
+        <span class="motion-stale" data-stale={staleSecs}>not read for {staleSecs} s — nothing on the map is moving</span>
+      {/if}
+    </div>
+    <div class="stage" class:stale={staleSecs !== null}>
+      {@render world()}
+      <MotionLayer rails={motionRails} {borders} {regions} {compression} {reduced} stale={staleSecs !== null} />
+    </div>
+  {:else}
+    {@render world()}
+  {/if}
+
 
   {#if opened !== null}
     <!-- THE CROSSING, INLINE (decision 6): everything the border read
@@ -391,6 +496,18 @@
           <dd>{machineText(row.machine)} — {row.machine.why}</dd>
           <dt>waiting</dt>
           <dd>{waitingText(row)}</dd>
+          {#if motion}
+            <!-- What the moving map draws, in words: whom the pile waits
+                 on, and the rule its stillness was judged by. -->
+            <dt>waits on</dt>
+            <dd data-by-class>
+              {row.holds_by_class === null
+                ? 'cannot tell'
+                : `${row.holds_by_class.machine} in line for a machine · ${row.holds_by_class.person} on a person or the world · ${row.holds_by_class.unknown} cannot tell · ${row.holds_by_class.stuck} stuck`}
+            </dd>
+            <dt>flowing</dt>
+            <dd>{row.flowing === null ? 'cannot tell' : row.flowing ? 'yes' : 'no'} — {row.flowing_why}</dd>
+          {/if}
         </dl>
         {#if row.holds.length > 0}
           <ol class="crossing-holds">
@@ -567,6 +684,34 @@
   .glyph.unknown .shed { stroke-dasharray: 2 2; }
   .yard .glyph text.mark { font-size: 9px; letter-spacing: 0; }
   @keyframes piston { to { transform: translateX(4px); } }
+  /* THE MOVING MAP (flight it-map-motion, design 31bade8f). Motion means
+     work and only work (decision 1): the CSS dashes were decoration at
+     five bands of pace, so they go — the canvas replays the measured
+     rate instead — except an UNMEASURED rail's still grey dotting,
+     which is how unknown is drawn (decision 5). No lamp blinks: the one
+     cue for trouble is a single ring (Q2), never a loop. A region past
+     its band freezes its machinery (decision 4). */
+  .motion .traffic { animation: none; }
+  .motion .traffic:not([data-density='unknown']) { display: none; }
+  .motion .lamp.err, .motion .machine-lamp.err { animation: none; }
+  .motion .territory:not([data-state='clear']) .piston, .reduced .piston { animation: none; }
+  .motion .rail[data-still='held'] { stroke: var(--map-bad-edge); }
+  .yard text.held { fill: var(--map-bad-ink); letter-spacing: 0; }
+  .stage { position: relative; min-width: 900px; }
+  /* Past three missed reads the whole map greys and stops (decision 6). */
+  .stage.stale { filter: grayscale(1); opacity: 0.6; }
+  .motion-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3);
+    margin-bottom: var(--s2); font-family: var(--font-mono); font-size: 11px; color: var(--map-muted); }
+  .motion-label { text-transform: uppercase; letter-spacing: 0.08em; }
+  .motion-speeds { display: inline-flex; }
+  .motion-speeds button { font: inherit; color: var(--map-ink); background: var(--map-surface);
+    border: 1px solid var(--map-rule-strong); padding: 2px 8px; cursor: pointer; }
+  .motion-speeds button + button { border-left: none; }
+  .motion-speeds button[aria-pressed='true'] { background: var(--map-ink); color: var(--map-surface); }
+  .motion-speeds button:focus-visible, .motion-reduced input:focus-visible { outline: 2px solid var(--map-accent); outline-offset: 1px; }
+  .motion-said { color: var(--map-ink); }
+  .motion-reduced { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+  .motion-stale { color: var(--map-bad-ink); }
   @media (prefers-reduced-motion: reduce) {
     .lamp, .glyph, .traffic, .machine-lamp { animation: none !important; }
     /* A still piston is still a FILLED housing, which idle never is —

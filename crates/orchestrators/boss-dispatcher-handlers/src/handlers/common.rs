@@ -1197,9 +1197,11 @@ mod lane_pin {
         // `jobs.agent_step_overdue` (078ddcb0), whose alarm per late
         // real-work step is stamped `Telemetry` too; eleven since
         // `jobs.flight_overdue` (73c31776), whose stale-flight alarm is
-        // `Telemetry` for the same reason.
+        // `Telemetry` for the same reason; twelve since the door alarm
+        // (`estate.alarm`'s `door_dark`, e6406701), stamped `Telemetry`
+        // like the estate alarms beside it.
         assert_eq!(
-            filings, 11,
+            filings, 12,
             "the number of machine filing sites changed. That is fine — but check the new \
              one stamps a lane, then update this count, which exists so a filing that \
              DISAPPEARS from the scan (a renamed key, a reshaped body) cannot read as \
