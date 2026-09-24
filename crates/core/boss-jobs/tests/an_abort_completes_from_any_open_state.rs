@@ -90,6 +90,7 @@ fn spec() -> WorkflowSpec {
                     covers: None,
                     binds: None,
                     item_value_max_bytes: None,
+                    item_one_of: Vec::new(),
                 }],
                 ..Default::default()
             },

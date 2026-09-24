@@ -445,17 +445,44 @@ pub(crate) fn review_step_metadata(body: &Value, doc_path: &str) -> Value {
 /// file by `the_verbs_inline_bound_is_the_protocols` (CLAUDE.md §9a).
 pub(crate) const EXHIBIT_INLINE_MAX_BYTES: u64 = 256 * 1024;
 
+/// One `--exhibit`, read and judged before anything is filed.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Exhibit {
+    /// Within the inline bound: `{anchor, title, html}`, ready to ride
+    /// the review step as it is.
+    Inline(Value),
+    /// Over it (design 26a89f11's file_refs arm): attached to the review
+    /// step in the file store once the packet exists, and carried as
+    /// `{anchor, title, file_ref, sha256, size_bytes}` — see
+    /// [`carry_exhibits`].
+    Attach {
+        anchor: String,
+        title: String,
+        path: PathBuf,
+    },
+}
+
+impl Exhibit {
+    pub(crate) fn anchor(&self) -> &str {
+        match self {
+            Exhibit::Inline(v) => v.get("anchor").and_then(Value::as_str).unwrap_or(""),
+            Exhibit::Attach { anchor, .. } => anchor,
+        }
+    }
+}
+
 /// `anchor|title|path.html` — one `--exhibit`. The file is read as
 /// BYTES by `read` (the filesystem in production, a closure in the
 /// tests), with no shell between the file and the record: a byte a
 /// shell re-encodes is a byte the review no longer shows as authored.
 /// Refused, naming the flag: a partial triple, an unreadable, empty or
-/// non-UTF-8 file, and one over [`EXHIBIT_INLINE_MAX_BYTES`] — the
-/// file_refs arm for larger renderings is decided and not yet built.
+/// non-UTF-8 file, and one the file store could not take either (over
+/// [`crate::attach::largest_file`]). Within [`EXHIBIT_INLINE_MAX_BYTES`]
+/// it rides inline; above it, it is attached after filing.
 pub(crate) fn read_exhibit(
     raw: &str,
     read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
-) -> Result<Value> {
+) -> Result<Exhibit> {
     let parts: Vec<&str> = raw.splitn(3, '|').map(str::trim).collect();
     let [anchor, title, path] = parts[..] else {
         bail!("--exhibit wants `anchor|title|path.html`, got {raw:?}");
@@ -469,21 +496,75 @@ pub(crate) fn read_exhibit(
         bail!("--exhibit {anchor}: {path} is empty — an exhibit with nothing in it shows nothing");
     }
     let size = bytes.len() as u64;
-    if size > EXHIBIT_INLINE_MAX_BYTES {
+    let largest = crate::attach::largest_file();
+    if size > largest {
         bail!(
-            "--exhibit {anchor}: {path} is {size} bytes, over the {EXHIBIT_INLINE_MAX_BYTES}-byte \
-             inline bound an exhibit rides under (design 26a89f11). Larger renderings go by \
-             file_refs, which is decided and not yet built into this verb — make the rendering \
-             self-contained and smaller, or split it into two exhibits."
+            "--exhibit {anchor}: {path} is {size} bytes. An exhibit rides inline up to \
+             {EXHIBIT_INLINE_MAX_BYTES} bytes and is attached to the file store above that, \
+             which takes a file of at most {largest} bytes (design 26a89f11) — make the \
+             rendering smaller, or split it into two exhibits. {}",
+            crate::attach::limit_sentence()
         );
     }
     let html = String::from_utf8(bytes).map_err(|_| {
         anyhow::anyhow!(
             "--exhibit {anchor}: {path} is not UTF-8 text — an exhibit is an HTML document, \
-             carried as a string in step metadata"
+             rendered from its text"
         )
     })?;
-    Ok(json!({ "anchor": anchor, "title": title, "html": html }))
+    if size > EXHIBIT_INLINE_MAX_BYTES {
+        return Ok(Exhibit::Attach {
+            anchor: anchor.to_string(),
+            title: title.to_string(),
+            path: PathBuf::from(path),
+        });
+    }
+    Ok(Exhibit::Inline(
+        json!({ "anchor": anchor, "title": title, "html": html }),
+    ))
+}
+
+/// The exhibits as the review step carries them: inline ones as they
+/// are, and each [`Exhibit::Attach`] attached to `target` (the filed
+/// design's review step) through the `boss attach` path — which reads
+/// the file back by id and refuses unless the bytes on disk, the row's
+/// sha256 and the bytes read back are one digest — and carried as its
+/// `file_ref` with the sha256 and size that read-back CONFIRMED: the
+/// receipt copied, not retyped. The review surface checks what it
+/// fetches against that sha256 before it renders anything.
+pub(crate) async fn carry_exhibits(
+    http: &reqwest::Client,
+    content_base: &str,
+    target: &crate::attach::Target,
+    exhibits: &[Exhibit],
+    signature: crate::identity::Signature,
+) -> Result<Vec<Value>> {
+    let mut out = Vec::with_capacity(exhibits.len());
+    for e in exhibits {
+        match e {
+            Exhibit::Inline(v) => out.push(v.clone()),
+            Exhibit::Attach {
+                anchor,
+                title,
+                path,
+            } => {
+                let a =
+                    crate::attach::attach_at(http, content_base, target, path, signature.clone())
+                        .await
+                        .with_context(|| {
+                            format!("--exhibit {anchor}: attaching {}", path.display())
+                        })?;
+                out.push(json!({
+                    "anchor": anchor,
+                    "title": title,
+                    "file_ref": a.file_id,
+                    "sha256": a.sha256,
+                    "size_bytes": a.size_bytes,
+                }));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Apply every `--bind Q|E`: exhibit anchor E joins question Q's
@@ -615,7 +696,24 @@ pub async fn run(
         .iter()
         .map(|raw| read_exhibit(raw, |p| std::fs::read(p)))
         .collect::<Result<Vec<_>>>()?;
-    let parsed = bind_exhibits(&parsed, &exhibits, &binds)?;
+    let anchors: Vec<Value> = exhibits
+        .iter()
+        .map(|e| json!({ "anchor": e.anchor() }))
+        .collect();
+    let parsed = bind_exhibits(&parsed, &anchors, &binds)?;
+    // An exhibit over the inline bound is ATTACHED after filing, and an
+    // attachment is a write of its own: an unnamed one is refused here,
+    // before the packet exists, rather than after it is half-built.
+    let attach_signature = crate::identity::signature_for(
+        &reqwest::Method::POST,
+        "/api/files",
+        crate::identity::caller(),
+    );
+    if exhibits.iter().any(|e| matches!(e, Exhibit::Attach { .. }))
+        && let crate::identity::Signature::Refused(msg) = &attach_signature
+    {
+        bail!("{msg}");
+    }
     let http = reqwest::Client::new();
 
     // `--answers`: the feedback (or backlog item) this design decides.
@@ -749,6 +847,37 @@ pub async fn run(
         .and_then(Value::as_str)
         .context("the filed doc has no review-design step")?
         .to_string();
+    // Exhibits over the inline bound are attached to THAT step — the
+    // one whose completion freezes the record that names them — before
+    // the mirror write, so the questions' bindings and every exhibit
+    // land in one write the merge door judges together.
+    let exhibits = if exhibits.iter().any(|e| matches!(e, Exhibit::Attach { .. })) {
+        let content = crate::tenant_publish::service_on_door(
+            &crate::gate::resolve_jobs_base(None)?,
+            "content",
+        )?;
+        let target = crate::attach::Target {
+            kind: "step",
+            id: sid.clone(),
+            label: format!("the review step of design {short}"),
+        };
+        carry_exhibits(&http, &content, &target, &exhibits, attach_signature)
+            .await
+            .with_context(|| {
+                format!(
+                    "attaching exhibits to the review step (the design {short} is filed; its \
+                     review step carries no questions yet)"
+                )
+            })?
+    } else {
+        exhibits
+            .iter()
+            .filter_map(|e| match e {
+                Exhibit::Inline(v) => Some(v.clone()),
+                Exhibit::Attach { .. } => None,
+            })
+            .collect()
+    };
     let (method, path, step_md) = review_mirror_write(
         &id,
         &sid,
@@ -1231,14 +1360,20 @@ mod tests {
 
     /// `--exhibit anchor|title|path.html` (design 26a89f11): the file is
     /// read as BYTES, with no shell between it and the record, and rides
-    /// as `{anchor, title, html}`. A partial triple, an empty file, a
-    /// file that is not UTF-8, and one over the inline bound are each
-    /// refused before anything is filed, naming the flag and the number.
+    /// as `{anchor, title, html}` up to the inline bound. A partial
+    /// triple, an empty file and a file that is not UTF-8 are each
+    /// refused before anything is filed, naming the flag. Over the inline
+    /// bound it is to be ATTACHED (the file_refs arm); over what the file
+    /// store takes it is refused, naming both numbers.
     #[test]
-    fn an_exhibit_is_read_from_its_file_and_refused_over_the_bound() {
+    fn an_exhibit_is_read_from_its_file_and_attached_over_the_bound() {
         let board = b"<!doctype html><style>b{color:red}</style><b>palette</b>".to_vec();
         let read_ok = |_: &Path| Ok(board.clone());
-        let e = read_exhibit("E1 | IT map motion | /x/board.html", read_ok).expect("an exhibit");
+        let Exhibit::Inline(e) =
+            read_exhibit("E1 | IT map motion | /x/board.html", read_ok).expect("an exhibit")
+        else {
+            panic!("a small exhibit rides inline");
+        };
         assert_eq!(e["anchor"], json!("E1"));
         assert_eq!(e["title"], json!("IT map motion"));
         assert_eq!(
@@ -1264,15 +1399,123 @@ mod tests {
         assert!(format!("{err:#}").contains("/x.html"), "{err:#}");
 
         let at = vec![b'a'; EXHIBIT_INLINE_MAX_BYTES as usize];
-        read_exhibit("E1|t|/x.html", |_: &Path| Ok(at.clone())).expect("exactly the bound fits");
-        let over = vec![b'a'; EXHIBIT_INLINE_MAX_BYTES as usize + 1];
-        let err = read_exhibit("E1|t|/x.html", |_: &Path| Ok(over.clone())).unwrap_err();
-        let text = err.to_string();
         assert!(
-            text.contains(&(EXHIBIT_INLINE_MAX_BYTES + 1).to_string())
-                && text.contains(&EXHIBIT_INLINE_MAX_BYTES.to_string()),
-            "the refusal names the size and the bound: {text}"
+            matches!(
+                read_exhibit("E1|t|/x.html", |_: &Path| Ok(at.clone())),
+                Ok(Exhibit::Inline(_))
+            ),
+            "exactly the bound rides inline"
         );
+        let over = vec![b'a'; EXHIBIT_INLINE_MAX_BYTES as usize + 1];
+        assert_eq!(
+            read_exhibit("E1 | big board | /x.html", |_: &Path| Ok(over.clone())).unwrap(),
+            Exhibit::Attach {
+                anchor: "E1".into(),
+                title: "big board".into(),
+                path: PathBuf::from("/x.html"),
+            },
+            "one byte over is attached, not refused"
+        );
+        // Over the inline bound, still UTF-8 or refused: it renders as
+        // text either way.
+        let mut not_text = vec![b'a'; EXHIBIT_INLINE_MAX_BYTES as usize + 1];
+        not_text.push(0xff);
+        let err = read_exhibit("E1|t|/x.html", |_: &Path| Ok(not_text.clone())).unwrap_err();
+        assert!(err.to_string().contains("UTF-8"), "{err}");
+
+        let largest = crate::attach::largest_file();
+        let too_big = vec![b'a'; largest as usize + 1];
+        let text = read_exhibit("E1|t|/x.html", |_: &Path| Ok(too_big.clone()))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            text.contains(&(largest + 1).to_string())
+                && text.contains(&largest.to_string())
+                && text.contains(&EXHIBIT_INLINE_MAX_BYTES.to_string()),
+            "the refusal names the size, the store's limit and the inline bound: {text}"
+        );
+    }
+
+    /// The file_refs arm, through the REAL files router (in-memory
+    /// adapters, on a socket): an inline exhibit passes through as it is,
+    /// and an attached one is sent to the review step and carried as its
+    /// `file_ref` with the sha256 and size the attach path CONFIRMED by
+    /// reading the bytes back — the receipt copied, not retyped. The
+    /// store then lists the file on that step.
+    #[tokio::test]
+    async fn an_exhibit_over_the_bound_is_attached_to_the_review_step_and_carried_by_ref() {
+        use sha2::Digest;
+        let big = format!(
+            "<!doctype html><style>b{{color:red}}</style>{}",
+            "<b>frame</b>".repeat(30_000)
+        );
+        let path = boss_testing::scratch_dir("boss-design-exhibit").join("motion.html");
+        std::fs::write(&path, &big).unwrap();
+        let big_exhibit = read_exhibit(&format!("E2|Motion prototype|{}", path.display()), |p| {
+            std::fs::read(p)
+        })
+        .unwrap();
+        assert!(matches!(big_exhibit, Exhibit::Attach { .. }));
+        let small = Exhibit::Inline(json!({"anchor": "E1", "title": "board", "html": "<p>x</p>"}));
+
+        let base = crate::attach::tests::store().await;
+        let target = crate::attach::Target {
+            kind: "step",
+            id: "5f8ec71b-60a5-4d6c-99d1-2591fcea966f".into(),
+            label: "the review step".into(),
+        };
+        let carried = carry_exhibits(
+            &reqwest::Client::new(),
+            &base,
+            &target,
+            &[small.clone(), big_exhibit],
+            crate::identity::Signature::As("agent-test".into()),
+        )
+        .await
+        .expect("carried");
+        assert_eq!(
+            carried[0],
+            json!({"anchor": "E1", "title": "board", "html": "<p>x</p>"})
+        );
+        let e2 = &carried[1];
+        assert_eq!(e2["anchor"], json!("E2"));
+        assert_eq!(e2["title"], json!("Motion prototype"));
+        assert!(e2.get("html").is_none(), "one of html and file_ref: {e2}");
+        assert_eq!(
+            e2["sha256"],
+            json!(hex::encode(sha2::Sha256::digest(big.as_bytes())))
+        );
+        assert_eq!(e2["size_bytes"], json!(big.len()));
+        let file = e2["file_ref"].as_str().expect("a file id");
+
+        let listed: Value = reqwest::Client::new()
+            .get(format!(
+                "{base}/api/files?target_kind=step&target_id={}",
+                target.id
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(listed[0]["id"].as_str(), Some(file), "{listed}");
+
+        // An unnamed attach is refused before the socket, naming why.
+        let err = carry_exhibits(
+            &reqwest::Client::new(),
+            &base,
+            &target,
+            &[Exhibit::Attach {
+                anchor: "E3".into(),
+                title: "t".into(),
+                path: path.clone(),
+            }],
+            crate::identity::Signature::Refused(crate::identity::refusal("POST", "/api/files")),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("E3"), "{err:#}");
     }
 
     /// The verb's bound IS the protocol's: the design-doc review step's

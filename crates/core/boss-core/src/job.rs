@@ -354,6 +354,19 @@ pub struct StepField {
     /// is what every field authored before this existed already meant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_value_max_bytes: Option<u64>,
+    /// For an `array` field: keys of which every element must carry
+    /// EXACTLY ONE, as a non-empty string — the "one of" twin of
+    /// `item_keys`, which names keys an element carries ALL of. Carrying
+    /// two is refused at every write that touches the field (a record
+    /// that says two things about one element is ambiguous whoever reads
+    /// it); carrying none is refused at done, the way a missing item key
+    /// is. Registry data for design 26a89f11's second arm: an exhibit is
+    /// `{anchor, title}` plus its bytes inline as `html` OR, over the
+    /// inline bound, a `file_ref` into the file store — never both, and
+    /// never neither. Empty (the default) means no such choice, which is
+    /// what every field authored before this existed already meant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub item_one_of: Vec<String>,
 }
 
 /// Who supplies a step field's value — the enforcement point follows
@@ -912,6 +925,7 @@ mod tests {
             covers: None,
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
         };
         let json = serde_json::to_value(&f).unwrap();
         assert_eq!(json["filled_by"], serde_json::json!("filer"));
@@ -927,6 +941,7 @@ mod tests {
             covers: None,
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
             ..f
         };
         let json = serde_json::to_value(&exec).unwrap();
@@ -946,18 +961,22 @@ mod tests {
         .unwrap();
         assert_eq!(bare.binds, None);
         assert_eq!(bare.item_value_max_bytes, None);
+        assert!(bare.item_one_of.is_empty());
         let json = serde_json::to_value(&bare).unwrap();
         assert!(json.get("binds").is_none() && json.get("item_value_max_bytes").is_none());
+        assert!(json.get("item_one_of").is_none());
 
         let stated: StepField = serde_json::from_value(serde_json::json!({
             "name": "exhibits",
             "field_type": "array",
             "binds": "other",
             "item_value_max_bytes": 262144,
+            "item_one_of": ["html", "file_ref"],
         }))
         .unwrap();
         assert_eq!(stated.binds.as_deref(), Some("other"));
         assert_eq!(stated.item_value_max_bytes, Some(262_144));
+        assert_eq!(stated.item_one_of, vec!["html", "file_ref"]);
         let back: StepField =
             serde_json::from_value(serde_json::to_value(&stated).unwrap()).unwrap();
         assert_eq!(back, stated);

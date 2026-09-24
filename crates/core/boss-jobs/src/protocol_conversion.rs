@@ -540,6 +540,7 @@ mod tests {
             covers: None,
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
         }
     }
 

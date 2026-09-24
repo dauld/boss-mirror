@@ -2968,19 +2968,26 @@ packet does not carry. (5) **It is proven** when the visual redesign is
 reviewed in `/it/design` with no claude.ai link. Authoring is `boss
 design --exhibit anchor|title|path.html`, read with no shell between;
 where an exhibit cannot render (a terminal, `boss brief`) it is listed
-by anchor, title, size and hash, never dropped. **The inline arm is
-built** (backlog `73ef81fa`, 2026-09-24; `file_refs` measured ON that
-day, so its arm above 256 KB is the item's remaining car): the review
-step declares `exhibits = [{anchor, title, html}]` with
-`item_value_max_bytes = 262144`, and `questions` declares `binds =
-"exhibits"` — two generic `StepField` attributes, with an `anchor`
-repeated inside one field refused beside them, all judged at the step
-merge door as the write lands (only for the fields it touches) and
-again at done; `boss design --exhibit` / `--bind` refuse the same
-before filing; `review-design.js` renders each exhibit in the reading
-pane beside the decision rail, a bound question naming it. Not yet
-proven: both rounds of theme boards (`dea94998`, `a4df741a`) were
-decided from a linked Artifact.
+by anchor, title, size and hash, never dropped. **Both arms are
+built** (backlog `73ef81fa`, 2026-09-24, two cars; `file_refs` measured
+ON that day): the review step declares `exhibits = [{anchor, title}]`
+with `item_one_of = ["html", "file_ref"]` and `item_value_max_bytes =
+262144`, and `questions` declares `binds = "exhibits"` — three generic
+`StepField` attributes, with an `anchor` repeated inside one field and
+an element carrying two of its one-of keys refused beside them, all
+judged at the step merge door and on a non-completing step PUT as the
+write lands (only for the fields it touches) and again at done, where
+an element carrying none of its one-of keys is refused too. `boss
+design --exhibit` / `--bind` refuse the same before filing; a file over
+256 KB is attached to the filed review step through the `boss attach`
+path (read back and digest-checked) and recorded as `{anchor, title,
+file_ref, sha256, size_bytes}`. `review-design.js` renders each exhibit
+in the reading pane beside the decision rail, a bound question naming
+it; a by-reference exhibit is fetched as the reviewer, refused unless
+its size and sha256 match the record (said so when no digest can be
+computed), and handed to the same sandboxed frame. Not yet proven:
+both rounds of theme boards (`dea94998`, `a4df741a`) were decided from
+a linked Artifact.
 
 **The legacy corpus is translated once, not indexed forever.** All 52
 markdown docs become packets and the directory stops being read;

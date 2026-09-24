@@ -319,6 +319,27 @@ impl StepRegistry {
                     }
                 }
             }
+            // ONE OF, at done: an element carrying NONE of its
+            // `item_one_of` keys is incomplete the way a missing item
+            // key is (design 26a89f11 — an exhibit with neither `html`
+            // nor `file_ref` shows nothing). Carrying two is the
+            // standing refusal below, judged at every write.
+            if let Some(items) = obj.get(&field.name).and_then(|v| v.as_array())
+                && !field.item_one_of.is_empty()
+            {
+                for (i, item) in items.iter().enumerate() {
+                    if one_of_carried(field, item).is_empty() {
+                        errors.push(ValidationError {
+                            field: format!("{}[{i}]", field.name),
+                            message: format!(
+                                "element {i} of '{}' carries none of {} — it must carry exactly one",
+                                field.name,
+                                field.item_one_of.join(", ")
+                            ),
+                        });
+                    }
+                }
+            }
             // COVERAGE: every anchor of the covered field has an element
             // here with the same anchor. The refusal names the anchors
             // still unanswered, so the reader knows which questions are
@@ -369,8 +390,9 @@ impl StepRegistry {
 
     /// The refusals that hold at EVERY write, not only at done (design
     /// 26a89f11, exhibits): an `anchor` repeated within one field, a
-    /// string over the field's `item_value_max_bytes`, and a `binds`
-    /// element naming an anchor the bound field does not carry.
+    /// string over the field's `item_value_max_bytes`, a `binds`
+    /// element naming an anchor the bound field does not carry, and an
+    /// element carrying more than one of its `item_one_of` keys.
     ///
     /// Required-at-done is the rule for what the WORK must produce; these
     /// are the rule for what a record may never say, so the step merge
@@ -426,6 +448,25 @@ impl StepRegistry {
                             repeated.join(", ")
                         ),
                     });
+                }
+            }
+            // TWO OF A ONE-OF is a record saying two things about one
+            // element — an exhibit with both inline `html` and a
+            // `file_ref` leaves every reader to guess which was reviewed.
+            if !field.item_one_of.is_empty() {
+                for (i, item) in elements.iter().enumerate() {
+                    let carried = one_of_carried(field, item);
+                    if carried.len() > 1 {
+                        errors.push(ValidationError {
+                            field: format!("{}[{i}]", field.name),
+                            message: format!(
+                                "'{}' element {i} carries {} — it may carry exactly one of {}",
+                                field.name,
+                                carried.join(" and "),
+                                field.item_one_of.join(", ")
+                            ),
+                        });
+                    }
                 }
             }
             if let Some(max) = field.item_value_max_bytes {
@@ -541,6 +582,25 @@ impl StepRegistry {
             Err(errors)
         }
     }
+}
+
+/// Which of `field.item_one_of` an element carries, as a non-empty
+/// string — the presence rule `item_keys` uses, so a blank or null value
+/// is not a choice made.
+fn one_of_carried<'a>(
+    field: &'a boss_core::job::StepField,
+    item: &serde_json::Value,
+) -> Vec<&'a str> {
+    field
+        .item_one_of
+        .iter()
+        .filter(|k| {
+            item.get(k.as_str())
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.trim().is_empty())
+        })
+        .map(String::as_str)
+        .collect()
 }
 
 fn validate_field_type(
@@ -1123,6 +1183,7 @@ mod tests {
             covers: None,
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
         }];
         let meta = serde_json::json!({"disposition": "ship"});
         let err = StepRegistry::validate_authored_fields(&fields, &meta).unwrap_err();
@@ -1216,6 +1277,7 @@ mod tests {
                 covers: None,
                 binds: None,
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             },
             StepField {
                 name: "resolutions".into(),
@@ -1226,6 +1288,7 @@ mod tests {
                 covers: Some("questions".into()),
                 binds: None,
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             },
         ];
         let questions = serde_json::json!([
@@ -1294,8 +1357,10 @@ mod tests {
 
     /// The exhibit contract of design 26a89f11, in registry terms:
     /// `questions` BINDS `exhibits`, and `exhibits` bounds each string it
-    /// carries. Built here rather than read from the bundle so the rules
-    /// are pinned apart from the one protocol that uses them today.
+    /// carries, and each exhibit carries its bytes as ONE of `html`
+    /// (inline) or `file_ref` (the file store). Built here rather than
+    /// read from the bundle so the rules are pinned apart from the one
+    /// protocol that uses them today.
     fn exhibit_contract(max: u64) -> Vec<boss_core::job::StepField> {
         use boss_core::job::{FilledBy, StepField};
         vec![
@@ -1308,16 +1373,18 @@ mod tests {
                 covers: None,
                 binds: Some("exhibits".into()),
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             },
             StepField {
                 name: "exhibits".into(),
                 field_type: "array".into(),
                 required: false,
                 filled_by: FilledBy::Filer,
-                item_keys: vec!["anchor".into(), "title".into(), "html".into()],
+                item_keys: vec!["anchor".into(), "title".into()],
                 covers: None,
                 binds: None,
                 item_value_max_bytes: Some(max),
+                item_one_of: vec!["html".into(), "file_ref".into()],
             },
         ]
     }
@@ -1459,11 +1526,76 @@ mod tests {
         );
     }
 
+    /// `item_one_of` (design 26a89f11's file_refs arm): an exhibit
+    /// carries its bytes inline as `html` OR as a `file_ref` into the
+    /// file store. Either alone is a whole exhibit; both at once is a
+    /// record that says two things about one element, refused at every
+    /// write that touches the field and named by element and keys.
+    #[test]
+    fn an_element_carrying_two_of_its_one_of_keys_is_refused_at_every_write() {
+        let fields = exhibit_contract(1024);
+        let by_ref = serde_json::json!({"anchor": "E2", "title": "big", "file_ref": "f-1"});
+        let ok = serde_json::json!({
+            "questions": [q("Q1", &["E1", "E2"])],
+            "exhibits": [exhibit("E1", "<p>x</p>"), by_ref],
+        });
+        assert!(StepRegistry::standing_refusals(&fields, &ok, |_| true).is_empty());
+        StepRegistry::validate_authored_fields(&fields, &ok)
+            .expect("an inline exhibit and a file_ref exhibit are both whole");
+
+        let both = serde_json::json!({ "exhibits": [
+            {"anchor": "E1", "title": "t", "html": "<p>x</p>", "file_ref": "f-1"},
+        ]});
+        let errs = StepRegistry::standing_refusals(&fields, &both, |k| k == "exhibits");
+        let e = errs
+            .iter()
+            .find(|e| e.field == "exhibits[0]")
+            .unwrap_or_else(|| panic!("the element is named: {errs:?}"));
+        assert!(
+            e.message.contains("html") && e.message.contains("file_ref"),
+            "{}",
+            e.message
+        );
+        // Not judged by a write that touches neither.
+        assert!(StepRegistry::standing_refusals(&fields, &both, |k| k == "resolutions").is_empty());
+    }
+
+    /// Carrying NONE of the one-of keys is the shape of a missing item
+    /// key — judged at done, where the work must be whole, and not at
+    /// every write, where a half-built element is a legitimate state. An
+    /// empty string is not a value, exactly as for `item_keys`.
+    #[test]
+    fn an_element_carrying_none_of_its_one_of_keys_is_refused_at_done() {
+        let fields = exhibit_contract(1024);
+        for bare in [
+            serde_json::json!({"anchor": "E1", "title": "t"}),
+            serde_json::json!({"anchor": "E1", "title": "t", "html": "  "}),
+            serde_json::json!({"anchor": "E1", "title": "t", "file_ref": null}),
+        ] {
+            let md = serde_json::json!({ "exhibits": [bare] });
+            assert!(
+                StepRegistry::standing_refusals(&fields, &md, |_| true).is_empty(),
+                "not a standing refusal: {md}"
+            );
+            let err = StepRegistry::validate_authored_fields(&fields, &md).unwrap_err();
+            let e = err
+                .iter()
+                .find(|e| e.field == "exhibits[0]")
+                .unwrap_or_else(|| panic!("the element is named at done: {err:?}"));
+            assert!(
+                e.message.contains("html") && e.message.contains("file_ref"),
+                "{}",
+                e.message
+            );
+        }
+    }
+
     /// The platform bundle's design-doc review step carries the exhibit
     /// contract design 26a89f11 decided: `questions` binds `exhibits`,
-    /// an exhibit is `{anchor, title, html}`, and the html is bounded
-    /// inline at 256 KB. Read from the file the registry seeds, so the
-    /// protocol row and these rules cannot part.
+    /// an exhibit is `{anchor, title}` plus ONE of `html` (bounded inline
+    /// at 256 KB) or `file_ref` (the file store, above it). Read from the
+    /// file the registry seeds, so the protocol row and these rules
+    /// cannot part.
     #[test]
     fn the_design_doc_review_step_declares_the_exhibit_contract() {
         let fields = crate::seed_loader::load_workflows(crate::registry::platform_bundle_path())
@@ -1486,7 +1618,8 @@ mod tests {
         let exhibits = field("exhibits");
         assert_eq!(exhibits.field_type, "array");
         assert!(!exhibits.required, "most designs carry no exhibit");
-        assert_eq!(exhibits.item_keys, vec!["anchor", "title", "html"]);
+        assert_eq!(exhibits.item_keys, vec!["anchor", "title"]);
+        assert_eq!(exhibits.item_one_of, vec!["html", "file_ref"]);
         assert_eq!(exhibits.item_value_max_bytes, Some(256 * 1024));
 
         let md = serde_json::json!({
@@ -1516,6 +1649,7 @@ mod tests {
                 covers: None,
                 binds: None,
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             },
             StepField {
                 name: "notes".into(),
@@ -1526,6 +1660,7 @@ mod tests {
                 covers: None,
                 binds: None,
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             },
         ];
         // Missing required authored field → error naming it.

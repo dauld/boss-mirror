@@ -970,20 +970,33 @@ fn key_blocks<'a>(md: impl IntoIterator<Item = (&'a String, &'a Value)>) -> Stri
 
 /// One exhibit as a line a terminal can hold: anchor, title, the html's
 /// size in UTF-8 bytes, and its sha256 — enough to know exactly which
-/// rendering a reviewer saw and to check a copy against it. An element
-/// with no inline html says so rather than inventing a size.
+/// rendering a reviewer saw and to check a copy against it. An exhibit
+/// over the inline bound rides as a `file_ref` into the file store
+/// (design 26a89f11's second arm): its size and hash are the ones the
+/// attaching verb confirmed by read-back and recorded beside the ref,
+/// listed with the file id a reader fetches it by. An element carrying
+/// neither says so rather than inventing a size.
 pub(crate) fn exhibit_line(e: &Value) -> String {
     use sha2::{Digest, Sha256};
     let s = |k: &str| e.get(k).and_then(Value::as_str);
     let anchor = s("anchor").unwrap_or("?");
     let title = s("title").unwrap_or("(untitled)");
-    match s("html") {
-        Some(html) => format!(
+    match (s("html"), s("file_ref")) {
+        (Some(html), _) => format!(
             "{anchor} — {title} — {} bytes — sha256 {}",
             html.len(),
             hex::encode(Sha256::digest(html.as_bytes()))
         ),
-        None => format!("{anchor} — {title} — no inline html"),
+        (None, Some(file)) => {
+            let size = e
+                .get("size_bytes")
+                .and_then(Value::as_u64)
+                .map_or("size not recorded".to_string(), |n| format!("{n} bytes"));
+            let sha =
+                s("sha256").map_or("sha256 not recorded".to_string(), |h| format!("sha256 {h}"));
+            format!("{anchor} — {title} — {size} — {sha} — file {file}")
+        }
+        (None, None) => format!("{anchor} — {title} — no inline html and no file_ref"),
     }
 }
 
@@ -1826,6 +1839,8 @@ mod tests {
                     "exhibits": [
                         {"anchor": "E1", "title": "Warm palette", "html": html},
                         {"anchor": "E2", "title": "Cool palette", "html": "<p>x</p>"},
+                        {"anchor": "E3", "title": "Motion prototype", "file_ref": "f-3",
+                         "sha256": "ab12", "size_bytes": 912_345},
                     ],
                 },
             }],
@@ -1842,6 +1857,14 @@ mod tests {
             out.contains("E2 — Cool palette — 8 bytes — sha256 "),
             "{out}"
         );
+        // Over the inline bound, a file_ref (design 26a89f11's second
+        // arm): listed the same way, by the size and hash recorded at
+        // attach, with the file id a reader fetches it by.
+        assert!(
+            out.contains("E3 — Motion prototype — 912345 bytes — sha256 ab12 — file f-3"),
+            "{out}"
+        );
+        assert!(out.contains("exhibits: (3 "), "{out}");
         assert!(
             !out.contains("<b>palette</b>"),
             "the markup itself is not printed: a terminal cannot render it"

@@ -371,6 +371,7 @@ fn workflow_design_spec() -> WorkflowSpec {
                 covers: None,
                 binds: None,
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             }],
             ..Default::default()
         },
@@ -418,6 +419,7 @@ fn workflow_design_spec() -> WorkflowSpec {
                 covers: None,
                 binds: None,
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             }],
             ..Default::default()
         },
@@ -551,6 +553,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                 covers: None,
                 binds: None,
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             }],
             ..Default::default()
         }
@@ -586,6 +589,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                     covers: None,
                     binds: None,
                     item_value_max_bytes: None,
+                    item_one_of: Vec::new(),
                 },
                 boss_core::job::StepField {
                     name: "destroying".into(),
@@ -596,6 +600,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                     covers: None,
                     binds: None,
                     item_value_max_bytes: None,
+                    item_one_of: Vec::new(),
                 },
             ],
             ..Default::default()
@@ -1328,25 +1333,33 @@ fn filer_field_misses(
     if filer_value_missing(value) {
         return vec![field.name.clone()];
     }
-    if field.item_keys.is_empty() {
+    if field.item_keys.is_empty() && field.item_one_of.is_empty() {
         return Vec::new();
     }
     let Some(items) = value.and_then(|v| v.as_array()) else {
         return vec![format!("{} (not an array)", field.name)];
     };
+    let blank = |item: &serde_json::Value, key: &str| {
+        item.get(key)
+            .and_then(|v| v.as_str())
+            .is_none_or(|s| s.trim().is_empty())
+    };
     items
         .iter()
         .enumerate()
         .flat_map(|(i, item)| {
-            field
+            let keys = field
                 .item_keys
                 .iter()
-                .filter(move |key| {
-                    item.get(key.as_str())
-                        .and_then(|v| v.as_str())
-                        .is_none_or(|s| s.trim().is_empty())
-                })
-                .map(move |key| format!("{}[{i}].{key}", field.name))
+                .filter(move |key| blank(item, key))
+                .map(move |key| format!("{}[{i}].{key}", field.name));
+            // An element carrying none of its one-of keys (design
+            // 26a89f11) is missing its one required choice, named as the
+            // alternatives it could have carried.
+            let choice = (!field.item_one_of.is_empty()
+                && field.item_one_of.iter().all(|k| blank(item, k)))
+            .then(|| format!("{}[{i}].({})", field.name, field.item_one_of.join("|")));
+            keys.chain(choice)
         })
         .collect()
 }
@@ -3541,6 +3554,7 @@ mod tests {
                 covers: None,
                 binds: None,
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             },
             StepField {
                 name: "markdown".into(),
@@ -3551,6 +3565,7 @@ mod tests {
                 covers: None,
                 binds: None,
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             },
             StepField {
                 name: "resolutions".into(),
@@ -3561,6 +3576,7 @@ mod tests {
                 covers: None,
                 binds: None,
                 item_value_max_bytes: None,
+                item_one_of: Vec::new(),
             },
         ];
         step.metadata = serde_json::json!({ "title": "Packet loss" });
@@ -3591,6 +3607,7 @@ mod tests {
             covers: None,
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
         }];
 
         // An explicit null is not a value.
@@ -3633,6 +3650,7 @@ mod tests {
             covers: None,
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
         }];
 
         // A title-less element is named by index and key.
@@ -3677,6 +3695,40 @@ mod tests {
         assert!(missing_filer_fields(std::slice::from_ref(&step)).is_empty());
     }
 
+    /// `item_one_of` at admission (design 26a89f11's file_refs arm): a
+    /// required filer field whose element carries NONE of its one-of
+    /// keys is missing its one choice, named as the alternatives. One
+    /// is whole; which one is the filer's call.
+    #[test]
+    fn missing_filer_fields_names_an_element_with_none_of_its_one_of_keys() {
+        use boss_core::job::{FilledBy, StepField};
+        let mut step = Step::new(JobId::new(), "review-design", "Answer the questions", 0);
+        step.spec_slug = Some("review".into());
+        step.fields = vec![StepField {
+            name: "exhibits".into(),
+            field_type: "array".into(),
+            required: true,
+            filled_by: FilledBy::Filer,
+            item_keys: vec!["anchor".into()],
+            covers: None,
+            binds: None,
+            item_value_max_bytes: None,
+            item_one_of: vec!["html".into(), "file_ref".into()],
+        }];
+        step.metadata = serde_json::json!({ "exhibits": [
+            { "anchor": "E1", "html": "<p>x</p>" },
+            { "anchor": "E2", "file_ref": "f-1" },
+            { "anchor": "E3", "html": " " },
+        ]});
+        assert_eq!(
+            missing_filer_fields(std::slice::from_ref(&step)),
+            vec![(
+                "review".to_string(),
+                "exhibits[2].(html|file_ref)".to_string()
+            )]
+        );
+    }
+
     #[test]
     fn missing_filer_fields_ignores_optional_filer_fields() {
         use boss_core::job::{FilledBy, StepField};
@@ -3690,6 +3742,7 @@ mod tests {
             covers: None,
             binds: None,
             item_value_max_bytes: None,
+            item_one_of: Vec::new(),
         }];
         assert!(
             missing_filer_fields(std::slice::from_ref(&step)).is_empty(),
