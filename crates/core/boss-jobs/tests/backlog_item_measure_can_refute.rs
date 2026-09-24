@@ -17,6 +17,12 @@
 //! into, reached by a different door.
 //!
 //! The fix is the same predicate shape, not a new step.
+//!
+//! And the OTHER answer a measurement gives (backlog c4d82c6f): a
+//! re-measure that CONFIRMS the claim had no exit either, only
+//! `closed`. `measure` now also carries `build` and `design`, which
+//! open the build and the draft the way triage's own dispositions do,
+//! and `closed` excludes both — the last three tests below.
 
 use std::sync::Arc;
 
@@ -319,13 +325,19 @@ async fn a_refuting_measurement_reaches_the_terminal_its_disposition_names() {
     }
 }
 
-/// THE REGRESSION THIS MUST NOT CAUSE. A measurement that CONFIRMED
-/// the claim carries no disposition and still closes the item as
-/// `completed` — which is what `closed`'s new measure disjunct states
-/// negatively, since boss-expr resolves a missing identifier to
-/// Absent and `NOT (false OR false OR false)` is true.
+/// CLOSURE, NOT A ROUTE. A measurement completed with NO disposition
+/// still reaches a terminal — `closed`'s measure disjunct is stated as
+/// the NEGATIVE of the five dispositions that route elsewhere, and
+/// boss-expr resolves a missing identifier to Absent, so `NOT (false
+/// OR ... OR false)` is true and the packet cannot wedge open.
+///
+/// Until c4d82c6f this was also the ONLY exit for a measurement that
+/// CONFIRMED the claim, and this test was named for that: a confirmed
+/// claim closed as `completed` with nothing built. A confirmation now
+/// routes with `build` or `design` (the tests below); an absent
+/// disposition is the fallback that keeps the packet closable.
 #[tokio::test]
-async fn a_measurement_that_held_still_closes_the_item_as_completed() {
+async fn a_measurement_with_no_disposition_still_closes_the_item() {
     let app = app();
     let (job_id, after) = routed_to_measure(&app).await;
 
@@ -334,7 +346,7 @@ async fn a_measurement_that_held_still_closes_the_item_as_completed() {
         &job_id,
         &after,
         "measure",
-        serde_json::json!({ "evidence": "Re-measured on origin/main: the claim holds." }),
+        serde_json::json!({ "evidence": "Re-measured on origin/main: nothing left to route." }),
     )
     .await;
     let after = read(&app, &job_id).await;
@@ -343,7 +355,7 @@ async fn a_measurement_that_held_still_closes_the_item_as_completed() {
         assert_eq!(
             status_of(&after, slug),
             "skipped",
-            "a measurement that held withdraws nothing — `{slug}` is `{}`",
+            "a measurement with no disposition withdraws nothing — `{slug}` is `{}`",
             status_of(&after, slug)
         );
     }
@@ -356,9 +368,144 @@ async fn a_measurement_that_held_still_closes_the_item_as_completed() {
     assert_eq!(done["status"], "closed");
     assert_eq!(
         done["metadata"]["outcome"], "completed",
-        "a confirmed measurement closes the packet as completed: {:#?}",
+        "a measurement with no disposition still closes the packet: {:#?}",
         done["metadata"]
     );
+}
+
+/// A CONFIRMED CLAIM ROUTES ONWARD (backlog c4d82c6f). Measured
+/// 2026-09-24: four items triaged `verify` on 2026-09-22 (07eee681,
+/// 9b0ad69d, af27db95, ddf0773e) were re-measured on origin/main
+/// 518a4f8 and every claim held — and the row gave that answer no
+/// exit but `closed`, whose outcome is `completed`. Completing
+/// `measure` would have recorded four items as done with nothing
+/// built, so all four sat at `measure`.
+///
+/// Routing to `measure` must therefore keep `build` and
+/// `draft-design` PENDING rather than Skipped at triage time: a
+/// skipped step never comes back, and each is held alive by naming
+/// `measure` in its `ready_when` — the mechanism af28e250 used to keep
+/// `build` alive across the review.
+#[tokio::test]
+async fn routing_to_measure_keeps_the_build_and_design_routes_alive() {
+    let app = app();
+    let (_id, after) = routed_to_measure(&app).await;
+
+    for slug in ["build", "draft-design"] {
+        assert_eq!(
+            status_of(&after, slug),
+            "pending",
+            "`{slug}` must stay reachable from the measurement — it is `{}`. Steps: {:#?}",
+            status_of(&after, slug),
+            after["steps"]
+        );
+    }
+}
+
+/// A measurement that CONFIRMS the claim and completes with
+/// `disposition = build` opens `build` and leaves the packet OPEN —
+/// `closed` must not go Ready off the same write. The withdrawal
+/// terminals stay reachable, because a builder may still refute
+/// (6c114a23), and the build that builds closes the item as
+/// `completed` exactly as a triage-routed build does.
+#[tokio::test]
+async fn a_confirming_measurement_routed_to_build_opens_the_build() {
+    let app = app();
+    let (job_id, after) = routed_to_measure(&app).await;
+
+    complete(
+        &app,
+        &job_id,
+        &after,
+        "measure",
+        serde_json::json!({
+            "disposition": "build",
+            "evidence": "Re-measured on origin/main 518a4f8: the claim holds.",
+        }),
+    )
+    .await;
+    let after = read(&app, &job_id).await;
+
+    assert!(
+        actionable(&after, "build"),
+        "`disposition = build` on `measure` must open `build` — it is `{}`. Steps: {:#?}",
+        status_of(&after, "build"),
+        after["steps"]
+    );
+    assert_eq!(
+        after["status"], "open",
+        "a confirmed claim is not a closed item: {:#?}",
+        after["metadata"]
+    );
+    assert_eq!(
+        status_of(&after, "closed"),
+        "pending",
+        "`closed` must not fire on a confirming measurement"
+    );
+    for slug in ["stale", "duplicate", "declined"] {
+        assert_eq!(
+            status_of(&after, slug),
+            "pending",
+            "the build may still refute — `{slug}` is `{}`",
+            status_of(&after, slug)
+        );
+    }
+
+    complete(&app, &job_id, &after, "build", serde_json::json!({})).await;
+    let after = read(&app, &job_id).await;
+    let done = if actionable(&after, "closed") {
+        complete(&app, &job_id, &after, "closed", serde_json::json!({})).await;
+        read(&app, &job_id).await
+    } else {
+        after
+    };
+    assert_eq!(done["status"], "closed");
+    assert_eq!(
+        done["metadata"]["outcome"], "completed",
+        "the build that built closes the item as completed: {:#?}",
+        done["metadata"]
+    );
+}
+
+/// The same confirmation, routed to `design`: `draft-design` opens,
+/// `closed` stays Pending, and `build` stays Pending too — it is still
+/// reachable through an approved review.
+#[tokio::test]
+async fn a_confirming_measurement_routed_to_design_opens_the_draft() {
+    let app = app();
+    let (job_id, after) = routed_to_measure(&app).await;
+
+    complete(
+        &app,
+        &job_id,
+        &after,
+        "measure",
+        serde_json::json!({
+            "disposition": "design",
+            "evidence": "Re-measured on origin/main: the claim holds, and the fix is a decision.",
+        }),
+    )
+    .await;
+    let after = read(&app, &job_id).await;
+
+    assert!(
+        actionable(&after, "draft-design"),
+        "`disposition = design` on `measure` must open `draft-design` — it is `{}`. Steps: {:#?}",
+        status_of(&after, "draft-design"),
+        after["steps"]
+    );
+    assert_eq!(
+        after["status"], "open",
+        "a routed claim is not a closed item"
+    );
+    for slug in ["closed", "build"] {
+        assert_eq!(
+            status_of(&after, slug),
+            "pending",
+            "`{slug}` must wait on the review — it is `{}`",
+            status_of(&after, slug)
+        );
+    }
 }
 
 /// NO EVIDENCE IS NOT A PASS, at the step that exists to produce it
