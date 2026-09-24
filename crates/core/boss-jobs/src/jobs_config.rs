@@ -31,18 +31,10 @@ pub struct JobsApiConfig {
     /// no roles are treated as executive.
     #[serde(default)]
     pub classes_api_url: Option<String>,
-    /// Base URLs for the four upstream services the Subject
-    /// existence checker needs. All four must be set for the
-    /// checker to come up; missing any one leaves the checker
-    /// disabled and the create-Job handler accepts any subject id.
-    #[serde(default)]
-    pub people_api_url: Option<String>,
-    #[serde(default)]
-    pub assets_api_url: Option<String>,
-    #[serde(default)]
-    pub locations_api_url: Option<String>,
-    #[serde(default)]
-    pub inventory_api_url: Option<String>,
+    // No people/assets/locations/inventory URLs: the subject-existence
+    // gate is the `subjects` table (design R1), and those four outlived
+    // their prober read by nothing (backlog 839ba062). Every `*_api_url`
+    // here must be one generate-configs.sh writes (generate_configs_sh.rs).
 }
 
 impl JobsApiConfig {
