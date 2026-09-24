@@ -59,14 +59,17 @@
 //! set, in the same order (CLAUDE.md §9a — a fact that lives twice gets
 //! an equality test).
 
+use std::collections::BTreeSet;
+
 use boss_core::job::Job;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::region_states::{BORDER_STILL, STILL_AFTER_GAPS, duration_text};
 use crate::regions::{
     Instant, RegionInputs, RegionState, Trend, Windows, awaiting_proof, closed_at, count_split,
     find_step, marshalling_view, meta_instant, opened_at, parse_instant, plural, rate_trend,
-    receiving_standing, released_awaiting_repair, shed_place, step_done_at, taken_in_at,
+    receiving_standing, released_awaiting_repair, shed_place, step_done_at, stuck_ids, taken_in_at,
 };
 use crate::stranded::is_train_gate;
 use crate::yard::{SILENT_AFTER_INTERVALS, TrainBlock};
@@ -240,6 +243,75 @@ pub struct Hold {
     pub why: String,
 }
 
+/// ON WHOM what stands at a border is waiting — every packet `waiting`
+/// counts, in exactly one class, so the four always sum to it (design
+/// 31bade8f decision 8, car M1 on backlog d220022f). The map shades its
+/// pile by these: solid for a machine, hollow for a person or the world,
+/// grey for "cannot tell", red sediment for stuck.
+///
+/// WHY A FIELD AND NOT THE HOLDS' WORDS. The prototype read each hold's
+/// sentence with a regex and extrapolated the unlisted rest from the
+/// [`MAX_HOLDS`] it could see — a shade the record never said, for most
+/// of a 235-deep pile. The server classifies every packet it counted,
+/// from the same facts the hold sentence was written from.
+///
+/// `stuck` IS THE STUCK BLOCK'S OWN POPULATION (`regions::stuck_ids`),
+/// not a second definition: across all borders the stuck class sums to
+/// the regions payload's `stuck` block, so a rail's sediment and the
+/// HUD's stuck number cannot disagree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HoldsByClass {
+    /// In line for a machine: a bay, a train, a probe runner, a rule.
+    pub machine: usize,
+    /// Waiting on a person or the world: a triage nobody has taken, a
+    /// merge, a repair, an event that has to happen.
+    pub person: usize,
+    /// The server cannot tell: a station whose flow the cube is blind
+    /// to, a pull request GitHub was never asked about, a gate that
+    /// never judged, an ordering edge nobody could read.
+    pub unknown: usize,
+    /// Stuck and ours ([`crate::regions::stuck`]).
+    pub stuck: usize,
+}
+
+/// One packet's class, before it is counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HoldClass {
+    Machine,
+    Person,
+    Unknown,
+    Stuck,
+}
+
+impl HoldsByClass {
+    fn of(classes: impl IntoIterator<Item = HoldClass>) -> Self {
+        classes
+            .into_iter()
+            .fold(HoldsByClass::default(), |c, class| match class {
+                HoldClass::Machine => HoldsByClass {
+                    machine: c.machine + 1,
+                    ..c
+                },
+                HoldClass::Person => HoldsByClass {
+                    person: c.person + 1,
+                    ..c
+                },
+                HoldClass::Unknown => HoldsByClass {
+                    unknown: c.unknown + 1,
+                    ..c
+                },
+                HoldClass::Stuck => HoldsByClass {
+                    stuck: c.stuck + 1,
+                    ..c
+                },
+            })
+    }
+
+    fn total(self) -> usize {
+        self.machine + self.person + self.unknown + self.stuck
+    }
+}
+
 /// The machinery of one border, as its own record answers for it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Machine {
@@ -278,6 +350,23 @@ pub struct Border {
     pub waiting: Option<usize>,
     /// Up to [`MAX_HOLDS`] of them, each with its reason.
     pub holds: Vec<Hold>,
+    /// All of them, by whom they wait on — summing to `waiting`, and
+    /// `null` exactly when `waiting` is (design 31bade8f decision 8).
+    pub holds_by_class: Option<HoldsByClass>,
+    /// Is work crossing this rail? `false` once it has been quiet past
+    /// [`STILL_AFTER_GAPS`] of its own mean gap, or nothing crossed in
+    /// the window; `null` when its crossings could not be read — never
+    /// `true` or `false` for "cannot tell" (design 31bade8f decision 8).
+    /// It does not change `state`: stillness is drawn beside the state.
+    pub flowing: Option<bool>,
+    /// RFC3339: the record's own last crossing, when `flowing` is
+    /// `false` — the instant the map's "held for" clock counts from, so
+    /// no client ever invents one. `null` while flowing, and when nothing
+    /// crossed in the whole read (the onset is not in the record read).
+    pub held_since: Option<String>,
+    /// The rule `flowing` was judged by, in words, with the numbers it
+    /// was judged on.
+    pub flowing_why: String,
     pub machine: Machine,
     pub state: RegionState,
     /// One sentence naming why the state is what it is.
@@ -340,7 +429,11 @@ pub struct BorderInputs<'a> {
 struct Flow {
     rate: Trend,
     last: Option<Instant>,
-    waiting: Option<usize>,
+    /// Every packet standing at the border, by class. The border's
+    /// `waiting` is their TOTAL, so the count and the pile's shades are
+    /// one number and cannot drift apart. `None` when the queue could
+    /// not be read.
+    classes: Option<HoldsByClass>,
     holds: Vec<Hold>,
     /// Set when a row this border needs could not be read. The border
     /// is then troubled and this is its `why`.
@@ -381,11 +474,26 @@ impl Flow {
         Flow {
             rate: unknown_rate(),
             last: None,
-            waiting: None,
+            classes: None,
             holds: Vec::new(),
             unread: Some(why.to_string()),
             oldest_waiting: None,
         }
+    }
+
+    /// The rate and newest crossing were measured; the QUEUE was not.
+    /// An unread queue is not an empty one, so it has no count and no
+    /// classes, and the border is troubled with `why`.
+    fn queue_unread(w: &Windows, stamps: Vec<Instant>, why: &str) -> Self {
+        Flow {
+            classes: None,
+            unread: Some(why.to_string()),
+            ..Flow::of(w, stamps, HoldsByClass::default(), Vec::new())
+        }
+    }
+
+    fn waiting(&self) -> Option<usize> {
+        self.classes.map(HoldsByClass::total)
     }
 
     /// The arrival this border's machine is judged against. Only a
@@ -395,13 +503,13 @@ impl Flow {
         self
     }
 
-    fn of(w: &Windows, stamps: Vec<Instant>, waiting: usize, holds: Vec<Hold>) -> Self {
+    fn of(w: &Windows, stamps: Vec<Instant>, classes: HoldsByClass, holds: Vec<Hold>) -> Self {
         let last = stamps.iter().copied().max();
         let (cur, prev) = count_split(w, stamps);
         Flow {
             rate: rate_trend("crossings", w, cur, prev),
             last,
-            waiting: Some(waiting),
+            classes: Some(classes),
             holds: holds.into_iter().take(MAX_HOLDS).collect(),
             unread: None,
             oldest_waiting: None,
@@ -442,9 +550,20 @@ fn outcome(j: &Job) -> &str {
 /// holds. Every arm names the transition it counts; an undeclared
 /// border answers UNREAD rather than an empty rail (a border nobody
 /// taught this module about must not read as a quiet one).
+///
+/// EVERY ARM CLASSES WHAT IT COUNTS ([`HoldsByClass`]): a packet in the
+/// stuck block's population (`stuck`) is stuck wherever it stands, and
+/// every other packet is classed by what its own hold says it waits on.
 #[allow(clippy::too_many_lines)]
-fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
+fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows, stuck: &BTreeSet<String>) -> Flow {
     let status = r.status;
+    let class_of = |id: &str, otherwise: HoldClass| {
+        if stuck.contains(id) {
+            HoldClass::Stuck
+        } else {
+            otherwise
+        }
+    };
     match (spec.from, spec.to) {
         // inbound -> taken in. One crossing per packet whose intake
         // step completed, stamped when it completed (`taken_in_at`, the
@@ -483,7 +602,13 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     )
                 })
                 .collect();
-            Flow::of(w, stamps, open.len(), holds)
+            // Nobody has taken it in: a person's triage — or, past the
+            // triage band, stuck.
+            let classes = HoldsByClass::of(
+                open.iter()
+                    .map(|j| class_of(&j.id.to_string(), HoldClass::Person)),
+            );
+            Flow::of(w, stamps, classes, holds)
         }
         // routed -> being built: an actor took a packet off a station
         // and a run opened on it (design c87fb59b car 2). One crossing
@@ -504,15 +629,7 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                 Err(why) => {
                     // The rate is still a measurement; the QUEUE is not,
                     // and an unread station registry is not an empty yard.
-                    let last = stamps.iter().copied().max();
-                    return Flow {
-                        rate: Flow::of(w, stamps, 0, Vec::new()).rate,
-                        last,
-                        waiting: None,
-                        holds: Vec::new(),
-                        unread: Some(why.to_string()),
-                        oldest_waiting: None,
-                    };
+                    return Flow::queue_unread(w, stamps, why);
                 }
             };
             let standing: std::collections::BTreeSet<&str> = stations
@@ -534,7 +651,25 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     )
                 })
                 .collect();
-            Flow::of(w, stamps, standing.len(), holds)
+            // Each distinct packet once, the worst of its stations
+            // deciding: stuck (a station over its limit or not draining —
+            // the stuck block's own predicate), then unknown (a station
+            // within its limit whose flow the cube cannot see, the stuck
+            // block's `unknown` arm), then a person to take it.
+            let classes = HoldsByClass::of(standing.iter().map(|id| {
+                let blind = stations.iter().any(|s| {
+                    !s.over_limit && s.served.is_none() && s.members.iter().any(|m| m == *id)
+                });
+                class_of(
+                    id,
+                    if blind {
+                        HoldClass::Unknown
+                    } else {
+                        HoldClass::Person
+                    },
+                )
+            }));
+            Flow::of(w, stamps, classes, holds)
         }
         // being built -> gated: a branch built on the shop floor taking
         // a bay. What waits is the line for a slot, in its own order.
@@ -565,7 +700,13 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     )
                 })
                 .collect();
-            Flow::of(w, stamps, queued.len(), holds)
+            // In line for a bay.
+            let classes = HoldsByClass::of(
+                queued
+                    .iter()
+                    .map(|q| class_of(&q.packet_id, HoldClass::Machine)),
+            );
+            Flow::of(w, stamps, classes, holds)
         }
         // gated green -> parked: the green became a car standing on the
         // dock, which is the car's `gate` (park) step completing. What
@@ -591,7 +732,21 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     "green, and no car claims it — rescue it, never rebuild it blind".to_string(),
                 )
             }));
-            let waiting = status.held.len() + status.stranded.len();
+            // A held green is a brake someone here set (the stuck block
+            // counts it); a stranded one is what this hop's rule owes a
+            // car, which is how the judge below reads it (c53f8f38).
+            let classes = HoldsByClass::of(
+                status
+                    .held
+                    .iter()
+                    .map(|h| class_of(&h.packet_id, HoldClass::Person))
+                    .chain(
+                        status
+                            .stranded
+                            .iter()
+                            .map(|s| class_of(&s.packet_id, HoldClass::Machine)),
+                    ),
+            );
             // WHAT THIS HOP'S MACHINE IS JUDGED AGAINST (c53f8f38). Only
             // the STRANDED greens: a held green is a brake an operator
             // put on, and `auto-park-on-gate-green` was never going to
@@ -615,7 +770,7 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     arrived,
                 })
             });
-            Flow::of(w, stamps, waiting, holds).waiting_since(oldest)
+            Flow::of(w, stamps, classes, holds).waiting_since(oldest)
         }
         // parked -> boarded: one crossing per CAR the train collected,
         // stamped at the train's `collect`. What waits is the dock — the
@@ -640,14 +795,11 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
             if matches!(r.dock_reading, crate::yard::Reading::Unread) {
                 // The rate is still a measurement; the QUEUE is not, and
                 // an unread dock is not an empty one (52fed017).
-                return Flow {
-                    rate: Flow::of(w, stamps, 0, Vec::new()).rate,
-                    last: None,
-                    waiting: None,
-                    holds: Vec::new(),
-                    unread: Some("the loading-dock station row could not be read".to_string()),
-                    oldest_waiting: None,
-                };
+                return Flow::queue_unread(
+                    w,
+                    stamps,
+                    "the loading-dock station row could not be read",
+                );
             }
             let mut holds: Vec<Hold> = status
                 .held_cars
@@ -667,13 +819,40 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
             // edge is listed with the conductor's own refusal, not as a
             // train due (backlog 4142d821) — judged by the one function
             // both read, through the dock region's own reading.
-            let edge_holds: Vec<(&str, String)> = crate::regions::dock_edges(r)
-                .into_iter()
+            let edges = crate::regions::dock_edges(r);
+            let edge_holds: Vec<(&str, String)> = edges
+                .iter()
                 .filter_map(|(d, o)| match o {
-                    crate::car::EdgeOutcome::Hold(h) => Some((d.id.as_str(), h.reason)),
+                    crate::car::EdgeOutcome::Hold(h) => Some((d.id.as_str(), h.reason.clone())),
                     _ => None,
                 })
                 .collect();
+            // A parked car is in line for a train — behind a predecessor
+            // still in flight too, which boards by itself when that one
+            // lands. An edge that can never clear, and a car braked on
+            // the dock by hand, are the stuck block's; an edge nobody
+            // could read is unknown (the conductor boards it anyway).
+            let unjudged = |id: &str| {
+                edges.iter().any(|(d, o)| {
+                    d.id == id && matches!(o, crate::car::EdgeOutcome::BoardUnjudged(_))
+                })
+            };
+            let classes = HoldsByClass::of(
+                status
+                    .held_cars
+                    .iter()
+                    .map(|h| class_of(&h.car.id, HoldClass::Person))
+                    .chain(status.dock.iter().map(|c| {
+                        class_of(
+                            &c.id,
+                            if unjudged(&c.id) {
+                                HoldClass::Unknown
+                            } else {
+                                HoldClass::Machine
+                            },
+                        )
+                    })),
+            );
             holds.extend(status.dock.iter().map(|c| {
                 let why = edge_holds.iter().find(|(id, _)| *id == c.id).map_or_else(
                     || waiting_for.clone(),
@@ -681,7 +860,7 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                 );
                 hold(c.branch.as_deref().unwrap_or(c.title.as_str()), why)
             }));
-            Flow::of(w, stamps, status.dock.len() + status.held_cars.len(), holds)
+            Flow::of(w, stamps, classes, holds)
         }
         // boarded -> arrived. What waits is every train in transit, each
         // with the yard's own block when it has one.
@@ -706,7 +885,22 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     hold(&t.title, why)
                 })
                 .collect();
-            Flow::of(w, stamps, status.trains.len(), holds)
+            // A train in transit is the conductor's to move. A BLOCKED
+            // one is not in a queue any more: the machine refused it or
+            // ran past its own policy, and what moves it next is a
+            // person's repair or the world (a red CI, a deploy refused, a
+            // converge overdue) — the block rides its hold in words.
+            let classes = HoldsByClass::of(status.trains.iter().map(|t| {
+                class_of(
+                    &t.id,
+                    if t.block.is_some() {
+                        HoldClass::Person
+                    } else {
+                        HoldClass::Machine
+                    },
+                )
+            }));
+            Flow::of(w, stamps, classes, holds)
         }
         // arrived -> proven. What waits is the inspection shed, each car
         // with WHERE it stands (`regions::shed_place`) — a probe
@@ -730,7 +924,23 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     hold(branch, shed_words(&j.metadata))
                 })
                 .collect();
-            Flow::of(w, stamps, awaiting.len(), holds)
+            // A probe recorded and not yet run waits on the probe runner;
+            // every other place waits on a person or the world — a
+            // failing probe on its fix, a not-yet on the event it names,
+            // an unproven car on someone to say how it is proven. Past
+            // the proof band and ours, the stuck block's.
+            let classes = HoldsByClass::of(awaiting.iter().map(|(j, _)| {
+                class_of(
+                    &j.id.to_string(),
+                    match shed_place(&j.metadata) {
+                        crate::regions::ShedPlace::ProbePending { last: None } => {
+                            HoldClass::Machine
+                        }
+                        _ => HoldClass::Person,
+                    },
+                )
+            }));
+            Flow::of(w, stamps, classes, holds)
         }
         // A red gate sends a car to the garage. What stands AT this
         // border is a run the gate never judged: "we do not know" is not
@@ -759,7 +969,10 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     )
                 })
                 .collect();
-            Flow::of(w, stamps, status.limbo.len(), holds)
+            // A run the gate never judged: whether it passed cannot be
+            // told.
+            let classes = HoldsByClass::of(status.limbo.iter().map(|_| HoldClass::Unknown));
+            Flow::of(w, stamps, classes, holds)
         }
         // A red train releases its cars. What stands at the border is
         // the cars it released that are still awaiting repair — the same
@@ -778,10 +991,12 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                 .filter_map(|(j, _)| closed_at(j))
                 .collect();
             let released = released_awaiting_repair(r.closed_trains, r.cars, w);
-            let mut waiting = 0;
             let mut holds = Vec::new();
+            // Each released car waits on its repair — a person's (or an
+            // agent's) re-gate.
+            let mut repairs = Vec::new();
             for (train, cars) in released {
-                waiting += cars.len();
+                repairs.extend(cars.iter().map(|_| HoldClass::Person));
                 holds.extend(cars.into_iter().map(|c| {
                     hold(
                         c,
@@ -789,7 +1004,7 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     )
                 }));
             }
-            Flow::of(w, stamps, waiting, holds)
+            Flow::of(w, stamps, HoldsByClass::of(repairs), holds)
         }
         // A snapshot of main proposed to the public mirror (design
         // cb38d806). One crossing per pull request OPENED, which is the
@@ -827,7 +1042,20 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
             // merge, not on this rule, and judging the rule against it
             // would blame the machine for a gate the design made
             // David's on purpose.
-            Flow::of(w, stamps, open.len(), holds)
+            //
+            // A red reading nobody judged waits on a person to judge it;
+            // a PR GitHub was never asked about is unknown — an unasked
+            // question is not "open" (a5d4322c); one read open waits on
+            // the person whose merge it is. The same order the hold's
+            // sentence is chosen in above.
+            let classes = HoldsByClass::of(open.iter().map(|p| {
+                if !p.unjudged_red() && p.state_read_at.is_empty() {
+                    HoldClass::Unknown
+                } else {
+                    HoldClass::Person
+                }
+            }));
+            Flow::of(w, stamps, classes, holds)
         }
         _ => Flow::unread("no crossing is declared for this border"),
     }
@@ -968,21 +1196,27 @@ fn machine_of(spec: &BorderSpec, inputs: &BorderInputs<'_>, now: Instant) -> Mac
 pub fn borders(inputs: &BorderInputs<'_>) -> Borders {
     let r = inputs.regions;
     let w = Windows::of(r.now, r.window_hours);
+    let stuck = stuck_ids(r);
     Borders {
         window_hours: r.window_hours,
         borders: BORDERS
             .iter()
             .map(|spec| {
-                let flow = flow_of(spec, r, &w);
+                let flow = flow_of(spec, r, &w, &stuck);
                 let machine = machine_of(spec, inputs, r.now);
                 let (state, why) = judge(spec, &flow, &machine, &w);
+                let motion = motion(&flow, &w, r.now);
                 Border {
                     from: spec.from.to_string(),
                     to: spec.to.to_string(),
                     crossing: spec.crossing.to_string(),
-                    rate: flow.rate,
                     last_crossed: flow.last.map(|t| t.to_rfc3339()),
-                    waiting: flow.waiting,
+                    waiting: flow.waiting(),
+                    holds_by_class: flow.classes,
+                    flowing: motion.flowing,
+                    held_since: motion.held_since.map(|t| t.to_rfc3339()),
+                    flowing_why: motion.why,
+                    rate: flow.rate,
                     holds: flow.holds,
                     machine,
                     state,
@@ -990,6 +1224,86 @@ pub fn borders(inputs: &BorderInputs<'_>) -> Borders {
                 }
             })
             .collect(),
+    }
+}
+
+/// Whether a rail is flowing, and since when it has been held.
+struct Motion {
+    flowing: Option<bool>,
+    held_since: Option<Instant>,
+    why: String,
+}
+
+/// IS WORK CROSSING THIS RAIL? (design 31bade8f decision 8, car M1).
+/// Judged ON THE SERVER, from the rail's own record, so no client ever
+/// decides that a rail has stalled — `borders.ts` already says "nothing
+/// here derives a judgement", and the map's stillness is drawn off this.
+///
+/// THE EXPECTED INTERVAL IS THE RAIL'S OWN MEAN GAP — the window over
+/// its crossings in it — and the rail is still past [`STILL_AFTER_GAPS`]
+/// of those ([`BORDER_STILL`]). The design offered a machine's declared
+/// cadence as the interval where one exists, and it is not one: the
+/// cadence is how often the MACHINE runs, not how often the rail is
+/// crossed. `train-reconcile` fires every 10 minutes and moves the
+/// track -> garage rail about 4 times a day (live, 2026-09-24), so four
+/// of its intervals would call that rail still for most of every day.
+/// The machine's heartbeat is already judged, as `machine.silent`.
+///
+/// NULL IS "CANNOT TELL": a rail whose crossings could not be read has
+/// no rate to judge against. A rail nothing crossed in the window is
+/// still — a plain fact about motion — held since the last crossing the
+/// read holds, or with no onset when it holds none.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn motion(flow: &Flow, w: &Windows, now: Instant) -> Motion {
+    if flow.rate.current.is_none() {
+        return Motion {
+            flowing: None,
+            held_since: None,
+            why: "its crossings could not be read, so whether it flows cannot be told".to_string(),
+        };
+    }
+    let n = flow.rate.samples;
+    let Some(last) = flow.last.filter(|_| n > 0) else {
+        return Motion {
+            flowing: Some(false),
+            held_since: flow.last,
+            why: match flow.last {
+                Some(last) => format!(
+                    "nothing crossed in {}h; the last crossing read was {}",
+                    w.hours,
+                    last.to_rfc3339()
+                ),
+                None => format!("nothing crossed in the {}h read", w.hours * 2),
+            },
+        };
+    };
+    let gap = (w.hours * 60) as f64 / n as f64;
+    let quiet = (now - last).num_minutes().max(0);
+    let gap_text = duration_text(gap.ceil() as i64);
+    let measured = format!(
+        "a mean gap of {gap_text}: {} in {}h",
+        plural(n, "crossing", "crossings"),
+        w.hours
+    );
+    if quiet as f64 > STILL_AFTER_GAPS as f64 * gap {
+        Motion {
+            flowing: Some(false),
+            held_since: Some(last),
+            why: format!(
+                "quiet {} > {} ({measured})",
+                duration_text(quiet),
+                BORDER_STILL.band
+            ),
+        }
+    } else {
+        Motion {
+            flowing: Some(true),
+            held_since: None,
+            why: format!(
+                "last crossed {} ago, inside {STILL_AFTER_GAPS}× its mean gap ({measured})",
+                duration_text(quiet)
+            ),
+        }
     }
 }
 
@@ -1005,7 +1319,7 @@ fn judge(spec: &BorderSpec, flow: &Flow, machine: &Machine, w: &Windows) -> (Reg
     if let Some(unread) = flow.unread.as_deref() {
         return (RegionState::Troubled, unread.to_string());
     }
-    let waiting = flow.waiting.unwrap_or(0);
+    let waiting = flow.waiting().unwrap_or(0);
     if waiting > 0 && machine.silent == Some(true) {
         let silent = machine.silent_for_minutes.unwrap_or_default();
         let every = machine.expected_every_minutes.unwrap_or_default();
@@ -2176,6 +2490,400 @@ mod tests {
             "the newest INTAKE, not the newest close"
         );
         assert_eq!(rail.waiting, Some(1), "only the untriaged one stands");
+    }
+
+    // -----------------------------------------------------------------
+    // MOTION'S FACTS (design 31bade8f, "The IT map moves", decision 8;
+    // car M1 on backlog d220022f): whether a rail is flowing, since when
+    // it has been held, and on whom what stands at it is waiting.
+    // -----------------------------------------------------------------
+
+    /// Every border's classes sum to its `waiting` — the pile the map
+    /// draws is the server's count, square for square — and the stuck
+    /// class across every border is the stuck block's own population, so
+    /// a rail's red sediment and the HUD's stuck number cannot disagree.
+    fn assert_conserved(out: &Borders, inputs: &RegionInputs<'_>) {
+        for b in &out.borders {
+            match (b.waiting, b.holds_by_class) {
+                (Some(n), Some(c)) => assert_eq!(
+                    c.machine + c.person + c.unknown + c.stuck,
+                    n,
+                    "{} -> {}: {c:?} does not sum to {n} waiting",
+                    b.from,
+                    b.to
+                ),
+                (None, None) => {}
+                (w, c) => panic!(
+                    "{} -> {}: waiting {w:?} and classes {c:?} disagree about whether the queue was read",
+                    b.from, b.to
+                ),
+            }
+        }
+        let on_rails: usize = out
+            .borders
+            .iter()
+            .filter_map(|b| b.holds_by_class)
+            .map(|c| c.stuck)
+            .sum();
+        let in_block: usize = crate::regions::stuck(inputs).iter().map(|t| t.stuck).sum();
+        assert_eq!(
+            on_rails, in_block,
+            "the rails' stuck sediment is the stuck block's population"
+        );
+    }
+
+    fn classes(b: &Border) -> (usize, usize, usize, usize) {
+        let c = b.holds_by_class.expect("the queue was read");
+        (c.machine, c.person, c.unknown, c.stuck)
+    }
+
+    /// 24 branches took a bay in 24 minutes: a mean gap of 60m over the
+    /// 24h window, so the rail is still once it has been quiet past
+    /// 240m. It has been quiet since 05:23 — 397m at noon.
+    #[test]
+    fn a_rail_quiet_past_four_of_its_mean_gaps_is_still_and_held_since_its_last_crossing() {
+        let mut runs: Vec<Job> = (0..24)
+            .map(|k| {
+                gate_run(
+                    &format!("fix/b{k}"),
+                    &format!("2026-09-19T05:{k:02}:00Z"),
+                    None,
+                    None,
+                )
+            })
+            .collect();
+        let status = empty_status();
+        let inputs = region_inputs(&status, &[], &[], &runs, Some(&[]), Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let still = only(&out, "shop-floor", "gates").clone();
+        assert_eq!(still.rate.samples, 24);
+        assert_eq!(still.flowing, Some(false), "{}", still.flowing_why);
+        assert_eq!(
+            still.held_since.as_deref(),
+            Some(t("2026-09-19T05:23:00Z").to_rfc3339().as_str()),
+            "held since the record's own last crossing"
+        );
+        assert_eq!(still.held_since, still.last_crossed);
+        assert!(
+            still.flowing_why.contains(BORDER_STILL.band)
+                && still.flowing_why.contains("quiet 6h")
+                && still
+                    .flowing_why
+                    .contains("a mean gap of 1h: 24 crossings in 24h"),
+            "the rule's words, with the quiet and the gap it was judged by: {}",
+            still.flowing_why
+        );
+
+        // THE CONTROL: one more crossing at 11:00 is 60m of quiet
+        // against a limit of ~230m — flowing, and nothing is held.
+        runs.push(gate_run("fix/late", "2026-09-19T11:00:00Z", None, None));
+        let inputs = region_inputs(&status, &[], &[], &runs, Some(&[]), Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let moving = only(&out, "shop-floor", "gates");
+        assert_eq!(moving.flowing, Some(true), "{}", moving.flowing_why);
+        assert_eq!(moving.held_since, None);
+        // Stillness is its own signal: it changes neither the state nor
+        // its sentence.
+        assert_eq!(moving.state, still.state);
+    }
+
+    /// A rail nothing crossed in the window is still, and the instant it
+    /// has been held since is the last crossing the record holds — or
+    /// none, when nothing crossed in the whole read: an onset the record
+    /// does not hold is never invented.
+    #[test]
+    fn a_rail_nothing_crossed_in_the_window_is_still_and_names_the_last_crossing_it_read() {
+        let yesterday = vec![gate_run(
+            "fix/red-yesterday",
+            "2026-09-18T09:00:00Z",
+            None,
+            Some("failed"),
+        )];
+        let status = empty_status();
+        let inputs = region_inputs(&status, &[], &[], &yesterday, Some(&[]), Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let b = only(&out, "gates", "garage");
+        assert_eq!((b.rate.samples, b.rate.previous_samples), (0, 1));
+        assert_eq!(b.flowing, Some(false), "{}", b.flowing_why);
+        assert_eq!(
+            b.held_since.as_deref(),
+            Some(t("2026-09-18T09:00:00Z").to_rfc3339().as_str())
+        );
+        assert!(
+            b.flowing_why.contains("nothing crossed in 24h"),
+            "{}",
+            b.flowing_why
+        );
+
+        let inputs = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let b = only(&out, "gates", "garage");
+        assert_eq!(b.flowing, Some(false));
+        assert_eq!(b.held_since, None, "no crossing read, so no onset");
+        assert!(
+            b.flowing_why.contains("nothing crossed in the 48h read"),
+            "{}",
+            b.flowing_why
+        );
+    }
+
+    /// UNKNOWN STAYS NULL, NEVER 0 OR FALSE. A rail whose crossings could
+    /// not be read cannot be told to flow, and a queue that could not be
+    /// read has no classes — each rides the payload as an explicit null,
+    /// so a reader can tell "cannot tell" from an older server.
+    #[test]
+    fn a_rail_whose_crossings_could_not_be_read_cannot_be_told_to_flow() {
+        let status = empty_status();
+        let inputs = region_inputs(&status, &[], &[], &[], None, Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let b = only(&out, "receiving", "marshalling");
+        assert_eq!(b.flowing, None);
+        assert_eq!(b.held_since, None);
+        assert_eq!(b.holds_by_class, None);
+        assert!(
+            b.flowing_why.contains("cannot be told"),
+            "{}",
+            b.flowing_why
+        );
+        let v = serde_json::to_value(b).unwrap();
+        for key in ["flowing", "held_since", "holds_by_class"] {
+            assert_eq!(v.get(key), Some(&Value::Null), "{key}: {v}");
+        }
+        // And a read one carries the four classes by name.
+        let read = serde_json::to_value(only(&out, "shop-floor", "gates")).unwrap();
+        assert_eq!(
+            read["holds_by_class"],
+            json!({ "machine": 0, "person": 0, "unknown": 0, "stuck": 0 })
+        );
+    }
+
+    /// RECEIVING and MARSHALLING. Intake nobody has taken in waits on a
+    /// person, and past the triage band it is stuck (the stuck block's
+    /// own predicate). A station's packet waits on a person to take it,
+    /// is stuck at a station that served nothing, and is unknown at a
+    /// station whose flow the cube cannot see — each distinct packet
+    /// once, the worst of its stations deciding.
+    #[test]
+    fn intake_and_stations_are_classed_by_the_stuck_blocks_own_predicates() {
+        let intake = |title: &str, opened: (i32, u32, u32)| {
+            let mut j = job("backlog-item", title, JobStatus::Open, json!({}));
+            j.opened_on = chrono::NaiveDate::from_ymd_opt(opened.0, opened.1, opened.2).unwrap();
+            let mut admitted = step(
+                &j,
+                "submitted",
+                StepStatus::Completed,
+                Some("2026-09-10T08:00:00Z"),
+            );
+            admitted.kind = crate::regions::TRIGGER_STEP_KIND.to_string();
+            let steps = vec![admitted, step(&j, "triage", StepStatus::Ready, None)];
+            (j, steps)
+        };
+        let inbound = vec![
+            intake("fresh", (2026, 9, 19)),
+            intake("a week old", (2026, 9, 12)),
+        ];
+        let station = |name: &str, members: &[&str], served: Option<i64>| StationReading {
+            name: name.to_string(),
+            members: members.iter().map(|m| (*m).to_string()).collect(),
+            served,
+            ..Default::default()
+        };
+        let stations = vec![
+            station("draining", &["p1", "p2"], Some(3)),
+            station("blind", &["p2", "p3"], None),
+            station("not-draining", &["p4"], Some(0)),
+        ];
+        let status = empty_status();
+        let mut inputs = region_inputs(&status, &[], &[], &[], Some(&inbound), Some(&stations));
+        // The run packets read, so the rail into the shop floor is read.
+        inputs.agent_runs = Some(&[]);
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        assert_eq!(
+            classes(only(&out, "receiving", "marshalling")),
+            (0, 1, 0, 1),
+            "fresh waits on a person; a week old is past the 3-day band"
+        );
+        assert_eq!(
+            classes(only(&out, "marshalling", "shop-floor")),
+            (0, 1, 2, 1),
+            "p1 on a person; p2 and p3 at a blind station; p4 stuck"
+        );
+        assert_conserved(&out, &inputs);
+    }
+
+    /// THE DELIVERY RAILS. A branch in line for a bay and a parked car
+    /// waiting for a train are in line for a machine; a held green and a
+    /// car held on the dock are brakes someone here set — stuck, as the
+    /// stuck block counts them; a stranded green waits on the rule the
+    /// rail's own judge reads it against.
+    #[test]
+    fn the_delivery_rails_class_each_packet_by_what_it_waits_on() {
+        let held = {
+            let md = json!({
+                "branch": "fix/a-held-green",
+                "outcome": "passed",
+                "hold": "waiting on David's call",
+                "opened_at": "2026-09-19T08:00:00Z",
+            });
+            let g = job("gate-run", "a held green", JobStatus::Closed, md);
+            let mut s = step(&g, "record-verdict", StepStatus::Completed, None);
+            s.metadata = json!({ "verdict": "green" });
+            (g, vec![s])
+        };
+        let runs = vec![
+            held,
+            green_run("fix/a-stranded-green", Some("2026-09-19T08:00:00Z")),
+        ];
+        let parked = vec![
+            (
+                job("ship-a-change", "car a", JobStatus::Open, json!({})),
+                Vec::new(),
+            ),
+            (
+                job("ship-a-change", "car b", JobStatus::Open, json!({})),
+                Vec::new(),
+            ),
+        ];
+        let yard = YardInputs {
+            now: Some(t(NOW)),
+            gate_runs: &runs,
+            dock_cars: &parked,
+            ..Default::default()
+        };
+        let mut status = build_status_for(yard, Reading::Read, BoardingReadings::default());
+        assert_eq!((status.held.len(), status.stranded.len()), (1, 1));
+        assert_eq!(status.dock.len(), 2);
+        // One of the two parked cars held on the dock by hand.
+        let braked = status.dock.remove(1);
+        status.held_cars.push(crate::yard::HeldCar {
+            car: braked,
+            reason: "held for the restart".to_string(),
+        });
+        status.gates.queued.push(crate::yard::QueuedGate {
+            branch: "fix/in-line".to_string(),
+            packet_id: "g-1".to_string(),
+            queued_at: "2026-09-19T11:50:00Z".to_string(),
+            position: 1,
+            waiting_seconds: None,
+            estimated_wait_seconds: None,
+            train: None,
+        });
+        let inputs = region_inputs(&status, &[], &[], &[], Some(&[]), Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        assert_eq!(classes(only(&out, "shop-floor", "gates")), (1, 0, 0, 0));
+        assert_eq!(
+            classes(only(&out, "gates", "dock")),
+            (1, 0, 0, 1),
+            "the stranded green on the rule; the held green stuck"
+        );
+        assert_eq!(
+            classes(only(&out, "dock", "track")),
+            (1, 0, 0, 1),
+            "the parked car on a train; the braked car stuck"
+        );
+        assert_conserved(&out, &inputs);
+    }
+
+    /// THE SHED and THE MIRROR. A car whose probe is recorded and has not
+    /// run waits on the probe runner; one waiting on an event waits on
+    /// the world; one a day old with nothing that can prove it is stuck.
+    /// A pull request GitHub was never asked about is unknown; one open
+    /// on the mirror waits on the person whose merge it is.
+    #[test]
+    fn the_shed_and_the_mirror_class_what_stands_at_them() {
+        let awaiting = |branch: &str, md: Value| {
+            let j = job("ship-a-change", branch, JobStatus::Open, md);
+            let s = vec![
+                step(
+                    &j,
+                    "gate",
+                    StepStatus::Completed,
+                    Some("2026-09-18T06:00:00Z"),
+                ),
+                step(&j, "proven", StepStatus::Ready, None),
+            ];
+            (j, s)
+        };
+        let cars = vec![
+            awaiting(
+                "fix/probe-pending",
+                json!({ "proof_probe": "true", "opened_at": "2026-09-19T10:00:00Z" }),
+            ),
+            awaiting(
+                "fix/on-an-event",
+                json!({ "proof_event": "the next red train", "opened_at": "2026-09-19T10:00:00Z" }),
+            ),
+            awaiting(
+                "fix/forgotten",
+                json!({ "opened_at": "2026-09-18T06:00:00Z" }),
+            ),
+        ];
+        let publish = vec![
+            publish_packet(
+                "https://mirror/pull/250",
+                "snap-250",
+                "mirror-a",
+                "2026-09-19T09:00:00Z",
+                ("success", "0", "0"),
+            ),
+            {
+                let (mut j, s) = publish_packet(
+                    "https://mirror/pull/251",
+                    "snap-251",
+                    "snap-250",
+                    "2026-09-19T10:00:00Z",
+                    ("success", "0", "0"),
+                );
+                j.metadata = json!({ "pr_state": {
+                    "pr_url": "https://mirror/pull/251", "state": "open", "merged": false,
+                    "read_at": "2026-09-19T11:00:00Z",
+                }});
+                (j, s)
+            },
+        ];
+        let status = empty_status();
+        let mut inputs = region_inputs(&status, &cars, &[], &[], Some(&[]), Some(&[]));
+        inputs.publish_packets = Some(&publish);
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        assert_eq!(classes(only(&out, "arrivals", "shed")), (1, 1, 0, 1));
+        assert_eq!(
+            classes(only(&out, "arrivals", "publish")),
+            (0, 1, 1, 0),
+            "#250 never read from GitHub; #251 read open"
+        );
+        assert_conserved(&out, &inputs);
     }
 
     #[test]

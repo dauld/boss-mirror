@@ -343,10 +343,37 @@ pub const PUBLISH_HELD: Band = band(
     0,
 );
 
+// --- every rail ---------------------------------------------------------
+
+/// How many of a rail's own mean gaps it may stay quiet before it is
+/// judged STILL — `flowing: false` on `GET /api/yard/borders` (design
+/// 31bade8f, "The IT map moves", decision 8; car M1 on backlog
+/// d220022f). The mean gap is the rail's measured window over its
+/// crossings in it, so a rail crossed 24 times a day is still after four
+/// quiet hours and one crossed 500 times after about eleven minutes. Four
+/// is the design's number: at the mean rate, evenly spaced traffic is
+/// never quiet past one gap, and bursty traffic seldom past two or three.
+pub const STILL_AFTER_GAPS: i64 = 4;
+
+/// A rail quiet past [`STILL_AFTER_GAPS`] of its own mean gap: nothing
+/// is crossing where work has been crossing. It decides no region's
+/// state and it does not change the border's own `state` either — the
+/// design draws stillness as its own signal beside the state (a rail
+/// stops moving), and folding it into the state word would repaint the
+/// map on a number the review never asked to judge. So `state` here is
+/// the reading it would be if a surface judged one: worth a look.
+pub const BORDER_STILL: Band = band(
+    "border-still",
+    "*",
+    Attention,
+    "silence past 4× the rail's own mean gap",
+    0,
+);
+
 /// EVERY BAND, once. A region names a band by referring to its constant,
 /// so an undeclared band cannot be named at all; this list is what the
 /// uniqueness and coverage pins read.
-pub const BANDS: [Band; 25] = [
+pub const BANDS: [Band; 26] = [
     UNREAD,
     MACHINE_FAILED,
     DOCK_CANNOT_BOARD,
@@ -372,6 +399,7 @@ pub const BANDS: [Band; 25] = [
     PUBLISH_UNJUDGED_RED,
     PUBLISH_PR_STALLED,
     PUBLISH_HELD,
+    BORDER_STILL,
 ];
 
 /// ONE CONDITION a region found true on this read.
@@ -578,6 +606,10 @@ mod tests {
             (SHED_THEIRS_STALE, format!("{PROOF_STALE_HOURS}h")),
             (PUBLISH_PR_STALLED, format!("{STALLED_PUBLISH_HOURS}h")),
             (PUBLISH_HELD, format!("{STALLED_PUBLISH_HOURS}h")),
+            (
+                BORDER_STILL,
+                format!("{STILL_AFTER_GAPS}× the rail's own mean gap"),
+            ),
         ] {
             assert!(
                 b.band.contains(&says),

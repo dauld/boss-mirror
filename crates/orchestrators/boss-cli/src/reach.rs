@@ -234,11 +234,36 @@ mod tests {
         assert_eq!(exit_code(&outcome), 0);
     }
 
+    /// A loopback port that is shut and STAYS shut for as long as the
+    /// returned socket lives: bound, never listening. A connect to it is
+    /// refused by the kernel exactly as a shut port's is, and nothing
+    /// else can take it in the meantime — a bind(0) or a connect's
+    /// source port never picks a port an explicit bind holds.
+    ///
+    /// The test used to bind a listener, read its port and DROP it, and
+    /// under a loaded gate the freed port was handed straight back out —
+    /// to another test's listener, or to the probe's own connect as its
+    /// source port, which connects to itself — so it read `Open { ms: 0 }`
+    /// (backlog 73c30639, 2026-09-24). A listener bound to the freed port
+    /// between the drop and the probe reproduced that line every time.
+    /// The same hold fixed the same race in `gate.rs` (backlog 1fe351e8).
+    fn a_port_nothing_can_open() -> (tokio::net::TcpSocket, SocketAddr) {
+        let socket = tokio::net::TcpSocket::new_v4().expect("a TCP socket");
+        socket
+            .bind("127.0.0.1:0".parse().expect("a loopback address"))
+            .expect("bind a loopback port");
+        let target = socket.local_addr().expect("its address");
+        (socket, target)
+    }
+
     #[test]
     fn a_shut_port_is_closed_with_the_kernels_reason_and_exits_one() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
-        let target = listener.local_addr().expect("its address");
-        drop(listener);
+        let (_held, target) = a_port_nothing_can_open();
+        assert!(
+            TcpListener::bind(target).is_err(),
+            "the shut port must not be takeable while the test holds it, or another \
+             test's listener can answer the probe"
+        );
         let outcome = probe(target);
         match &outcome {
             Outcome::Closed { reason } => assert_eq!(reason, "Connection refused"),

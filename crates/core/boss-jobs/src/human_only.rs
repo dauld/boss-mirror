@@ -1,5 +1,8 @@
 //! The human-only declaration on a step, and the one question it asks
-//! at assignment time: is the assignee a person?
+//! at assignment and claim time — is the assignee a person? — and again
+//! at completion: is the actor signing the flip a person? (The second
+//! was missing until backlog adac8fa4: an unheld human-only step could
+//! be completed by an agent through the step PUT.)
 //!
 //! WHY (c17871fe, David 2026-09-08: "A human decision must be
 //! unambiguous on the step: who, when, how"). Measured that day: all
@@ -156,6 +159,69 @@ pub fn refusal_body(
     })
 }
 
+/// The sentence a COMPLETION refusal carries as its `rule` (backlog
+/// adac8fa4). The assignment rule above guards who may HOLD the step;
+/// this one guards the act itself, because an unheld step could be
+/// flipped by anyone the policy lets write steps — measured on the
+/// in-memory API 2026-09-24: an agent's `{"status":"completed"}` on an
+/// unassigned human-only step answered 204 and stamped the agent as
+/// `completed_by`.
+pub const COMPLETION_RULE: &str = "metadata.human_only = true: only an active employee may \
+                                   complete or skip this step; automations and agent sessions \
+                                   are refused, whoever holds it";
+
+/// The completion refusal: names the step, the actor that signed the
+/// write, which test it failed, and the rule.
+pub fn completion_refusal_body(
+    step_id: &str,
+    step_title: &str,
+    authority_role: Option<&str>,
+    actor_id: &str,
+    why: &NotAPerson,
+) -> Value {
+    serde_json::json!({
+        "error": "human-only step refuses completion by a non-human actor",
+        "step_id": step_id,
+        "step_title": step_title,
+        "actor_id": actor_id,
+        "why": why.to_string(),
+        "rule": COMPLETION_RULE,
+        "authority_role": authority_role,
+        "hint": "a person completes this step: a holder of its authority_role, signed in \
+                 as themselves — the declaration is the protocol's, so an agent that \
+                 finished the work leaves the flip to them",
+    })
+}
+
+/// Whether a write would change the declaration the STORED step makes.
+/// `next` is the metadata as it would stand after the write (a merge
+/// door `null` already applied). A stored row that says nothing has
+/// nothing to protect, and an unchanged re-send is not a change.
+///
+/// WHY THE DECLARATION IS FROZEN ON THE STEP. The completion check reads
+/// the stored row, and the row is the only thing a step write can
+/// reach — so if a write could set `human_only` to `false` or delete it
+/// through the merge door, the next status PUT would sail past the
+/// check. Which acts need a person is the protocol's decision, made in
+/// the Workflow row and changed by publishing a new version, never by a
+/// write to one in-flight step.
+pub fn declaration_changed(stored: &Value, next: &Value) -> bool {
+    stored.get(KEY).is_some() && stored.get(KEY) != next.get(KEY)
+}
+
+/// The refusal for a write that would change the declaration.
+pub fn change_refusal_body(step_id: &str, step_title: &str, stored: &Value) -> Value {
+    serde_json::json!({
+        "error": "human_only is the protocol's declaration and a step write cannot change it",
+        "step_id": step_id,
+        "step_title": step_title,
+        "stored": stored.get(KEY),
+        "rule": COMPLETION_RULE,
+        "hint": "send the stored value back unchanged; which steps need a person is \
+                 changed by publishing a new workflow version",
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +338,47 @@ mod tests {
             person_check(Some(&BrokenRoster), "automation:x").await,
             Err(NotAPerson::MachineShaped)
         );
+    }
+
+    #[test]
+    fn a_change_is_only_a_change_to_a_declaration_the_row_already_makes() {
+        let stored = json!({ "human_only": "true", "authority_role": "platform-admin" });
+        // Deleted (merge-door null), flipped, or respelled: all changes.
+        assert!(declaration_changed(
+            &stored,
+            &json!({ "authority_role": "platform-admin" })
+        ));
+        assert!(declaration_changed(
+            &stored,
+            &json!({ "human_only": false })
+        ));
+        assert!(declaration_changed(&stored, &json!({ "human_only": true })));
+        // Sent back as stored: not a change.
+        assert!(!declaration_changed(
+            &stored,
+            &json!({ "human_only": "true", "note": "x" })
+        ));
+        // A row that says nothing has nothing to protect.
+        assert!(!declaration_changed(
+            &json!({ "note": "x" }),
+            &json!({ "human_only": true })
+        ));
+    }
+
+    #[test]
+    fn the_completion_refusal_names_the_step_the_actor_and_the_rule() {
+        let body = completion_refusal_body(
+            "step-1",
+            "Human review of the findings",
+            Some("platform-admin"),
+            "agent-claude",
+            &NotAPerson::MachineShaped,
+        );
+        assert_eq!(body["step_id"], "step-1");
+        assert_eq!(body["actor_id"], "agent-claude");
+        assert!(body["rule"].as_str().unwrap().contains("human_only"));
+        assert!(body["rule"].as_str().unwrap().contains("complete"));
+        assert!(body["why"].as_str().unwrap().contains("machine-shaped"));
     }
 
     #[test]

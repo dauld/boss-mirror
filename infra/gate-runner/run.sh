@@ -515,6 +515,7 @@ RAW_TAIL = 200         # lines of gate.log when nothing can be parsed
 PER_CHECK = 5          # named failures per check on the receipt
 TOTAL_ENTRIES = 40     # entries on the whole receipt
 ENTRY_CHARS = 400      # characters per entry
+MESSAGE_LINES = 12     # lines of one panic message kept, before the entry's own clip
 QUOTE_LINES = 3        # raw lines quoted for a check this cannot parse
 EXCERPT_CHARS = 6000   # characters of `fails_excerpt` per failed check
 EXCERPT_TOTAL = 24000  # characters of `fails_excerpt` on the whole receipt
@@ -576,6 +577,9 @@ RE_LISTED = re.compile(r"^ {4}(\S+)$")
 # (backlog 2dc742c1, 2026-09-22). Both formats carry it.
 RE_PANIC_OLD = re.compile(r"^thread '([^']*)'(?: \(\d+\))? panicked at '(.*)', (\S+)$")
 RE_PANIC_NEW = re.compile(r"^thread '([^']*)'(?: \(\d+\))? panicked at (\S+):$")
+# Where a panic's message stops: cargo's hint, a captured backtrace, or
+# the `failures:` roll-call that follows the last block.
+RE_MESSAGE_END = re.compile(r"^(note: run with `RUST_BACKTRACE|stack backtrace:$|failures:$)")
 RE_ERROR = re.compile(r"^\s*(error(\[E\d{4}\])?|Error|ERROR)\b[: ]")
 RE_ARROW = re.compile(r"^\s*--> (\S+)")
 
@@ -635,9 +639,29 @@ def panics(body):
             continue
         m = RE_PANIC_NEW.match(line)
         if m:
-            msg = body[i + 1].strip() if i + 1 < len(body) else ""
-            out.append((block or m.group(1) or None, m.group(2), msg))
+            out.append((block or m.group(1) or None, m.group(2), message_after(body, i)))
     return out
+
+
+def message_after(body, i):
+    """A current-format panic's message: EVERY line after the header up
+    to cargo's own `note:` (or a backtrace, the next block, the roll-call),
+    not the first one. Gate-run 2510ac65 (2026-09-24, backlog b53dca8c)
+    recorded an assertion's header - "... and that relaunching is safe:"
+    - and dropped the lines it introduced, which held the cause ("refused
+    every connection for 0s"); only the excerpt had them. Bounded to
+    MESSAGE_LINES, saying what it left; `clip` bounds the entry itself."""
+    lines = []
+    for nxt in body[i + 1:]:
+        if RE_MESSAGE_END.match(nxt) or RE_STDOUT.match(nxt) \
+                or RE_PANIC_OLD.match(nxt) or RE_PANIC_NEW.match(nxt):
+            break
+        if nxt.strip():
+            lines.append(nxt.strip())
+    if len(lines) > MESSAGE_LINES:
+        lines = lines[:MESSAGE_LINES] + ["(+%d more message line(s); the excerpt has them)" % (
+            len(lines) - MESSAGE_LINES)]
+    return " ".join(lines)
 
 
 # Playwright's own verdict lines, in the order a reader acts on them:

@@ -37,8 +37,14 @@ async function installReads(page: Page): Promise<void> {
   await installSmokeMocks(page);
   await page.route(/\/api\/jobs\?department=support&limit=5000$/, (r) =>
     json(r, { data: [], total: 0, limit: 5000, offset: 0 }));
-  await page.route(/\/api\/people\/accounts\?limit=1000$/, (r) =>
-    json(r, { data: ACCOUNTS, total: ACCOUNTS.length, limit: 1000, offset: 0 }));
+  // The accounts answer LATE on purpose (the sweep a9c76cf7 asked for):
+  // the tab and its Tier header paint before the rows do, and the rows
+  // used to be snapshotted straight after the tab click — so a read of
+  // an undrawn table fails every run here, not one run in a busy hour.
+  await page.route(/\/api\/people\/accounts\?limit=1000$/, async (r) => {
+    await new Promise((ok) => setTimeout(ok, 750));
+    await json(r, { data: ACCOUNTS, total: ACCOUNTS.length, limit: 1000, offset: 0 });
+  });
   await page.route(/\/api\/assets\?limit=1000$/, (r) =>
     json(r, { data: [], total: 0, limit: 1000, offset: 0 }));
 }
@@ -58,6 +64,8 @@ test('an account with no tier reads "untiered", not an empty cell', async ({ pag
   await mountPage(page, '/ux/support');
   await page.getByRole('tab', { name: 'Account Health' }).click();
 
+  // Polled until every account is drawn, then read once for the rest.
+  await expect.poll(() => accountTierRows(page).then((r) => r.length)).toBe(ACCOUNTS.length);
   const rows = await accountTierRows(page);
   expect(rows).toContainEqual(['Newly Opened Bar', 'untiered']);
   expect(rows).toContainEqual(['Gilded Taproom', 'Gold']);
@@ -73,9 +81,9 @@ test('the Tier sort places untiered accounts first ascending and last descending
   const tierHeader = page.getByRole('columnheader', { name: /Tier/ });
   await tierHeader.click();
   await expect(tierHeader).toContainText('↑');
-  expect((await accountTierRows(page)).map(([, t]) => t)).toEqual(['untiered', 'Gold', 'Platinum', 'Silver']);
+  await expect.poll(() => accountTierRows(page).then((r) => r.map(([, t]) => t))).toEqual(['untiered', 'Gold', 'Platinum', 'Silver']);
 
   await tierHeader.click();
   await expect(tierHeader).toContainText('↓');
-  expect((await accountTierRows(page)).map(([, t]) => t)).toEqual(['Silver', 'Platinum', 'Gold', 'untiered']);
+  await expect.poll(() => accountTierRows(page).then((r) => r.map(([, t]) => t))).toEqual(['Silver', 'Platinum', 'Gold', 'untiered']);
 });

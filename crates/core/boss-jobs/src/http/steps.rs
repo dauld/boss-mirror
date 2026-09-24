@@ -574,15 +574,33 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // authority — the sign-off gate reads `old.metadata` for its
     // decision, and this keeps the stored row consistent with it. The
     // merge door strips the key for the same reason. (Its OMISSION is
-    // the drop refusal above; `human_only` and `agent_run`, which were
-    // carried past omission beside it until e39a9d2a, need nothing
-    // here now — a body that omits either is refused, and both remain
-    // writable through the merge door, as they always were.)
+    // the drop refusal above; `agent_run`, which was carried past
+    // omission beside it until e39a9d2a, needs nothing here now — a
+    // body that omits it is refused, and it remains writable through
+    // the merge door. `human_only` is not writable anywhere once the
+    // row carries it: the change refusal below, adac8fa4.)
     if let Some(old_obj) = old.metadata.as_object()
         && let Some(auth) = old_obj.get("authority_role").cloned()
         && let Some(obj) = step.metadata.as_object_mut()
     {
         obj.insert("authority_role".into(), auth);
+    }
+
+    // THE DECLARATION IS FROZEN ON THE STEP (adac8fa4). The completion
+    // check below reads the STORED row, so a body that set `human_only`
+    // to false — in the completing PUT itself, or in an earlier one —
+    // would otherwise walk round it. Refused, not silently kept like
+    // `authority_role` above, so the caller learns the rule at the call.
+    if crate::human_only::declaration_changed(&old.metadata, &step.metadata) && !is_terminal {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(crate::human_only::change_refusal_body(
+                &step_id.to_string(),
+                &old.title,
+                &old.metadata,
+            )),
+        )
+            .into_response();
     }
 
     // A HUMAN-ONLY STEP REFUSES A NON-HUMAN ASSIGNEE (c17871fe). Checked
@@ -700,6 +718,39 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // completing by another name.
     let is_leaving_open = !matches!(old.status, StepStatus::Completed | StepStatus::Skipped)
         && matches!(step.status, StepStatus::Completed | StepStatus::Skipped);
+    // A HUMAN-ONLY STEP IS COMPLETED BY A PERSON (backlog adac8fa4). The
+    // assignment and claim checks above guard who may HOLD the step; an
+    // unheld one could still be flipped by any caller the policy lets
+    // write steps, and on the in-memory API an agent's bare
+    // `{"status":"completed"}` answered 204 and stamped the agent as
+    // `completed_by`. Every completion path in the estate — the UI, the
+    // merge door followed by this PUT, `boss step complete`, a
+    // dispatcher handler — lands here, so this is the one boundary.
+    //
+    // Judged on the actor that SIGNED the write, not on the one the
+    // event will name: an automation's body `completed_by` proxy (the
+    // sim's attribution, below) names a person who did not make this
+    // call, and the declaration's whole claim is that a person did.
+    // Read from `old.metadata`, the protocol's materialised row, never
+    // from the body (the change refusal above keeps them equal). The
+    // same scope as the assurance guard: a skip satisfies `steps.x.done`
+    // exactly as a completion does.
+    if is_leaving_open
+        && crate::human_only::declared(&old.metadata)
+        && let Err(why) = crate::human_only::person_check(state.roster.as_deref(), &user.id).await
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(crate::human_only::completion_refusal_body(
+                &step_id.to_string(),
+                &old.title,
+                old.metadata.get("authority_role").and_then(|v| v.as_str()),
+                &user.id,
+                &why,
+            )),
+        )
+            .into_response();
+    }
     if is_leaving_open {
         let floor = state
             .step_registry
@@ -1538,6 +1589,20 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
         }
         serde_json::Value::Object(md)
     };
+    // `human_only` is the protocol's, same rule as the PUT (adac8fa4):
+    // deleting it here with `null`, or flipping it, and then PUTting the
+    // status alone was the second road round the completion check.
+    if crate::human_only::declaration_changed(&old.metadata, &merged_view) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(crate::human_only::change_refusal_body(
+                &step_id.to_string(),
+                &old.title,
+                &old.metadata,
+            )),
+        )
+            .into_response();
+    }
     let refusals =
         crate::step_registry::StepRegistry::standing_refusals(&old.fields, &merged_view, |k| {
             patch.contains_key(k)

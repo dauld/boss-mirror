@@ -12,7 +12,10 @@
 //! active person, with a 4xx naming the step, the assignee and the
 //! rule; a step without the declaration is untouched; a packet filed by
 //! automation leaves such a step unassigned, carrying its
-//! `authority_role`, so it is claimable by role in My Day.
+//! `authority_role`, so it is claimable by role in My Day. And since
+//! backlog adac8fa4, the act itself: completing or skipping such a step
+//! is refused 403 unless a person signs the write, and no step write may
+//! change the declaration on the way there.
 //!
 //! HOW: an `answer-question` completion records `accepted_as_proposed`
 //! by comparing the answer to the packet's `proposed` text server-side.
@@ -473,4 +476,259 @@ async fn an_answer_question_completion_records_whether_the_proposal_was_accepted
         "{}",
         stored.metadata
     );
+}
+
+// ── COMPLETION (backlog adac8fa4) ──────────────────────────────────
+//
+// The checks above run at assignment and claim. A human-only step that
+// nobody holds could still be FLIPPED by an agent through the step PUT,
+// which is the act the declaration reserves — found by the flights car-1
+// builder from the code on 2026-09-24 and measured here first: before
+// the fix each test below completed the step and answered 204.
+
+async fn patch_metadata(
+    app: &Router,
+    step: &Step,
+    as_user: &str,
+    patch: serde_json::Value,
+) -> (StatusCode, serde_json::Value, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!(
+                    "/api/jobs/{}/steps/{}/metadata",
+                    step.job_id, step.id
+                ))
+                .header("content-type", "application/json")
+                .header("x-boss-user", as_user)
+                .body(Body::from(patch.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    read(resp).await
+}
+
+fn assert_completion_refused(
+    status: StatusCode,
+    body: &serde_json::Value,
+    text: &str,
+    step: &Step,
+    actor: &str,
+) {
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a human-only step must refuse completion by {actor}: {text}"
+    );
+    assert_eq!(body["step_id"], step.id.to_string(), "{text}");
+    assert_eq!(body["actor_id"], actor, "{text}");
+    assert!(
+        body["rule"]
+            .as_str()
+            .is_some_and(|r| r.contains("human_only") && r.contains("complete")),
+        "the refusal names the completion rule: {text}"
+    );
+}
+
+async fn assert_still_open(jobs: &InMemoryJobs, step: &Step) {
+    let stored = jobs.get_step(&step.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.status,
+        boss_core::job::StepStatus::Ready,
+        "a refused completion writes nothing"
+    );
+    assert_eq!(stored.completed_by, None);
+    assert!(
+        boss_jobs::human_only::declared(&stored.metadata),
+        "the declaration survives: {}",
+        stored.metadata
+    );
+}
+
+/// THE HOLE. An unassigned human-only step, and an agent flips it —
+/// in each spelling an agent reaches the API with: the session login
+/// (human-shaped, not on the roster), its resolved registered-agent id,
+/// and an `<mode>:<model>` session id.
+#[tokio::test]
+async fn an_agent_cannot_complete_an_unassigned_human_only_step() {
+    let (app, jobs) = app();
+    let job = file(&app, &jobs, "rotation", serde_json::json!({})).await;
+    let kill = step_by_slug(&jobs, &job, "kill").await;
+    assert_eq!(
+        kill.assignee_id, None,
+        "the measured shape: nobody holds it"
+    );
+
+    for agent in [AGENT, "agent-claude", "claude:opus-5"] {
+        let (status, body, text) = put_step(
+            &app,
+            &kill,
+            &user(agent, "platform-admin"),
+            serde_json::json!({ "status": "completed" }),
+        )
+        .await;
+        assert_completion_refused(status, &body, &text, &kill, agent);
+        assert_still_open(&jobs, &kill).await;
+    }
+}
+
+/// Skipping is completing by another name — a dependent's `ready_when`
+/// reads `steps.kill.done`, which a skip satisfies — so it is refused
+/// the same way.
+#[tokio::test]
+async fn an_agent_cannot_skip_a_human_only_step() {
+    let (app, jobs) = app();
+    let job = file(&app, &jobs, "rotation", serde_json::json!({})).await;
+    let kill = step_by_slug(&jobs, &job, "kill").await;
+
+    let (status, body, text) = put_step(
+        &app,
+        &kill,
+        &user(AGENT, "platform-admin"),
+        serde_json::json!({ "status": "skipped" }),
+    )
+    .await;
+    assert_completion_refused(status, &body, &text, &kill, AGENT);
+    assert_still_open(&jobs, &kill).await;
+}
+
+/// An automation is not a person either, and naming one in the body's
+/// `completed_by` (the sim's proxy attribution) does not make it one:
+/// the check reads who SIGNED the write, because a human-only step's
+/// whole claim is that a person did the act.
+#[tokio::test]
+async fn an_automation_cannot_complete_a_human_only_step_by_naming_a_person() {
+    let (app, jobs) = app();
+    let job = file(&app, &jobs, "rotation", serde_json::json!({})).await;
+    let kill = step_by_slug(&jobs, &job, "kill").await;
+
+    let (status, body, text) = put_step(
+        &app,
+        &kill,
+        &dispatcher(),
+        serde_json::json!({ "status": "completed", "completed_by": DAVID }),
+    )
+    .await;
+    assert_completion_refused(status, &body, &text, &kill, "system:dispatcher");
+    assert_still_open(&jobs, &kill).await;
+}
+
+/// The declaration cannot be lifted on the way to completion: not in
+/// the completing PUT's own body, and not through the merge door first
+/// (a key sent as `null` is deleted there). The rule is the protocol's
+/// — a new workflow version changes it, never a step write.
+#[tokio::test]
+async fn the_declaration_cannot_be_lifted_on_the_way_to_completion() {
+    let (app, jobs) = app();
+    let job = file(&app, &jobs, "rotation", serde_json::json!({})).await;
+    let kill = step_by_slug(&jobs, &job, "kill").await;
+    let agent = user(AGENT, "platform-admin");
+
+    // In the completing PUT itself.
+    let (status, body, text) = put_step(
+        &app,
+        &kill,
+        &agent,
+        serde_json::json!({
+            "status": "completed",
+            "metadata": over(&kill, serde_json::json!({ "human_only": false })),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+    assert_eq!(body["step_id"], kill.id.to_string(), "{text}");
+    assert_still_open(&jobs, &kill).await;
+
+    // In a PUT that does not complete, to set up a later flip.
+    let (status, _, text) = put_step(
+        &app,
+        &kill,
+        &agent,
+        serde_json::json!({
+            "metadata": over(&kill, serde_json::json!({ "human_only": "false" })),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+    assert_still_open(&jobs, &kill).await;
+
+    // Through the merge door, deleted or flipped.
+    for patch in [
+        serde_json::json!({ "human_only": null }),
+        serde_json::json!({ "human_only": false }),
+    ] {
+        let (status, body, text) = patch_metadata(&app, &kill, &agent, patch).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+        assert_eq!(body["step_id"], kill.id.to_string(), "{text}");
+        assert_still_open(&jobs, &kill).await;
+    }
+
+    // ...so the status PUT that would follow is still refused.
+    let (status, body, text) = put_step(
+        &app,
+        &kill,
+        &agent,
+        serde_json::json!({ "status": "completed" }),
+    )
+    .await;
+    assert_completion_refused(status, &body, &text, &kill, AGENT);
+
+    // An unchanged re-send is not a change: the merge door still takes
+    // other keys beside the declaration as it stands.
+    let (status, _, text) = patch_metadata(
+        &app,
+        &kill,
+        &agent,
+        serde_json::json!({ "human_only": "true", "note": "looked at it" }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {text}");
+}
+
+/// The person the step is reserved for completes it, and the record
+/// names them.
+#[tokio::test]
+async fn an_employee_completes_a_human_only_step() {
+    let (app, jobs) = app();
+    let job = file(&app, &jobs, "rotation", serde_json::json!({})).await;
+    let kill = step_by_slug(&jobs, &job, "kill").await;
+
+    let (status, _, text) = put_step(
+        &app,
+        &kill,
+        &user(DAVID, "platform-admin"),
+        serde_json::json!({ "status": "completed" }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {text}");
+    let stored = jobs.get_step(&kill.id).await.unwrap().unwrap();
+    assert_eq!(stored.status, boss_core::job::StepStatus::Completed);
+    assert_eq!(
+        stored.completed_by,
+        Some(boss_core::actor::ActorId::Human(DAVID.into()))
+    );
+}
+
+/// Automation that completes steps the protocol did NOT reserve is
+/// untouched — the dispatcher's own flips, and an agent's.
+#[tokio::test]
+async fn automation_and_agents_still_complete_a_step_that_is_not_human_only() {
+    for completer in [dispatcher(), user(AGENT, "platform-admin")] {
+        let (app, jobs) = app();
+        let job = file(&app, &jobs, "rotation", serde_json::json!({})).await;
+        let install = step_by_slug(&jobs, &job, "install").await;
+        let (status, _, text) = put_step(
+            &app,
+            &install,
+            &completer,
+            serde_json::json!({ "status": "completed" }),
+        )
+        .await;
+        assert!(status.is_success(), "{completer}: {status} {text}");
+        let stored = jobs.get_step(&install.id).await.unwrap().unwrap();
+        assert_eq!(stored.status, boss_core::job::StepStatus::Completed);
+    }
 }

@@ -58,7 +58,9 @@ test.describe('Admin new job kind — name-it entry', () => {
       page.waitForURL(new RegExp(`/it/registry/authoring/${JOB_ID}`), { timeout: 15_000 }),
       create.click(),
     ]);
-    // Landed on the workspace for the new design Job.
-    await expect(page.locator('h1').first()).toContainText(/Authoring/i, { timeout: 10_000 });
+    // Landed on the workspace for the new design Job. Its h1 paints only
+    // once the design Job's read answers, so it waits under the suite's
+    // stated budget, not a tighter cap of its own (backlog e614c5de).
+    await expect(page.locator('h1').first()).toContainText(/Authoring/i);
   });
 });

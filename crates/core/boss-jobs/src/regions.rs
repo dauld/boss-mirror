@@ -3912,13 +3912,7 @@ fn third_stuck(third: &str, parts: &[&StuckPart]) -> ThirdStuck {
 /// a day unproven (delivery). Each part is its region's own predicate,
 /// so every number clicks back to the card that owns it.
 pub fn stuck(inputs: &RegionInputs<'_>) -> Vec<ThirdStuck> {
-    let parts = [
-        receiving_stuck(inputs),
-        stations_stuck(inputs),
-        garage_stuck(inputs),
-        dock_stuck(inputs),
-        shed_stuck(inputs),
-    ];
+    let parts = stuck_parts(inputs);
     THIRDS
         .iter()
         .map(|(third, owned)| {
@@ -3926,6 +3920,29 @@ pub fn stuck(inputs: &RegionInputs<'_>) -> Vec<ThirdStuck> {
                 parts.iter().filter(|p| owned.contains(&p.region)).collect();
             third_stuck(third, &mine)
         })
+        .collect()
+}
+
+/// The five populations [`stuck`] is the union of, each its region's own.
+fn stuck_parts(inputs: &RegionInputs<'_>) -> [StuckPart; 5] {
+    [
+        receiving_stuck(inputs),
+        stations_stuck(inputs),
+        garage_stuck(inputs),
+        dock_stuck(inputs),
+        shed_stuck(inputs),
+    ]
+}
+
+/// EVERY PACKET [`stuck`] COUNTS, by id, before it is folded into
+/// thirds. The IT map's borders class what stands at each rail by it
+/// (design 31bade8f decision 8, car M1 on backlog d220022f), so a rail's
+/// red sediment and the HUD's stuck block are one predicate and cannot
+/// disagree.
+pub(crate) fn stuck_ids(inputs: &RegionInputs<'_>) -> std::collections::BTreeSet<String> {
+    stuck_parts(inputs)
+        .into_iter()
+        .flat_map(|p| p.stuck.into_iter().map(|(id, _)| id))
         .collect()
 }
 

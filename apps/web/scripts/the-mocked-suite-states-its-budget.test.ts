@@ -37,6 +37,8 @@
 // the same reason that one lives here: it is the first web phase with
 // node_modules.
 import { expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import config from '../playwright.mocked.config';
 
@@ -82,4 +84,30 @@ test('the per-test budget leaves room for the assertions inside it', () => {
       + `(${perExpect} ms) — otherwise the test dies before its second `
       + 'assertion can report what it was waiting for',
   ).toBeGreaterThan(perExpect * 2);
+});
+
+test('the shared mount waits under the stated budget, not a number of its own', () => {
+  // Every mocked spec mounts through mountPage, so a cap it writes for
+  // itself overrides the stated budget for the whole suite. It wrote
+  // 10 000 ms for the shell and the h1 while the config stated 15 000,
+  // and on 2026-09-24 the workflow authoring workspace — whose h1 paints
+  // only once its first read answers — missed that cap under gate load
+  // on a car that did not touch it (gate 2ab44d1d, backlog e614c5de).
+  // Forced there by holding the design Job's read back 11 s: red under
+  // the 10 000 ms cap with the gate's exact "element(s) not found", green
+  // under the stated budget. Holding a read back 11 s on every run is too
+  // dear to keep, so this holds the cause instead.
+  const helpers = readFileSync(join(import.meta.dir, '../tests/mocked/_helpers.ts'), 'utf8');
+  const at = helpers.indexOf('export async function mountPage');
+  expect(at, 'tests/mocked/_helpers.ts has no mountPage to hold').toBeGreaterThanOrEqual(0);
+  // To the function's closing brace, which is the first one in column 0.
+  const end = helpers.indexOf('\n}\n', at);
+  const mount = helpers.slice(at, end < 0 ? undefined : end);
+  const caps = mount.match(/timeout:\s*[\d_]+/g) ?? [];
+  expect(
+    caps,
+    'mountPage carries a timeout of its own — it runs under '
+      + `playwright.mocked.config.ts's stated expect budget (${config.expect?.timeout} ms), `
+      + 'and a tighter cap here is a tighter cap for every spec',
+  ).toEqual([]);
 });

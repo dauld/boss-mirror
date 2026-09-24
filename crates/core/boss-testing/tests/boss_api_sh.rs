@@ -978,7 +978,10 @@ fn through_a_symlink_the_door_finds_the_lib_beside_its_real_file() {
 /// Replace the fixture's curl with one that refuses its first
 /// `STUB_REFUSALS` calls the way real curl does under `-sS -w
 /// '\n%{http_code}'` (its message on stderr, `000` on stdout, exit
-/// `STUB_RC`, default 7), then answers as the plain stub does. Every
+/// `STUB_RC`, default 7), then answers as the plain stub does. With
+/// `STUB_OUTLAST_A_SECOND` set, each refusal first takes 1.1 s of real
+/// time, through the system's own `sleep` (`command -p`, so not the
+/// recording one below). Every
 /// call is counted in `curl-calls.txt`. And a `sleep` that records the
 /// wait it was asked for in `sleeps.txt` and returns at once, so a test
 /// reads the backoff without spending it.
@@ -992,9 +995,8 @@ fn install_rolling_stubs(f: &Fixture) -> (PathBuf, PathBuf) {
              echo call >> '{calls}'\n\
              n=$(wc -l < '{calls}')\n\
              if [ \"$n\" -le \"${{STUB_REFUSALS:-0}}\" ]; then\n\
-                 if [ -n \"${{STUB_CROSS_A_SECOND:-}}\" ]; then\n\
-                     t=$(printf '%(%s)T' -1)\n\
-                     while [ \"$(printf '%(%s)T' -1)\" = \"$t\" ]; do :; done\n\
+                 if [ -n \"${{STUB_OUTLAST_A_SECOND:-}}\" ]; then\n\
+                     command -p sleep 1.1\n\
                  fi\n\
                  echo 'curl: (7) Failed to connect to sor.test port 7900: No route to host' >&2\n\
                  printf '\\n000'\n\
@@ -1125,7 +1127,7 @@ fn a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time() {
         &["GET", "/api/jobs"],
         &[
             ("STUB_REFUSALS", "99"),
-            ("STUB_CROSS_A_SECOND", "1"),
+            ("STUB_OUTLAST_A_SECOND", "1"),
             ("BOSS_SOR_WAIT_SECONDS", "0"),
             ("BOSS_ACTOR", "agent-x"),
         ],
@@ -1135,9 +1137,23 @@ fn a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time() {
     assert_eq!(count_lines(&sleeps), 0);
     // The elapsed time is bash's whole-second $SECONDS, so it reads the
     // wall clock's boundaries, not the call's length: a sub-second
-    // refusal names 0s or 1s. The stub spins across a boundary so the
-    // answer is always at least 1 — the reading is the real elapsed
-    // time, never a constant (the gate flaked on an exact "0s").
+    // refusal names 0s or 1s (the gate flaked on an exact "0s",
+    // 2026-09-23). So the refusal takes MORE than a second of real
+    // time, and any whole-second reading of an interval over one second
+    // is at least 1 — the reading is the real elapsed time, never a
+    // constant, and no boundary decides it.
+    //
+    // It used to spin until `printf '%(%s)T' -1` changed second, and
+    // that raced too (backlog b53dca8c, gate 2510ac65, 2026-09-24,
+    // "for 0s" again): printf reads the kernel's COARSE time(), which
+    // lags the gettimeofday() $SECONDS reads by up to a tick after
+    // every boundary. A $SECONDS read in those few milliseconds and a
+    // stub whose first printf still saw the old second ended the spin
+    // inside the SAME $SECONDS second. Forced at the boundary with the
+    // stub as a function, the old spin read "for 0s" 10 times in 10;
+    // a spin that watches a different clock from the one it is meant
+    // to advance proves nothing, so the stub now waits rather than
+    // watches.
     const NAMED: &str = "boss-api: GET /api/jobs: the jobs API refused every connection for ";
     let elapsed = r.stderr.split_once(NAMED).and_then(|(_, rest)| {
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();

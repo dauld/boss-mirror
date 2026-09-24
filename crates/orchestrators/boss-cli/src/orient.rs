@@ -1409,17 +1409,65 @@ pub(crate) fn border_lines(map: &Value) -> Vec<String> {
         };
         // A waiting count the server could not take is `?`, never 0.
         let waiting = match b.get("waiting") {
-            Some(Value::Number(n)) => format!("{n} waiting"),
+            Some(Value::Number(n)) => format!("{n} waiting{}", classes_text(b)),
             _ => "? waiting".to_string(),
         };
         let why = b.get("why").and_then(Value::as_str).unwrap_or("");
         out.push(format!(
-            "    {hop:<26} {:<24} {waiting:<12} {state:<9} {}  — {why}",
+            "    {hop:<26} {:<24} {waiting:<12} {}{state:<9} {}  — {why}",
             rate_text(b.get("rate").unwrap_or(&Value::Null)),
+            flow_text(b),
             machine_text(b.get("machine").unwrap_or(&Value::Null)),
         ));
     }
     out
+}
+
+/// ` [machine 1 · person 2 · unknown 0 · stuck 1]` — on whom what stands
+/// at the border waits, the server's `holds_by_class` (design 31bade8f
+/// decision 8), every class printed because a zero there is a reading.
+/// Nothing when the payload carries no classes: a queue the server
+/// could not read already prints `? waiting`, and an older server's
+/// payload makes no claim to print.
+fn classes_text(b: &Value) -> String {
+    let Some(c) = b.get("holds_by_class").filter(|c| c.is_object()) else {
+        return String::new();
+    };
+    let n = |k: &str| {
+        c.get(k)
+            .and_then(Value::as_u64)
+            .map_or_else(|| "?".to_string(), |n| n.to_string())
+    };
+    format!(
+        " [machine {} · person {} · unknown {} · stuck {}]",
+        n("machine"),
+        n("person"),
+        n("unknown"),
+        n("stuck")
+    )
+}
+
+/// Whether the rail flows, as the server judged it (design 31bade8f
+/// decision 8): `flowing`, `STILL since <the record's own instant> (the
+/// rule's words)`, or `flow ?` when it cannot be told. The instant is
+/// printed as the server sent it — never a duration this process
+/// computed against its own clock. An older server's payload, which
+/// carries no `flowing` key at all, prints nothing: absent is not
+/// unknown, and neither is a reading.
+fn flow_text(b: &Value) -> String {
+    match b.get("flowing") {
+        None => String::new(),
+        Some(Value::Bool(true)) => "flowing  ".to_string(),
+        Some(Value::Bool(false)) => {
+            let since = b
+                .get("held_since")
+                .and_then(Value::as_str)
+                .unwrap_or("before the read");
+            let why = b.get("flowing_why").and_then(Value::as_str).unwrap_or("");
+            format!("STILL since {since} ({why})  ")
+        }
+        Some(_) => "flow ?  ".to_string(),
+    }
 }
 
 /// `3.0/day (was 5.0/day)`, with a half nobody measured as `—`.
@@ -4075,6 +4123,78 @@ mod tests {
             !lines[2].contains(" 0 "),
             "an unknown rail must not print a zero: {}",
             lines[2]
+        );
+    }
+
+    /// MOTION'S FACTS, from the same payload the map draws (design
+    /// 31bade8f decision 8, car M1): whether each rail flows, the
+    /// record's own instant it has been held since, and on whom what
+    /// stands at it waits. The single-server-read protection of 62de32ae
+    /// — orient prints what the map draws, not a second derivation.
+    /// Unknown prints as unknown; a payload from an older server, which
+    /// carries none of the three, prints no claim about them at all.
+    #[test]
+    fn border_lines_print_whether_a_rail_flows_and_on_whom_its_queue_waits() {
+        let rail = |from: &str, extra: Value| {
+            let mut b = serde_json::json!({
+                "from": from, "to": "x",
+                "rate": { "current": 24.0, "previous": 20.0 },
+                "waiting": 3, "state": "clear", "why": "3 packets waiting to cross",
+                "machine": { "name": "the gate runner", "kind": "gate-runner",
+                             "silent_for_minutes": 0, "silent": null },
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                b[k] = v.clone();
+            }
+            b
+        };
+        let map = serde_json::json!({
+            "window_hours": 24,
+            "borders": [
+                rail("still", serde_json::json!({
+                    "flowing": false,
+                    "held_since": "2026-09-19T05:23:00+00:00",
+                    "flowing_why": "quiet 6h > silence past 4× the rail's own mean gap",
+                    "holds_by_class": { "machine": 1, "person": 1, "unknown": 0, "stuck": 1 },
+                })),
+                rail("moving", serde_json::json!({
+                    "flowing": true, "held_since": null,
+                    "flowing_why": "last crossed 5m ago",
+                    "holds_by_class": { "machine": 3, "person": 0, "unknown": 0, "stuck": 0 },
+                })),
+                rail("blind", serde_json::json!({
+                    "waiting": null,
+                    "flowing": null, "held_since": null,
+                    "flowing_why": "its crossings could not be read",
+                    "holds_by_class": null,
+                })),
+                rail("older", serde_json::json!({})),
+            ]
+        });
+        let lines = border_lines(&map);
+        assert_eq!(lines.len(), 5, "{}", lines.join("\n"));
+        let (still, moving, blind, older) = (&lines[1], &lines[2], &lines[3], &lines[4]);
+        assert!(
+            still.contains("STILL since 2026-09-19T05:23:00+00:00")
+                && still.contains("quiet 6h > silence past 4×")
+                && still.contains("3 waiting [machine 1 · person 1 · unknown 0 · stuck 1]"),
+            "{still}"
+        );
+        assert!(
+            moving.contains("flowing")
+                && !moving.contains("STILL")
+                && moving.contains("[machine 3 · person 0 · unknown 0 · stuck 0]"),
+            "{moving}"
+        );
+        // Cannot tell is said as such — never flowing, never a zero.
+        assert!(
+            blind.contains("flow ?") && blind.contains("? waiting") && !blind.contains("[machine"),
+            "{blind}"
+        );
+        // An older server's payload makes no claim either way.
+        assert!(
+            !older.contains("flow") && !older.contains("STILL") && !older.contains("[machine"),
+            "{older}"
         );
     }
 }

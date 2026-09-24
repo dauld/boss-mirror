@@ -715,6 +715,75 @@ fn a_panic_line_with_a_thread_id_is_still_attributed_to_its_test() {
     );
 }
 
+/// The shape of an assertion whose message is a HEADER line and then
+/// the output it asserted on — copied verbatim from gate-run 2510ac65
+/// (2026-09-24), whose `fails` entry ended at the header's colon.
+const CARGO_LOG_MULTI_LINE_MESSAGE: &str = "\
+::group::gate: test
+running 22 tests
+test a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time ... FAILED
+
+failures:
+
+---- a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time stdout ----
+
+thread 'a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time' (118329) panicked at crates/core/boss-testing/tests/boss_api_sh.rs:1149:5:
+the failure names the call, the elapsed time, and that relaunching is safe:
+curl: (7) Failed to connect to sor.test port 7900: No route to host
+boss-api: GET /api/jobs: the jobs API refused every connection for 0s (1 attempts, curl exit 7; waited out for up to 0s in case it was a rollout) \u{2014} nothing was sent, so nothing landed and relaunching is safe
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time
+
+test result: FAILED. 21 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+::endgroup::
+";
+
+/// A PANIC MESSAGE IS EVERY LINE UP TO THE NOTE, NOT THE FIRST ONE
+/// (backlog b53dca8c, 2026-09-24). Gate-run 2510ac65's `fails` read
+/// "panicked at …boss_api_sh.rs:1149:5: the failure names the call, the
+/// elapsed time, and that relaunching is safe:" — the assertion's own
+/// header, ending at the colon that introduces what it saw. What it saw
+/// ("refused every connection for 0s") was the second and third lines,
+/// so the verdict named the test and the line and not the cause; only
+/// the excerpt beside it did. `fails` is what the alert and the yard
+/// quote, and a verdict someone must go re-derive is not a verdict.
+#[test]
+fn a_multi_line_panic_message_keeps_its_body_in_fails() {
+    if python3_missing() {
+        eprintln!("skipping: python3 not available");
+        return;
+    }
+    let got = run_extractor(
+        &red_receipt("{\"name\":\"test\",\"result\":\"fail\"}"),
+        CARGO_LOG_MULTI_LINE_MESSAGE,
+    );
+    assert!(got.ok, "extractor failed: {}", got.stdout);
+    let fails = got.fails().expect("fails is present");
+    let entry = fails
+        .iter()
+        .find(|e| e.contains("a_roll_that_outlasts_the_window_fails_naming_the_elapsed_time"))
+        .unwrap_or_else(|| panic!("the failing test is named:\n{fails:#?}"));
+    assert!(
+        entry.contains("boss_api_sh.rs:1149:5")
+            && entry.contains("the failure names the call")
+            && entry.contains("refused every connection for 0s"),
+        "`fails` carries the message's body — the cause — not only its header:\n{entry}"
+    );
+    assert!(
+        !entry.contains("RUST_BACKTRACE") && !entry.contains("test result"),
+        "the message ends where cargo's own note begins:\n{entry}"
+    );
+    assert_eq!(
+        fails.len(),
+        1,
+        "still one entry per failing test:\n{fails:#?}"
+    );
+}
+
 /// A green receipt carries `fails_excerpt: {}` — present and empty, for
 /// the reason `fails` is `[]` and never `null`: "nothing failed" and
 /// "nobody wrote the field" must not look the same to a reader.

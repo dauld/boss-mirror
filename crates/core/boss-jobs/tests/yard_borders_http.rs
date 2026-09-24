@@ -271,8 +271,21 @@ async fn every_border_carries_its_flow_its_queue_and_its_machine() {
     let declared: Vec<(&str, &str)> = BORDERS.iter().map(|s| (s.from, s.to)).collect();
     assert_eq!(pairs, declared, "the declared set, in layout order");
     for b in v["borders"].as_array().unwrap() {
+        // Motion's facts (design 31bade8f decision 8, car M1) ride every
+        // border — as an explicit null where they cannot be told, never
+        // absent, so a reader can tell "cannot tell" from an older server.
         for key in [
-            "crossing", "rate", "waiting", "holds", "machine", "state", "why",
+            "crossing",
+            "rate",
+            "waiting",
+            "holds",
+            "holds_by_class",
+            "flowing",
+            "held_since",
+            "flowing_why",
+            "machine",
+            "state",
+            "why",
         ] {
             assert!(
                 b.get(key).is_some(),
@@ -301,6 +314,11 @@ async fn every_border_carries_its_flow_its_queue_and_its_machine() {
     // border is holding traffic, with the record's own reason on it.
     let boarding = border(&v, "dock", "track");
     assert_eq!(boarding["waiting"], 1, "{boarding}");
+    assert_eq!(
+        boarding["holds_by_class"],
+        json!({ "machine": 1, "person": 0, "unknown": 0, "stuck": 0 }),
+        "a parked car is in line for a train: {boarding}"
+    );
     assert_eq!(boarding["state"], "clear");
     let hold = &boarding["holds"][0];
     assert_eq!(hold["what"], "fix/a");
@@ -315,6 +333,10 @@ async fn every_border_carries_its_flow_its_queue_and_its_machine() {
     assert_eq!(arrivals["rate"]["current"], 1.0);
     assert_eq!(arrivals["rate"]["samples"], 1);
     assert_eq!(arrivals["last_crossed"], "2026-09-19T09:00:00+00:00");
+    // One crossing in 24h is a mean gap of a day, and three hours of
+    // quiet is well inside four of them: flowing, and held since nothing.
+    assert_eq!(arrivals["flowing"], true, "{arrivals}");
+    assert_eq!(arrivals["held_since"], Value::Null);
 }
 
 #[tokio::test]

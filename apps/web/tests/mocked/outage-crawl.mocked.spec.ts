@@ -100,12 +100,48 @@ const ALSO_BROKEN: ReadonlyMap<string, ReadonlyArray<RegExp>> = new Map([
   ['/ux/people', [/\/api\/people$/]],
 ]);
 
+/// How late a route's OWN read is issued — the manual-page fix's figure
+/// (0eda772f), three times the quiet window the crawl used to settle on.
+const LATE_READ_MS = 750;
+
+/// A ROUTE'S OWN READ, ISSUED LATE on purpose (backlog 6592caf7). The
+/// crawl redded gate 59ed3414 on /ux/people with no marker, and passed on
+/// a re-gate of the same sha: the page asks for /api/people from an
+/// $effect after mount, and under load the shell's reads can all answer
+/// and sit quiet for longer than the old 250 ms window before that
+/// request is even made — so the crawl counted a page whose read had not
+/// been asked for yet. Holding each ALSO_BROKEN read back before it
+/// leaves the page makes that the ordinary case, so a crawl that counts
+/// before the route's own read fails every run, not one in a busy hour.
+async function issueOwnReadsLate(page: Page): Promise<void> {
+  const late = [...ALSO_BROKEN].map(([path, reads]) => ({
+    path,
+    reads: reads.map((re) => re.source),
+  }));
+  await page.addInitScript(
+    ({ late, ms }) => {
+      const mine = late.find((l) => l.path === location.pathname);
+      if (!mine) return;
+      const reads = mine.reads.map((s) => new RegExp(s));
+      const real = window.fetch.bind(window);
+      window.fetch = async (input, init) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const path = new URL(url, location.href).pathname;
+        if (reads.some((re) => re.test(path))) await new Promise((ok) => setTimeout(ok, ms));
+        return real(input, init);
+      };
+    },
+    { late, ms: LATE_READ_MS },
+  );
+}
+
 /// Force the outage. Runs AFTER installSmokeMocks, so it takes
 /// precedence, and falls back to the healthy fixtures for HEALTHY —
 /// except the reads ALSO_BROKEN names for the route being crawled, which
 /// `current` answers at the moment each request is made.
 async function installOutage(page: Page, current: () => string): Promise<void> {
   await installSmokeMocks(page);
+  await issueOwnReadsLate(page);
   await page.route('**/api/**', async (route) => {
     const url = route.request().url();
     const broken = ALSO_BROKEN.get(current()) ?? [];
@@ -185,10 +221,26 @@ async function settle(page: Page, reads: Reads): Promise<void> {
   await page.waitForTimeout(PAINT_MS);
 }
 
+/// WHAT A QUIET WINDOW CANNOT SEE (backlog 6592caf7). settle() leaves
+/// once the reads ISSUED so far have answered and nothing new has left
+/// for QUIET_MS. A read the page has not asked for yet is invisible to
+/// it: /ux/people asks for its roster from an $effect after mount, and on
+/// gate 59ed3414 the shell's own reads answered and sat quiet for longer
+/// than the window before that request was made, so the crawl counted a
+/// page mid-mount and named it mute. So the crawl that ASSERTS a marker
+/// waits for one first — the page's rendered answer, under the same
+/// budget — and only then settles for the rest. A page that never draws
+/// one still counts zero and is still named, one budget later; only the
+/// page that had not drawn it YET stops being reported as a falsehood.
+/// The SILENT crawl cannot wait on a marker it expects not to see, and
+/// its miss is the opposite direction — a fixed page counted before its
+/// marker renders stays on the list one more run, which reds nothing.
+type Await = 'marker' | 'quiet';
+
 /// One shared page, one navigation per route — same rationale as
 /// route-smoke: the browser keeps the on-the-fly bundle warm, and a full
 /// goto wipes the previous route's JS state, so there is no effect bleed.
-async function crawl(page: Page, routes: ReadonlyArray<string>): Promise<Seen[]> {
+async function crawl(page: Page, routes: ReadonlyArray<string>, until: Await): Promise<Seen[]> {
   let current = '';
   await installOutage(page, () => current);
   const reads = watchReads(page);
@@ -206,6 +258,15 @@ async function crawl(page: Page, routes: ReadonlyArray<string>): Promise<Seen[]>
       } catch {
         // Recorded as shell:false below if the retry also misses.
       }
+    }
+    // The asserted crawl waits for the page's own answer first; a miss is
+    // not thrown here but counted below, so the failure names the route.
+    if (shell && until === 'marker') {
+      await page
+        .locator(FAILURE_MARKER)
+        .first()
+        .waitFor({ state: 'attached', timeout: SETTLE_BUDGET_MS })
+        .catch(() => undefined);
     }
     // Let onMount's reads be ANSWERED and the failure branch render.
     if (shell) await settle(page, reads);
@@ -227,7 +288,7 @@ test.describe('the outage crawl — a surface cannot render a falsehood', () => 
   test('every asserted surface says a read failed when every read fails', async ({ page }) => {
     test.setTimeout(600_000);
     const asserted = ROUTES.filter((r) => !SILENT.has(r));
-    const seen = await crawl(page, asserted);
+    const seen = await crawl(page, asserted, 'marker');
 
     const mute = seen.filter((s) => s.markers === 0);
     expect(
@@ -252,7 +313,7 @@ test.describe('the outage crawl — a surface cannot render a falsehood', () => 
   test('no surface on the SILENT list has quietly started reporting its failures', async ({ page }) => {
     test.setTimeout(600_000);
     const silent = ROUTES.filter((r) => SILENT.has(r));
-    const seen = await crawl(page, silent);
+    const seen = await crawl(page, silent, 'quiet');
 
     const fixed = seen.filter((s) => s.markers > 0);
     expect(
