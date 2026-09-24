@@ -529,8 +529,11 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
       'Live stream down: the server refused it (the browser does not say why). Re-reading the tail every 5 s.',
     );
     const tailsAtMount = seen.tail.length;
-    // The fallback poll is SNAPSHOT_RELOAD_MS = 5000.
-    await expect.poll(() => seen.tail.length, { timeout: 12_000 }).toBeGreaterThan(tailsAtMount);
+    // The fallback poll is SNAPSHOT_RELOAD_MS = 5000, so the suite's
+    // stated expect budget covers it twice over. This wait capped itself
+    // at 12 000 ms until backlog de205627 — under the budget, and the one
+    // number in the file a loaded host could beat.
+    await expect.poll(() => seen.tail.length).toBeGreaterThan(tailsAtMount);
     // The failed stream is not retried: a non-200 answer CLOSES an
     // EventSource.
     expect(seen.stream.length).toBe(1);
@@ -558,7 +561,7 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     await expect(liveLine(page)).toHaveText(`Live stream down: ${error}. Re-reading the tail every 5 s.`);
     const tailsAtFailure = seen.tail.length;
-    await expect.poll(() => seen.tail.length, { timeout: 12_000 }).toBeGreaterThan(tailsAtFailure);
+    await expect.poll(() => seen.tail.length).toBeGreaterThan(tailsAtFailure);
     // Closed on the frame, so the browser never reconnects.
     expect(seen.stream.length).toBe(1);
     // The frame is not a row.

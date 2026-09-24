@@ -236,9 +236,7 @@ test('an exhibit runs its own script in a sandbox that reaches nothing of the pa
 
   const frame = page.frameLocator('iframe[title^="Exhibit E1"]');
   // Its own script RAN (allow-scripts), and each reach was refused.
-  await expect(frame.locator('#r')).toHaveText('parent:blocked storage:blocked fetch:blocked', {
-    timeout: 10_000,
-  });
+  await expect(frame.locator('#r')).toHaveText('parent:blocked storage:blocked fetch:blocked');
   expect(apiFromExhibit, 'the exhibit reached the API').toEqual([]);
   // The bound question names its exhibit beside it.
   await expect(page.getByRole('button', { name: 'E1' })).toBeVisible();

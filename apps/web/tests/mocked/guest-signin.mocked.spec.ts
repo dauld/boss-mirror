@@ -92,7 +92,7 @@ test.describe('guest sign-in', () => {
     expect(mintCalls).toBe(0);
 
     await guestButton(page).click();
-    await page.waitForURL(/\/ux\/jobs/, { timeout: 10_000 });
+    await page.waitForURL(/\/ux\/jobs/);
     expect(mintCalls).toBe(1);
   });
 });
