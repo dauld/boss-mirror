@@ -238,6 +238,11 @@ async fn main() -> Result<()> {
         let stations: Arc<dyn boss_jobs::StationRegistry> =
             Arc::new(boss_jobs::PgStations::new(pool.clone()));
         verify_station_viability(stations.as_ref()).await;
+        // The migration ledger, read on every health request so
+        // `capabilities.schema` says whether THIS database is migrated
+        // to THIS build (design a5323701, backlog 7c298c34).
+        let schema_ledger: Arc<dyn boss_jobs::schema_level::SchemaLedger> =
+            Arc::new(boss_jobs::schema_level::PgSchemaLedger::new(pool.clone()));
         return run_server(
             Some(
                 std::sync::Arc::new(boss_jobs::job_edges::PgJobEdges::new(pool.clone()))
@@ -258,6 +263,7 @@ async fn main() -> Result<()> {
             Some(surface_opens),
             Some(sensors),
             Some(departments),
+            Some(schema_ledger),
             agents,
             calendar,
             subject_kinds,
@@ -300,6 +306,7 @@ async fn run_server<R: JobsRepository + 'static>(
     surface_opens: Option<Arc<dyn boss_jobs::surface_opens::SurfaceOpens>>,
     sensors: Option<Arc<dyn boss_jobs::sensors::Sensors>>,
     departments: Option<Arc<dyn boss_jobs::department::registry::DepartmentRegistry>>,
+    schema_ledger: Option<Arc<dyn boss_jobs::schema_level::SchemaLedger>>,
     agents: Arc<dyn boss_jobs::agents::AgentsRegistry>,
     calendar: Option<Arc<dyn boss_calendar_client::CalendarClient>>,
     subject_kinds: Option<Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
@@ -383,6 +390,7 @@ async fn run_server<R: JobsRepository + 'static>(
         // serve; without a run log there is no spend to measure and
         // every claim is admitted as before.
         dispatcher_firings,
+        schema_ledger,
         agent_budget: agent_runs.as_ref().map(|log| {
             Arc::new(boss_jobs::agent_budget::BudgetDoor {
                 agents: agents.clone(),

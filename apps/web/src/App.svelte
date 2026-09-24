@@ -2,12 +2,12 @@
   // Root component — parses the URL, dispatches to the matched
   // page inside AppShell.
   //
-  // Phase 1 wires /me, /jobs, /jobs/:id, /service, /sales,
-  // /assets, /assets/:id. Unmatched URLs fall back to My Day
-  // (same as the React app's default).
+  // An unmatched URL renders the not-found page, naming the path
+  // (design ee3a3a2f) — never a page it did not ask for.
 
   import { onMount } from 'svelte';
-  import { parseRoute, type Route } from './router';
+  import { href, notFoundBack, parseRoute, type Route } from './router';
+  import NotFound from '@boss/web-kit/ui/NotFound.svelte';
   import { JOBS_DEFAULT_STATUS } from './jobs/filterQuery';
   import { goToLogin } from '@boss/web-kit/session/deadSession';
   import { loadSession } from '@boss/web-kit/session/session.svelte';
@@ -260,6 +260,20 @@
     <ModuleDisabled module={blockedModule.id} label={blockedModule.label} />
   {:else if route.kind === 'home'}
       <LandingPage />
+    {:else if route.kind === 'notFound'}
+      <!-- An unmatched path says so, and names the path (design
+           ee3a3a2f). Rendered in place, inside the chrome of the
+           department it was under, with one door back into it. It
+           rendered the landing page (or, under /it, the yard) until
+           then, so a dead link looked like a working one that went
+           elsewhere (backlog c4f2ae24). -->
+      {@const back = notFoundBack(route.path)}
+      <div class="theme-exec">
+        <NotFound eyebrow="Not found" title="No page at this address" backHref={href(back.href)} backLabel={back.label}>
+          Nothing in this app answers <code>{route.path}</code>. The link that brought you here is out of date or
+          mistyped.
+        </NotFound>
+      </div>
     {:else if route.kind === 'search'}
       <SearchResultsPage q={route.q} />
     {:else if route.kind === 'views'}

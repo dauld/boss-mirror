@@ -970,8 +970,14 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows, stuck: &BTreeSe
                 })
                 .collect();
             // A run the gate never judged: whether it passed cannot be
-            // told.
-            let classes = HoldsByClass::of(status.limbo.iter().map(|_| HoldClass::Unknown));
+            // told — until it stands past the garage's grace, when the
+            // stuck block counts it as ours (4142d821) and so does this.
+            let classes = HoldsByClass::of(
+                status
+                    .limbo
+                    .iter()
+                    .map(|l| class_of(&l.packet_id, HoldClass::Unknown)),
+            );
             Flow::of(w, stamps, classes, holds)
         }
         // A red train releases its cars. What stands at the border is
@@ -2739,7 +2745,8 @@ mod tests {
     /// waiting for a train are in line for a machine; a held green and a
     /// car held on the dock are brakes someone here set — stuck, as the
     /// stuck block counts them; a stranded green waits on the rule the
-    /// rail's own judge reads it against.
+    /// rail's own judge reads it against until it has stood past the
+    /// garage's grace, and is stuck after (backlog 4142d821).
     #[test]
     fn the_delivery_rails_class_each_packet_by_what_it_waits_on() {
         let held = {
@@ -2757,6 +2764,7 @@ mod tests {
         let runs = vec![
             held,
             green_run("fix/a-stranded-green", Some("2026-09-19T08:00:00Z")),
+            green_run("fix/a-fresh-green", Some("2026-09-19T11:55:00Z")),
         ];
         let parked = vec![
             (
@@ -2775,7 +2783,7 @@ mod tests {
             ..Default::default()
         };
         let mut status = build_status_for(yard, Reading::Read, BoardingReadings::default());
-        assert_eq!((status.held.len(), status.stranded.len()), (1, 1));
+        assert_eq!((status.held.len(), status.stranded.len()), (1, 2));
         assert_eq!(status.dock.len(), 2);
         // One of the two parked cars held on the dock by hand.
         let braked = status.dock.remove(1);
@@ -2801,8 +2809,9 @@ mod tests {
         assert_eq!(classes(only(&out, "shop-floor", "gates")), (1, 0, 0, 0));
         assert_eq!(
             classes(only(&out, "gates", "dock")),
-            (1, 0, 0, 1),
-            "the stranded green on the rule; the held green stuck"
+            (1, 0, 0, 2),
+            "the five-minute green on the rule, inside the garage's grace; the held \
+             green and the four-hour stranded one stuck (4142d821)"
         );
         assert_eq!(
             classes(only(&out, "dock", "track")),

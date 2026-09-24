@@ -8,7 +8,11 @@
 import { readFinanceView, type FinanceView } from './finance/financeQuery';
 
 export type Route =
+  /// The landing page (the System Model live view), at /ux/system-model.
   | { kind: 'home' }
+  /// A path nothing in the app answers — rendered in place, naming the
+  /// path as it was asked for (design ee3a3a2f).
+  | { kind: 'notFound'; path: string }
   | { kind: 'login' }
   | { kind: 'authAdmin' }
   | { kind: 'me' }
@@ -157,8 +161,38 @@ export type Route =
   | { kind: 'shop' }
   | { kind: 'shopProduct'; sku: string };
 
+/// The path as the router matches it: the /dashboard mount and a
+/// trailing slash dropped.
+function routable(pathname: string): string {
+  return pathname.replace(/^\/dashboard/, '').replace(/\/$/, '') || '/';
+}
+
+function underIt(raw: string): boolean {
+  return raw === '/it' || raw.startsWith('/it/');
+}
+
+/// One path segment, decoded — or as it was typed when its escape is
+/// malformed, so a mistyped URL renders a page instead of throwing out
+/// of the router.
+function segment(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+/// The one door an unmatched path offers: back to the department it was
+/// under (design ee3a3a2f Q3). No search box and no "did you mean" — a
+/// suggestion is a guess, which is what the not-found page refuses.
+export function notFoundBack(pathname: string): { href: string; label: string } {
+  return underIt(routable(pathname))
+    ? { href: '/it', label: 'Back to the IT yard' }
+    : { href: '/ux', label: 'Back to My Day' };
+}
+
 export function parseRoute(pathname: string): Route {
-  let raw = pathname.replace(/^\/dashboard/, '').replace(/\/$/, '') || '/';
+  const raw = routable(pathname);
   if (raw === '/login') return { kind: 'login' };
 
   // ===== The IT department — /it/* =====
@@ -171,7 +205,7 @@ export function parseRoute(pathname: string): Route {
   // "kept permanently" promise the old alias comment made (feedback
   // 0fc8b216 got the /it half; this finishes it). A /system path now
   // falls through to the catch-all like any other unknown route.
-  if (raw === '/it' || raw.startsWith('/it/')) {
+  if (underIt(raw)) {
     const p = raw.slice('/it'.length) || '/';
     // 1. The landing is the yard — delivery truth first. Since design
     //    0524fc95 (car 2) the landing is the yard's MAP: eight region
@@ -205,14 +239,14 @@ export function parseRoute(pathname: string): Route {
     if (p === '/registry') return { kind: 'workflows' };
     if (p === '/registry/new') return { kind: 'workflowNew' };
     if (p === '/registry/authoring') return { kind: 'workflowsAdmin' };
-    const jkDesignM = p.match(/^\/registry\/authoring\/(.+)$/);
-    if (jkDesignM) return { kind: 'workflowDesign', jobId: decodeURIComponent(jkDesignM[1]!) };
+    const jkDesignM = p.match(/^\/registry\/authoring\/([^/]+)$/);
+    if (jkDesignM) return { kind: 'workflowDesign', jobId: segment(jkDesignM[1]!) };
     if (p === '/registry/step-plugins') return { kind: 'systemStepPlugins' };
-    const spM = p.match(/^\/registry\/step-plugins\/(.+)$/);
-    if (spM) return { kind: 'systemStepPluginDetail', pluginSlug: decodeURIComponent(spM[1]!) };
+    const spM = p.match(/^\/registry\/step-plugins\/([^/]+)$/);
+    if (spM) return { kind: 'systemStepPluginDetail', pluginSlug: segment(spM[1]!) };
     if (p === '/registry/rules') return { kind: 'dispatcherRulesList' };
-    const drM = p.match(/^\/registry\/rules\/(.+)$/);
-    if (drM) return { kind: 'dispatcherRuleEdit', ruleName: decodeURIComponent(drM[1]!) };
+    const drM = p.match(/^\/registry\/rules\/([^/]+)$/);
+    if (drM) return { kind: 'dispatcherRuleEdit', ruleName: segment(drM[1]!) };
     if (p === '/registry/dispatcher') return { kind: 'dispatcherRules' };
     if (p === '/registry/policy') return { kind: 'policy' };
     if (p === '/registry/subjects') return { kind: 'systemSubjects' };
@@ -236,55 +270,69 @@ export function parseRoute(pathname: string): Route {
     if (p === '/auth-admin') return { kind: 'authAdmin' };
     // Workflow detail LAST — its wildcard would eclipse the
     // specific /registry/* cases above.
-    const jkM = p.match(/^\/registry\/(.+)$/);
-    if (jkM) return { kind: 'workflowDetail', kindSlug: decodeURIComponent(jkM[1]!) };
-    // Unknown /it path: the department's own landing, not Home.
-    return { kind: 'systemYard' };
+    const jkM = p.match(/^\/registry\/([^/]+)$/);
+    if (jkM) return { kind: 'workflowDetail', kindSlug: segment(jkM[1]!) };
+    // Unknown /it path: it says so, inside the IT chrome. It returned the
+    // yard until design ee3a3a2f (Q4), so a mistyped IT link landed on the
+    // map and looked like a working one.
+    return { kind: 'notFound', path: pathname };
   }
 
   // ===== User Experiences perspective — /ux/* (canonical); bare / is the public alias for the UX home.
   // Unprefixed legacy paths still resolve here (defensive). =====
   const p = raw === '/' || raw === '/ux' ? '/' : raw.startsWith('/ux/') ? raw.slice('/ux'.length) : raw;
   // User Experiences lands on My Day by default — the actor's personal
-  // work view, not a marketing landing. (The landing page stays the
-  // catch-all fallback for unknown paths, at the bottom of this fn.)
+  // work view, not a marketing landing.
+  //
+  // EVERY SINGLE-ID WILDCARD BELOW TAKES ONE SEGMENT, `([^/]+)`. They
+  // were greedy `(.+)` until design ee3a3a2f (Q6), and a deeper path
+  // under a list became a convincing "missing X": /ux/accounts/
+  // agreements/<id> rendered the ACCOUNT page for accountId
+  // "agreements/<id>". An id holding a slash arrives percent-encoded
+  // (entityHref encodes every id) and is decoded by `segment`. The one
+  // exception is /manual, whose slug may hold a slash by design — the
+  // content API routes it as `{*slug}`.
   if (p === '/') return { kind: 'me' };
   if (p === '/me') return { kind: 'me' };
   if (p === '/inbox') return { kind: 'inbox' };
   if (p === '/views') return { kind: 'views' };
+  // The landing page's own door. The catch-all was its ONLY way in until
+  // design ee3a3a2f (Q5) — `/` and `/ux` are My Day — so turning the
+  // catch-all into a not-found would have orphaned a real page.
+  if (p === '/system-model') return { kind: 'home' };
   if (p === '/accounts') return { kind: 'accounts' };
-  const cm = p.match(/^\/accounts\/(.+)$/);
-  if (cm) return { kind: 'account', accountId: cm[1]! };
+  const cm = p.match(/^\/accounts\/([^/]+)$/);
+  if (cm) return { kind: 'account', accountId: segment(cm[1]!) };
 
   if (p === '/vendors') return { kind: 'vendors' };
-  const vm = p.match(/^\/vendors\/(.+)$/);
-  if (vm) return { kind: 'vendor', vendorLookup: decodeURIComponent(vm[1]!) };
+  const vm = p.match(/^\/vendors\/([^/]+)$/);
+  if (vm) return { kind: 'vendor', vendorLookup: segment(vm[1]!) };
 
   if (p === '/people') return { kind: 'people' };
-  const em = p.match(/^\/people\/(.+)$/);
-  if (em) return { kind: 'employee', empId: em[1]! };
+  const em = p.match(/^\/people\/([^/]+)$/);
+  if (em) return { kind: 'employee', empId: segment(em[1]!) };
 
   if (p === '/parts') return { kind: 'parts' };
-  const partM = p.match(/^\/parts\/(.+)$/);
-  if (partM) return { kind: 'part', partSku: decodeURIComponent(partM[1]!) };
+  const partM = p.match(/^\/parts\/([^/]+)$/);
+  if (partM) return { kind: 'part', partSku: segment(partM[1]!) };
 
   if (p === '/products') {
     return { kind: 'products', q: new URLSearchParams(window.location.search).get('q') ?? '' };
   }
-  const prodM = p.match(/^\/products\/(.+)$/);
-  if (prodM) return { kind: 'product', productSku: decodeURIComponent(prodM[1]!) };
+  const prodM = p.match(/^\/products\/([^/]+)$/);
+  if (prodM) return { kind: 'product', productSku: segment(prodM[1]!) };
 
   if (p === '/finance') return { kind: 'finance', view: readFinanceView(window.location.search) };
   if (p === '/finance/new') return { kind: 'newInvoice' };
   if (p === '/finance/journal-entries/new') return { kind: 'newJournalEntry' };
   // Wildcard MUST come after every specific `/finance/X` case above —
-  // it eagerly matches any tail and would otherwise eclipse them.
-  const invM = p.match(/^\/finance\/(.+)$/);
-  if (invM) return { kind: 'invoice', invoiceId: decodeURIComponent(invM[1]!) };
+  // it matches any one-segment tail and would otherwise eclipse /new.
+  const invM = p.match(/^\/finance\/([^/]+)$/);
+  if (invM) return { kind: 'invoice', invoiceId: segment(invM[1]!) };
 
   if (p === '/shipping') return { kind: 'shipping' };
-  const shipM = p.match(/^\/shipments\/(.+)$/);
-  if (shipM) return { kind: 'shipmentDetail', shipmentId: decodeURIComponent(shipM[1]!) };
+  const shipM = p.match(/^\/shipments\/([^/]+)$/);
+  if (shipM) return { kind: 'shipmentDetail', shipmentId: segment(shipM[1]!) };
 
   if (p === '/support') return { kind: 'support' };
 
@@ -292,28 +340,29 @@ export function parseRoute(pathname: string): Route {
   if (p === '/service/schedule') return { kind: 'schedule' };
   if (p === '/exec') return { kind: 'exec' };
   const deptM = p.match(/^\/departments\/([^/]+)$/);
-  if (deptM) return { kind: 'department', code: decodeURIComponent(deptM[1]!) };
+  if (deptM) return { kind: 'department', code: segment(deptM[1]!) };
   if (p === '/warehouse') return { kind: 'warehouse' };
   if (p === '/catalog') return { kind: 'catalog' };
-  const catM = p.match(/^\/catalog\/(.+)$/);
-  if (catM) return { kind: 'device', sku: decodeURIComponent(catM[1]!) };
+  const catM = p.match(/^\/catalog\/([^/]+)$/);
+  if (catM) return { kind: 'device', sku: segment(catM[1]!) };
   if (p === '/assets') return { kind: 'assets' };
-  const assetM = p.match(/^\/assets\/(.+)$/);
-  if (assetM) return { kind: 'asset', assetId: decodeURIComponent(assetM[1]!) };
+  const assetM = p.match(/^\/assets\/([^/]+)$/);
+  if (assetM) return { kind: 'asset', assetId: segment(assetM[1]!) };
   if (p === '/marketing-assets') return { kind: 'marketingAssets' };
-  const mktM = p.match(/^\/marketing-assets\/(.+)$/);
-  if (mktM) return { kind: 'marketingAsset', assetId: decodeURIComponent(mktM[1]!) };
+  const mktM = p.match(/^\/marketing-assets\/([^/]+)$/);
+  if (mktM) return { kind: 'marketingAsset', assetId: segment(mktM[1]!) };
   if (p === '/manual') return { kind: 'manual' };
+  // `(.+)` on purpose: a manual slug may hold a slash (see above).
   const mManual = p.match(/^\/manual\/(.+)$/);
-  if (mManual) return { kind: 'manualSection', slug: decodeURIComponent(mManual[1]!) };
-  const poM = p.match(/^\/purchase-orders\/(.+)$/);
-  if (poM) return { kind: 'po', poId: decodeURIComponent(poM[1]!) };
-  const viM = p.match(/^\/vendor-invoices\/(.+)$/);
-  if (viM) return { kind: 'vendorInvoice', vendorInvoiceId: decodeURIComponent(viM[1]!) };
+  if (mManual) return { kind: 'manualSection', slug: segment(mManual[1]!) };
+  const poM = p.match(/^\/purchase-orders\/([^/]+)$/);
+  if (poM) return { kind: 'po', poId: segment(poM[1]!) };
+  const viM = p.match(/^\/vendor-invoices\/([^/]+)$/);
+  if (viM) return { kind: 'vendorInvoice', vendorInvoiceId: segment(viM[1]!) };
   if (p === '/watchlist') return { kind: 'watchlist' };
   if (p === '/shop') return { kind: 'shop' };
-  const shopM = p.match(/^\/shop\/(.+)$/);
-  if (shopM) return { kind: 'shopProduct', sku: decodeURIComponent(shopM[1]!) };
+  const shopM = p.match(/^\/shop\/([^/]+)$/);
+  if (shopM) return { kind: 'shopProduct', sku: segment(shopM[1]!) };
 
   if (p === '/search') {
     const sp = new URLSearchParams(window.location.search);
@@ -324,12 +373,12 @@ export function parseRoute(pathname: string): Route {
   if (p === '/qa') return { kind: 'qa' };
 
   if (p === '/service') return { kind: 'service' };
-  const tm = p.match(/^\/service\/(.+)$/);
-  if (tm) return { kind: 'jobDetail', jobId: tm[1]! };
+  const tm = p.match(/^\/service\/([^/]+)$/);
+  if (tm) return { kind: 'jobDetail', jobId: segment(tm[1]!) };
 
   if (p === '/sales') return { kind: 'sales' };
-  const sm = p.match(/^\/sales\/(.+)$/);
-  if (sm) return { kind: 'jobDetail', jobId: sm[1]! };
+  const sm = p.match(/^\/sales\/([^/]+)$/);
+  if (sm) return { kind: 'jobDetail', jobId: segment(sm[1]!) };
 
   if (p === '/jobs') {
     const sp = new URLSearchParams(window.location.search);
@@ -358,8 +407,8 @@ export function parseRoute(pathname: string): Route {
     if (sid) (r as { newJobSubjectId?: string }).newJobSubjectId = sid;
     return r;
   }
-  // Before the greedy /jobs/(.+) below, which would otherwise swallow
-  // the whole `{id}/steps/{stepId}` tail as a job id.
+  // Before /jobs/([^/]+) below — which, while it was the greedy
+  // /jobs/(.+), swallowed the whole `{id}/steps/{stepId}` tail as a job id.
   const sfm = p.match(/^\/jobs\/([^/]+)\/steps\/([^/]+)$/);
   if (sfm) {
     const sp = new URLSearchParams(window.location.search);
@@ -379,10 +428,16 @@ export function parseRoute(pathname: string): Route {
     return r;
   }
 
-  const jm = p.match(/^\/jobs\/(.+)$/);
-  if (jm) return { kind: 'jobDetail', jobId: jm[1]! };
+  const jm = p.match(/^\/jobs\/([^/]+)$/);
+  if (jm) return { kind: 'jobDetail', jobId: segment(jm[1]!) };
 
-  return { kind: 'home' };
+  // Nothing answers this path, and the page says so, naming it as it was
+  // asked for (design ee3a3a2f). This returned the landing page until
+  // then, so a dead link rendered a real, working, plausible page and
+  // the reader concluded they had misremembered (backlog c4f2ae24).
+  // Rendered in place, never redirected: a redirect replaces the
+  // evidence in the address bar with a working page, which is the defect.
+  return { kind: 'notFound', path: pathname };
 }
 
 // `href` (honors the /dashboard mount) + `navigate` (pushState SPA nav)

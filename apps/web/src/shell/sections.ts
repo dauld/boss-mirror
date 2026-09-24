@@ -19,7 +19,7 @@
 //     IT tab's own landing page — rendered under Home chrome.
 //     `sections.test.ts` pins every value now (CLAUDE.md §9a).
 
-import type { Route } from '../router';
+import { notFoundBack, parseRoute, type Route } from '../router';
 import { ROUTE_CATALOG, appForSection, type AppId, type NavItem } from './nav-catalog';
 
 /// Sections that deliberately resolve to the Home app instead of a
@@ -110,6 +110,14 @@ export function sectionForRoute(route: Route): string {
   if (route.kind === 'systemYardFloor') {
     return REGION_SECTIONS[route.region] ?? SECTION_FOR_KIND.systemYardFloor!;
   }
+  // An unmatched path lights the row of the page its one back link
+  // opens, so it renders in the department it was under: /it/<typo> in
+  // the IT chrome, anything else in Home (design ee3a3a2f Q4). The /it
+  // catch-all returned the yard until then, which is how that chrome
+  // came for free.
+  if (route.kind === 'notFound' && route.path) {
+    return sectionForRoute(parseRoute(notFoundBack(route.path).href));
+  }
   return SECTION_FOR_KIND[route.kind];
 }
 
@@ -127,6 +135,9 @@ const SECTION_FOR_KIND: Readonly<Record<Route['kind'], string>> = {
   login: 'me',
   stepFocus: 'me',
   home: 'me',
+  // The kind half only: `sectionForRoute` answers by the path's
+  // department, the way it answers a yard floor by its region.
+  notFound: 'me',
   search: 'me',
   me: 'me',
   hr: 'hr',

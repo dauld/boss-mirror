@@ -79,6 +79,60 @@ pub struct Capabilities {
     /// value still names the tree the image was built from, and the
     /// compiled layer is invalidated only by what it compiles.
     pub commit: Option<&'static str>,
+    /// The migration level of the database this process is serving
+    /// from, READ on each `/health` request (design a5323701, backlog
+    /// 7c298c34). Three states, because they mean three different
+    /// things and must not collapse into one:
+    ///
+    /// - absent — this service does not report a schema (every service
+    ///   but the jobs API today: build for the one reader that exists);
+    /// - `null` — this service tried and could not read the ledger.
+    ///   "Could not read" is never zero, and never a pass;
+    /// - an object — what `schema_migrations` held at the moment of
+    ///   the request, judged against the running build's own tree.
+    ///
+    /// WHY. `commit` alone says a build is RUNNING, not that its
+    /// migrations have RUN: a reader comparing `commit` to a sha got
+    /// YES the moment the binary rolled, even when the migration the
+    /// change needed had not been applied — the false-green shape, and
+    /// the incident `boss-cli/src/running.rs` carries in its header.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_or_null"
+    )]
+    pub schema: Option<Option<Schema>>,
+}
+
+/// A service's own judgement of its database's migration level against
+/// the tree it was built from — see [`Capabilities::schema`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Schema {
+    /// The full id (file name) of the highest applied migration, in
+    /// migration order. The whole name rather than the numeric prefix:
+    /// the legacy 2- and 3-digit prefixes are not unique on their own,
+    /// and `schema_migrations.id` already holds the name. Directly
+    /// comparable to `infra/postgres/schema/` at any sha. `None` when
+    /// the ledger is empty.
+    pub head: Option<String>,
+    /// How many migrations in the running build's OWN tree the ledger
+    /// does not hold. `0` is "migrated to my own build"; anything else
+    /// is a build running ahead of its schema. A count of applied rows
+    /// was rejected: it compares to nothing.
+    pub pending: u32,
+    /// The first pending migration in order, so the number explains
+    /// itself. `None` exactly when `pending` is 0.
+    pub first_pending: Option<String>,
+}
+
+/// Deserialize a PRESENT `schema` field — `null` included — as
+/// `Some(_)`, so a `null` read back stays "could not read" instead of
+/// folding into "not reported" (which `default` gives an absent field).
+fn present_or_null<'de, D>(d: D) -> Result<Option<Option<Schema>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<Schema> as serde::Deserialize>::deserialize(d).map(Some)
 }
 
 impl Capabilities {
@@ -96,6 +150,17 @@ impl Capabilities {
             storage,
             version,
             commit: build_commit(),
+            schema: None,
+        }
+    }
+
+    /// The same snapshot, reporting a schema reading: `Some(schema)`
+    /// when the ledger was read, `None` when the read failed — which
+    /// serialises as `null`, never as an absent field or a zero.
+    pub fn with_schema(self, reading: Option<Schema>) -> Self {
+        Self {
+            schema: Some(reading),
+            ..self
         }
     }
 }
@@ -169,6 +234,66 @@ pub fn health_response(
     HealthResponse {
         status: "ok",
         capabilities: Capabilities::new(service, version, storage),
+    }
+}
+
+#[cfg(test)]
+mod schema_field_tests {
+    use super::{Capabilities, Schema};
+
+    fn caps() -> Capabilities {
+        Capabilities::new("boss-test-api", "0.1.0", "postgres")
+    }
+
+    fn read(schema: Option<Schema>) -> serde_json::Value {
+        serde_json::to_value(caps().with_schema(schema)).unwrap()
+    }
+
+    #[test]
+    fn a_service_that_does_not_report_a_schema_omits_the_field() {
+        let v = serde_json::to_value(caps()).unwrap();
+        assert!(v.get("schema").is_none(), "{v}");
+    }
+
+    #[test]
+    fn a_ledger_that_could_not_be_read_answers_null_never_zero() {
+        let v = read(None);
+        assert!(v.get("schema").is_some_and(|s| s.is_null()), "{v}");
+    }
+
+    #[test]
+    fn a_read_ledger_names_head_pending_and_first_pending() {
+        let v = read(Some(Schema {
+            head: Some("20260924000000-a.sql".into()),
+            pending: 1,
+            first_pending: Some("20260924000001-b.sql".into()),
+        }));
+        assert_eq!(
+            v["schema"],
+            serde_json::json!({
+                "head": "20260924000000-a.sql",
+                "pending": 1,
+                "first_pending": "20260924000001-b.sql",
+            })
+        );
+    }
+
+    #[test]
+    fn all_three_states_survive_a_round_trip() {
+        for original in [
+            caps(),
+            caps().with_schema(None),
+            caps().with_schema(Some(Schema {
+                head: None,
+                pending: 3,
+                first_pending: Some("00-extensions.sql".into()),
+            })),
+        ] {
+            let text = serde_json::to_string(&original).unwrap();
+            let back: Capabilities =
+                serde_json::from_str(Box::leak(text.into_boxed_str())).unwrap();
+            assert_eq!(back.schema, original.schema);
+        }
     }
 }
 

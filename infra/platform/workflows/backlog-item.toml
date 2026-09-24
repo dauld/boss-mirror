@@ -259,10 +259,36 @@ agent = { profile = "builder", model = "opus-5[1m]", budget_usd = 5, effort = "h
 # `agent-run-delivers-when-its-step-is-done`, which would land the run
 # as `delivered`, and a completed `building` is every later writer's
 # no-op.
+#
+# `delivered` IS NOT A REFUTATION (backlog 4bcf1265, design fd8b5143
+# item 3). 3fec1ed9 and fa77e3d7 were delivered through the tenant repo
+# (david/algedonic-llc) and a tenant publish, with no car in this tree,
+# and this set offered only the three withdrawals — so both closed as
+# `stale`, a record saying the claim died when the work was done. A
+# delivered build opens `prove-delivery` below instead of closing the
+# item, because this tree cannot see the tenant repo: the item closes
+# on the live read-back, not on the builder's word.
 [[workflow.step.fields]]
 name = "disposition"
-field_type = "stale|duplicate|decline"
+field_type = "stale|duplicate|decline|delivered"
 required = false
+
+[[workflow.step]]
+title = "prove-delivery"
+kind = "task"
+# Only a delivered build opens it; any other build, and every route
+# that skips `build`, leaves it with its one reference terminal and its
+# predicate false, so it is skipped (registry.rs, `refs_all_terminal`).
+ready_when = "steps.build.done AND steps.build.metadata.disposition = \"delivered\""
+title_template = "Prove the tenant delivery"
+# Declared once, the shape `triage` uses (f5ebd2e1).
+audience = { role = "platform-admin" }
+metadata_defaults = { procedure = "The work landed outside this tree, so the item closes on a read of the live system, not on the delivery report. `landed`: where it landed — the tenant repo, the commit on its main, and the publish that carried it (for example `boss tenant publish`). `read_back`: the read of the LIVE registry that shows it running, with its answer — for a protocol, `GET /api/workflows/<kind>` naming the kind at the version the tenant branch declared. A read-back you did not run is not a read-back; if the live system does not show it yet, leave this step open." }
+# Both required at done, not at create: no evidence is not a pass.
+fields = [
+  { name = "landed", field_type = "string", required = true },
+  { name = "read_back", field_type = "string", required = true },
+]
 
 [[workflow.step]]
 title = "duplicate"
@@ -330,7 +356,12 @@ kind = "outcome"
 # open. A build that built carries no disposition at all, which is
 # Absent, false against every literal, so `NOT (false OR false OR
 # false)` is true and the ordinary path is unchanged.
-ready_when = "(steps.measure.done AND NOT (steps.measure.metadata.disposition = \"stale\" OR steps.measure.metadata.disposition = \"duplicate\" OR steps.measure.metadata.disposition = \"decline\")) OR (steps.build.done AND NOT (steps.build.metadata.disposition = \"stale\" OR steps.build.metadata.disposition = \"duplicate\" OR steps.build.metadata.disposition = \"decline\")) OR (steps.design-review.done AND NOT (steps.design-review.metadata.verdict = \"approved\" OR steps.design-review.metadata.verdict = \"declined\"))"
+#
+# `delivered` joins that negative list and reaches here through its
+# own arm instead, `steps.prove-delivery.done` (4bcf1265): a delivered
+# build closes the item as `completed` only once the live read-back is
+# on the record, never on the build alone.
+ready_when = "(steps.measure.done AND NOT (steps.measure.metadata.disposition = \"stale\" OR steps.measure.metadata.disposition = \"duplicate\" OR steps.measure.metadata.disposition = \"decline\")) OR (steps.build.done AND NOT (steps.build.metadata.disposition = \"stale\" OR steps.build.metadata.disposition = \"duplicate\" OR steps.build.metadata.disposition = \"decline\" OR steps.build.metadata.disposition = \"delivered\")) OR steps.prove-delivery.done OR (steps.design-review.done AND NOT (steps.design-review.metadata.verdict = \"approved\" OR steps.design-review.metadata.verdict = \"declined\"))"
 title_template = "Backlog item closed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }

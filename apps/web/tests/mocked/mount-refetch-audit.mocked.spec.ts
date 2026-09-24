@@ -69,9 +69,10 @@ test.describe('a failed mount-time read is not retried without bound', () => {
     await installSmokeMocks(page);
     const reads = await failAndCount(page, /\/api\/workflows$/);
 
-    // The landing page is the router's catch-all, so an unrouted /ux
-    // path is how a mocked mount reaches SystemModelLiveView.
-    await mountPage(page, '/ux/not-a-route');
+    // The landing page renders SystemModelLiveView. It was reachable
+    // only through the router's catch-all (an unrouted /ux path) until
+    // design ee3a3a2f gave it /ux/system-model.
+    await mountPage(page, '/ux/system-model');
 
     // A failed registry read leaves `selectedKind` empty, which is
     // what both of this component's $effects key off — so neither
@@ -89,7 +90,7 @@ test.describe('a failed mount-time read is not retried without bound', () => {
     // re-run; onMount's own loadSpec call is the second read.
     const reads = await failAndCount(page, /\/api\/workflows\/[^/?]+$/);
 
-    await mountPage(page, '/ux/not-a-route');
+    await mountPage(page, '/ux/system-model');
 
     expect(await settledReads(page, reads, 2)).toBe(2);
   });

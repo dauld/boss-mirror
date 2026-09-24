@@ -84,6 +84,7 @@ const SILENT: ReadonlyMap<string, string> = new Map([
   ['/it/registry/new', 'new-workflow form: /api/workflows + /api/subject-kinds only fill suggestion lists; a failure keeps the defaults and paints no line'],
   ['/it/auth-admin', 'auth admin: its reads fire behind a tab'],
   ['/hr', 'HR (bare alias): same as /ux/hr'],
+  ['/ux/accounts/agreements/x', 'the not-found page (design ee3a3a2f): it names the unmatched path and makes no read of its own'],
 ]);
 
 /// PER-READ OUTAGES: a shell read that is also a route's OWN data, broken

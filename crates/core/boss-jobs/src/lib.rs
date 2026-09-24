@@ -60,6 +60,7 @@ pub mod regions;
 pub mod registry;
 pub mod repin;
 pub mod scheduling;
+pub mod schema_level;
 pub mod station_flow;
 pub mod station_lint;
 pub mod station_projection;

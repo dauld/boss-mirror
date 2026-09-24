@@ -99,6 +99,15 @@ describe('sections resolve in the nav catalog', () => {
     expect(appForRoute({ kind: 'me' })).toBe('home');
   });
 
+  test('an unmatched path renders in the department it was under (design ee3a3a2f Q4)', () => {
+    // The /it catch-all returned the yard, so the IT chrome came free;
+    // the not-found that replaced it must keep the reader in IT.
+    expect(appForRoute({ kind: 'notFound', path: '/it/no-such' })).toBe('it');
+    expect(appForRoute({ kind: 'notFound', path: '/dashboard/it/no-such' })).toBe('it');
+    expect(appForRoute({ kind: 'notFound', path: '/ux/no-such' })).toBe('home');
+    expect(appForRoute({ kind: 'notFound', path: '/items' })).toBe('home');
+  });
+
   test('a yard with its own sidebar row highlights that row, not Operate', () => {
     // Feedback 92921c2f / design 55417146 (2026-09-18): the Receiving
     // Yard and the Marshalling Yard are sidebar rows now. The row that

@@ -181,7 +181,7 @@ test.describe('/it/operate/audit — the tab links', () => {
     for (const t of TABS) {
       await expect(page.locator('nav.it-tabs').getByRole('link', { name: t.label, exact: true })).toHaveAttribute('href', t.path);
       const r = route(t.path);
-      expect(r.kind, `${t.path} must not fall to the router's catch-all`).not.toBe('home');
+      expect(r.kind, `${t.path} must not fall to the router's catch-all`).not.toBe('notFound');
       expect(CATALOGUED.has(t.path), `${t.label} catalogued`).toBe(t.catalogued);
     }
     await expect(page.locator('nav.it-tabs a[aria-current="page"]')).toHaveText('Audit Log');

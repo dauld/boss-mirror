@@ -303,3 +303,7 @@ required-features = ["postgres"]
 [[test]]
 name = "a_rebuild_recovers_the_admission_instant_from_the_log_pg"
 required-features = ["postgres"]
+
+[[test]]
+name = "the_health_reads_the_schema_ledger_pg"
+required-features = ["postgres"]

@@ -531,7 +531,7 @@ describe('departments map to apps', () => {
       } else {
         expect(app.href).toBe(departmentJobsPath(app.id));
       }
-      expect(parseRoute(app.href).kind, `app "${app.id}" lands on the catch-all`).not.toBe('home');
+      expect(parseRoute(app.href).kind, `app "${app.id}" lands on the catch-all`).not.toBe('notFound');
     }
   });
 

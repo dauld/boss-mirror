@@ -54,6 +54,7 @@ async fn minimal_wires_the_required_ports_and_leaves_every_optional_one_absent()
     assert!(state.dispatcher_firings.is_none());
     assert!(state.delivery.is_none());
     assert!(state.agent_budget.is_none());
+    assert!(state.schema_ledger.is_none());
 
     let app = router(state);
 

@@ -36,7 +36,8 @@
 //     the two ROUTES seeds, and every DEFERRED route;
 //   - a link a greedy wildcard eats: an agreement href parsed as the
 //     ACCOUNT page with accountId 'agreements/<id>' — "served", by the
-//     wrong page.
+//     wrong page. (Closed for single-id paths by design ee3a3a2f: the
+//     wildcards take one segment, so that href is notFound now.)
 //
 // All three shapes were live at once, on four entity kinds, and this
 // crawl stayed green through every one of them until 38d4e458 retired
@@ -116,7 +117,7 @@
 
 import { test, expect, type Page, type Request } from '@playwright/test';
 import { DISPATCHER_RULES, OBJECT_ENDPOINTS, SHELL_ENDPOINTS, VIEW_RESULTS, installSmokeMocks } from './_smokeMocks';
-import { FAILURE_MARKER, LANDING_FALLBACK, ROUTES } from './_routes';
+import { FAILURE_MARKER, NOT_FOUND_ROW, ROUTES } from './_routes';
 import { parseRoute } from '../../src/router';
 import { pageRequests, readsSettled, recordPageRequests } from './_helpers';
 
@@ -139,8 +140,8 @@ const OFF_SPA: ReadonlyArray<RegExp> = [
 ];
 
 /// Does the SPA router serve this path? parseRoute falls through to
-/// `home` for an unknown path and to `systemYard` for an unknown
-/// /it/* path, so a served path is one that parses to anything else.
+/// `notFound` for an unknown path, /it/* included (design ee3a3a2f), so
+/// a served path is one that parses to anything else.
 /// The router is the definition of "served" — the nav catalog is the
 /// sidebar, and a detail page (/ux/jobs/{id}) is served without a
 /// catalog row — so the check reads the router rather than a copy of
@@ -150,10 +151,7 @@ function servedBySpa(href: string): boolean {
   // parseRoute reads the query string off `window` for /jobs and
   // /search. This is Node, so give it the one field it reads.
   (globalThis as { window?: unknown }).window = { location: { search: query ? `?${query}` : '' } };
-  const r = parseRoute(path);
-  if (r.kind === 'home') return false;
-  if (r.kind === 'systemYard') return path.replace(/\/$/, '') === '/it';
-  return true;
+  return parseRoute(path).kind !== 'notFound';
 }
 
 // ---------------------------------------------------------------------------
@@ -854,12 +852,12 @@ test.describe('the interaction crawl — every rendered link lands, every contro
   });
 
   test('every crawled route is one the router serves', () => {
-    // A roster row nothing serves crawls the landing page under a false
+    // A roster row nothing serves crawls the catch-all under a false
     // name and reports success for a page that does not exist: that
-    // was '/ux/refurb', for months (see LANDING_FALLBACK in _routes.ts).
-    const ghosts = ROUTES.filter((r) => r !== LANDING_FALLBACK && !servedBySpa(r));
+    // was '/ux/refurb', for months (see NOT_FOUND_ROW in _routes.ts).
+    const ghosts = ROUTES.filter((r) => r !== NOT_FOUND_ROW && !servedBySpa(r));
     expect(ghosts, 'these ROUTES rows parse to the router catch-all — there is no such page').toEqual([]);
-    expect(servedBySpa(LANDING_FALLBACK), 'LANDING_FALLBACK must stay a path the router does not serve').toBe(false);
+    expect(servedBySpa(NOT_FOUND_ROW), 'NOT_FOUND_ROW must stay a path the router does not serve').toBe(false);
   });
 
   test('no KNOWN_GAPS entry names a route that is not crawled', () => {

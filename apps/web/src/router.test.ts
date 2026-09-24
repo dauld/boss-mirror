@@ -8,7 +8,7 @@
 // Run via `bun test`.
 
 import { beforeAll, describe, expect, test } from 'bun:test';
-import { parseRoute } from './router';
+import { notFoundBack, parseRoute } from './router';
 
 // `/jobs` reads `window.location.search` for filter query params.
 // Stub a minimal window shape so the test runs in bun's
@@ -55,7 +55,10 @@ describe('parseRoute — every specific path matches its specific case', () => {
     // The launch calendar retired with the second example tenant
     // (design 2ea444f5, backlog a8991c86): /ux/calendar is an unknown
     // path now and takes the catch-all; /ux/calendar/me is untouched.
-    ['/ux/calendar', { kind: 'home' }],
+    ['/ux/calendar', { kind: 'notFound', path: '/ux/calendar' }],
+    // The landing page (the System Model live view) was reachable ONLY
+    // through the catch-all until design ee3a3a2f gave it a door.
+    ['/ux/system-model', { kind: 'home' }],
     ['/ux/calendar/me', { kind: 'myCalendar' }],
     ['/ux/service/schedule', { kind: 'schedule' }],
     // Exec (User Experiences)
@@ -151,6 +154,83 @@ describe('parseRoute — every specific path matches its specific case', () => {
       }
     });
   }
+});
+
+// An unmatched path says so, and names the path (design ee3a3a2f,
+// backlog c4f2ae24). The catch-all used to return the landing page for
+// /ux and the yard for /it, so a dead link rendered a real, working,
+// plausible page and the reader concluded they had misremembered.
+describe('an unmatched path is notFound, naming the path', () => {
+  test('an unknown path is notFound, not the landing page', () => {
+    expect(parseRoute('/no-such-route')).toEqual({ kind: 'notFound', path: '/no-such-route' });
+    expect(parseRoute('/ux/no-such-route')).toEqual({ kind: 'notFound', path: '/ux/no-such-route' });
+  });
+
+  test('an unknown /it path is notFound, not the yard', () => {
+    expect(parseRoute('/it/no-such')).toEqual({ kind: 'notFound', path: '/it/no-such' });
+    // /system retired with the IT consolidation; it is unknown like any other.
+    expect(parseRoute('/it/system/yard').kind).toBe('notFound');
+  });
+
+  test('the path named is the one asked for, mount and all', () => {
+    expect(parseRoute('/dashboard/ux/nope')).toEqual({ kind: 'notFound', path: '/dashboard/ux/nope' });
+  });
+
+  test('the deliberate /it aliases above the catch-all still answer', () => {
+    expect(parseRoute('/it/operate/marshalling').kind).toBe('systemYardFloor');
+    expect(parseRoute('/it/design/codebase').kind).toBe('systemCodebase');
+  });
+
+  test('the one back link goes to the department the path was under', () => {
+    expect(notFoundBack('/it/no-such')).toEqual({ href: '/it', label: 'Back to the IT yard' });
+    expect(notFoundBack('/dashboard/it/no-such/')).toEqual({ href: '/it', label: 'Back to the IT yard' });
+    expect(notFoundBack('/ux/no-such')).toEqual({ href: '/ux', label: 'Back to My Day' });
+    expect(notFoundBack('/items')).toEqual({ href: '/ux', label: 'Back to My Day' });
+  });
+});
+
+// The single-id wildcards were greedy `(.+)`, so a deeper path under a
+// list became a convincing "missing X": /ux/accounts/agreements/<id>
+// rendered the ACCOUNT page for accountId "agreements/<id>", and
+// /ux/sales/opportunities/<id> the JOB page. Narrowed to one segment
+// (design ee3a3a2f Q6); an id holding a slash arrives percent-encoded.
+describe('a single-id wildcard takes one segment', () => {
+  test('the two motivating dead links are notFound, not a missing entity', () => {
+    expect(parseRoute('/ux/accounts/agreements/x').kind).toBe('notFound');
+    expect(parseRoute('/ux/sales/opportunities/x').kind).toBe('notFound');
+  });
+
+  const families = [
+    '/ux/accounts', '/ux/vendors', '/ux/people', '/ux/parts', '/ux/products', '/ux/finance',
+    '/ux/shipments', '/ux/catalog', '/ux/assets', '/ux/marketing-assets', '/ux/purchase-orders',
+    '/ux/vendor-invoices', '/ux/shop', '/ux/service', '/ux/sales', '/ux/jobs',
+    '/it/registry', '/it/registry/authoring', '/it/registry/step-plugins', '/it/registry/rules',
+  ];
+  for (const f of families) {
+    test(`${f}/a/b is notFound`, () => {
+      expect(parseRoute(`${f}/a/b`)).toEqual({ kind: 'notFound', path: `${f}/a/b` });
+    });
+  }
+
+  test('an encoded slash is one segment, and arrives decoded', () => {
+    expect(parseRoute('/ux/accounts/a%2Fb')).toEqual({ kind: 'account', accountId: 'a/b' });
+    expect(parseRoute('/ux/people/a%2Fb')).toEqual({ kind: 'employee', empId: 'a/b' });
+    expect(parseRoute('/ux/jobs/a%2Fb')).toEqual({ kind: 'jobDetail', jobId: 'a/b' });
+    expect(parseRoute('/ux/service/a%2Fb')).toEqual({ kind: 'jobDetail', jobId: 'a/b' });
+    expect(parseRoute('/ux/sales/a%2Fb')).toEqual({ kind: 'jobDetail', jobId: 'a/b' });
+  });
+
+  test('a malformed escape does not throw; the segment arrives as typed', () => {
+    expect(parseRoute('/ux/accounts/%E0')).toEqual({ kind: 'account', accountId: '%E0' });
+  });
+
+  test('a manual section slug may hold a slash — the content API routes {*slug}', () => {
+    expect(parseRoute('/ux/manual/ops/brewing')).toEqual({ kind: 'manualSection', slug: 'ops/brewing' });
+  });
+
+  test('a job id followed by a lone steps segment is not a job page', () => {
+    expect(parseRoute('/ux/jobs/job-1/steps').kind).toBe('notFound');
+  });
 });
 
 describe('parseRoute — wildcard does not shadow specific cases', () => {

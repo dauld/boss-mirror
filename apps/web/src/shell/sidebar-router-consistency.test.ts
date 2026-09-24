@@ -1,12 +1,13 @@
 // Lint test: every sidebar path defined in AppShell.svelte must be
 // matched by a non-catch-all branch in router.ts.
 //
-// Why this exists: the router has a catch-all
-// `return { kind: 'home' }` at the end of parseRoute(). When a
-// sidebar path doesn't match any earlier branch, clicking it
-// silently renders the home page (which itself falls through to
-// MePage in App.svelte) — no console error, no 404, just the
-// wrong page. The /schedule bug on 2026-05-22 was exactly this:
+// Why this exists: the router has a catch-all at the end of
+// parseRoute(). It returned `{ kind: 'home' }` until design ee3a3a2f,
+// so a sidebar path that matched no earlier branch silently rendered
+// the wrong page — no console error, no 404. It returns
+// `{ kind: 'notFound' }` now and the page says so, but a labelled
+// sidebar row that says "No page at this address" is still a broken
+// row. The /schedule bug on 2026-05-22 was exactly this:
 // sidebar `path: '/schedule'` but router only matched
 // `/service/schedule`. The user clicked "My schedule" and landed
 // on their profile page.
@@ -63,20 +64,21 @@ describe('sidebar-router consistency', () => {
   for (const path of SIDEBAR_PATHS) {
     it(`sidebar path "${path}" resolves to a non-catch-all route`, () => {
       const route = parseRoute(path);
-      // The catch-all returns { kind: 'home' }. If a sidebar path
-      // intentionally lands on home, that's a configuration smell
-      // — the home view has its own entry point ("/"), and any
-      // *labeled* sidebar item should resolve to its own route.
+      // The catch-all returns { kind: 'notFound' }; any *labeled*
+      // sidebar item should resolve to its own route.
       expect(
         route.kind,
-        `sidebar path "${path}" fell through to the catch-all '{kind: "home"}' — ` +
+        `sidebar path "${path}" fell through to the catch-all '{kind: "notFound"}' — ` +
           `router.ts has no branch matching it. Either add a branch to parseRoute() ` +
-          `or repoint the sidebar entry in AppShell.svelte's ALL_NAV.`,
-      ).not.toBe('home');
+          `or repoint the sidebar entry in nav-catalog.ts.`,
+      ).not.toBe('notFound');
     });
   }
 
-  it('the catch-all itself still works (regression: parseRoute returns home for unknown paths)', () => {
-    expect(parseRoute('/definitely-not-a-real-route-xyzzy').kind).toBe('home');
+  it('the catch-all itself still works: an unknown path is notFound, naming it', () => {
+    expect(parseRoute('/definitely-not-a-real-route-xyzzy')).toEqual({
+      kind: 'notFound',
+      path: '/definitely-not-a-real-route-xyzzy',
+    });
   });
 });

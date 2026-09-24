@@ -144,6 +144,12 @@ pub struct JobsApiState<R: JobsRepository, B: EventBus> {
     /// hour-window spend. `None` is a deployment without the two
     /// registries, where every claim is admitted exactly as before.
     pub agent_budget: Option<Arc<crate::agent_budget::BudgetDoor>>,
+    /// The `schema_migrations` ledger, read on every `/api/jobs/health`
+    /// so `capabilities.schema` says whether the database has been
+    /// migrated to THIS build (design a5323701, backlog 7c298c34).
+    /// `None` is a wiring without a database, where health reports no
+    /// schema at all — absent, not `null`: nothing was tried.
+    pub schema_ledger: Option<Arc<dyn crate::schema_level::SchemaLedger>>,
 }
 
 impl<R: JobsRepository, B: EventBus> JobsApiState<R, B> {
@@ -198,6 +204,7 @@ impl<R: JobsRepository, B: EventBus> JobsApiState<R, B> {
             dispatcher_firings: None,
             delivery: None,
             agent_budget: None,
+            schema_ledger: None,
         }
     }
 }
@@ -233,7 +240,7 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
     let refusals =
         axum::middleware::from_fn_with_state(shared.clone(), record_step_write_refusals::<R, B>);
     Router::new()
-        .route("/api/jobs/health", get(health))
+        .route("/api/jobs/health", get(health::<R, B>))
         .route(
             "/api/jobs/step-write-refusals",
             get(list_step_write_refusals::<R, B>),
@@ -463,12 +470,27 @@ const STORAGE: &str = "postgres";
 #[cfg(not(feature = "postgres"))]
 const STORAGE: &str = "in-memory";
 
-async fn health() -> Json<boss_core::startup::HealthResponse> {
-    Json(boss_core::startup::health_response(
-        "boss-jobs-api",
-        env!("CARGO_PKG_VERSION"),
-        STORAGE,
-    ))
+/// `GET /api/jobs/health` — the standard payload, plus the schema
+/// reading when a ledger is wired. The ledger is read on THIS request,
+/// never cached: a startup read goes stale the moment the database is
+/// repointed or restored (design a5323701 D2). A failed or slow read is
+/// `schema: null` and the answer is still 200 — the process IS serving;
+/// what it could not do is vouch for its database.
+async fn health<R: JobsRepository, B: EventBus>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+) -> Json<boss_core::startup::HealthResponse> {
+    let response =
+        boss_core::startup::health_response("boss-jobs-api", env!("CARGO_PKG_VERSION"), STORAGE);
+    let capabilities = match state.schema_ledger.as_ref() {
+        Some(ledger) => response
+            .capabilities
+            .with_schema(crate::schema_level::read(ledger).await),
+        None => response.capabilities,
+    };
+    Json(boss_core::startup::HealthResponse {
+        capabilities,
+        ..response
+    })
 }
 
 // ---------------------------------------------------------------------------

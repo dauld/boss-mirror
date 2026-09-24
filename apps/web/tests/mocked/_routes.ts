@@ -156,18 +156,23 @@ export const ROUTES: ReadonlyArray<string> = [
   // `[]` catch-all for `/api/jobs?department=sales` renders the "no
   // jobs in Sales" state, and the outage renders `load-failed`.
   '/ux/departments/sales',
-  // The router's catch-all — see LANDING_FALLBACK.
-  '/ux/unknown-path',
+  // The landing page (the System Model live view). It was reachable only
+  // through the router's catch-all, crawled here as '/ux/unknown-path',
+  // until design ee3a3a2f gave it this door.
+  '/ux/system-model',
+  // The router's catch-all — see NOT_FOUND_ROW.
+  '/ux/accounts/agreements/x',
 ];
 
 /// The one ROUTES entry the router does NOT serve, on purpose: an
-/// unknown path renders LandingPage (the System Model live view) as the
-/// catch-all, and nothing else reaches that page. Until 2026-09-18 this
-/// row was spelled '/ux/refurb' and both crawls believed they were
-/// crawling a refurb page — there is no refurb route, and the outage
-/// roster explained its silence with reads the landing page makes.
-/// interaction-crawl pins every OTHER row to the router (f2b8a01c).
-export const LANDING_FALLBACK = '/ux/unknown-path';
+/// unmatched path renders the not-found page, naming the path (design
+/// ee3a3a2f). It is spelled as one of the dead links that motivated that
+/// page — a greedy `/accounts/(.+)` used to render it as the account page
+/// for a missing account "agreements/x". Before that the catch-all
+/// rendered the landing page, and until 2026-09-18 this row was spelled
+/// '/ux/refurb' while both crawls believed they were crawling a refurb
+/// page. interaction-crawl pins every OTHER row to the router (f2b8a01c).
+export const NOT_FOUND_ROW = '/ux/accounts/agreements/x';
 
 /// Routes the crawls cannot cover yet, each with why. Shrinking this
 /// list is the work; adding to it is a decision.

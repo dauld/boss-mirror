@@ -3799,6 +3799,16 @@ fn stations_stuck(inputs: &RegionInputs<'_>) -> StuckPart {
 /// THE GARAGE: cars held on the dock by hand and greens held before
 /// parking — the yard's own held lanes. A hold is a brake someone here
 /// set, so releasing it is ours.
+///
+/// AND WHAT TROUBLES IT: greens no car claims (stranded) and gate-runs
+/// never judged (limbo), once they have stood past the garage's own
+/// grace, [`bands::GARAGE_STRANDED`] — the same line that turns the
+/// card troubled, so the card and this count cross it together. Car 2
+/// left them out and the garage could read troubled beside "stuck 0";
+/// the operator decided from the company frame that they count
+/// (backlog 4142d821, car 2's handback): a green nobody parks and a
+/// question the gate never answered each wait on nobody but us. Inside
+/// the grace a green is still becoming a car, so it counts as neither.
 fn garage_stuck(inputs: &RegionInputs<'_>) -> StuckPart {
     let s = inputs.status;
     let cars = s.held_cars.iter().map(|h| {
@@ -3811,8 +3821,21 @@ fn garage_stuck(inputs: &RegionInputs<'_>) -> StuckPart {
         .held
         .iter()
         .map(|g| (g.packet_id.clone(), hours_since(&g.since, inputs.now)));
+    // A `since` the record cannot date is past the grace: an unknown
+    // onset is stated at once (region_states), never read as a pass.
+    let past_grace = |since: &str| {
+        stamp_instant(since)
+            .is_none_or(|t| (inputs.now - t).num_minutes() >= bands::GARAGE_STRANDED.hold_minutes)
+    };
+    let unclaimed = s
+        .stranded
+        .iter()
+        .map(|g| (&g.packet_id, &g.since))
+        .chain(s.limbo.iter().map(|l| (&l.packet_id, &l.since)))
+        .filter(|(_, since)| past_grace(since))
+        .map(|(id, since)| (id.clone(), hours_since(since, inputs.now)));
     StuckPart {
-        stuck: cars.chain(greens).collect(),
+        stuck: cars.chain(greens).chain(unclaimed).collect(),
         ..StuckPart::new("garage")
     }
 }
@@ -3907,8 +3930,9 @@ fn third_stuck(third: &str, parts: &[&StuckPart]) -> ThirdStuck {
 /// WHAT IS STUCK, per third, in [`THIRDS`] order — the union of five
 /// populations that already have an owner, with no new measure (design
 /// cf820810 Q2): intake past its triage band and stations not draining
-/// or over their limit (queue management); cars and greens held by hand
-/// (actors building); cars held on an ordering edge and landed cars past
+/// or over their limit (queue management); cars and greens held by hand,
+/// and greens no car claims and gate-runs never judged past the garage's
+/// grace (actors building); cars held on an ordering edge and landed cars past
 /// a day unproven (delivery). Each part is its region's own predicate,
 /// so every number clicks back to the card that owns it.
 pub fn stuck(inputs: &RegionInputs<'_>) -> Vec<ThirdStuck> {
@@ -7525,6 +7549,42 @@ mod tests {
         let a = third(&out, "actors-building");
         assert_eq!((a.stuck, a.waiting), (2, 0), "{a:?}");
         assert_eq!(a.oldest_hours, Some(60), "held since 2026-09-17: {a:?}");
+        assert_eq!(a.regions, ["garage"]);
+    }
+
+    /// A STRANDED GREEN AND A NEVER-JUDGED GATE-RUN ARE STUCK once they
+    /// have stood past the garage's own 15-minute grace (backlog 4142d821,
+    /// car 2's handback, decided from the company frame): a troubled
+    /// garage card must not sit beside "stuck 0". Inside the grace a
+    /// green is still becoming a car, so it counts as neither.
+    #[test]
+    fn stranded_greens_and_never_judged_runs_past_the_grace_are_the_actors_thirds_stuck() {
+        let mut status = empty_status();
+        let green = |branch: &str, since: &str, id: &str| crate::yard::StrandedGreen {
+            branch: branch.into(),
+            packet_id: id.into(),
+            sha: None,
+            since: since.into(),
+        };
+        status.stranded = vec![
+            green("fix/old-green", "2026-09-19T04:00:00Z", "g-old"),
+            green("fix/fresh-green", "2026-09-19T11:55:00Z", "g-fresh"),
+        ];
+        status.limbo = vec![crate::yard::LimboCar {
+            branch: "fix/lost".into(),
+            verdict: "lost".into(),
+            since: "2026-09-19T10:00:00Z".into(),
+            packet_id: "g-lost".into(),
+            sha: None,
+        }];
+        let out = regions(&inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[])));
+        let a = third(&out, "actors-building");
+        assert_eq!(
+            (a.stuck, a.waiting),
+            (2, 0),
+            "the eight-hour green and the lost run; the five-minute green is inside the grace: {a:?}"
+        );
+        assert_eq!(a.oldest_hours, Some(8), "{a:?}");
         assert_eq!(a.regions, ["garage"]);
     }
 
