@@ -79,6 +79,79 @@ test('the workflow renders as a rail beside the step surface', async ({ page }) 
   await expect(page.locator('.sg-canvas .dag')).toBeHidden();
 });
 
+// The rail is the packet's progress line (backlog 6f471ff6, car 3): the
+// round-2 board's route turned to run down the rail — a square 10px line,
+// filled in the progress colour as far as the packet has come, through
+// stops that wear the state plates. Read as the browser computes it, so a
+// page rule that took any of it back would show here.
+test('the rail is the board’s route line, its stops wearing the plates', async ({ page }) => {
+  await mocks(page);
+  await page.goto(`/ux/jobs/${JOB_ID}`);
+  const rows = page.locator('.sg-rail .rail-row');
+  await expect(rows).toHaveCount(9);
+
+  const look = await rows.evaluateAll((els) =>
+    els.map((row) => {
+      const stop = row.querySelector('.rail-stop');
+      const s = stop ? getComputedStyle(stop) : null;
+      const before = getComputedStyle(row, '::before');
+      const after = getComputedStyle(row, '::after');
+      return {
+        title: row.textContent?.trim() ?? '',
+        stop: s ? `${s.width} ${s.borderTopWidth} ${s.borderTopStyle} ${s.borderTopColor}` : 'none',
+        fill: s?.backgroundColor ?? 'none',
+        in: `${before.display} ${before.width} ${before.borderTopLeftRadius} ${before.backgroundColor}`,
+        out: `${after.display} ${after.width} ${after.borderTopLeftRadius} ${after.backgroundColor}`,
+      };
+    }),
+  );
+  const at = (title: string) => look.find((l) => l.title === title);
+
+  const INK = 'rgb(14, 27, 46)';
+  const BUSY = 'rgb(242, 194, 48)';
+  const WHITE = 'rgb(255, 255, 255)';
+  const PROGRESS = 'rgb(15, 110, 159)';
+  const RULE = 'rgb(220, 226, 234)';
+
+  // Every stop is 26px, ringed 4px in night ink; pending's ring is dashed.
+  expect(at('submitted')?.stop).toBe(`26px 4px solid ${INK}`);
+  expect(at('closed')?.stop).toBe(`26px 4px dashed ${INK}`);
+  // The plates: completed solid ink, active busy, pending hollow.
+  expect(at('submitted')?.fill).toBe(INK);
+  expect(at('triage')?.fill).toBe(INK);
+  expect(at('investigate')?.fill).toBe(BUSY);
+  expect(at('build')?.fill).toBe(WHITE);
+
+  // The line: square, 10px, filled from the first stop to the one the
+  // packet is at (investigate), in the rule colour after it. The first
+  // stop has no line above it and the last none below.
+  expect(at('submitted')?.in).toMatch(/^none /);
+  expect(at('submitted')?.out).toBe(`block 10px 0px ${PROGRESS}`);
+  expect(at('triage')?.in).toBe(`block 10px 0px ${PROGRESS}`);
+  expect(at('investigate')?.in).toBe(`block 10px 0px ${PROGRESS}`);
+  expect(at('investigate')?.out).toBe(`block 10px 0px ${RULE}`);
+  expect(at('design-review')?.in).toBe(`block 10px 0px ${RULE}`);
+  expect(at('closed')?.out).toMatch(/^none /);
+});
+
+// The graph draws the same four states in the same plates: its left edge.
+test('the whole-workflow graph edges each step in its plate', async ({ page }) => {
+  await mocks(page);
+  await page.goto(`/ux/jobs/${JOB_ID}`);
+  await page.locator('.sg-canvas summary').click();
+  const edge = (title: string) =>
+    page
+      .locator('.sg-canvas .node', { hasText: title })
+      .first()
+      .evaluate((n) => {
+        const s = getComputedStyle(n);
+        return `${s.borderLeftStyle} ${s.borderLeftColor} ${s.backgroundColor}`;
+      });
+  expect(await edge('triage')).toBe('solid rgb(14, 27, 46) rgb(255, 255, 255)');
+  expect(await edge('investigate')).toBe('solid rgb(242, 194, 48) rgb(255, 255, 255)');
+  expect(await edge('build')).toBe('dashed rgb(14, 27, 46) rgb(255, 255, 255)');
+});
+
 test('job page rail screenshot', async ({ page }, testInfo) => {
   await mocks(page);
   await page.goto(`/ux/jobs/${JOB_ID}`);

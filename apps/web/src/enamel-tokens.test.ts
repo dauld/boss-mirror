@@ -630,3 +630,165 @@ describe('the filter chip is Enamel’s', () => {
     expect(silent).toEqual([]);
   });
 });
+
+/** A component's own <style> block, as selector -> declarations — the same
+ *  reading `rules` gives styles.css. */
+const componentRules = (file: string): ReadonlyMap<string, ReadonlyMap<string, string>> => {
+  const src = svelteFiles.find(([f]) => f === file)?.[1] ?? '';
+  const css = (src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '').replace(
+    /\/\*[\s\S]*?\*\//g,
+    '',
+  );
+  const map = new Map<string, Map<string, string>>();
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const decls = new Map(
+      [...(m[2] ?? '').matchAll(/([a-z-]+)\s*:\s*([^;]+);?/g)].map(
+        (d) => [d[1] ?? '', (d[2] ?? '').trim()] as const,
+      ),
+    );
+    for (const sel of (m[1] ?? '').split(',').map((s) => s.trim())) {
+      map.set(sel, new Map([...(map.get(sel) ?? []), ...decls]));
+    }
+  }
+  return map;
+};
+
+/** The failed read is the board's red rail (backlog 6f471ff6, car 3). The
+ *  round-2 board's `.st.failed` under `.t-enamel`: a white card squared to
+ *  4px, padding 12px 14px, no frame but an 8px troubled rail down its left,
+ *  its words 600 in troubled ink — "the same device as a department line,
+ *  so it reads as 'this line is down'" and never as an empty list. Before
+ *  this car `.load-failed` was red words and nothing else, on 131 elements,
+ *  and inside a `.theme-exec` page the `.empty` it also wears won the
+ *  colour back: a failure set in the dim italic of "nothing here". */
+describe('the failed read is a red rail', () => {
+  // Written to outrank any ONE page class on the same element — the
+  // `.theme-exec .empty` it shares a paragraph with, a scoped `.tb-msg` —
+  // so every page that names the marker wears the rail without an edit.
+  const RAIL = ':root body .load-failed';
+
+  it('is an 8px troubled rail on a white card, its words 600 in troubled ink', () => {
+    expect(decl(RAIL, 'background')).toBe('var(--card)');
+    expect(decl(RAIL, 'border')).toBe('0');
+    expect(decl(RAIL, 'border-left')).toBe('8px solid var(--troubled)');
+    expect(decl(RAIL, 'border-radius')).toBe('var(--radius)');
+    expect(decl(RAIL, 'padding')).toBe('12px 14px');
+    expect(decl(RAIL, 'color')).toBe('var(--troubled-ink)');
+    expect(decl(RAIL, 'font-weight')).toBe('600');
+    expect(decl(RAIL, 'font-style')).toBe('normal');
+  });
+
+  it('is the only rule that draws the marker', () => {
+    expect([...rules.keys()].filter((s) => /\.load-failed\b/.test(s))).toEqual([RAIL]);
+  });
+
+  it('no failure outside IT repaints its words inline', () => {
+    // An inline colour outranks every rule, so it would take the troubled
+    // ink back to the plate's red. The two left are IT surfaces, which the
+    // IT map cars (c3105b2a) own.
+    const LEFT = ['it/monitoring/PerfPage.svelte', 'it/step-plugins/StepPluginsPage.svelte'];
+    const repainted = svelteFiles
+      .filter(([, src]) =>
+        [...src.matchAll(/<[a-z]+\b[^>]*>/g)].some(
+          (m) => /\bload-failed\b/.test(m[0]) && /style="[^"]*\bcolor\s*:/.test(m[0]),
+        ),
+      )
+      .map(([file]) => file);
+    expect(repainted.sort()).toEqual(LEFT);
+  });
+});
+
+/** A packet's progress line is the board's route (backlog 6f471ff6, car 3):
+ *  a square 10px line in the rule colour, filled in the progress colour as
+ *  far as the packet has come, through 26px stops ringed 4px in night ink,
+ *  labelled in 10.5px/700 caps tracked .06em. The job page draws it in the
+ *  step rail, the one place a packet's steps are read in order, run top to
+ *  bottom. Before this car the rail was 7px lamps, and the only progress
+ *  bar in the stylesheet — `.jd-progress-bar`, 6px, rounded — had no caller
+ *  anywhere and had had none since the initial commit. */
+describe('a packet’s progress is the board’s route line', () => {
+  const rail = componentRules('jobs/StepRail.svelte');
+  const d = (sel: string, prop: string) => rail.get(sel)?.get(prop);
+
+  it('runs a square 10px line in the rule colour through every stop', () => {
+    for (const half of ['.rail-row::before', '.rail-row::after']) {
+      expect(d(half, 'width')).toBe('10px');
+      expect(d(half, 'border-radius')).toBe('0');
+      expect(d(half, 'background')).toBe('var(--hairline)');
+    }
+  });
+
+  it('fills the line in the progress colour as far as the packet has come', () => {
+    expect(d('.rail-row.run-in::before', 'background')).toBe('var(--signal)');
+    expect(d('.rail-row.run-out::after', 'background')).toBe('var(--signal)');
+  });
+
+  it('draws each stop 26px, ringed 4px in night ink', () => {
+    expect(d('.rail-stop', 'width')).toBe('26px');
+    expect(d('.rail-stop', 'height')).toBe('26px');
+    expect(d('.rail-stop', 'border')).toBe('4px solid var(--border-strong)');
+    expect(d('.rail-stop', 'border-radius')).toBe('50%');
+    expect(d('.rail-stop', 'background')).toBe('var(--card)');
+  });
+
+  it('labels each stop in 10.5px, 700, uppercase, tracked .06em', () => {
+    expect(d('.rail-title', 'font-size')).toBe('10.5px');
+    expect(d('.rail-title', 'font-weight')).toBe('700');
+    expect(d('.rail-title', 'text-transform')).toBe('uppercase');
+    expect(d('.rail-title', 'letter-spacing')).toBe('var(--ls-button)');
+  });
+
+  it('keeps no second progress bar in the stylesheet', () => {
+    expect([...rules.keys()].filter((s) => /jd-progress/.test(s))).toEqual([]);
+  });
+});
+
+/** A step's state is the same colour wherever it is drawn: the plates
+ *  (backlog 6f471ff6, car 3; the fold: "pending dashed, ready solid blue,
+ *  completed solid ink"; the plate an active step already wears is busy,
+ *  and the board fills the stop a packet is at in busy). Before this car the
+ *  rail lit ready amber and active blue — the plates reversed — and the
+ *  graph set a ready step on the clear green's wash. */
+describe('a step’s state wears its plate in the rail and the graph', () => {
+  const PLATE: ReadonlyArray<readonly [string, string]> = [
+    ['completed', 'var(--completed)'],
+    ['active', 'var(--busy)'],
+    ['ready', 'var(--ready)'],
+  ];
+
+  const rail = componentRules('jobs/StepRail.svelte');
+  for (const [status, ground] of PLATE) {
+    it(`the rail fills a ${status} stop with ${ground}`, () => {
+      expect(rail.get(`.rail-row.status-${status} .rail-stop`)?.get('background')).toBe(ground);
+    });
+  }
+  it('the rail leaves a pending stop hollow, in a dashed ring', () => {
+    expect(rail.get('.rail-row.status-pending .rail-stop')?.get('background')).toBeUndefined();
+    expect(rail.get('.rail-row.status-pending .rail-stop')?.get('border-style')).toBe('dashed');
+  });
+
+  const dag = componentRules('jobs/StepDag.svelte');
+  const NODE: Readonly<Record<string, string>> = {
+    completed: '.node.n-done',
+    active: '.node.n-active',
+    ready: '.node.n-ready',
+  };
+  for (const [status, ground] of PLATE) {
+    it(`the graph edges a ${status} step in ${ground}, on no wash`, () => {
+      const sel = NODE[status] ?? '';
+      expect(dag.get(sel)?.get('border-left-color')).toBe(ground);
+      expect(dag.get(sel)?.get('background')).toBeUndefined();
+    });
+  }
+  it('the graph edges a pending step in a dashed ink rule', () => {
+    expect(dag.get('.node.n-pending')?.get('border-left-color')).toBe('var(--border-strong)');
+    expect(dag.get('.node.n-pending')?.get('border-left-style')).toBe('dashed');
+  });
+  it('no state in the graph is a tint', () => {
+    const tinted = [...dag]
+      .filter(([sel]) => /\.n-(?:done|active|ready|pending|skipped)\b/.test(sel))
+      .filter(([, decls]) => /-wash\b/.test(decls.get('background') ?? ''))
+      .map(([sel]) => sel);
+    expect(tinted).toEqual([]);
+  });
+});

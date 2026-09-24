@@ -415,29 +415,29 @@
     white-space: nowrap;
   }
 
-  /* Status accents — left border + a tinted wash, matched to the
-     status-chip palette used elsewhere in the app: done → OK,
-     ready → SIGNAL (.step-status-ready), active → WARN amber for
-     in-flight work (the Yard's `run` lamp), so active and ready-only
-     nodes stay distinguishable at a glance. */
+  /* Status accents — the left edge, in the step's plate (backlog
+     6f471ff6, car 3), so a state is one colour wherever a step is
+     drawn: completed solid ink, active busy, ready the action blue,
+     pending the plate's dashed ink frame, skipped that frame gone
+     quiet. No wash: Enamel's states are solid plates, never tints —
+     and the tints here had drifted from the plates (a ready step sat
+     on the clear green's wash). */
   .node.n-done {
-    border-left-color: var(--ok);
-    background: var(--ok-wash);
+    border-left-color: var(--completed);
   }
   .node.n-active {
-    border-left-color: var(--warn);
-    background: var(--warn-wash);
+    border-left-color: var(--busy);
   }
   .node.n-ready {
-    border-left-color: var(--signal);
-    background: var(--ok-wash);
+    border-left-color: var(--ready);
   }
   .node.n-pending {
-    border-left-color: var(--hairline);
+    border-left-color: var(--border-strong);
+    border-left-style: dashed;
   }
   .node.n-skipped {
-    border-left-color: var(--hairline);
-    background: var(--wash);
+    border-left-color: var(--static);
+    border-left-style: dashed;
   }
   .node.n-skipped .node-title {
     color: var(--static);
