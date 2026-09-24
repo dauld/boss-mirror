@@ -31,7 +31,7 @@
 // decision, not a render to pin.
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
-import { mountPage, settledReads } from './_helpers';
+import { mountPage, openedRequests, recordPageRequests, settledReads } from './_helpers';
 import {
   installSmokeMocks, installTenantManifest, LIVE_MANIFEST_RECORDED_AT, MODULES_LIVE, MODULES_NONE, MODULES_ON,
 } from './_smokeMocks';
@@ -709,7 +709,7 @@ test.describe('/ux/warehouse — State B: the Create PO form (the one write)', (
   // Gap 10 (aad31699): a quantity below 1 makes Submit a silent no-op —
   // the button stays enabled, nothing is sent and nothing is said.
   test('a quantity below 1 sends nothing and says nothing', async ({ page }) => {
-    const seen = watch(page);
+    await recordPageRequests(page);
     await installWarehouse(page);
     await mountWarehouse(page);
     await openForm(page);
@@ -720,8 +720,11 @@ test.describe('/ux/warehouse — State B: the Create PO form (the one write)', (
       await expect(button(page, 'Submit')).toBeEnabled();
       await button(page, 'Submit').click();
     }
-    await page.waitForTimeout(300);
-    expect(seen.writes).toEqual([]);
+    // The page's own record, read once Submit has returned: a write the
+    // click opened is in it already. It slept 300 ms and read Playwright's
+    // request event until backlog 840c5a76 — a bet on the event's transit.
+    const writes = (await openedRequests(page)).filter((e) => e.method !== 'GET' && !SHELL_WRITES.has(e.path));
+    expect(writes.map((e) => `${e.method} ${e.path}`)).toEqual([]);
     await expect(poStatusLine(page)).toHaveCount(0);
     await expect(button(page, 'Cancel')).toBeVisible();
   });

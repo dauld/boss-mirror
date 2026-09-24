@@ -155,6 +155,8 @@ test('the whole-workflow graph edges each step in its plate', async ({ page }) =
 test('job page rail screenshot', async ({ page }, testInfo) => {
   await mocks(page);
   await page.goto(`/ux/jobs/${JOB_ID}`);
-  await page.waitForTimeout(1200);
+  // What the picture is of: the rail, every step in it. It slept 1 200 ms
+  // and photographed whatever had painted by then (backlog 840c5a76).
+  await expect(page.locator('.sg-rail .rail-row')).toHaveCount(9);
   await page.screenshot({ path: testInfo.outputPath('rail.png'), fullPage: true });
 });

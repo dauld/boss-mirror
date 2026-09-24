@@ -38,6 +38,7 @@
 import { test, expect, type Page, type Request } from '@playwright/test';
 import { SHELL_ENDPOINTS, installSmokeMocks } from './_smokeMocks';
 import { FAILURE_MARKER, ROUTES } from './_routes';
+import { nextFrame } from './_helpers';
 
 /// The endpoints that stay up — SHELL_ENDPOINTS, defined beside the
 /// fixtures in _smokeMocks.ts since the interaction crawl's empty leg
@@ -204,9 +205,6 @@ const QUIET_MS = 250;
 /// has not run. Bounded so a genuinely read-free route costs this much
 /// and not the whole budget.
 const FIRST_READ_MS = 2_000;
-/// The last answer lands in JS; the render it causes is the next frame.
-const PAINT_MS = 100;
-
 async function settle(page: Page, reads: Reads): Promise<void> {
   const start = Date.now();
   const deadline = start + SETTLE_BUDGET_MS;
@@ -216,9 +214,12 @@ async function settle(page: Page, reads: Reads): Promise<void> {
     if (reads.inFlight.size > 0 || !started) quietSince = 0;
     else if (quietSince === 0) quietSince = Date.now();
     else if (Date.now() - quietSince >= QUIET_MS) break;
+    // short on purpose: the loop's poll interval — QUIET_MS above is the window, this only paces the reads of it
     await page.waitForTimeout(25);
   }
-  await page.waitForTimeout(PAINT_MS);
+  // The last answer lands in JS; the render it causes is the next frame —
+  // waited for as a frame, not as the 100 ms it was until backlog 840c5a76.
+  await nextFrame(page);
 }
 
 /// WHAT A QUIET WINDOW CANNOT SEE (backlog 6592caf7). settle() leaves

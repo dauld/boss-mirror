@@ -8,6 +8,7 @@
 // assignment, so a stale answer is dropped instead of landed.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { answerRead, recordPageRequests } from './_helpers';
 
 const EMP = { id: 'emp-david', name: 'David', email: 'd@a', role: 'platform-admin',
   department: 'it', hire_date: '2023-01-01', status: 'active', location: 'loc-hq',
@@ -26,25 +27,33 @@ const jobBody = (id: string, title: string) => ({
 const json = (r: Route, b: unknown, status = 200) =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(b) });
 
-async function mocks(page: Page) {
+/// Packet A's answer, held until the test releases it — after B has
+/// rendered, so the stale answer lands LAST, every time.
+async function mocks(page: Page): Promise<() => void> {
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await recordPageRequests(page);
   await page.route('**/api/**', (r) => json(r, { data: [], total: 0 }));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: 'emp-david', role: 'platform-admin' }));
   await page.route(/\/api\/jobs\/job-edges$/, (r) => json(r, []));
-  // Packet A answers SLOWLY — slower than the whole trip to B.
+  // Packet A answers SLOWLY — slower than the whole trip to B. It was a
+  // 1 200 ms timer, with a 1 600 ms sleep after B to outlast it; under
+  // load neither number says which answer landed last (backlog 840c5a76).
   await page.route(new RegExp(`/api/jobs/${A}$`), async (r) => {
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await held;
     return json(r, jobBody(A, 'Packet A, the slow one'));
   });
   await page.route(new RegExp(`/api/jobs/${B}$`), (r) =>
     json(r, jobBody(B, 'Packet B, where the reader went')));
+  return release;
 }
 
 test('a fast A→B navigation never renders A under B\'s URL', async ({ page }) => {
-  await mocks(page);
+  const releaseA = await mocks(page);
 
-  // Land on A (its fetch is now in flight and will take 1.2s), then
+  // Land on A (its fetch is now in flight, held), then
   // move to B the way the SPA does before A ever answers.
   await page.goto(`/jobs/${A}`);
   await page.evaluate((b) => {
@@ -57,8 +66,11 @@ test('a fast A→B navigation never renders A under B\'s URL', async ({ page }) 
 
   // …and KEEPS rendering after A's stale answer finally arrives. This
   // is the assertion that fails without the ticket check: A's slow
-  // response used to land last and repaint the page.
-  await page.waitForTimeout(1600);
+  // response used to land last and repaint the page. Released now, and
+  // read by the page — body parsed, and what the page does with it done
+  // — before anything is asserted.
+  releaseA();
+  await answerRead(page, new RegExp(`/api/jobs/${A}$`));
   await expect(page.locator('h1')).toContainText('Packet B');
   await expect(page.getByText('Packet A, the slow one')).toHaveCount(0);
 });

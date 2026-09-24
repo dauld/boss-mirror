@@ -19,7 +19,7 @@
 import { test, expect } from '@playwright/test';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
-import { mountPage } from './_helpers';
+import { mountPage, paintedOrThrew } from './_helpers';
 import { installSmokeMocks } from './_smokeMocks';
 
 const PLUGIN = readFileSync(
@@ -99,7 +99,7 @@ test('a self-carried design doc renders its questions without touching the docs 
   // The step surface deliberately renders OUTSIDE `.app-shell` to take
   // the whole viewport, so it passes its own root.
   await mountPage(page, '/jobs/job-dd-1/steps/step-1', { root: '.step-focus' });
-  await page.waitForTimeout(2000);
+  await paintedOrThrew(page.getByText('New Subject kinds, or Classes of asset?'), errs);
 
   expect(errs, `plugin threw: ${errs.join(' | ')}`).toEqual([]);
   // Both questions on the surface, by their own text.
@@ -161,7 +161,7 @@ test('a step carrying only a pointer says so, and never calls a docs API', async
   );
 
   await mountPage(page, '/jobs/job-dd-1/steps/step-1', { root: '.step-focus' });
-  await page.waitForTimeout(2000);
+  await paintedOrThrew(page.getByText(/carries only a pointer/), errs);
 
   expect(errs, `plugin threw: ${errs.join(' | ')}`).toEqual([]);
   // It names the pointer it was given and the verb that replaces it.

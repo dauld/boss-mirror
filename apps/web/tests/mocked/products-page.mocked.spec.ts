@@ -23,7 +23,7 @@
 // as a changed expectation instead of a silently-passing one.
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
-import { mountPage, settledReads } from './_helpers';
+import { answerRead, mountPage, openedRequests, recordPageRequests, settledReads } from './_helpers';
 import {
   installSmokeMocks, installTenantManifest, LIVE_MANIFEST_RECORDED_AT, MODULES_LIVE, MODULES_NONE,
 } from './_smokeMocks';
@@ -197,7 +197,7 @@ test.describe('/ux/products — State A, the parts module off (the live instance
   // the `product` kind to the `products` row), so a deep link to one
   // product answers with the same notice, under the list's label.
   test('a deep link to one product renders the same notice, and reads nothing', async ({ page }) => {
-    const seen = watch(page);
+    await recordPageRequests(page);
     await installProducts(page);
     await installTenantManifest(page, MODULES_LIVE);
     await inlineManifest(page, MODULES_LIVE);
@@ -207,8 +207,13 @@ test.describe('/ux/products — State A, the parts module off (the live instance
     await expect(notice.locator('h1')).toHaveText('Not enabled for this tenant');
     await expect(notice.locator('strong')).toHaveText('Products');
     await expect(page.getByText('Hazy IPA')).toHaveCount(0);
-    await page.waitForTimeout(300);
-    expect(seen.reads).toEqual([]);
+    // The page's own record, read once the notice has painted: a read the
+    // page opened on the way there is in it already. It slept 300 ms and
+    // read Playwright's request event until backlog 840c5a76.
+    const reads = (await openedRequests(page)).filter(
+      (e) => e.method === 'GET' && (e.path === '/api/products' || e.path.startsWith('/api/products/')),
+    );
+    expect(reads.map((e) => e.path)).toEqual([]);
   });
 
   // a1fcee7b, measured while writing this spec: with no inlined manifest
@@ -400,6 +405,7 @@ test.describe('/ux/products — State B: empty, loading, and a failed read', () 
     const listHeld = new Promise<void>((resolve) => { releaseList = resolve; });
     let releaseDetail: () => void = () => {};
     const detailHeld = new Promise<void>((resolve) => { releaseDetail = resolve; });
+    await recordPageRequests(page);
     await installProducts(page);
     await page.route(LIST, async (r) => {
       await listHeld;
@@ -415,8 +421,10 @@ test.describe('/ux/products — State B: empty, loading, and a failed read', () 
     await expect(list(page).locator('h1.exec-title')).toHaveText('Products');
     releaseList();
     // The list has arrived; one detail read has not. The whole table
-    // waits on the slowest product.
-    await page.waitForTimeout(300);
+    // waits on the slowest product. "Arrived" is the page having read the
+    // list and done what it does with it — a page that painted the table
+    // then has painted it now. It slept 300 ms until backlog 840c5a76.
+    await answerRead(page, LIST);
     await expect(status(page)).toHaveText('Loading products…');
     await expect(list(page).locator('table')).toHaveCount(0);
     releaseDetail();

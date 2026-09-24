@@ -29,7 +29,7 @@
 // wall clock this spec fixes.
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
-import { mountPage, settledReads } from './_helpers';
+import { mountPage, openedRequests, recordPageRequests, settledReads } from './_helpers';
 import {
   installSmokeMocks, installTenantManifest, LIVE_MANIFEST_RECORDED_AT, MODULES_LIVE, MODULES_NONE,
 } from './_smokeMocks';
@@ -146,7 +146,7 @@ test.describe('/ux/calendar/me — State A, the calendar module off (the live in
 
 test.describe('/ux/calendar/me — State B, the module on: identity', () => {
   test('no session: "Sign in to see your week.", the three buttons disabled, no read', async ({ page }) => {
-    const seen = watch(page);
+    await recordPageRequests(page);
     await page.clock.setFixedTime(NOW);
     await installSmokeMocks(page); // /api/session answers {} — unauthenticated
     await mountPage(page, PATH, { titleMatch: /^My Week$/ });
@@ -158,8 +158,11 @@ test.describe('/ux/calendar/me — State B, the module on: identity', () => {
       await expect(button(page, name)).toBeDisabled();
     }
     await expect(page.locator('.week-grid')).toHaveCount(0);
-    await page.waitForTimeout(500);
-    expect(seen.reads).toHaveLength(0);
+    // The page's own record, read once the signed-out state has painted:
+    // a read the page opened on the way there is in it already. It slept
+    // 500 ms and read Playwright's request event until backlog 840c5a76.
+    const reads = (await openedRequests(page)).filter((e) => e.path === '/api/calendar/reservations');
+    expect(reads.map((e) => e.url)).toEqual([]);
   });
 
   // Gap 4 (cfe3f465): while the session is still loading, the page tells

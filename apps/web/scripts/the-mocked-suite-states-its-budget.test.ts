@@ -209,6 +209,82 @@ test('no mocked spec hand-writes a wait shorter than the budget its call inherit
   ).toEqual([]);
 });
 
+// NO SPEC SLEEPS WITHOUT SAYING WHY THE SLEEP IS THE ANSWER (backlog
+// 840c5a76).
+//
+// A `timeout:` is a ceiling on a wait for something; `waitForTimeout` is
+// a wait for NOTHING, and every one the builder of de205627 found was a
+// bet in the same shape — 1 600 ms that a slow answer had landed, 2 000
+// ms that a plugin had mounted, 6 000 ms that a 5 000 ms timer would
+// have fired, 300 and 500 ms that a request the page never sent would
+// have arrived by now. Under load each loses: the thing it stood for
+// happens later than the number, and the assertion after it reads a page
+// mid-change. The interaction crawl lost the same bet on a request EVENT
+// (a Reset click judged silent with its POST on the wire). Each is now a
+// wait on the event it stood for: a locator, the page's own record of
+// the requests it opened (tests/mocked/_helpers.ts), the page's clock
+// run forward, an answer the page has read, a frame.
+//
+// What is left is a window whose ELAPSING is the answer — a runaway read
+// loop only shows itself by counting over time, a quiescence loop needs
+// a pace. Such a line says so, the same way a short `timeout:` does:
+// `short on purpose: <why>` on the line or the line above. Every other
+// `waitForTimeout` under tests/mocked is refused, named by file and line.
+function bareSleeps(file: string, source: string): ReadonlyArray<string> {
+  const sf = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
+  const lines = source.split('\n');
+  const found: string[] = [];
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isCallExpression(n)
+      && ts.isPropertyAccessExpression(n.expression)
+      && n.expression.name.text === 'waitForTimeout'
+    ) {
+      const line = sf.getLineAndCharacterOfPosition(n.getStart(sf)).line;
+      const said = SHORT_ON_PURPOSE.test(lines[line] ?? '') || SHORT_ON_PURPOSE.test(lines[line - 1] ?? '');
+      if (!said) found.push(`${file}:${line + 1} ${n.getText(sf)}`);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+test('no mocked spec sleeps unless the sleep is the answer, and says so', () => {
+  const sleeps = readdirSync(MOCKED_DIR)
+    .filter((f) => f.endsWith('.ts'))
+    .flatMap((f) => bareSleeps(f, readFileSync(join(MOCKED_DIR, f), 'utf8')));
+  expect(
+    sleeps,
+    'a mocked spec sleeps for a fixed time. Wait for the event the sleep stands for — '
+      + 'a locator, the page\'s own request record (recordPageRequests / openedRequests / '
+      + 'readsSettled / answerRead in tests/mocked/_helpers.ts), page.clock.runFor for a '
+      + 'timer, nextFrame for a paint. If the window elapsing IS the answer, say so on the '
+      + 'line: `short on purpose: <why>`',
+  ).toEqual([]);
+});
+
+test('the sleep floor reads what a spec actually writes', () => {
+  // A scanner that reads nothing passes the test above on any tree. The
+  // shapes: a bare sleep, a named one, the exception on the line above
+  // and on the line itself, a sleep inside a comment (not a call), and a
+  // setTimeout inside a route handler — a held answer, which is the
+  // fixture's own event and not a sleep in the spec.
+  const src = [
+    'await page.waitForTimeout(1600);',
+    'await page.waitForTimeout(SETTLE_MS);',
+    '// short on purpose: a loop only shows itself over a window',
+    'await page.waitForTimeout(1_000);',
+    'await page.waitForTimeout(25); // short on purpose: the poll interval',
+    '// it used to be `await page.waitForTimeout(500)`',
+    'await page.route(x, async (r) => { await new Promise((s) => setTimeout(s, 3_000)); });',
+  ].join('\n');
+  expect(bareSleeps('fixture.ts', src)).toEqual([
+    'fixture.ts:1 page.waitForTimeout(1600)',
+    'fixture.ts:2 page.waitForTimeout(SETTLE_MS)',
+  ]);
+});
+
 test('the floor reads what a spec actually writes', () => {
   // The scanner itself, on the shapes it must see: a literal, a named
   // constant, both arms of a ternary, a navigation's larger budget, and

@@ -12,6 +12,7 @@
 import { test, expect } from '@playwright/test';
 import { installSmokeMocks } from './_smokeMocks';
 import { installAuthoringMocks, JOB_ID } from './_mockApi';
+import { paintedOrThrew, readsSettled, recordPageRequests } from './_helpers';
 // The roster lives in _routes.ts, not here: outage-crawl.mocked.spec.ts
 // reads the same list, and a second copy would reproduce the very defect
 // the drift test at the bottom of this file exists to stop (CLAUDE.md
@@ -64,6 +65,7 @@ test.describe('route smoke — every surface renders without a runtime crash', (
     // wiping the previous route's JS state — so there's no effect/timer
     // bleed despite sharing the page. `page.route` handlers persist
     // across navigations, so the mocks are installed once.
+    await recordPageRequests(page);
     await installSmokeMocks(page);
 
     const issues: Issue[] = [];
@@ -96,8 +98,12 @@ test.describe('route smoke — every surface renders without a runtime crash', (
         }
       }
       // Let onMount effects + the (instant) mocked fetches settle so any
-      // data-render crash fires while we're listening.
-      if (shellOk) await page.waitForTimeout(500);
+      // data-render crash fires while we're listening: every read the
+      // route opened answered, and a frame painted with what it said. It
+      // was a flat 500 ms until backlog 840c5a76 — under load, a crash in
+      // a render the answers had not reached yet was never heard. A route
+      // whose reads outlast the budget is judged on what it painted.
+      if (shellOk) await readsSettled(page).catch(() => undefined);
     }
 
     // Gate on crashes: uncaught exceptions + shells that never painted.
@@ -128,8 +134,9 @@ test.describe('route smoke — every surface renders without a runtime crash', (
     await page.goto(`/it/registry/authoring/${JOB_ID}`);
     await expect(page.locator('.app-shell')).toBeVisible();
     // Wait for the lazy graph + the step-authoring surface (which mounts
-    // StepDagEditor) to render the seeded spec.
-    await page.waitForTimeout(2_000);
+    // StepDagEditor) to render the seeded spec — or for the throw this
+    // test exists to catch. It slept 2 000 ms until backlog 840c5a76.
+    await paintedOrThrew(page.locator('.sde-header'), errors);
 
     expect(errors, `pageerrors in the authoring workspace:\n${errors.join('\n')}`).toEqual([]);
   });

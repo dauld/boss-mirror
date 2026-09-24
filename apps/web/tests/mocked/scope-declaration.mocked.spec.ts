@@ -13,7 +13,7 @@
 
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'fs';
-import { mountPage } from './_helpers';
+import { mountPage, paintedOrThrew } from './_helpers';
 import { installSmokeMocks } from './_smokeMocks';
 
 const PLUGIN = readFileSync(
@@ -77,7 +77,11 @@ const JOB = {
   steps: [SCOPE_STEP, GATE_STEP],
 };
 
-async function mountScope(page: import('@playwright/test').Page, job: unknown) {
+/// Mount the scope step and wait for the plugin to paint `ready` (or
+/// throw — a spec that listens for pageerror then names the throw).
+async function mountScope(page: import('@playwright/test').Page, job: unknown, ready: string) {
+  const errs: string[] = [];
+  page.on('pageerror', (e) => errs.push(String(e)));
   await installSmokeMocks(page);
   await page.route('**/api/jobs/job-car-1', (r) => r.fulfill({ json: job }));
   await page.route('**/api/jobs/step-plugins', (r) => r.fulfill({ json: SPEC }));
@@ -85,7 +89,7 @@ async function mountScope(page: import('@playwright/test').Page, job: unknown) {
     r.fulfill({ contentType: 'application/javascript', body: PLUGIN }),
   );
   await mountPage(page, '/jobs/job-car-1/steps/step-scope', { root: '.step-focus' });
-  await page.waitForTimeout(1500);
+  await paintedOrThrew(page.getByText(ready).first(), errs);
 }
 
 test('the scope step asks its two questions in words, and names the car it is scoping', async ({
@@ -94,7 +98,7 @@ test('the scope step asks its two questions in words, and names the car it is sc
   const errs: string[] = [];
   page.on('pageerror', (e) => errs.push(String(e)));
 
-  await mountScope(page, JOB);
+  await mountScope(page, JOB, 'What this car DOES');
   expect(errs, `plugin threw: ${errs.join(' | ')}`).toEqual([]);
 
   // The two halves, as questions rather than as field names.
@@ -117,7 +121,7 @@ test('the scope step asks its two questions in words, and names the car it is sc
 });
 
 test('the boundary cannot be declared with half of it missing', async ({ page }) => {
-  await mountScope(page, JOB);
+  await mountScope(page, JOB, 'What this car DOES');
 
   const declare = page.getByRole('button', { name: 'Declare the boundary' });
   await expect(declare).toBeDisabled();
@@ -159,7 +163,8 @@ test('declaring the boundary writes both fields and completes the step', async (
   });
 
   await mountPage(page, '/jobs/job-car-1/steps/step-scope', { root: '.step-focus' });
-  await page.waitForTimeout(1500);
+  // The plugin's form, painted — it slept 1 500 ms for it until 840c5a76.
+  await expect(page.locator('#ssd-summary')).toBeVisible();
 
   await page.locator('#ssd-summary').fill('Fix the marketing-asset tag chips.');
   await page.locator('#ssd-excludes').fill('  Not the other pages — a sibling car owns them.  ');
@@ -193,7 +198,7 @@ test('a declared boundary reads back as the two halves it was asked in', async (
       },
       GATE_STEP,
     ],
-  });
+  }, 'It deliberately does not');
 
   await expect(page.getByText('This car does')).toBeVisible();
   await expect(page.getByText('It deliberately does not')).toBeVisible();

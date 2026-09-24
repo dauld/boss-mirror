@@ -30,7 +30,7 @@
 // (with the server's words when it gave any), then the 5s poll.
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
-import { mountPage } from './_helpers';
+import { mountPage, openedRequests, recordPageRequests } from './_helpers';
 import { FAILURE_MARKER } from './_routes';
 import { AUDIT_STATS, installSmokeMocks } from './_smokeMocks';
 import { parseRoute } from '../../src/router';
@@ -111,6 +111,18 @@ async function installAuditReads(page: Page, rows: ReadonlyArray<unknown> = ROWS
 }
 
 const param = (url: string, key: string): string | null => new URL(url).searchParams.get(key);
+
+/// How many live streams, and how many tail reads, the page has opened,
+/// by its own record (recordPageRequests) — what a "nothing more was
+/// opened" assertion reads, rather than Playwright's request events after
+/// a sleep (backlog 840c5a76).
+const streamsOpenedBy = async (page: Page): Promise<number> =>
+  (await openedRequests(page)).filter((e) => STREAM.test(e.url)).length;
+const tailsOpenedBy = async (page: Page): Promise<number> =>
+  (await openedRequests(page)).filter((e) => TAIL.test(e.url)).length;
+
+/// The page's own re-read period: SNAPSHOT_RELOAD_MS in EventsPage.svelte.
+const RELOAD_MS = 5_000;
 const last = (xs: ReadonlyArray<string>): string => xs[xs.length - 1] ?? '';
 
 /// parseRoute reads `window.location.search` for two routes; this is
@@ -405,6 +417,7 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     // retro or an incident could read no further back without the
     // export. The tail has always taken `since` (inclusive) and `until`
     // (exclusive); the page now sends them.
+    await recordPageRequests(page);
     await installAuditReads(page);
     const seen = watch(page);
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
@@ -427,6 +440,7 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     await expect.poll(() => seen.stream.length).toBeGreaterThan(1);
 
     const streams = seen.stream.length;
+    const streamsOpened = await streamsOpenedBy(page);
     await page.getByLabel('Until').fill('2026-09-20T09:30');
     const untilUtc = await inUtc('2026-09-20T09:30');
     await expect.poll(() => param(last(seen.tail), 'until')).toBe(untilUtc);
@@ -436,8 +450,11 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     await expect(liveLine(page)).toHaveText(
       'Live stream off: the Until bound closes the window, so no new row can land in it. Clear Until to follow the log.',
     );
-    await page.waitForTimeout(500);
-    expect(seen.stream.length).toBe(streams);
+    // The page's own record, read once the line saying why has painted:
+    // the effect that paints it is the one that would open the stream, so
+    // a stream it opened is in the record already. It slept 500 ms and
+    // counted Playwright's request events until backlog 840c5a76.
+    expect(await streamsOpenedBy(page)).toBe(streamsOpened);
     await expect(page.getByLabel('Live (SSE)')).toBeChecked();
 
     // Clearing both bounds is the unbounded tail again, streaming.
@@ -445,7 +462,7 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     await since.fill('');
     await expect.poll(() => param(last(seen.tail), 'since')).toBeNull();
     expect(param(last(seen.tail), 'until')).toBeNull();
-    expect(seen.stream.length).toBeGreaterThan(streams);
+    await expect.poll(() => seen.stream.length).toBeGreaterThan(streams);
   });
 });
 
@@ -622,6 +639,14 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
   });
 
   test('unticking Live (SSE) reads one snapshot and opens no stream', async ({ page }) => {
+    // The claim is about the page's CLOCK: with Live off, no timer of its
+    // own re-reads the tail or reopens the stream. It was proven by
+    // sleeping 6 000 ms of real time past the 5 000 ms reload and counting
+    // Playwright's request events (backlog 840c5a76); now the page's clock
+    // is run forward instead, which fires every timer it holds, and the
+    // page's own record is read — no wall time, and no event in transit.
+    await page.clock.install();
+    await recordPageRequests(page);
     await installAuditReads(page);
     const seen = watch(page);
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
@@ -630,9 +655,10 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
     const tails = seen.tail.length;
     await page.getByLabel('Live (SSE)').uncheck();
     await expect.poll(() => seen.tail.length).toBe(tails + 1);
-    await page.waitForTimeout(6_000);
-    expect(seen.stream.length).toBe(1);
-    expect(seen.tail.length).toBe(tails + 1);
+    const tailsOpened = await tailsOpenedBy(page);
+    await page.clock.runFor(RELOAD_MS * 2);
+    expect(await streamsOpenedBy(page), 'a stream reopened with Live off').toBe(1);
+    expect(await tailsOpenedBy(page), 'the tail was re-read on a timer with Live off').toBe(tailsOpened);
   });
 
   test('a frame that beats the snapshot is still on screen after the snapshot paints (697f9f87)', async ({ page }) => {
@@ -796,15 +822,19 @@ test.describe('/it/operate/audit — Download ⤓ (GET /api/events/export)', () 
 
 test.describe('/it/operate/audit — writes', () => {
   test('the page issues no write: every control above is a read (0 writes in controls_md)', async ({ page }) => {
+    await recordPageRequests(page);
     await installAuditReads(page);
-    const seen = watch(page);
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     await stream(page).first().click();
     await page.getByLabel('Provenance').selectOption('sim');
     await page.getByRole('button', { name: 'Download ⤓' }).click();
     await page.locator('.events-download-panel').getByRole('button', { name: 'Cancel' }).click();
     await page.getByLabel('Live (SSE)').uncheck();
-    await page.waitForTimeout(500);
-    expect(seen.writes).toEqual([]);
+    // The page's own record, read once the last control has returned: a
+    // write any of them opened is in it already. It slept 500 ms and read
+    // Playwright's request events until backlog 840c5a76. The chrome's
+    // route-open POST is the shell's write, not this page's.
+    const writes = (await openedRequests(page)).filter((e) => e.method !== 'GET' && e.path !== '/api/surface-opens');
+    expect(writes.map((e) => `${e.method} ${e.url}`)).toEqual([]);
   });
 });
