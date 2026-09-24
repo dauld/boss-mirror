@@ -84,10 +84,6 @@ fn apply_one(acc: &mut ProjectionAccumulator, e: &AssetEvent) -> bool {
                 acc.oem_serial = Some(ser.clone());
             }
         }
-        AssetEventKind::TriageCompleted { .. } => acc.phase = AssetLifecyclePhase::TRIAGING.into(),
-        AssetEventKind::RefurbStarted { .. } => acc.phase = AssetLifecyclePhase::REFURBING.into(),
-        AssetEventKind::RefurbCompleted => acc.phase = AssetLifecyclePhase::QA.into(),
-        AssetEventKind::QaPassed { .. } => acc.phase = AssetLifecyclePhase::READY.into(),
         AssetEventKind::Shipped {
             holder_kind,
             holder_id,
@@ -358,7 +354,7 @@ mod tests {
 
     #[test]
     fn identified_event_sets_sku_after_registration() {
-        // Register now, identify later — the device-shop triage path.
+        // Register now, identify later — the identity-first path.
         let events = vec![
             evt(
                 "1",
@@ -441,9 +437,7 @@ mod tests {
             evt(
                 "2",
                 d(2026, 1, 14),
-                AssetEventKind::QaPassed {
-                    certificate_id: None,
-                },
+                AssetEventKind::PutAway { bin: "A-01".into() },
             ),
             evt(
                 "3",
@@ -833,9 +827,7 @@ mod tests {
             evt(
                 "2",
                 d(2026, 1, 14),
-                AssetEventKind::QaPassed {
-                    certificate_id: None,
-                },
+                AssetEventKind::PutAway { bin: "A-01".into() },
             ),
         ];
         let state = project(&AssetId::new("x"), &evts).unwrap();

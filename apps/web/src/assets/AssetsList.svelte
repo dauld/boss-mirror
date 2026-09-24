@@ -15,16 +15,11 @@
   import type { Asset, AssetsSummary, AssetLifecyclePhase } from './types';
 
   const PHASE_ORDER: ReadonlyArray<AssetLifecyclePhase> = [
-    'received', 'triaging', 'refurbing', 'qa', 'ready',
-    'shipped', 'installed', 'out-for-service', 'decommissioned',
+    'received', 'shipped', 'installed', 'out-for-service', 'decommissioned',
   ];
   const PHASE_LABEL: Record<AssetLifecyclePhase, string> = {
     registered: 'Registered',
     received: 'Received',
-    triaging: 'In triage',
-    refurbing: 'Refurb',
-    qa: 'QA',
-    ready: 'Ready',
     shipped: 'Shipped',
     installed: 'Installed',
     'out-for-service': 'In service',

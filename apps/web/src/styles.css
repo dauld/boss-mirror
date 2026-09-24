@@ -1203,7 +1203,7 @@ a:hover { color: var(--fog); }
 .chip-provenance-hand-set { background: var(--wash); color: var(--warn); border-color: var(--warn); }
 .chip-provenance-data-derived { background: var(--wash); color: var(--static); border-color: var(--hairline); }
 
-/* Kanban summary for refurbishment board */
+/* Kanban summary — the Assets list's phase rail */
 .kanban {
   display: grid;
   grid-template-columns: repeat(5, 1fr);
@@ -1218,11 +1218,6 @@ a:hover { color: var(--fog); }
   padding: 16px 18px;
   border-top: 3px solid var(--stage-color, var(--static));
 }
-.kanban-col[data-stage="intake"] { --stage-color: var(--static); }
-.kanban-col[data-stage="triage"] { --stage-color: var(--signal); }
-.kanban-col[data-stage="refurb"] { --stage-color: var(--fog); }
-.kanban-col[data-stage="qa"] { --stage-color: var(--warn); }
-.kanban-col[data-stage="ready"] { --stage-color: var(--ok); }
 .kanban-head {
   display: flex;
   align-items: baseline;

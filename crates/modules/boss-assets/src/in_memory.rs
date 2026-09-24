@@ -181,7 +181,7 @@ impl AssetsRepository for InMemoryAssets {
         // In-memory test stub: walk the in-memory projections and tally
         // phases + skus. Not used in production, but keeps the tests
         // runnable without requiring a Postgres backend.
-        use crate::types::{AssetsSummary, PhaseRollup, SkuRollup};
+        use crate::types::{AssetLifecyclePhase, AssetsSummary, PhaseRollup, SkuRollup};
         let state = self.inner.lock().expect("poisoned lock");
         let mut phase_map: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
@@ -202,19 +202,7 @@ impl AssetsRepository for InMemoryAssets {
                 *sku_map.entry(sku.clone()).or_insert(0) += 1;
             }
         }
-        let phase_order = [
-            "registered",
-            "received",
-            "triaging",
-            "refurbing",
-            "qa",
-            "ready",
-            "shipped",
-            "installed",
-            "out-for-service",
-            "decommissioned",
-        ];
-        let phase_counts: Vec<PhaseRollup> = phase_order
+        let phase_counts: Vec<PhaseRollup> = AssetLifecyclePhase::ORDER
             .iter()
             .map(|p| PhaseRollup {
                 phase: p.to_string(),
@@ -346,9 +334,7 @@ mod tests {
             (
                 "e2",
                 d(2026, 1, 14),
-                AssetEventKind::QaPassed {
-                    certificate_id: None,
-                },
+                AssetEventKind::PutAway { bin: "A-01".into() },
             ),
             (
                 "e3",

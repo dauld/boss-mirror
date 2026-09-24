@@ -2,10 +2,10 @@
 //! append-only event logs.
 //!
 //! Every physical unit that enters Boss's custody is a `Asset` identified
-//! by a `AssetId`. Its full life — custody (Received → Triage →
-//! Refurb → QA → Ready), commerce (Sold → Shipped → Installed →
-//! WarrantyStarted), and service (TicketOpened/Closed, PartReplaced,
-//! Decommissioned) — lives in one append-only `AssetEvent` log.
+//! by a `AssetId`. Its full life — custody (Registered → Received →
+//! PutAway), commerce (Sold → Shipped → Installed → WarrantyStarted),
+//! and service (TicketOpened/Closed, PartReplaced, Decommissioned) —
+//! lives in one append-only `AssetEvent` log.
 //!
 //! `AssetCurrentState` is a projection from that log, rebuildable at any
 //! time. The log is the source of truth; current state is a summary.

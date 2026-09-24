@@ -52,19 +52,11 @@ fn arb_event_kind() -> impl Strategy<Value = AssetEventKind> {
             oem_serial: None,
         }),
         "[a-z]{3,6}".prop_map(|bin| AssetEventKind::PutAway { bin }),
-        "[a-z]{3,6}".prop_map(|notes| AssetEventKind::TriageCompleted { notes }),
-        Just(AssetEventKind::RefurbStarted {
-            bench: Some("bench-1".into()),
-        }),
         (
             "[a-z0-9]{3,8}".prop_map(String::from),
             "[a-z]{3,8}".prop_map(String::from),
         )
             .prop_map(|(part_sku, reason)| AssetEventKind::PartReplaced { part_sku, reason }),
-        Just(AssetEventKind::RefurbCompleted),
-        Just(AssetEventKind::QaPassed {
-            certificate_id: None,
-        }),
         "account-[0-9]{3}".prop_map(|holder_id| AssetEventKind::Shipped {
             holder_kind: "account".to_string(),
             holder_id,
