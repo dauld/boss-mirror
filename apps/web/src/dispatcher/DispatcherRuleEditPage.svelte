@@ -233,7 +233,7 @@
     <!-- The reload half was stale: the dispatcher polls dispatcher_rules
          every 30s and rebuilds its runners (backlog 1e576baf). The file
          half is the drift the boot seed reports as `behind` (7d9df2fe). -->
-    <p class="empty" style="padding:0 24px 8px; color:#92400e">
+    <p class="empty" style="padding:0 24px 8px; color:var(--warn)">
       A version published here is live within about 30 seconds, and runs ahead of
       the file that authors this rule until that file's version is raised to match:
       infra/dispatcher/rules/{ruleName}.toml for a product rule, the tenant's
@@ -280,13 +280,13 @@
       </button>
       {#if validateState}
         {#if validateState.ok}
-          <span style="color:#166534; font-size:13px">✓ Valid</span>
+          <span style="color:var(--ok); font-size:13px">✓ Valid</span>
         {:else}
-          <span style="color:#dc2626; font-size:13px">✗ {validateState.error}</span>
+          <span style="color:var(--err); font-size:13px">✗ {validateState.error}</span>
         {/if}
       {/if}
       {#if actionError}
-        <span style="color:#dc2626; font-size:13px">{actionError}</span>
+        <span style="color:var(--err); font-size:13px">{actionError}</span>
       {/if}
     </div>
 
@@ -295,9 +295,9 @@
       <Section title="Rule">
         <div style="display:grid; gap:12px; max-width:800px">
           <div>
-            <div style="font-size:12px; color:#666; margin-bottom:2px">
+            <div style="font-size:12px; color:var(--static); margin-bottom:2px">
               Name
-              <span style="color:#888"> — the rule's permanent identity (not editable)</span>
+              <span style="color:var(--static)"> — the rule's permanent identity (not editable)</span>
             </div>
             <input
               bind:value={formName}
@@ -308,8 +308,8 @@
             />
           </div>
           <div>
-            <div style="font-size:12px; color:#666; margin-bottom:2px">
-              On event <span style="color:#888"> — the NATS topic this rule listens for</span>
+            <div style="font-size:12px; color:var(--static); margin-bottom:2px">
+              On event <span style="color:var(--static)"> — the NATS topic this rule listens for</span>
             </div>
             <input
               bind:value={onEvent}
@@ -319,8 +319,8 @@
             />
           </div>
           <div>
-            <div style="font-size:12px; color:#666; margin-bottom:2px">
-              When <span style="color:#888"> — optional predicate; rule fires only when it's true</span>
+            <div style="font-size:12px; color:var(--static); margin-bottom:2px">
+              When <span style="color:var(--static)"> — optional predicate; rule fires only when it's true</span>
             </div>
             <input
               bind:value={whenExpr}
@@ -330,8 +330,8 @@
             />
           </div>
           <div>
-            <div style="font-size:12px; color:#666; margin-bottom:2px">
-              Delay <span style="color:#888"> — optional; defers the side-effects (e.g. 5m, 1h)</span>
+            <div style="font-size:12px; color:var(--static); margin-bottom:2px">
+              Delay <span style="color:var(--static)"> — optional; defers the side-effects (e.g. 5m, 1h)</span>
             </div>
             <input
               bind:value={delay}
@@ -351,9 +351,9 @@
         </p>
         <div style="display:grid; gap:16px; max-width:900px">
           {#each doRows as row, i (i)}
-            <div style="border:1px solid #e7e5e4; border-radius:6px; padding:12px">
+            <div style="border:1px solid var(--hairline); border-radius:6px; padding:12px">
               <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px">
-                <span style="font-size:12px; color:#888; width:48px">#{i + 1}</span>
+                <span style="font-size:12px; color:var(--static); width:48px">#{i + 1}</span>
                 <input
                   bind:value={row.handler}
                   placeholder="handler-name"
@@ -378,7 +378,7 @@
                       class="mono"
                       style="padding:5px; font-size:12px; width:200px"
                     />
-                    <span style="color:#888">=</span>
+                    <span style="color:var(--static)">=</span>
                     <input
                       bind:value={arg.value}
                       placeholder="expression"

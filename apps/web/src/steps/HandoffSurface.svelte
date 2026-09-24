@@ -213,13 +213,13 @@
   .step-handoff-side {
     flex: 1;
     padding: 10px 12px;
-    background: var(--bg-soft, #f9fafb);
-    border: 1px solid var(--border-soft, #f3f4f6);
+    background: var(--ink-raised);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
   }
   .step-handoff-arrow {
     align-self: center;
-    color: var(--text-muted, #9ca3af);
+    color: var(--static);
     font-size: 24px;
     font-weight: 300;
   }
@@ -227,7 +227,7 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: var(--text-muted, #6b7280);
+    color: var(--static);
     margin-bottom: 2px;
   }
   .step-handoff-name {

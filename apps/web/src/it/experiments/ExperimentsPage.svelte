@@ -183,12 +183,12 @@
   .exp-msg,
   .exp-empty,
   .exp-note {
-    color: var(--text-muted);
+    color: var(--static);
     font-size: 0.9rem;
   }
   .exp-failed {
-    border: 1px solid var(--danger, #b3261e);
-    border-radius: var(--radius, 6px);
+    border: 1px solid var(--err);
+    border-radius: var(--radius);
     padding: 0.75rem 1rem;
     margin-bottom: 1rem;
   }
@@ -200,12 +200,12 @@
     margin: 1.25rem 0 0.5rem;
   }
   .exp-count {
-    color: var(--text-muted);
+    color: var(--static);
     font-weight: 400;
   }
   .exp-card {
     border: 1px solid var(--border);
-    border-radius: var(--radius, 6px);
+    border-radius: var(--radius);
     padding: 0.75rem 1rem;
     margin-bottom: 0.75rem;
   }
@@ -221,7 +221,7 @@
   .exp-waiting,
   .exp-outcome {
     font-size: 0.8rem;
-    color: var(--text-muted);
+    color: var(--static);
     white-space: nowrap;
   }
   .exp-dl {
@@ -232,12 +232,12 @@
     font-size: 0.875rem;
   }
   .exp-dl dt {
-    color: var(--text-muted);
+    color: var(--static);
   }
   .exp-dl dd {
     margin: 0;
   }
   .exp-confounds {
-    color: var(--text-muted);
+    color: var(--static);
   }
 </style>

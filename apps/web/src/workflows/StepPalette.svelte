@@ -81,9 +81,9 @@
 
 <style>
   .jk-palette {
-    border: 1px solid #e2e8f0;
+    border: 1px solid var(--hairline);
     border-radius: 8px;
-    background: #f8fafc;
+    background: var(--ink-raised);
     padding: 10px 12px;
     display: flex;
     flex-direction: column;
@@ -98,19 +98,19 @@
   .jk-palette-title {
     font-size: 12px;
     font-weight: 600;
-    color: #475569;
+    color: var(--static);
   }
   .jk-palette-filter {
     font-size: 12px;
     padding: 4px 8px;
-    border: 1px solid #cbd5e1;
+    border: 1px solid var(--hairline);
     border-radius: 6px;
     width: 220px;
     max-width: 50%;
   }
   .jk-palette-empty {
     font-size: 12px;
-    color: #94a3b8;
+    color: var(--static);
   }
   .jk-palette-groups {
     display: flex;
@@ -126,7 +126,7 @@
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: #94a3b8;
+    color: var(--static);
     font-weight: 600;
   }
   .jk-palette-chips {
@@ -138,24 +138,24 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    border: 1px solid #cbd5e1;
+    border: 1px solid var(--hairline);
     border-radius: 999px;
-    background: #fff;
+    background: var(--ink);
     padding: 3px 10px 3px 8px;
     cursor: pointer;
     font-size: 12px;
     line-height: 1.4;
   }
   .jk-chip:hover {
-    border-color: #3b82f6;
-    background: #eff6ff;
+    border-color: var(--signal);
+    background: var(--signal-wash);
   }
   .jk-chip-plus {
-    color: #3b82f6;
+    color: var(--signal);
     font-weight: 700;
   }
   .jk-chip-kind {
-    color: #94a3b8;
+    color: var(--static);
     font-size: 11px;
   }
 </style>

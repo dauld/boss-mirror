@@ -213,13 +213,13 @@
   }
   .week-controls button {
     padding: 6px 12px;
-    border: 1px solid #d6d3d1;
-    background: #fff;
+    border: 1px solid var(--hairline);
+    background: var(--ink);
     border-radius: 6px;
     cursor: pointer;
   }
   .week-controls button:hover {
-    background: #f5f5f4;
+    background: var(--ink-raised);
   }
   .week-grid {
     display: grid;
@@ -228,26 +228,26 @@
     min-height: 60vh;
   }
   .week-col {
-    border: 1px solid #e7e5e4;
+    border: 1px solid var(--hairline);
     border-radius: 6px;
-    background: #fff;
+    background: var(--ink);
     padding: 8px;
     min-height: 200px;
   }
   .week-col-header {
     font-weight: 600;
-    border-bottom: 1px solid #e7e5e4;
+    border-bottom: 1px solid var(--hairline);
     padding-bottom: 4px;
     margin-bottom: 8px;
-    color: #44403c;
+    color: var(--static);
   }
   .week-col-empty {
-    color: #a8a29e;
+    color: var(--static);
     font-size: 12px;
   }
   .week-cell {
-    border-left: 3px solid #c47a35;
-    background: #fdf6ec;
+    border-left: 3px solid var(--busy);
+    background: var(--warn-wash);
     padding: 6px 8px;
     margin-bottom: 6px;
     border-radius: 0 4px 4px 0;
@@ -255,43 +255,43 @@
   }
   .week-cell-time {
     font-weight: 600;
-    color: #292524;
+    color: var(--fog);
   }
   .week-cell-ref {
-    color: #78716c;
+    color: var(--static);
     font-size: 11px;
   }
   .week-cell-notes {
-    color: #57534e;
+    color: var(--static);
     margin-top: 2px;
     font-style: italic;
   }
   :global(.chip-reason-job-step) {
-    background: #d2f4ea;
-    color: #115e59;
+    background: var(--ok-wash);
+    color: var(--ok);
   }
   :global(.chip-reason-pto) {
-    background: #fde2e1;
-    color: #9b1c1c;
+    background: var(--err-wash);
+    color: var(--err);
   }
   :global(.chip-reason-meeting) {
-    background: #ddebff;
-    color: #1e3a8a;
+    background: var(--signal-wash);
+    color: var(--signal);
   }
   :global(.chip-reason-preventive-maintenance-visit) {
-    background: #fef3c7;
-    color: #92400e;
+    background: var(--warn-wash);
+    color: var(--warn);
   }
   :global(.chip-reason-training) {
-    background: #ede9fe;
-    color: #5b21b6;
+    background: var(--signal-wash);
+    color: var(--signal);
   }
   :global(.chip-reason-travel) {
-    background: #f1f5f9;
-    color: #334155;
+    background: var(--ink-raised);
+    color: var(--static);
   }
   :global(.chip-reason-custom) {
-    background: #f5f5f4;
-    color: #44403c;
+    background: var(--ink-raised);
+    color: var(--static);
   }
 </style>

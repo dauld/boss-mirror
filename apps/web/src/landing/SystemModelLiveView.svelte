@@ -498,8 +498,8 @@
 
 <style>
   .live-view {
-    color: #2a1d10;
-    font-family: var(--font-display, 'Iowan Old Style', 'Palatino Linotype', Georgia, serif);
+    color: var(--fog);
+    font-family: var(--font-display);
   }
   .live-panel {
     display: grid;
@@ -507,8 +507,8 @@
     gap: 1.5rem;
     margin: 0 0 1rem;
     padding: 1rem;
-    background: var(--brew-amber-bg, #fff7e0);
-    border: 1px solid var(--brew-amber, #d99b3a);
+    background: var(--brew-amber-bg);
+    border: 1px solid var(--brew-amber);
     border-radius: 8px;
   }
   .live-summary {
@@ -522,17 +522,17 @@
     gap: 0.5rem;
   }
   .live-stat-num {
-    font-family: var(--font-display, 'Fraunces', Georgia, serif);
+    font-family: var(--font-display);
     font-size: 2.5rem;
     font-weight: 700;
-    color: var(--brew-malt-dark, #4a2510);
+    color: var(--brew-malt-dark);
     line-height: 1;
   }
   .live-stat-label {
     font-size: 0.85rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: var(--brew-malt, #7a3f1f);
+    color: var(--brew-malt);
   }
   .live-counts {
     list-style: none;
@@ -553,15 +553,15 @@
     padding: 0.3rem 0.55rem;
     cursor: pointer;
     font: inherit;
-    color: #2a1d10;
+    color: var(--fog);
     transition: background 80ms;
   }
   .live-count:hover {
-    background: rgba(217, 155, 58, 0.18);
+    background: var(--warn-wash);
   }
   .live-count.active {
-    background: var(--brew-amber-soft, #f4d790);
-    border-color: var(--brew-amber, #d99b3a);
+    background: var(--brew-amber-soft);
+    border-color: var(--brew-amber);
     font-weight: 600;
   }
   .live-count .kind-name {
@@ -569,8 +569,8 @@
     font-style: italic;
   }
   .live-count .kind-count {
-    background: var(--brew-malt, #7a3f1f);
-    color: #fff;
+    background: var(--brew-malt);
+    color: var(--on-band);
     padding: 0.05em 0.5em;
     border-radius: 99px;
     font-size: 0.8rem;
@@ -582,7 +582,7 @@
      a count moves between polls; pairs with the 1-second poll
      cadence so the visual reads as "the brewery just did a thing." */
   .live-count.pulsing .kind-count {
-    background: var(--brew-amber, #d99b3a);
+    background: var(--brew-amber);
     transform: scale(1.18);
   }
   /* Slide-in animation for genuinely new Job rows. The
@@ -597,8 +597,8 @@
     0% {
       opacity: 0;
       transform: translateX(-8px);
-      border-color: var(--brew-amber, #d99b3a);
-      background: var(--brew-amber-bg, #fff7e0);
+      border-color: var(--brew-amber);
+      background: var(--brew-amber-bg);
     }
     60% {
       opacity: 1;
@@ -607,8 +607,8 @@
     100% {
       opacity: 1;
       transform: translateX(0);
-      border-color: #e6d2a8;
-      background: #fffaf0;
+      border-color: var(--busy);
+      background: var(--warn-wash);
     }
   }
   @media (prefers-reduced-motion: reduce) {
@@ -616,10 +616,10 @@
     .live-job-row.is-new .live-job { animation: none; }
   }
   .live-feed h2 {
-    font-family: var(--font-display, 'Fraunces', Georgia, serif);
+    font-family: var(--font-display);
     font-size: 1rem;
     margin: 0 0 0.5rem;
-    color: var(--brew-malt-dark, #4a2510);
+    color: var(--brew-malt-dark);
   }
   .live-job-list {
     list-style: none;
@@ -637,23 +637,23 @@
     grid-template-rows: auto auto;
     gap: 0.1rem 0.6rem;
     width: 100%;
-    background: #fffaf0;
-    border: 1px solid #e6d2a8;
+    background: var(--warn-wash);
+    border: 1px solid var(--busy);
     border-radius: 4px;
     padding: 0.45rem 0.6rem;
     cursor: pointer;
     text-align: left;
-    color: #2a1d10;
+    color: var(--fog);
     text-decoration: none;
     font: inherit;
   }
-  .live-job:hover { border-color: var(--brew-amber, #d99b3a); }
+  .live-job:hover { border-color: var(--brew-amber); }
   .live-workflow {
     grid-row: 1 / 3;
     align-self: center;
     font-family: 'Iowa', 'Iowan Old Style', Georgia, serif;
     font-style: italic;
-    color: var(--brew-malt, #7a3f1f);
+    color: var(--brew-malt);
     font-size: 0.85rem;
     white-space: nowrap;
     overflow: hidden;
@@ -665,10 +665,10 @@
   }
   .live-job-meta {
     font-size: 0.78rem;
-    color: #7a6855;
+    color: var(--static);
   }
   .live-job-meta code {
-    background: #fff8e9;
+    background: var(--warn-wash);
     padding: 0 0.25em;
     border-radius: 3px;
     font-size: 0.78rem;
@@ -687,18 +687,18 @@
   }
   .picker-row select {
     padding: 0.35rem 0.5rem;
-    border: 1px solid #c5a880;
+    border: 1px solid var(--busy);
     border-radius: 4px;
-    background: #fff8e9;
+    background: var(--warn-wash);
     font: inherit;
   }
   .kind-meta {
-    color: #7a6855;
+    color: var(--static);
     font-size: 0.85rem;
   }
   .kind-meta em {
     font-style: normal;
-    color: #2a1d10;
+    color: var(--fog);
   }
   .content {
     display: grid;
@@ -708,8 +708,8 @@
     margin-top: 0.5rem;
   }
   .graph-wrap {
-    background: #fff8e9;
-    border: 1px solid #c5a880;
+    background: var(--warn-wash);
+    border: 1px solid var(--busy);
     border-radius: 6px;
     padding: 1rem;
     min-height: 300px;
@@ -722,21 +722,21 @@
   .graph :global(.step-title) {
     display: inline-block;
     font-size: 0.78em;
-    color: #4a392b;
+    color: var(--fog);
     font-style: italic;
   }
   .status {
     margin: 0;
-    color: #7a6855;
+    color: var(--static);
     font-style: italic;
   }
   .status.error {
-    color: #8b2b1f;
+    color: var(--err);
     font-style: normal;
   }
   .side-panel {
-    background: #f4ead2;
-    border: 1px solid #c5a880;
+    background: var(--warn-wash);
+    border: 1px solid var(--busy);
     border-radius: 6px;
     padding: 1rem;
     font-family: -apple-system, system-ui, sans-serif;
@@ -753,15 +753,15 @@
     font-size: 0.8rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: #7a3f1f;
+    color: var(--warn);
   }
   .side-panel code {
-    background: #fff8e9;
+    background: var(--warn-wash);
     padding: 0.05em 0.3em;
     border-radius: 3px;
   }
   .side-panel pre {
-    background: #fff8e9;
+    background: var(--warn-wash);
     padding: 0.5rem;
     border-radius: 4px;
     overflow-x: auto;
@@ -770,15 +770,15 @@
   }
   .badge {
     display: inline-block;
-    background: #f8d8a4;
-    border: 1px solid #c5a880;
+    background: var(--warn-wash);
+    border: 1px solid var(--busy);
     border-radius: 4px;
     padding: 0.1rem 0.5rem;
     font-size: 0.78rem;
     margin: 0.25rem 0;
   }
   .empty, .title-template {
-    color: #7a6855;
+    color: var(--static);
     margin: 0.25rem 0;
   }
   /* View-mode toggle. Two-pill button group lifted into the picker
@@ -786,24 +786,24 @@
      visual continuity with the live-count chips above. */
   .view-toggle {
     display: inline-flex;
-    border: 1px solid #c5a880;
+    border: 1px solid var(--busy);
     border-radius: 999px;
     overflow: hidden;
     margin-right: 0.5rem;
   }
   .view-toggle-btn {
     padding: 0.3rem 0.85rem;
-    background: #fff8e9;
+    background: var(--warn-wash);
     border: none;
     cursor: pointer;
     font: inherit;
     font-size: 0.85rem;
-    color: var(--brew-malt, #7a3f1f);
+    color: var(--brew-malt);
   }
-  .view-toggle-btn:hover { background: rgba(217, 155, 58, 0.18); }
+  .view-toggle-btn:hover { background: var(--warn-wash); }
   .view-toggle-btn.active {
-    background: var(--brew-amber, #d99b3a);
-    color: #fff;
+    background: var(--brew-amber);
+    color: var(--on-band);
     font-weight: 600;
   }
 
@@ -831,7 +831,7 @@
   .atlas-track-label {
     font-size: 13px;
     font-weight: 600;
-    fill: var(--brew-malt, #7a3f1f);
+    fill: var(--brew-malt);
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-family: 'Iowa', 'Iowan Old Style', Georgia, serif;
@@ -850,12 +850,12 @@
   .atlas-node-label {
     font-size: 13px;
     font-weight: 600;
-    fill: #2a1d10;
+    fill: var(--fog);
     font-family: -apple-system, system-ui, sans-serif;
   }
   .atlas-node-sub {
     font-size: 11px;
-    fill: #7a6855;
+    fill: var(--static);
     font-family: -apple-system, system-ui, sans-serif;
   }
   /* Atlas node pulse — flashes when fresh job lifecycle events
@@ -863,9 +863,9 @@
      + scale lift reads as "this kind just did something."
      Companion to the per-step-node pulse in workflow mode. */
   .atlas-node.is-pulsing rect {
-    stroke: var(--brew-amber, #d99b3a) !important;
+    stroke: var(--brew-amber) !important;
     stroke-width: 3px !important;
-    filter: drop-shadow(0 0 6px rgba(217, 155, 58, 0.6));
+    filter: drop-shadow(0 0 6px var(--busy));
   }
   .atlas-node.is-pulsing {
     animation: atlas-node-pulse 600ms ease-out;
@@ -884,18 +884,18 @@
 
   .description {
     margin-top: 1.75rem;
-    background: #fff8e9;
-    border-left: 3px solid #7a3f1f;
+    background: var(--warn-wash);
+    border-left: 3px solid var(--busy);
     padding: 0.5rem 1rem;
     font-family: -apple-system, system-ui, sans-serif;
     font-size: 0.9rem;
-    color: #4a392b;
+    color: var(--fog);
     white-space: pre-line;
   }
   .description h2 {
     margin: 0 0 0.5rem;
     font-size: 1rem;
-    color: #2a1d10;
+    color: var(--fog);
   }
   @media (max-width: 760px) {
     .content {

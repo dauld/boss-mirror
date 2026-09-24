@@ -106,48 +106,48 @@
   .head {
     margin: 0;
     font-size: 11px;
-    letter-spacing: var(--ls-label, 0.1em);
+    letter-spacing: var(--ls-label);
     text-transform: uppercase;
-    color: var(--static, #7a838c);
+    color: var(--static);
     font-weight: 600;
     display: flex;
     justify-content: space-between;
-    gap: var(--s3, 12px);
+    gap: var(--s3);
   }
-  .head small { font-weight: 500; color: var(--text-faint, #5c656e); }
-  .mono { font-family: var(--font-mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--s2, 8px); margin-top: var(--s3, 12px); }
-  .tile { border: 1px solid var(--hairline, #2a3138); padding: var(--s2, 8px) var(--s3, 12px); background: var(--void, #0d1014); min-width: 0; }
+  .head small { font-weight: 500; color: var(--text-faint); }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--s2); margin-top: var(--s3); }
+  .tile { border: 1px solid var(--hairline); padding: var(--s2) var(--s3); background: var(--void); min-width: 0; }
   .tile .n { font-size: 22px; font-weight: 600; line-height: 1.1; overflow-wrap: anywhere; }
-  .tile .n small { font-size: 11px; color: var(--static, #7a838c); font-weight: 500; }
-  .tile .l { font-size: 11px; color: var(--static, #7a838c); letter-spacing: var(--ls-label, 0.1em); text-transform: uppercase; margin-top: 2px; }
+  .tile .n small { font-size: 11px; color: var(--static); font-weight: 500; }
+  .tile .l { font-size: 11px; color: var(--static); letter-spacing: var(--ls-label); text-transform: uppercase; margin-top: 2px; }
 
   /* The chart: one series, one hue; text in text tokens; the axis a
      hairline; the current hour's column brighter so the eye finds
      "now". */
-  .chart { width: 100%; height: auto; display: block; margin: var(--s3, 12px) 0; font-family: var(--font-mono, ui-monospace, monospace); }
-  .axis { stroke: var(--hairline, #2a3138); stroke-width: 1; }
-  .bar rect { fill: var(--signal, #5fd4a8); opacity: 0.75; }
+  .chart { width: 100%; height: auto; display: block; margin: var(--s3) 0; font-family: var(--font-mono); }
+  .axis { stroke: var(--hairline); stroke-width: 1; }
+  .bar rect { fill: var(--signal); opacity: 0.75; }
   .bar.current rect { opacity: 1; }
-  .bar rect.foot { fill: var(--border-strong, #3a434d); opacity: 1; }
-  .bar.current rect.foot { fill: var(--signal, #5fd4a8); }
-  .bar.empty rect.foot { fill: var(--hairline, #2a3138); }
-  .bar.current.empty rect.foot { fill: var(--signal, #5fd4a8); }
+  .bar rect.foot { fill: var(--border-strong); opacity: 1; }
+  .bar.current rect.foot { fill: var(--signal); }
+  .bar.empty rect.foot { fill: var(--hairline); }
+  .bar.current.empty rect.foot { fill: var(--signal); }
   .bar:hover rect { opacity: 1; }
-  .value { fill: var(--fog, #e8ecef); font-size: 9px; }
-  .tick { fill: var(--static, #7a838c); font-size: 9px; }
+  .value { fill: var(--fog); font-size: 9px; }
+  .tick { fill: var(--static); font-size: 9px; }
 
-  .label { font-size: 11px; letter-spacing: var(--ls-label, 0.1em); text-transform: uppercase; color: var(--static, #7a838c); font-weight: 600; margin-top: var(--s3, 12px); }
+  .label { font-size: 11px; letter-spacing: var(--ls-label); text-transform: uppercase; color: var(--static); font-weight: 600; margin-top: var(--s3); }
   .stops { display: grid; gap: 3px; margin-top: 6px; }
   .stop {
-    display: grid; grid-template-columns: 76px 1fr; gap: var(--s2, 8px); align-items: baseline;
+    display: grid; grid-template-columns: 76px 1fr; gap: var(--s2); align-items: baseline;
     background: transparent; border: 0; padding: 2px 0; font: inherit; font-size: 12.5px; color: inherit;
     text-align: left; cursor: pointer; border-radius: 0;
   }
-  .stop:hover, .stop:focus-visible { color: var(--signal, #5fd4a8); }
-  .stop .t { color: var(--static, #7a838c); font-size: 11px; }
-  .stop.err span:last-child { color: var(--err, #e2685c); }
-  .stop.warn span:last-child { color: var(--warn, #d9a441); }
-  .stop.hold span:last-child { color: var(--static, #7a838c); }
-  .empty { color: var(--text-faint, #5c656e); font-size: 12px; }
+  .stop:hover, .stop:focus-visible { color: var(--signal); }
+  .stop .t { color: var(--static); font-size: 11px; }
+  .stop.err span:last-child { color: var(--err); }
+  .stop.warn span:last-child { color: var(--warn); }
+  .stop.hold span:last-child { color: var(--static); }
+  .empty { color: var(--text-faint); font-size: 12px; }
 </style>

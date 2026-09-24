@@ -291,71 +291,71 @@
 <style>
   .my-root { padding: 0 32px 32px; }
   .my-section {
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 12px; letter-spacing: var(--ls-eyebrow, 0.3em);
-    color: var(--signal, #5fd4a8); margin: 28px 0 8px;
+    font-family: var(--font-mono);
+    font-size: 12px; letter-spacing: var(--ls-eyebrow);
+    color: var(--signal); margin: 28px 0 8px;
     display: flex; align-items: center; gap: 12px;
   }
-  .my-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline, #2a3138); }
-  .my-quiet { color: var(--static, #7a838c); font-size: 13px; }
+  .my-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline); }
+  .my-quiet { color: var(--static); font-size: 13px; }
   .my-fail {
-    color: var(--warn, #d9a441);
-    border: 1px solid var(--warn, #d9a441);
+    color: var(--warn);
+    border: 1px solid var(--warn);
     padding: 8px 12px; font-size: 13px;
   }
   .my-controls { display: flex; align-items: center; gap: 6px; margin: 8px 0 0; flex-wrap: wrap; }
   .my-controls-label {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: 0.1em; text-transform: uppercase; color: var(--static, #7a838c);
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: var(--static);
   }
   .my-controls button {
-    font: inherit; font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
+    font: inherit; font-family: var(--font-mono); font-size: 11px;
     letter-spacing: 0.1em; text-transform: uppercase; background: transparent;
-    color: var(--static, #7a838c); border: 1px solid var(--hairline, #2a3138);
+    color: var(--static); border: 1px solid var(--hairline);
     padding: 3px 10px; cursor: pointer;
   }
   .my-controls button[aria-pressed='true'] {
-    color: var(--signal, #5fd4a8); border-color: var(--signal, #5fd4a8);
+    color: var(--signal); border-color: var(--signal);
   }
   .my-asof {
-    margin-left: auto; font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 11px; color: var(--static, #7a838c);
+    margin-left: auto; font-family: var(--font-mono);
+    font-size: 11px; color: var(--static);
   }
   .my-constraint {
-    border: 1px solid var(--hairline, #2a3138); border-left-width: 3px;
+    border: 1px solid var(--hairline); border-left-width: 3px;
     padding: 10px 12px; display: flex; flex-direction: column; gap: 4px;
   }
-  .my-constraint.named { border-left-color: var(--err, #d9534f); }
+  .my-constraint.named { border-left-color: var(--err); }
   .my-constraint-name {
-    font-family: var(--font-mono, ui-monospace, monospace); font-weight: 600; font-size: 15px;
+    font-family: var(--font-mono); font-weight: 600; font-size: 15px;
   }
-  .my-constraint-name.muted { color: var(--static, #7a838c); font-weight: 400; }
-  .my-constraint-why { color: var(--static, #7a838c); font-size: 13px; }
+  .my-constraint-name.muted { color: var(--static); font-weight: 400; }
+  .my-constraint-why { color: var(--static); font-size: 13px; }
   .my-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .my-table th {
-    text-align: left; font-family: var(--font-mono, ui-monospace, monospace);
+    text-align: left; font-family: var(--font-mono);
     font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
-    color: var(--static, #7a838c); font-weight: 400;
-    border-bottom: 1px solid var(--hairline, #2a3138); padding: 4px 12px 4px 0;
+    color: var(--static); font-weight: 400;
+    border-bottom: 1px solid var(--hairline); padding: 4px 12px 4px 0;
   }
-  .my-table td { padding: 6px 12px 6px 0; border-bottom: 1px solid var(--hairline, #2a3138); }
+  .my-table td { padding: 6px 12px 6px 0; border-bottom: 1px solid var(--hairline); }
   .my-table th.num, .my-table td.num {
-    text-align: right; font-family: var(--font-mono, ui-monospace, monospace);
+    text-align: right; font-family: var(--font-mono);
     font-variant-numeric: tabular-nums; white-space: nowrap;
   }
-  .my-table tr.constraint td { background: color-mix(in srgb, var(--err, #d9534f) 8%, transparent); }
+  .my-table tr.constraint td { background: color-mix(in srgb, var(--err) 8%, transparent); }
   .my-table tbody tr:hover td { background: color-mix(in srgb, currentColor 4%, transparent); }
-  .my-table td.stalled { color: var(--err, #d9534f); }
-  .my-table td.nobody { color: var(--err, #d9534f); }
-  .my-table td.why { color: var(--static, #7a838c); }
+  .my-table td.stalled { color: var(--err); }
+  .my-table td.nobody { color: var(--err); }
+  .my-table td.why { color: var(--static); }
   .my-table a { color: inherit; }
-  .mono { font-family: var(--font-mono, ui-monospace, monospace); }
-  .dim { color: var(--static, #7a838c); }
+  .mono { font-family: var(--font-mono); }
+  .dim { color: var(--static); }
   .my-blind { list-style: none; padding: 0; margin: 6px 0; display: flex; flex-direction: column; gap: 4px; }
   .my-blind li { font-size: 13px; }
   .my-clear {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
-    color: var(--static, #7a838c); line-height: 1.7;
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--static); line-height: 1.7;
   }
-  .my-footnote { color: var(--static, #7a838c); font-size: 12px; margin-top: 24px; max-width: 78ch; }
+  .my-footnote { color: var(--static); font-size: 12px; margin-top: 24px; max-width: 78ch; }
 </style>

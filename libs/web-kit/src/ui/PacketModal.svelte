@@ -173,7 +173,7 @@
   .pm-back {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.55);
+    background: var(--scrim);
     display: flex;
     align-items: flex-start;
     justify-content: center;
@@ -182,12 +182,11 @@
     overflow-y: auto;
   }
   .pm {
-    background: var(--card, #12161c);
-    border: 1px solid var(--hairline, #2a3138);
+    background: var(--card);
+    border: 1px solid var(--hairline);
     border-radius: 4px;
     width: min(640px, 100%);
     padding: 20px 24px 16px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
   }
   .pm-head {
     display: flex;
@@ -202,25 +201,25 @@
     margin: 0;
     font-size: 1.05rem;
     line-height: 1.35;
-    color: var(--chalk, #f4f7fa);
+    color: var(--fog);
   }
   .pm-sub {
     margin: 4px 0 0;
     font-size: 0.8rem;
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
   }
   .pm-btn {
     flex: none;
     background: transparent;
-    border: 1px solid var(--hairline, #2a3138);
-    color: var(--fog, #8b97a3);
+    border: 1px solid var(--hairline);
+    color: var(--fog);
     padding: 4px 10px;
     cursor: pointer;
     font: inherit;
     font-size: 0.8rem;
   }
   .pm-btn:hover {
-    color: var(--chalk, #f4f7fa);
+    color: var(--fog);
   }
   /* Reading line-height: the message is prose, and prose set at UI
      line-height is the FOG problem the readability sweep fixed. */
@@ -228,7 +227,7 @@
     margin: 16px 0 0;
     white-space: pre-wrap;
     line-height: 1.55;
-    color: var(--chalk, #f4f7fa);
+    color: var(--fog);
   }
   .pm-facts {
     display: grid;
@@ -238,11 +237,11 @@
     font-size: 0.85rem;
   }
   .pm-facts dt {
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
   }
   .pm-facts dd {
     margin: 0;
-    color: var(--chalk, #f4f7fa);
+    color: var(--fog);
     min-width: 0;
     overflow-wrap: anywhere;
   }
@@ -255,7 +254,7 @@
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
   }
   .pm-steps {
     list-style: none;
@@ -276,21 +275,21 @@
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
   }
   .pm-step-ready,
   .pm-step-active {
-    color: var(--go, #6fcf97);
+    color: var(--ok);
   }
   .pm-step-completed {
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
   }
   .pm-step-title {
-    color: var(--chalk, #f4f7fa);
+    color: var(--fog);
     min-width: 0;
   }
   .pm-step-who {
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
     font-size: 0.78rem;
   }
   /* Wide content scrolls inside its own box; the panel never scrolls
@@ -298,27 +297,27 @@
   .pm-json {
     margin: 0;
     padding: 10px 12px;
-    background: var(--ink, #0d1116);
-    border: 1px solid var(--hairline, #2a3138);
+    background: var(--ink);
+    border: 1px solid var(--hairline);
     font-size: 0.75rem;
     line-height: 1.5;
     overflow-x: auto;
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
   }
   .pm-foot {
     margin-top: 18px;
     padding-top: 12px;
-    border-top: 1px solid var(--hairline, #2a3138);
+    border-top: 1px solid var(--hairline);
     font-size: 0.85rem;
   }
   .pm-quiet {
     margin: 16px 0 0;
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
     font-size: 0.85rem;
   }
   .pm-error {
     margin: 16px 0 0;
-    color: var(--stop, #eb5757);
+    color: var(--err);
     font-size: 0.85rem;
   }
 </style>

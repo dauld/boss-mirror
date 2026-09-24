@@ -185,8 +185,8 @@
     display: flex;
     align-items: stretch;
     gap: 20px;
-    background: var(--void, #0d1014);
-    border-bottom: 1px solid var(--hairline, #2a3138);
+    background: var(--void);
+    border-bottom: 1px solid var(--hairline);
     padding: 0 16px;
   }
   .perspective-more {
@@ -220,25 +220,24 @@
     padding: 6px;
     display: flex;
     flex-direction: column;
-    background: var(--ink, #12161c);
-    border: 1px solid var(--hairline, #2a3138);
+    background: var(--ink);
+    border: 1px solid var(--hairline);
     border-radius: 0 0 8px 8px;
-    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.4);
   }
   .perspective-more-item {
     padding: 7px 10px;
     border-radius: 4px;
     font-size: 13px;
-    color: var(--static, #7a838c);
+    color: var(--static);
     text-decoration: none;
     white-space: nowrap;
   }
   .perspective-more-item:hover {
-    background: var(--wash, rgba(232,236,239,.04));
-    color: var(--fog, #e8ecef);
+    background: var(--wash);
+    color: var(--fog);
   }
   .perspective-more-item-on {
-    color: var(--fog, #e8ecef);
+    color: var(--fog);
     font-weight: 500;
   }
 
@@ -251,16 +250,16 @@
     flex: 0 0 auto;
   }
   .perspective-brand-name {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 14px;
     font-weight: 500;
     text-transform: uppercase;
-    letter-spacing: var(--ls-nav, 0.14em);
-    color: var(--fog, #e8ecef);
+    letter-spacing: var(--ls-nav);
+    color: var(--fog);
     white-space: nowrap;
   }
   .perspective-brand-sub {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 10px;
     font-weight: 400;
     text-transform: uppercase;
@@ -268,7 +267,7 @@
     /* Was brewery amber. Not SIGNAL either: the active-tab underline
        already spends the bar's one green on answering "where am I",
        which is the more useful signal of the two. */
-    color: var(--static, #7a838c);
+    color: var(--static);
   }
   .perspective-tablist {
     display: flex;
@@ -280,12 +279,12 @@
     display: flex;
     align-items: center;
     padding: 0 18px;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
     font-weight: 400;
     text-transform: uppercase;
-    letter-spacing: var(--ls-label, 0.1em);
-    color: var(--static, #7a838c);
+    letter-spacing: var(--ls-label);
+    color: var(--static);
     text-decoration: none;
     /* Reserve the active underline on every tab so selecting one
        doesn't shift the row. */
@@ -296,8 +295,8 @@
       border-color 0.1s;
   }
   .perspective-tab:hover {
-    color: var(--fog, #e8ecef);
-    background: var(--wash, rgba(232, 236, 239, 0.04));
+    color: var(--fog);
+    background: var(--wash);
   }
   /* Selected perspective: a neutral raised ground + the SIGNAL underline.
      The fill was an amber tint left from the brewery palette, which read
@@ -305,13 +304,13 @@
      underline is already spending this bar's one green on "you are
      here", and tinting the fill to match would just say it twice. */
   .perspective-tab.active {
-    color: var(--fog, #e8ecef);
+    color: var(--fog);
     font-weight: 500;
-    background: var(--ink-raised, #171c24);
-    border-bottom-color: var(--signal, #5fd4a8);
+    background: var(--ink-raised);
+    border-bottom-color: var(--signal);
   }
   .perspective-tab.active:hover {
-    background: var(--ink, #12161c);
+    background: var(--ink);
   }
   .perspective-right {
     margin-left: auto;

@@ -268,14 +268,14 @@
   .step-surface-expand { display: flex; justify-content: flex-end; }
   .step-surface-expand-link {
     font-size: 12px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     text-decoration: none;
     padding: 2px 6px;
     border-radius: 4px;
   }
   .step-surface-expand-link:hover {
-    background: var(--bg, #f5f5f4);
-    color: var(--text, #1c1917);
+    background: var(--bg);
+    color: var(--text);
   }
   .step-attachments {
     margin-top: 12px;

@@ -262,15 +262,15 @@
     text-align: left;
     font-weight: 600;
     padding: 4px 6px;
-    border-bottom: 1px solid var(--border, #e5e7eb);
-    color: var(--text-muted, #6b7280);
+    border-bottom: 1px solid var(--border);
+    color: var(--static);
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
   .step-line-items td {
     padding: 4px 6px;
-    border-bottom: 1px solid var(--border-soft, #f3f4f6);
+    border-bottom: 1px solid var(--hairline);
   }
   .step-line-items th.col-num,
   .step-line-items th.col-delta {
@@ -289,21 +289,21 @@
     padding: 3px 5px;
     font-size: 13px;
     text-align: right;
-    border: 1px solid var(--border, #d1d5db);
+    border: 1px solid var(--border);
     border-radius: 3px;
   }
   .step-line-items .desc {
-    color: var(--text-muted, #6b7280);
+    color: var(--static);
   }
   .step-line-items .delta-ok {
-    color: var(--text-muted, #9ca3af);
+    color: var(--static);
   }
   .step-line-items .delta-over {
-    color: var(--info, #2563eb);
+    color: var(--signal);
     font-weight: 500;
   }
   .step-line-items .delta-short {
-    color: var(--danger, #dc2626);
+    color: var(--err);
     font-weight: 500;
   }
 </style>

@@ -303,23 +303,23 @@
     animation: dag-pulse 1.4s ease-out forwards;
   }
   @keyframes dag-pulse {
-    0% { box-shadow: 0 0 0 0 rgba(95, 212, 168, 0.75); }
-    100% { box-shadow: 0 0 0 14px rgba(95, 212, 168, 0); }
+    0% { box-shadow: 0 0 0 0 var(--signal); }
+    100% { box-shadow: 0 0 0 14px transparent; }
   }
   .dag-edge {
     fill: none;
-    stroke: var(--border-strong, #3a434d);
+    stroke: var(--border-strong);
     stroke-width: 1.5px;
   }
   .dag-arrowhead {
-    fill: var(--border-strong, #3a434d);
+    fill: var(--border-strong);
   }
   .dag-edge-label {
-    fill: var(--static, #7A838C);
+    fill: var(--static);
     font-size: 10.5px;
     font-weight: 600;
     paint-order: stroke;
-    stroke: var(--bg, var(--void, #0D1014));
+    stroke: var(--bg);
     stroke-width: 3px;
   }
   /* Interactive routing edges: the svg layer is pointer-events:none,
@@ -333,7 +333,7 @@
   }
   .dag-edge-hit:hover + .dag-edge-label,
   .dag-edge-label.clickable:hover {
-    fill: var(--signal, #5FD4A8);
+    fill: var(--signal);
   }
   .dag-edge-label.clickable {
     pointer-events: auto;
@@ -348,11 +348,10 @@
     justify-content: center;
     box-sizing: border-box;
     padding: 8px 12px;
-    border: 1px solid var(--hairline, #2A3138);
-    border-left: 4px solid var(--border-strong, #3a434d);
+    border: 1px solid var(--hairline);
+    border-left: 4px solid var(--border-strong);
     border-radius: 8px;
-    background: var(--card, var(--ink, #12161C));
-    box-shadow: 0 1px 2px rgba(42, 29, 16, 0.06);
+    background: var(--card);
     cursor: pointer;
     text-align: left;
     font: inherit;
@@ -362,7 +361,6 @@
       transform 0.12s ease;
   }
   .node:hover {
-    box-shadow: 0 3px 10px rgba(42, 29, 16, 0.14);
     transform: translateY(-1px);
   }
   /* No handler: no pointer cursor and no hover lift, so the card does
@@ -371,10 +369,9 @@
   .node.inert:hover {
     cursor: default;
     transform: none;
-    box-shadow: 0 1px 2px rgba(42, 29, 16, 0.06);
   }
   .node.selected {
-    outline: 2px solid var(--signal, #5FD4A8);
+    outline: 2px solid var(--signal);
     outline-offset: 1px;
   }
 
@@ -383,7 +380,7 @@
     align-items: center;
     gap: 6px;
     font-size: 11px;
-    color: var(--static, #7A838C);
+    color: var(--static);
     text-transform: lowercase;
     letter-spacing: 0.02em;
   }
@@ -395,7 +392,7 @@
   }
   .node-terminal {
     margin-left: auto;
-    color: var(--signal, #5FD4A8);
+    color: var(--signal);
     font-weight: 600;
     text-transform: none;
   }
@@ -403,7 +400,7 @@
     font-size: 13px;
     font-weight: 500;
     line-height: 1.25;
-    color: var(--text, var(--fog, #E8ECEF));
+    color: var(--text);
     overflow: hidden;
     text-overflow: ellipsis;
     display: -webkit-box;
@@ -414,7 +411,7 @@
   .node-badge {
     font-size: 11px;
     font-weight: 600;
-    color: var(--signal, #5FD4A8);
+    color: var(--signal);
     white-space: nowrap;
   }
 
@@ -424,32 +421,30 @@
      in-flight work (the Yard's `run` lamp), so active and ready-only
      nodes stay distinguishable at a glance. */
   .node.n-done {
-    border-left-color: var(--ok, #4fb98a);
-    background: rgba(79, 185, 138, 0.08);
+    border-left-color: var(--ok);
+    background: var(--ok-wash);
   }
   .node.n-active {
-    border-left-color: var(--warn, #d9a441);
-    background: rgba(217, 164, 65, 0.08);
+    border-left-color: var(--warn);
+    background: var(--warn-wash);
   }
   .node.n-ready {
-    border-left-color: var(--signal, #5FD4A8);
-    background: rgba(95, 212, 168, 0.08);
+    border-left-color: var(--signal);
+    background: var(--ok-wash);
   }
   .node.n-pending {
-    border-left-color: var(--hairline, #2A3138);
+    border-left-color: var(--hairline);
   }
   .node.n-skipped {
-    border-left-color: var(--hairline, #2A3138);
-    background: var(--wash, rgba(232, 236, 239, 0.04));
+    border-left-color: var(--hairline);
+    background: var(--wash);
   }
   .node.n-skipped .node-title {
-    color: var(--static, #7A838C);
+    color: var(--static);
     text-decoration: line-through;
   }
   .node.terminal {
     border-style: solid;
-    box-shadow:
-      0 1px 2px rgba(42, 29, 16, 0.06),
-      0 0 0 1px var(--signal, #5FD4A8) inset;
+    box-shadow: 0 0 0 1px var(--signal) inset;
   }
 </style>

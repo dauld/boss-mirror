@@ -174,18 +174,18 @@
 
 <style>
   .sr-msg {
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     font-size: 14px;
     padding: 16px 0;
   }
   .sr-err {
-    color: #b91c1c;
+    color: var(--err);
   }
   .sr-subject {
-    border: 1px solid var(--border, #e7e5e4);
+    border: 1px solid var(--border);
     border-radius: 8px;
     margin-bottom: 14px;
-    background: var(--card, #fff);
+    background: var(--card);
     overflow: hidden;
   }
   .sr-subject-head {
@@ -194,17 +194,17 @@
     gap: 10px;
     padding: 12px 16px;
     text-decoration: none;
-    color: var(--text, #1c1917);
-    border-bottom: 1px solid var(--border, #e7e5e4);
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
   }
   .sr-subject-head:hover {
-    background: var(--bg, #f5f5f4);
+    background: var(--bg);
   }
   .sr-kind {
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
   .sr-title {
     font-size: 15px;
@@ -213,7 +213,7 @@
   }
   .sr-id {
     font-size: 11px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
   /* Work and history side by side: the adjacency is the point. */
   .sr-panes {
@@ -230,12 +230,12 @@
     padding: 10px 16px 14px;
   }
   .sr-pane + .sr-pane {
-    border-left: 1px solid var(--border, #e7e5e4);
+    border-left: 1px solid var(--border);
   }
   @media (max-width: 800px) {
     .sr-pane + .sr-pane {
       border-left: none;
-      border-top: 1px solid var(--border, #e7e5e4);
+      border-top: 1px solid var(--border);
     }
   }
   .sr-pane-label {
@@ -243,7 +243,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     margin-bottom: 6px;
   }
   .sr-line {
@@ -254,11 +254,11 @@
     margin: 0 -6px;
     border-radius: 4px;
     text-decoration: none;
-    color: var(--text, #1c1917);
+    color: var(--text);
     font-size: 13px;
   }
   .sr-line:not(.sr-line-static):hover {
-    background: var(--bg, #f5f5f4);
+    background: var(--bg);
   }
   .sr-line-title {
     overflow: hidden;
@@ -266,13 +266,13 @@
     white-space: nowrap;
   }
   .sr-line-sub {
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     font-size: 11px;
     white-space: nowrap;
   }
   .sr-none {
     font-size: 12px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     margin: 0;
   }
   .sr-group {

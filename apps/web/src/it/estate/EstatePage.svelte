@@ -162,47 +162,47 @@
 <style>
   .estate-root { padding: 0 32px 32px; }
   .estate-section {
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 12px; letter-spacing: var(--ls-eyebrow, 0.3em);
-    color: var(--signal, #5FD4A8); margin: 28px 0 8px;
+    font-family: var(--font-mono);
+    font-size: 12px; letter-spacing: var(--ls-eyebrow);
+    color: var(--signal); margin: 28px 0 8px;
     display: flex; align-items: center; gap: 12px;
   }
-  .estate-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline, #2A3138); }
-  .estate-quiet { color: var(--static, #7A838C); }
+  .estate-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline); }
+  .estate-quiet { color: var(--static); }
   .estate-fail {
-    color: var(--warn, #d9a441);
-    border: 1px solid var(--warn, #d9a441);
+    color: var(--warn);
+    border: 1px solid var(--warn);
     padding: 8px 12px; font-size: 13px;
   }
   .estate-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   .estate-table th {
-    text-align: left; font-family: var(--font-mono, ui-monospace, monospace);
+    text-align: left; font-family: var(--font-mono);
     font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
-    color: var(--static, #7A838C); font-weight: 400;
-    border-bottom: 1px solid var(--hairline, #2A3138); padding: 4px 12px 4px 0;
+    color: var(--static); font-weight: 400;
+    border-bottom: 1px solid var(--hairline); padding: 4px 12px 4px 0;
   }
-  .estate-table td { padding: 6px 12px 6px 0; border-bottom: 1px solid var(--hairline, #2A3138); }
-  .estate-id { font-family: var(--font-mono, ui-monospace, monospace); }
-  .estate-addr, .estate-num { font-family: var(--font-mono, ui-monospace, monospace); color: var(--static, #7A838C); }
-  .estate-roles { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--static, #7A838C); }
+  .estate-table td { padding: 6px 12px 6px 0; border-bottom: 1px solid var(--hairline); }
+  .estate-id { font-family: var(--font-mono); }
+  .estate-addr, .estate-num { font-family: var(--font-mono); color: var(--static); }
+  .estate-roles { font-family: var(--font-mono); font-size: 11px; color: var(--static); }
   .estate-obs { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
   .estate-obs-row { display: flex; gap: 16px; align-items: baseline; }
   .estate-scope {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: 0.1em; text-transform: uppercase; color: var(--static, #7A838C);
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: var(--static);
     min-width: 150px;
   }
-  .estate-when { color: var(--static, #7A838C); font-size: 12px; margin-left: auto; }
-  .estate-ok { color: var(--signal, #5FD4A8); }
-  .estate-drift { color: var(--warn, #d9a441); }
+  .estate-when { color: var(--static); font-size: 12px; margin-left: auto; }
+  .estate-ok { color: var(--signal); }
+  .estate-drift { color: var(--warn); }
   .estate-door { display: flex; flex-direction: column; gap: 8px; }
-  .estate-hint { color: var(--static, #7A838C); font-size: 12px; max-width: 60ch; }
-  .estate-hint code { font-family: var(--font-mono, ui-monospace, monospace); }
-  .estate-hint strong { color: var(--ink, #E6EDF3); font-weight: 500; }
+  .estate-hint { color: var(--static); font-size: 12px; max-width: 60ch; }
+  .estate-hint code { font-family: var(--font-mono); }
+  .estate-hint strong { color: var(--fog); font-weight: 500; }
   /* One click selects the whole snippet — copyable without a button. */
   .estate-snippet {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
-    color: var(--signal, #5FD4A8); border: 1px solid var(--hairline, #2A3138);
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--signal); border: 1px solid var(--hairline);
     padding: 8px 14px; margin: 0; width: fit-content; user-select: all;
   }
 </style>

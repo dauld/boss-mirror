@@ -768,8 +768,8 @@
     align-items: end;
     margin-bottom: 16px;
     padding: 12px 16px;
-    background: rgba(0, 0, 0, 0.02);
-    border: 1px solid rgba(0, 0, 0, 0.08);
+    background: var(--wash);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
   }
   .job-filter {
@@ -779,7 +779,7 @@
     font-size: 12px;
   }
   .job-filter > span {
-    color: rgba(0, 0, 0, 0.55);
+    color: var(--static);
     text-transform: uppercase;
     letter-spacing: 0.4px;
     font-size: 10px;
@@ -789,9 +789,9 @@
   .job-filter input {
     padding: 6px 10px;
     font-size: 13px;
-    border: 1px solid rgba(0, 0, 0, 0.18);
+    border: 1px solid var(--hairline);
     border-radius: 4px;
-    background: white;
+    background: var(--ink);
     min-width: 160px;
   }
   .job-filter-clear {
@@ -799,13 +799,13 @@
     padding: 6px 12px;
     font-size: 12px;
     background: transparent;
-    color: rgba(0, 0, 0, 0.6);
-    border: 1px solid rgba(0, 0, 0, 0.18);
+    color: var(--static);
+    border: 1px solid var(--hairline);
     border-radius: 4px;
     cursor: pointer;
   }
   .job-filter-clear:hover {
-    background: rgba(0, 0, 0, 0.04);
+    background: var(--wash);
   }
   .job-actions {
     display: flex;
@@ -827,9 +827,13 @@
     cursor: pointer;
     border: 1.5px solid var(--brew-amber);
   }
+  /* The filled action is Enamel's one blue. It was the old theme's amber
+     under malt text, which the Enamel re-point turned into slate on dark
+     brown — 1.2:1 (backlog 7eb59678). */
   .btn-primary {
-    background: var(--brew-amber);
-    color: var(--brew-malt);
+    background: var(--signal);
+    border-color: var(--signal);
+    color: var(--on-band);
   }
   .btn-primary:disabled {
     opacity: 0.6;
@@ -840,7 +844,7 @@
     color: var(--brew-malt);
   }
   .new-job-form {
-    background: var(--brew-amber-bg, rgba(212, 165, 91, 0.08));
+    background: var(--brew-amber-bg);
     border: 1.5px solid var(--brew-amber);
     border-radius: 8px;
     padding: 16px;
@@ -865,7 +869,7 @@
   }
   .form-row label span {
     font-size: 12px;
-    color: var(--muted, #666);
+    color: var(--static);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
@@ -873,22 +877,22 @@
   .form-row select {
     padding: 6px 10px;
     border-radius: 4px;
-    border: 1px solid var(--border, #ccc);
-    background: white;
+    border: 1px solid var(--border);
+    background: var(--ink);
     font: inherit;
     min-width: 220px;
   }
   .form-error {
-    color: #b00020;
+    color: var(--err);
     margin: 0;
   }
   .kind-description {
     margin: 0;
     padding: 8px 12px;
-    background: var(--brew-amber-bg, rgba(212, 165, 91, 0.05));
+    background: var(--brew-amber-bg);
     border-left: 3px solid var(--brew-amber);
     border-radius: 2px;
-    color: var(--brew-malt, #3d2c1a);
+    color: var(--brew-malt);
     font-size: 13px;
     line-height: 1.45;
   }
@@ -898,7 +902,7 @@
     padding: 1px 6px;
     border-radius: 3px;
     background: var(--brew-amber);
-    color: white;
+    color: var(--on-band);
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -906,13 +910,13 @@
     vertical-align: middle;
   }
   .hint {
-    color: var(--muted, #888);
+    color: var(--static);
     font-size: 11px;
     margin-top: 4px;
   }
   .step-preview {
-    background: rgba(255, 255, 255, 0.6);
-    border: 1px dashed var(--brew-amber, #d4a55b);
+    background: var(--ink);
+    border: 1px dashed var(--brew-amber);
     border-radius: 6px;
     padding: 8px 12px;
     font-size: 13px;
@@ -920,7 +924,7 @@
   .step-preview > summary {
     cursor: pointer;
     font-weight: 500;
-    color: var(--brew-malt, #3d2c1a);
+    color: var(--brew-malt);
     list-style: none;
   }
   .step-preview > summary::-webkit-details-marker { display: none; }
@@ -950,27 +954,27 @@
     border-radius: 3px;
   }
   .step-preview-list li:nth-child(odd) {
-    background: rgba(212, 165, 91, 0.06);
+    background: var(--warn-wash);
   }
   .step-preview-tier {
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--muted, #888);
+    color: var(--static);
   }
   .step-preview-kind {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
     font-size: 11px;
-    color: var(--brew-malt, #3d2c1a);
-    background: rgba(212, 165, 91, 0.18);
+    color: var(--brew-malt);
+    background: var(--warn-wash);
     padding: 1px 6px;
     border-radius: 3px;
   }
-  .step-preview-title { color: var(--text, #1c1917); }
+  .step-preview-title { color: var(--text); }
   .step-preview-signoff {
     font-size: 11px;
-    color: #2563eb;
-    background: rgba(37, 99, 235, 0.08);
+    color: var(--signal);
+    background: var(--signal-wash);
     padding: 1px 6px;
     border-radius: 3px;
   }

@@ -151,26 +151,26 @@
   <Section title="Identity">
     <div style="display:grid; gap:12px; max-width:800px">
       <div>
-        <div style="font-size:12px; color:#666; margin-bottom:2px">
+        <div style="font-size:12px; color:var(--static); margin-bottom:2px">
           Kind slug
-          <span style="color:#888"> — lowercase, hyphen-separated; becomes the kind's permanent identity</span>
+          <span style="color:var(--static)"> — lowercase, hyphen-separated; becomes the kind's permanent identity</span>
         </div>
         <input bind:value={kindSlug} placeholder="seasonal-release" class="mono" style="padding:6px; font-size:13px; width:100%" />
       </div>
       <div>
-        <div style="font-size:12px; color:#666; margin-bottom:2px">Label</div>
+        <div style="font-size:12px; color:var(--static); margin-bottom:2px">Label</div>
         <input bind:value={label} placeholder="Seasonal Release" style="padding:6px; font-size:13px; width:100%" />
       </div>
       <div>
-        <div style="font-size:12px; color:#666; margin-bottom:2px">Category</div>
+        <div style="font-size:12px; color:var(--static); margin-bottom:2px">Category</div>
         <input list="category-options" bind:value={category} placeholder="production / sales / procurement / …" style="padding:6px; font-size:13px" />
         <datalist id="category-options">
           {#each categoryOptions as c (c)}<option value={c}></option>{/each}
         </datalist>
       </div>
       <div>
-        <div style="font-size:12px; color:#666; margin-bottom:2px">
-          Subject kinds <span style="color:#888"> — what each Job of this kind is about</span>
+        <div style="font-size:12px; color:var(--static); margin-bottom:2px">
+          Subject kinds <span style="color:var(--static)"> — what each Job of this kind is about</span>
         </div>
         <div style="display:flex; gap:8px; flex-wrap:wrap">
           {#each subjectKindOptions as s (s)}
@@ -182,7 +182,7 @@
         </div>
       </div>
       <div>
-        <div style="font-size:12px; color:#666; margin-bottom:2px">Description <span style="color:#888"> — optional</span></div>
+        <div style="font-size:12px; color:var(--static); margin-bottom:2px">Description <span style="color:var(--static)"> — optional</span></div>
         <textarea bind:value={description} rows="3" placeholder="What this kind of Job accomplishes" style="padding:6px; font-size:13px; width:100%"></textarea>
       </div>
     </div>
@@ -192,6 +192,6 @@
     <button type="button" class="wb-btn wb-btn-primary" onclick={start} disabled={starting}>
       {starting ? 'Creating…' : 'Create & author →'}
     </button>
-    {#if error}<span style="color:#dc2626; font-size:13px">{error}</span>{/if}
+    {#if error}<span style="color:var(--err); font-size:13px">{error}</span>{/if}
   </div>
 </div>

@@ -317,13 +317,13 @@
     <Section title="Spec">
       <div style="display:grid; gap:12px; max-width:800px">
         <div>
-          <div style="font-size:12px; color:#666; margin-bottom:2px">
-            Kind slug <span style="color:#888"> — identity; fixed (it is this Job's subject)</span>
+          <div style="font-size:12px; color:var(--static); margin-bottom:2px">
+            Kind slug <span style="color:var(--static)"> — identity; fixed (it is this Job's subject)</span>
           </div>
-          <input value={slug} class="mono" disabled style="padding:6px; font-size:13px; width:100%; background:#f3f4f6; color:#666" />
+          <input value={slug} class="mono" disabled style="padding:6px; font-size:13px; width:100%; background:var(--ink-raised); color:var(--static)" />
         </div>
         <div>
-          <div style="font-size:12px; color:#666; margin-bottom:2px">Label</div>
+          <div style="font-size:12px; color:var(--static); margin-bottom:2px">Label</div>
           <input
             value={spec.label}
             oninput={(e) => editSpec({ ...spec!, label: (e.target as HTMLInputElement).value })}
@@ -332,7 +332,7 @@
           />
         </div>
         <div>
-          <div style="font-size:12px; color:#666; margin-bottom:2px">Category</div>
+          <div style="font-size:12px; color:var(--static); margin-bottom:2px">Category</div>
           <input
             list="ws-category-options"
             value={spec.category}
@@ -345,8 +345,8 @@
           </datalist>
         </div>
         <div>
-          <div style="font-size:12px; color:#666; margin-bottom:2px">
-            Subject kinds <span style="color:#888"> — what each Job of this kind is about</span>
+          <div style="font-size:12px; color:var(--static); margin-bottom:2px">
+            Subject kinds <span style="color:var(--static)"> — what each Job of this kind is about</span>
           </div>
           <div style="display:flex; gap:8px; flex-wrap:wrap">
             {#each subjectKindOptions as s (s)}
@@ -358,7 +358,7 @@
           </div>
         </div>
         <div>
-          <div style="font-size:12px; color:#666; margin-bottom:2px">Description <span style="color:#888"> — optional</span></div>
+          <div style="font-size:12px; color:var(--static); margin-bottom:2px">Description <span style="color:var(--static)"> — optional</span></div>
           <textarea
             value={spec.description ?? ''}
             oninput={(e) => editSpec({ ...spec!, description: (e.target as HTMLTextAreaElement).value || null })}
@@ -389,7 +389,7 @@
   }
   .wf-step::after {
     content: '→';
-    color: #cbd5e1;
+    color: var(--static);
     margin-left: 8px;
   }
   .wf-step:last-child::after {
@@ -410,10 +410,10 @@
   }
   .wf-saved {
     font-size: 12px;
-    color: #16a34a;
+    color: var(--ok);
   }
   .wf-error {
     font-size: 13px;
-    color: #dc2626;
+    color: var(--err);
   }
 </style>

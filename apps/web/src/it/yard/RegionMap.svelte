@@ -252,16 +252,16 @@
     --tie: var(--map-rule);
     background: var(--map-bg);
     border: 1px solid var(--map-rule);
-    padding: var(--s2, 8px);
+    padding: var(--s2);
     overflow-x: auto;
-    margin-top: var(--s3, 12px);
+    margin-top: var(--s3);
   }
   .yard svg {
     display: block;
     width: 100%;
     min-width: 900px;
     height: auto;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .yard text {
     fill: var(--map-muted);
@@ -282,9 +282,9 @@
   .region-head {
     display: flex;
     align-items: baseline;
-    gap: var(--s3, 12px);
+    gap: var(--s3);
     flex-wrap: wrap;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .leave {
     background: none;
@@ -292,7 +292,7 @@
     color: var(--map-muted);
     font: inherit;
     font-size: 11px;
-    letter-spacing: var(--ls-nav, 0.14em);
+    letter-spacing: var(--ls-nav);
     padding: 4px 10px;
     cursor: pointer;
   }
@@ -302,8 +302,8 @@
   .region-state { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--map-muted); }
   .region-state.err { color: var(--map-bad-ink); }
   .region-trend { font-size: 11px; color: var(--map-muted); }
-  .region-why { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
-    color: var(--map-muted); margin-top: var(--s2, 8px); }
+  .region-why { font-family: var(--font-mono); font-size: 12px;
+    color: var(--map-muted); margin-top: var(--s2); }
   .region-why.err { color: var(--map-bad-ink); }
   .lamp-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block;
     background: var(--map-rule-strong); }

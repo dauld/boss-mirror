@@ -198,9 +198,9 @@
   }
 
   function diffBackground(mark: DiffMark): string | undefined {
-    if (mark === 'added') return '#dcfce7';
-    if (mark === 'removed') return '#fee2e2';
-    if (mark === 'changed') return '#fef3c7';
+    if (mark === 'added') return 'var(--ok-wash)';
+    if (mark === 'removed') return 'var(--err-wash)';
+    if (mark === 'changed') return 'var(--warn-wash)';
     return undefined;
   }
 </script>
@@ -258,7 +258,7 @@
         Fork…
       </button>
       {#if actionError}
-        <span style="color:#dc2626; font-size:13px">{actionError}</span>
+        <span style="color:var(--err); font-size:13px">{actionError}</span>
       {/if}
     </div>
 
@@ -267,43 +267,43 @@
           <table class="data-table">
             <tbody>
               <tr>
-                <td style="color:#888; width:160px">Kind</td>
+                <td style="color:var(--static); width:160px">Kind</td>
                 <td><span class="mono">{spec.kind}</span></td>
               </tr>
-              <tr><td style="color:#888">Label</td><td>{spec.label}</td></tr>
-              <tr><td style="color:#888">Category</td><td>{spec.category}</td></tr>
+              <tr><td style="color:var(--static)">Label</td><td>{spec.label}</td></tr>
+              <tr><td style="color:var(--static)">Category</td><td>{spec.category}</td></tr>
               <tr>
-                <td style="color:#888">Status</td>
+                <td style="color:var(--static)">Status</td>
                 <td>
                   <StatusChip value={spec.status} tone={statusTone(spec.status)} />
                 </td>
               </tr>
-              <tr><td style="color:#888">Version</td><td>{spec.version}</td></tr>
+              <tr><td style="color:var(--static)">Version</td><td>{spec.version}</td></tr>
               <tr>
-                <td style="color:#888">Subject kinds</td>
+                <td style="color:var(--static)">Subject kinds</td>
                 <td>
                   {#each spec.subject_kinds as s (s)}
                     <span style="margin-right:4px"><StatusChip value={s} tone="muted" /></span>
                   {/each}
                 </td>
               </tr>
-              <tr><td style="color:#888">Owner</td><td>{spec.owning_team}</td></tr>
+              <tr><td style="color:var(--static)">Owner</td><td>{spec.owning_team}</td></tr>
               <tr>
-                <td style="color:#888">Authoring Job</td>
+                <td style="color:var(--static)">Authoring Job</td>
                 <td>
                   {#if spec.authoring_job_id}
                     <EntityLink kind="job" id={spec.authoring_job_id} />
                   {:else}
-                    <span style="color:#888">—</span>
+                    <span style="color:var(--static)">—</span>
                   {/if}
                 </td>
               </tr>
               <tr>
-                <td style="color:#888">Created</td>
+                <td style="color:var(--static)">Created</td>
                 <td>{formatDate(spec.created_at)}</td>
               </tr>
               {#if spec.description}
-                <tr><td style="color:#888">Description</td><td>{spec.description}</td></tr>
+                <tr><td style="color:var(--static)">Description</td><td>{spec.description}</td></tr>
               {/if}
             </tbody>
           </table>
@@ -354,17 +354,17 @@
               <button type="button" class="wb-btn" onclick={() => (compareVersion = null)}>
                 Close diff
               </button>
-              <span style="display:inline-flex; gap:12px; color:#666">
+              <span style="display:inline-flex; gap:12px; color:var(--static)">
                 <span style="display:inline-flex; gap:4px; align-items:center; font-size:12px">
-                  <span style="width:10px; height:10px; background:#dcfce7; border-radius:2px"></span>
+                  <span style="width:10px; height:10px; background:var(--ok-wash); border-radius:2px"></span>
                   added
                 </span>
                 <span style="display:inline-flex; gap:4px; align-items:center; font-size:12px">
-                  <span style="width:10px; height:10px; background:#fee2e2; border-radius:2px"></span>
+                  <span style="width:10px; height:10px; background:var(--err-wash); border-radius:2px"></span>
                   removed
                 </span>
                 <span style="display:inline-flex; gap:4px; align-items:center; font-size:12px">
-                  <span style="width:10px; height:10px; background:#fef3c7; border-radius:2px"></span>
+                  <span style="width:10px; height:10px; background:var(--warn-wash); border-radius:2px"></span>
                   changed
                 </span>
               </span>
@@ -372,7 +372,7 @@
             {@const slugKeys = slugUnion(compareSpec, spec)}
             <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px">
               <div>
-                <div style="font-size:12px; color:#666; margin-bottom:6px; font-weight:600">
+                <div style="font-size:12px; color:var(--static); margin-bottom:6px; font-weight:600">
                   v{compareSpec.version} ({compareSpec.status})
                 </div>
                 <div class="jd-steps">
@@ -390,7 +390,7 @@
                 </div>
               </div>
               <div>
-                <div style="font-size:12px; color:#666; margin-bottom:6px; font-weight:600">
+                <div style="font-size:12px; color:var(--static); margin-bottom:6px; font-weight:600">
                   v{spec.version} ({spec.status})
                 </div>
                 <div class="jd-steps">
@@ -448,7 +448,7 @@
                   <td>{new Date(v.created_at).toISOString().slice(0, 19).replace('T', ' ')}</td>
                   <td>
                     {#if isCurrent}
-                      <span style="color:#888; font-size:12px">current</span>
+                      <span style="color:var(--static); font-size:12px">current</span>
                     {:else if isCompared}
                       <button
                         type="button"

@@ -429,9 +429,9 @@
           <tbody>
             {#each scheduled.slice(0, 8) as r (r.job_id)}
               <tr>
-                <td class="mono" style="font-size:12px; color:#78716c">{r.launch_date}</td>
+                <td class="mono" style="font-size:12px; color:var(--static)">{r.launch_date}</td>
                 <td><EntityLink kind="job" id={r.job_id} label={r.title} /></td>
-                <td style="font-size:12px; color:#57534e">{r.launch_channel ?? '—'}</td>
+                <td style="font-size:12px; color:var(--static)">{r.launch_channel ?? '—'}</td>
                 <td style="font-size:12px">
                   {#if r.owner_id}
                     <EntityLink
@@ -452,7 +452,7 @@
             Couldn't load owner names — {peopleRead.error}. Owners show as ids.
           </p>
         {/if}
-        <div style="margin-top:8px; font-size:12px; color:#78716c">
+        <div style="margin-top:8px; font-size:12px; color:var(--static)">
           {#if scheduled.length > 8}+{scheduled.length - 8} more · {/if}
           {#if unscheduled > 0}{unscheduled} unscheduled · {/if}
           <a href={href('/ux/calendar')}>Open full calendar →</a>
@@ -512,7 +512,7 @@
       {:else if !balanceSheet}
         <p class="empty">Balance sheet unavailable.</p>
       {:else}
-        <div style="margin-bottom:12px; font-size:13px; color:#44403c">
+        <div style="margin-bottom:12px; font-size:13px; color:var(--static)">
           As of {balanceSheet.as_of}
         </div>
         <div class="stat-row">

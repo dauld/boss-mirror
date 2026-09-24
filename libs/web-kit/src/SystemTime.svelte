@@ -112,34 +112,34 @@
     align-items: baseline;
     gap: 8px;
     font-size: 12px;
-    color: #57534e;
+    color: var(--static);
     white-space: nowrap;
   }
   .system-time-label {
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: #a8a29e;
+    color: var(--static);
   }
   .system-time-val {
     font-variant-numeric: tabular-nums;
     font-weight: 600;
-    color: #fafaf9;
+    color: var(--fog);
   }
   .system-time-sim {
     font-size: 10px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    background: #fef3c7;
-    color: #92400e;
-    border: 1px solid #fcd34d;
+    background: var(--warn-wash);
+    color: var(--warn);
+    border: 1px solid var(--busy);
     border-radius: 4px;
     padding: 1px 6px;
   }
   .system-time-sim.paused {
-    background: #fee2e2;
-    color: #991b1b;
-    border-color: #fca5a5;
+    background: var(--err-wash);
+    color: var(--err);
+    border-color: var(--troubled);
   }
 </style>

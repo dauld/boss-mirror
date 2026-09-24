@@ -52,10 +52,10 @@
 
 <style>
   .step-procedure {
-    border: 1px solid var(--border, #e7e5e4);
-    border-left: 3px solid var(--text-dim, #78716c);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--text-dim);
     border-radius: 6px;
-    background: var(--card, #fff);
+    background: var(--card);
     margin-bottom: 12px;
   }
   .sp-head {
@@ -74,22 +74,22 @@
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
   .sp-source {
     font-size: 11px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     flex: 1 1 auto;
   }
   .sp-toggle {
     font-size: 11px;
-    color: var(--accent, #2563eb);
+    color: var(--accent);
   }
   .sp-body {
     padding: 0 12px 10px;
     font-size: 13px;
     line-height: 1.6;
-    color: var(--text, #1c1917);
+    color: var(--text);
     word-break: break-word;
     max-height: 22em;
     overflow-y: auto;
@@ -103,14 +103,14 @@
     margin: 0 0 8px;
   }
   .sp-body :global(pre) {
-    background: var(--bg, #f5f5f4);
+    background: var(--bg);
     padding: 8px 10px;
     border-radius: 5px;
     overflow-x: auto;
     font-size: 12px;
   }
   .sp-body :global(code) {
-    background: var(--bg, #f5f5f4);
+    background: var(--bg);
     padding: 1px 4px;
     border-radius: 3px;
     font-size: 0.9em;

@@ -150,7 +150,7 @@
   .passkeys-hint {
     margin: 0.5rem 0 0;
     font-size: 0.85rem;
-    color: var(--text-muted, #8a939c);
+    color: var(--static);
     max-width: 60ch;
   }
   .passkeys-panel h3 {
@@ -161,7 +161,7 @@
   .passkeys-empty {
     margin: 0 0 0.5rem;
     font-size: 0.85rem;
-    color: var(--dl-text-muted, #667);
+    color: var(--static);
   }
   .passkeys-list {
     list-style: none;
@@ -179,7 +179,7 @@
   }
   .passkeys-meta {
     font-size: 0.8rem;
-    color: var(--dl-text-muted, #667);
+    color: var(--static);
   }
   .passkeys-remove {
     margin-left: auto;
@@ -195,6 +195,6 @@
   .passkeys-error {
     margin: 0.5rem 0 0;
     font-size: 0.85rem;
-    color: var(--dl-danger, #b3261e);
+    color: var(--err);
   }
 </style>

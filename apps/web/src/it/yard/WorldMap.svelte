@@ -262,16 +262,16 @@
     --tie: var(--map-rule);
     background: var(--map-bg);
     border: 1px solid var(--map-rule);
-    padding: var(--s2, 8px);
+    padding: var(--s2);
     overflow-x: auto;
-    margin-top: var(--s3, 12px);
+    margin-top: var(--s3);
   }
   .yard svg {
     display: block;
     width: 100%;
     min-width: 900px;
     height: auto;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .yard text {
     fill: var(--map-muted);

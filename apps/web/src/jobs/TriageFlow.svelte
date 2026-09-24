@@ -260,10 +260,10 @@
 <style>
   .tf-msg {
     margin: 16px 0;
-    color: var(--static, #7A838C);
+    color: var(--static);
   }
   .tf-err {
-    color: var(--err, #e2685c);
+    color: var(--err);
   }
   .tf-queue {
     margin-top: 18px;
@@ -277,7 +277,7 @@
   .tf-queue-n {
     font-size: 12px;
     font-weight: 400;
-    color: var(--static, #7A838C);
+    color: var(--static);
   }
   .tf-items {
     list-style: none;
@@ -295,23 +295,23 @@
     width: 100%;
     text-align: left;
     padding: 8px 12px;
-    border: 1px solid var(--hairline, #2A3138);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
-    background: var(--card, var(--ink, #12161C));
+    background: var(--card);
     cursor: pointer;
   }
   .tf-item.selected {
-    border-color: var(--signal, #5FD4A8);
+    border-color: var(--signal);
   }
   .tf-item-pri {
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
-    color: var(--static, #7A838C);
+    color: var(--static);
   }
   .tf-item-pri[data-pri='urgent'],
   .tf-item-pri[data-pri='emergency'] {
-    color: var(--err, #e2685c);
+    color: var(--err);
   }
   .tf-item-title {
     flex: 1;
@@ -319,20 +319,20 @@
   }
   .tf-item-age {
     font-size: 12px;
-    color: var(--static, #7A838C);
+    color: var(--static);
   }
   .tf-hint {
     margin-top: 10px;
     font-size: 13px;
-    color: var(--static, #7A838C);
+    color: var(--static);
   }
   .tf-route {
     margin-left: 6px;
     padding: 3px 10px;
-    border: 1px solid var(--signal, #5FD4A8);
+    border: 1px solid var(--signal);
     border-radius: 999px;
     background: transparent;
-    color: var(--signal, #5FD4A8);
+    color: var(--signal);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;

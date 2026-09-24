@@ -63,7 +63,7 @@
   .write-gate-note {
     margin: 6px 0 0;
     font-size: 12px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
   .write-gate-note a {
     color: inherit;

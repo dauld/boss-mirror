@@ -181,16 +181,16 @@
 <style>
   .step-focus-brief {
     margin: 10px 0 14px;
-    border: 1px solid var(--hairline, #2A3138);
+    border: 1px solid var(--hairline);
     border-radius: 8px;
     padding: 10px 14px;
-    background: var(--card, var(--ink, #12161C));
+    background: var(--card);
   }
   .step-focus-brief summary {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: var(--static, #7A838C);
+    color: var(--static);
     font-weight: 600;
     cursor: pointer;
   }
@@ -207,7 +207,7 @@
     inset: 44px 0 0 0;
     display: flex;
     flex-direction: column;
-    background: var(--bg, var(--void, #0D1014));
+    background: var(--bg);
   }
   .step-focus-bar {
     flex: none;
@@ -215,8 +215,8 @@
     align-items: center;
     gap: 12px;
     padding: 10px 24px;
-    border-bottom: 1px solid var(--border, var(--hairline, #2A3138));
-    background: var(--card, var(--ink, #12161C));
+    border-bottom: 1px solid var(--border);
+    background: var(--card);
   }
   .step-focus-back {
     background: none;
@@ -227,11 +227,11 @@
     cursor: pointer;
     font: inherit;
     font-size: 13px;
-    color: var(--text-dim, var(--static, #7A838C));
+    color: var(--text-dim);
   }
   .step-focus-back:hover {
-    background: var(--wash, rgba(232, 236, 239, 0.04));
-    color: var(--text, var(--fog, #E8ECEF));
+    background: var(--wash);
+    color: var(--text);
   }
   .step-focus-title {
     font-size: 14px;
@@ -242,7 +242,7 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-dim, var(--static, #7A838C));
+    color: var(--text-dim);
   }
   /* The plugin owns everything from here down. */
   .step-focus-body {
@@ -260,10 +260,10 @@
     max-height: calc(100vh - 190px);
   }
   .step-focus-msg {
-    color: var(--text-dim, var(--static, #7A838C));
+    color: var(--text-dim);
     font-size: 14px;
   }
   .step-focus-err {
-    color: var(--err, #e2685c);
+    color: var(--err);
   }
 </style>

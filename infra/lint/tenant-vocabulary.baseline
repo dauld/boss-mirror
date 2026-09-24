@@ -14,7 +14,7 @@
 crates/core 367
 crates/modules 443
 crates/orchestrators 817
-apps/web/src 309
+apps/web/src 304
 apps/simulator 55
 infra/postgres/schema 202
 infra/platform 2

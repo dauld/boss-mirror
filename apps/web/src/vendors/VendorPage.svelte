@@ -335,7 +335,7 @@
                     label={empNames.get(m.employee_id)}
                   />
                   {#if m.notes}
-                    <span style="color:#78716c; margin-left:8px">· {m.notes}</span>
+                    <span style="color:var(--static); margin-left:8px">· {m.notes}</span>
                   {/if}
                 </dd>
               {/each}
@@ -411,7 +411,7 @@
                   <td>
                     {c.name}
                     {#if c.is_primary}
-                      <span style="margin-left:6px; font-size:10px; padding:1px 6px; border-radius:3px; background:#16a34a22; color:#16a34a; font-weight:600">
+                      <span style="margin-left:6px; font-size:10px; padding:1px 6px; border-radius:3px; background:var(--ok-wash); color:var(--ok); font-weight:600">
                         PRIMARY
                       </span>
                     {/if}
@@ -439,24 +439,24 @@
           <ul class="interaction-timeline" style="list-style:none; padding:0">
             {#each interactions.slice(0, 20) as i (i.id)}
               {@const contactName = contacts.find((c) => c.id === i.vendor_contact_id)?.name ?? null}
-              <li style="border-left:2px solid #e7e5e4; padding:8px 12px; margin-bottom:8px; font-size:13px">
+              <li style="border-left:2px solid var(--hairline); padding:8px 12px; margin-bottom:8px; font-size:13px">
                 <div style="display:flex; gap:8px; align-items:baseline">
-                  <span style="font-size:11px; padding:1px 6px; border-radius:3px; background:#e7e5e4; color:#44403c; font-weight:500">
+                  <span style="font-size:11px; padding:1px 6px; border-radius:3px; background:var(--ink-raised); color:var(--static); font-weight:500">
                     {INTERACTION_KIND_LABEL[i.kind] ?? i.kind}
                   </span>
-                  <span style="color:#78716c">{formatDate(i.occurred_at)}</span>
-                  <span style="color:#44403c">
+                  <span style="color:var(--static)">{formatDate(i.occurred_at)}</span>
+                  <span style="color:var(--static)">
                     by {formatActor(i.actor_id, empNames)}
                   </span>
-                  {#if contactName}<span style="color:#44403c">with {contactName}</span>{/if}
+                  {#if contactName}<span style="color:var(--static)">with {contactName}</span>{/if}
                 </div>
                 <div style="margin-top:4px">{i.body}</div>
                 {#if i.commitments.length > 0}
-                  <ul style="margin-top:6px; font-size:12px; color:#44403c">
+                  <ul style="margin-top:6px; font-size:12px; color:var(--static)">
                     {#each i.commitments as c, idx (idx)}
                       <li>
                         ↳ {c.summary}
-                        {#if c.due_by}<span style="color:#78716c"> — due {c.due_by}</span>{/if}
+                        {#if c.due_by}<span style="color:var(--static)"> — due {c.due_by}</span>{/if}
                         {#if c.linked_po_id}
                           {' · '}
                           <EntityLink kind="po" id={c.linked_po_id} />
@@ -466,7 +466,7 @@
                   </ul>
                 {/if}
                 {#if i.linked_po_id || i.linked_part_sku}
-                  <div style="margin-top:4px; font-size:11px; color:#78716c">
+                  <div style="margin-top:4px; font-size:11px; color:var(--static)">
                     {#if i.linked_po_id}
                       Linked PO: <EntityLink kind="po" id={i.linked_po_id} />
                     {/if}

@@ -59,7 +59,7 @@
   </div>
 
   {#if error}
-    <p class="empty" style="color:#dc2626; padding:0 24px">Failed to load: {error}</p>
+    <p class="empty" style="color:var(--err); padding:0 24px">Failed to load: {error}</p>
   {/if}
 
   {#if rules.length === 0 && !loading && !error}

@@ -92,6 +92,9 @@ export function isSim(j: SimFacts): boolean {
 // Categorical hues for protocol chips, tuned to sit quietly on the
 // VOID/INK grounds. SIGNAL teal is deliberately absent — it stays the
 // one live accent — and ok/warn/err stay reserved for state.
+// colour-literal-ok: identity hues for the card's rail, never its text.
+// On Enamel's white they measure 2.1-2.8:1, which a 3px rail can carry and
+// a word cannot, so the kind label reads --static (backlog 7eb59678).
 export const PROTOCOL_PALETTE: readonly string[] = [
   '#7FB4D8', // slate blue
   '#C9A96B', // brass

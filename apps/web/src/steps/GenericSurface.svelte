@@ -472,8 +472,8 @@
 
 <style>
   .step-ask {
-    border: 1px solid var(--border, #e7e5e4);
-    border-left: 3px solid var(--accent, #2563eb);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
     border-radius: 6px;
     padding: 10px 12px;
     margin-bottom: 12px;
@@ -487,18 +487,18 @@
   }
   .step-ask-needs {
     font-size: 12px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
   .step-field-label {
     font-size: 12px;
     font-weight: 500;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
   .step-ask-legend {
     margin-left: auto;
   }
   .step-field-required {
-    color: var(--danger, #b91c1c);
+    color: var(--err);
     margin-left: 2px;
   }
 </style>

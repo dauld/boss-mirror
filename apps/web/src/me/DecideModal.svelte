@@ -178,7 +178,7 @@
   .dm-back {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.55);
+    background: var(--scrim);
     display: flex;
     align-items: flex-start;
     justify-content: center;
@@ -188,14 +188,13 @@
   /* Wider than the packet modal on purpose: this one hosts working
      surfaces (two-pane reviews, context panels), not a summary. */
   .dm {
-    background: var(--card, #12161c);
-    border: 1px solid var(--hairline, #2a3138);
+    background: var(--card);
+    border: 1px solid var(--hairline);
     border-radius: 4px;
     width: min(1100px, 100%);
     max-height: calc(100vh - 80px);
     display: flex;
     flex-direction: column;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
   }
   .dm-head {
     flex: none;
@@ -203,7 +202,7 @@
     align-items: flex-start;
     gap: 10px;
     padding: 18px 24px 12px;
-    border-bottom: 1px solid var(--hairline, #2a3138);
+    border-bottom: 1px solid var(--hairline);
   }
   .dm-head-text {
     min-width: 0;
@@ -213,35 +212,35 @@
     margin: 0;
     font-size: 1.05rem;
     line-height: 1.35;
-    color: var(--chalk, #f4f7fa);
+    color: var(--fog);
   }
   .dm-sub {
     margin: 4px 0 0;
     font-size: 0.8rem;
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
   }
   .dm-btn {
     flex: none;
     background: transparent;
-    border: 1px solid var(--hairline, #2a3138);
-    color: var(--fog, #8b97a3);
+    border: 1px solid var(--hairline);
+    color: var(--fog);
     padding: 4px 10px;
     cursor: pointer;
     font: inherit;
     font-size: 0.8rem;
   }
   .dm-btn:hover {
-    color: var(--chalk, #f4f7fa);
+    color: var(--fog);
   }
   .dm-brief {
     flex: none;
     margin: 0;
     padding: 10px 24px;
-    border-bottom: 1px solid var(--hairline, #2a3138);
+    border-bottom: 1px solid var(--hairline);
     font-size: 13px;
     line-height: 1.55;
     white-space: pre-wrap;
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
     max-height: 20vh;
     overflow-y: auto;
   }
@@ -255,19 +254,19 @@
   }
   .dm-quiet {
     margin: 0;
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
     font-size: 0.85rem;
   }
   .dm-error {
     margin: 0;
-    color: var(--stop, #eb5757);
+    color: var(--err);
     font-size: 0.85rem;
   }
   /* The soft aside for "saved, but the re-read failed" — quiet on
      purpose: the surface below it is showing a successful receipt. */
   .dm-note {
     margin: 0 0 10px;
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
     font-size: 0.8rem;
   }
 </style>

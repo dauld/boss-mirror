@@ -89,7 +89,7 @@
         <input
           readonly
           value={absUrl}
-          style="flex:1; font-family:var(--font-mono, monospace); font-size:13px; padding:6px 8px"
+          style="flex:1; font-family:var(--font-mono); font-size:13px; padding:6px 8px"
           onfocus={(e: FocusEvent) => (e.target as HTMLInputElement).select()}
         />
         <button class="btn" onclick={() => void copy(absUrl)}>

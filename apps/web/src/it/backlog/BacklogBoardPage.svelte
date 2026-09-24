@@ -103,17 +103,17 @@
   /* Urgent is the one severity the backlog carries; everything else
      is just an area label. */
   .bl-chip-urgent {
-    background: #fef2f2;
-    color: #b91c1c;
+    background: var(--err-wash);
+    color: var(--err);
   }
   .bl-chip-area {
-    background: var(--bg, var(--void, #0d1014));
-    border: 1px solid var(--border, var(--hairline, #2a3138));
+    background: var(--bg);
+    border: 1px solid var(--border);
     color: inherit;
   }
   .bl-opened {
     font-size: 11px;
-    color: var(--text-dim, var(--static, #7a838c));
+    color: var(--text-dim);
     margin-left: auto;
   }
   .bl-viewbar {
@@ -126,14 +126,14 @@
     font-size: 12px;
     font-weight: 600;
     padding: 3px 12px;
-    border: 1px solid var(--border, var(--hairline, #2a3138));
+    border: 1px solid var(--border);
     border-radius: 999px;
     background: transparent;
     cursor: pointer;
     color: inherit;
   }
   .bl-view.active {
-    border-color: var(--signal, #5fd4a8);
-    color: var(--signal, #5fd4a8);
+    border-color: var(--signal);
+    color: var(--signal);
   }
 </style>

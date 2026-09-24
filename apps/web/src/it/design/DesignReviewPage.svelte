@@ -168,54 +168,54 @@
   .design-table td {
     text-align: left;
     padding: 8px 12px;
-    border-bottom: 1px solid var(--hairline, #2A3138);
+    border-bottom: 1px solid var(--hairline);
     vertical-align: top;
     font-variant-numeric: tabular-nums;
   }
   /* Column labels are instrument text: DM Mono caps in STATIC, not bold
      browser-default headers competing with the rows. Yard-board idiom. */
   .design-table th {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
     font-weight: 400;
-    letter-spacing: var(--ls-nav, 0.14em);
+    letter-spacing: var(--ls-nav);
     text-transform: uppercase;
-    color: var(--static, #7A838C);
+    color: var(--static);
   }
   .design-table tr:last-child td {
     border-bottom: none;
   }
   .design-status {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
-    letter-spacing: var(--ls-label, 0.1em);
+    letter-spacing: var(--ls-label);
     text-transform: uppercase;
-    color: var(--static, #7A838C);
+    color: var(--static);
     white-space: nowrap;
   }
   .design-when {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
-    color: var(--static, #7A838C);
+    color: var(--static);
     white-space: nowrap;
   }
   /* Inline literals (paths, verbs) in the system mono, pinned to 12px —
      bare <code> falls into the browser's monospace-shrink. */
   code {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 12px;
   }
   .empty {
-    color: var(--static, #7A838C);
+    color: var(--static);
     margin: 12px 0;
     line-height: 1.5;
   }
   .design-lede {
-    color: var(--static, #7A838C);
+    color: var(--static);
     margin: 0 0 12px;
   }
   .design-error {
-    color: var(--err, #e2685c);
+    color: var(--err);
     margin: 12px 0;
   }
 </style>

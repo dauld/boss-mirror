@@ -189,34 +189,34 @@
 </div>
 
 <style>
-  .ap-kind { border: 1px solid var(--hairline, #2a3138); padding: 10px 12px; margin-bottom: 10px; }
+  .ap-kind { border: 1px solid var(--hairline); padding: 10px 12px; margin-bottom: 10px; }
   .ap-head { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; font-size: 13px; }
-  .ap-head small { color: var(--static, #7a838c); font-size: 12px; }
+  .ap-head small { color: var(--static); font-size: 12px; }
   /* History, not work: the answer stays readable, the block recedes. */
   .ap-superseded { opacity: 0.55; border-style: dashed; }
-  .ap-superseded-label { color: var(--ok, #4fb98a); font-size: 12px; }
-  .mono { font-family: var(--font-mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
-  .ok { color: var(--ok, #4fb98a); }
-  .warn { color: var(--warn, #d9a441); }
+  .ap-superseded-label { color: var(--ok); font-size: 12px; }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
   .ap-answer { margin-top: 8px; font-size: 12px; }
   .ap-answer-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
-  .ap-answer-head small { color: var(--static, #7a838c); }
-  .ap-pending { color: var(--static, #7a838c); font-style: italic; }
+  .ap-answer-head small { color: var(--static); }
+  .ap-pending { color: var(--static); font-style: italic; }
   /* The whole output, scrolled, never cut: the refusal names the field
      by field and the confirmation is read from it. */
   .ap-output {
     margin: 6px 0 0; padding: 8px; max-height: 240px; overflow: auto;
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
+    font-family: var(--font-mono); font-size: 11px;
     white-space: pre-wrap; overflow-wrap: anywhere;
-    border: 1px solid var(--hairline, #2a3138); color: var(--fog, #e8ecef);
+    border: 1px solid var(--hairline); color: var(--fog);
   }
   .ap-controls { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-  .ap-force-why { margin: 0; font-size: 12px; max-width: 90ch; color: var(--warn, #d9a441); }
+  .ap-force-why { margin: 0; font-size: 12px; max-width: 90ch; color: var(--warn); }
   .ap-force-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .ap-confirm {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; padding: 4px 6px;
-    background: transparent; color: var(--fog, #e8ecef); border: 1px solid var(--hairline, #2a3138); min-width: 18ch;
+    font-family: var(--font-mono); font-size: 12px; padding: 4px 6px;
+    background: transparent; color: var(--fog); border: 1px solid var(--hairline); min-width: 18ch;
   }
-  .ap-refusal { color: var(--static, #7a838c); font-size: 11px; }
-  .ap-error { color: var(--warn, #d9a441); font-size: 12px; margin: 0; }
+  .ap-refusal { color: var(--static); font-size: 11px; }
+  .ap-error { color: var(--warn); font-size: 12px; margin: 0; }
 </style>

@@ -55,28 +55,27 @@
     flex-direction: column;
     gap: 0.125rem;
     padding: 0.5rem 0.85rem;
-    border: 1px solid var(--border-soft, rgba(0, 0, 0, 0.08));
+    border: 1px solid var(--hairline);
     border-radius: 0.5rem;
-    background: var(--surface-1, #fff);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+    background: var(--ink);
     min-width: 14rem;
   }
 
   .org-role {
     font-size: 0.85rem;
-    color: var(--text-muted, #555);
+    color: var(--static);
   }
 
   .org-meta {
     font-size: 0.75rem;
-    color: var(--text-muted, #888);
+    color: var(--static);
   }
 
   .org-children {
     list-style: none;
     margin: 0.4rem 0 0 0;
     padding: 0 0 0 1.25rem;
-    border-left: 1px dashed var(--border-soft, rgba(0, 0, 0, 0.15));
+    border-left: 1px dashed var(--hairline);
     display: flex;
     flex-direction: column;
     gap: 0.4rem;

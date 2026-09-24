@@ -231,11 +231,11 @@
               </td>
               <td class="num">{i.line_items.length}</td>
               <td class="num">{formatMoney({ amount_cents: i.amount_cents, currency: i.currency })}</td>
-              <td class="num" style={taxCents > 0 ? '' : 'color:#a8a29e'}>
+              <td class="num" style={taxCents > 0 ? '' : 'color:var(--static)'}>
                 {#if taxCents > 0}
                   {formatMoney({ amount_cents: taxCents, currency: i.currency })}
                   {#if i.tax_jurisdiction}
-                    <span class="mono" style="margin-left:4px; font-size:10px; color:#78716c">
+                    <span class="mono" style="margin-left:4px; font-size:10px; color:var(--static)">
                       {i.tax_jurisdiction.replace(/^US-/, '')}
                     </span>
                   {/if}
@@ -247,7 +247,7 @@
                 {#if i.payment_method}
                   {PAYMENT_METHOD_LABEL[i.payment_method]}
                 {:else}
-                  <span style="color:#a8a29e">—</span>
+                  <span style="color:var(--static)">—</span>
                 {/if}
               </td>
               <td>{i.issued_on}</td>

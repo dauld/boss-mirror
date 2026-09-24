@@ -161,72 +161,71 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: linear-gradient(180deg, #fafaf9 0%, #f5f5f4 100%);
+    background: var(--ink-raised);
     padding: 32px 16px;
   }
   .login-card {
     width: 100%;
     max-width: 420px;
-    background: #fff;
-    border: 1px solid #e7e5e4;
+    background: var(--ink);
+    border: 1px solid var(--hairline);
     border-radius: 12px;
     padding: 32px 28px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
   }
   .login-eyebrow {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.6px;
-    color: #78716c;
+    color: var(--static);
     margin-bottom: 6px;
   }
   .login-title {
     font-size: 22px;
     font-weight: 600;
-    color: #1c1917;
+    color: var(--fog);
     margin: 0 0 4px;
   }
   .login-subtitle {
     font-size: 13px;
-    color: #57534e;
+    color: var(--static);
     margin: 0 0 20px;
   }
   .login-banner {
-    background: #fef3c7;
-    border: 1px solid #fde68a;
+    background: var(--warn-wash);
+    border: 1px solid var(--busy);
     border-radius: 8px;
     padding: 10px 12px;
     font-size: 12px;
     line-height: 1.5;
-    color: #44403c;
+    color: var(--static);
     margin-bottom: 18px;
   }
-  .login-banner strong { color: #1c1917; }
+  .login-banner strong { color: var(--fog); }
   .form-row { margin-bottom: 14px; }
   .form-row label {
     display: block;
     font-size: 12px;
     font-weight: 500;
-    color: #44403c;
+    color: var(--static);
     margin-bottom: 4px;
   }
   .form-row input {
     width: 100%;
     padding: 9px 10px;
-    border: 1px solid #d6d3d1;
+    border: 1px solid var(--hairline);
     border-radius: 6px;
     font-size: 14px;
-    background: #fff;
+    background: var(--ink);
     box-sizing: border-box;
   }
   .form-row input:focus {
     outline: none;
-    border-color: #1c1917;
+    border-color: var(--border-strong);
   }
   .submit-btn {
     width: 100%;
-    background: #1c1917;
-    color: #fff;
+    background: var(--band);
+    color: var(--on-band);
     border: none;
     border-radius: 6px;
     padding: 10px 14px;
@@ -235,17 +234,17 @@
     cursor: pointer;
   }
   .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .submit-btn:hover:not(:disabled) { background: #44403c; }
+  .submit-btn:hover:not(:disabled) { background: var(--signal); }
   .mode-toggle {
     background: none;
     border: none;
-    color: #57534e;
+    color: var(--static);
     font-size: 12px;
     cursor: pointer;
     padding: 4px 0;
     text-decoration: underline;
   }
-  .mode-toggle:hover { color: #1c1917; }
+  .mode-toggle:hover { color: var(--fog); }
   .login-error {
     margin-top: 12px;
     padding: 8px 10px;
@@ -253,8 +252,8 @@
     font-size: 12px;
     line-height: 1.4;
   }
-  .login-error.bad { background: #fee2e2; color: #991b1b; }
-  .login-error.ok  { background: #dcfce7; color: #166534; }
+  .login-error.bad { background: var(--err-wash); color: var(--err); }
+  .login-error.ok  { background: var(--ok-wash); color: var(--ok); }
   .footer-row {
     margin-top: 18px;
     display: flex;
@@ -271,14 +270,14 @@
     gap: 10px;
     margin: 4px 0 14px;
     font-size: 11px;
-    color: #a8a29e;
+    color: var(--static);
   }
   .guest-divider::before,
   .guest-divider::after {
     content: '';
     flex: 1;
     height: 1px;
-    background: #e7e5e4;
+    background: var(--ink-raised);
   }
   .oidc-btn {
     display: block;
@@ -288,9 +287,9 @@
   }
   .guest-btn {
     width: 100%;
-    background: #fff;
-    color: #1c1917;
-    border: 1px solid #d6d3d1;
+    background: var(--ink);
+    color: var(--fog);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
     padding: 10px 14px;
     font-size: 14px;
@@ -298,12 +297,12 @@
     cursor: pointer;
   }
   .guest-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .guest-btn:hover:not(:disabled) { background: #f5f5f4; border-color: #a8a29e; }
+  .guest-btn:hover:not(:disabled) { background: var(--ink-raised); border-color: var(--hairline); }
   .guest-note {
     margin: 8px 0 0;
     font-size: 11px;
     line-height: 1.5;
-    color: #78716c;
+    color: var(--static);
   }
   .local-toggle {
     display: block;
@@ -311,16 +310,16 @@
     padding: 0;
     background: none;
     border: none;
-    color: #a8a29e;
+    color: var(--static);
     font-size: 0.78rem;
     text-decoration: underline;
     cursor: pointer;
   }
-  .local-toggle:hover { color: #78716c; }
+  .local-toggle:hover { color: var(--static); }
 
   .guest-note code {
     font-size: 11px;
-    background: #f5f5f4;
+    background: var(--ink-raised);
     padding: 1px 4px;
     border-radius: 3px;
   }

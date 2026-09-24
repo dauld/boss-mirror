@@ -112,11 +112,11 @@
 <style>
   .entries-cap-note {
     padding: 8px 12px;
-    background: #fff7ed;
-    border: 1px solid #fdba74;
+    background: var(--warn-wash);
+    border: 1px solid var(--busy);
     border-radius: 6px;
     font-size: 13px;
-    color: #7c2d12;
+    color: var(--warn);
     margin: 0 0 8px 0;
   }
 </style>

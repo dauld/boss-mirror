@@ -235,7 +235,7 @@
                         type="button"
                         onclick={() => removeLine(i)}
                         class="hr-done-btn"
-                        style="background:#fef2f2; color:#991b1b"
+                        style="background:var(--err-wash); color:var(--err)"
                       >
                         Remove
                       </button>
@@ -245,16 +245,16 @@
               {/each}
             </tbody>
             <tfoot>
-              <tr style="border-top:1px solid #e7e5e4; font-weight:600">
+              <tr style="border-top:1px solid var(--hairline); font-weight:600">
                 <td colspan="2" style="text-align:right">Totals:</td>
                 <td style="text-align:right">
                   {formatUsd(totals.totalDebits)} · {formatUsd(totals.totalCredits)}
                 </td>
                 <td colspan="2">
                   {#if balanced}
-                    <span style="color:#166534">Balanced</span>
+                    <span style="color:var(--ok)">Balanced</span>
                   {:else}
-                    <span style="color:#991b1b">
+                    <span style="color:var(--err)">
                       Off by {formatUsd(Math.abs(totals.totalDebits - totals.totalCredits))}
                     </span>
                   {/if}
@@ -272,7 +272,7 @@
     {#if error}
       <div
         role="alert"
-        style="margin:12px 0; padding:10px 14px; border:1px solid #dc2626; background:#fef2f2; border-radius:6px; color:#991b1b"
+        style="margin:12px 0; padding:10px 14px; border:1px solid var(--troubled); background:var(--err-wash); border-radius:6px; color:var(--err)"
       >
         {error}
       </div>

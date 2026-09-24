@@ -100,7 +100,7 @@
             {#each d.liabilities as r (r.account_code)}
               <tr>
                 <td class="mono">{r.account_code} · {r.account_name}</td>
-                <td style="color:#78716c; font-size:13px">
+                <td style="color:var(--static); font-size:13px">
                   {LIABILITY_DESCRIPTION[r.account_code] ?? ''}
                 </td>
                 <td class="num">{formatUsd(r.balance_cents)}</td>

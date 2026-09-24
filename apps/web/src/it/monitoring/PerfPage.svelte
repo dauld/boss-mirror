@@ -117,26 +117,23 @@
   }
 
   function latencyColor(ms: number): string {
-    if (ms < 10) return 'rgba(34, 197, 94, 0.15)';
-    if (ms < 50) return 'rgba(132, 204, 22, 0.18)';
-    if (ms < 100) return 'rgba(250, 204, 21, 0.25)';
-    if (ms < 250) return 'rgba(251, 146, 60, 0.3)';
-    if (ms < 1000) return 'rgba(239, 68, 68, 0.35)';
-    return 'rgba(153, 27, 27, 0.5)';
+    if (ms < 50) return 'var(--ok-wash)';
+    if (ms < 250) return 'var(--warn-wash)';
+    return 'var(--err-wash)';
   }
 
   function methodColor(method: string): string {
     const map: Record<string, string> = {
-      GET: '#16a34a',
-      POST: '#2563eb',
-      PUT: '#d97706',
-      DELETE: '#dc2626',
-      PATCH: '#9333ea',
+      GET: 'var(--clear)',
+      POST: 'var(--signal)',
+      PUT: 'var(--band)',
+      DELETE: 'var(--troubled)',
+      PATCH: 'var(--band)',
     };
-    return map[method] ?? '#6b7280';
+    return map[method] ?? 'var(--static)';
   }
 
-  const thBase = 'padding:8px 12px; font-size:13px; font-weight:600; color:var(--muted); user-select:none';
+  const thBase = 'padding:8px 12px; font-size:13px; font-weight:600; color:var(--static); user-select:none';
   const tdBase = 'padding:8px 12px; font-size:14px';
 
   let rows = $derived.by(() => {
@@ -154,7 +151,7 @@
     <div>
       <div class="exec-eyebrow">System Model · Observability</div>
       <h1 class="exec-title">Gateway latency</h1>
-      <p style="color:var(--muted); margin:4px 0 0">
+      <p style="color:var(--static); margin:4px 0 0">
         Per-endpoint p50/p95/p99 since gateway start. Refreshes every 2 seconds.
         Buckets collapse path IDs (e.g. <code>/api/people/emp-005</code> →
         <code>/api/people/{'{id}'}</code>).
@@ -169,20 +166,20 @@
       </button>
       <button type="button" class="btn" onclick={resetHistograms}>Reset</button>
       {#if resetError}
-        <span class="load-failed" role="alert" style="color:#dc2626">Reset refused: {resetError}</span>
+        <span class="load-failed" role="alert" style="color:var(--err)">Reset refused: {resetError}</span>
       {/if}
     </div>
   </div>
 
   {#if loadState.kind === 'loading'}
-    <div style="color:var(--muted)">Loading…</div>
+    <div style="color:var(--static)">Loading…</div>
   {:else if loadState.kind === 'error'}
-    <div style="color:#dc2626">
+    <div style="color:var(--err)">
       Failed to load perf snapshot: {loadState.message}
     </div>
   {:else}
     {@const snap = loadState.snap}
-    <div style="color:var(--muted); font-size:13px; margin-bottom:12px">
+    <div style="color:var(--static); font-size:13px; margin-bottom:12px">
       Snapshot taken <code>{snap.taken_at}</code> · {rows.length} endpoint buckets ·
       {totalRequests.toLocaleString()} total requests
     </div>
@@ -217,7 +214,7 @@
       <tbody>
         {#if rows.length === 0}
           <tr>
-            <td colspan="9" style="padding:24px; color:var(--muted)">
+            <td colspan="9" style="padding:24px; color:var(--static)">
               No traffic recorded yet. Exercise the app in another tab.
             </td>
           </tr>
@@ -231,7 +228,7 @@
           <tr style="border-bottom:1px solid var(--border)">
             <td style={tdBase}>
               <span
-                style={`font-size:11px; font-family:monospace; font-weight:600; color:white; background:${methodBg}; padding:2px 6px; border-radius:3px`}
+                style={`font-size:11px; font-family:monospace; font-weight:600; color:var(--on-band); background:${methodBg}; padding:2px 6px; border-radius:3px`}
               >
                 {row.method}
               </span>
@@ -256,18 +253,18 @@
               {row.p99_ms.toFixed(1)}
             </td>
             <td
-              style={`${tdBase}; text-align:right; font-variant-numeric:tabular-nums; color:var(--muted)`}
+              style={`${tdBase}; text-align:right; font-variant-numeric:tabular-nums; color:var(--static)`}
             >
               {row.max_ms.toFixed(1)}
             </td>
             <td
               title="Client (4xx) responses. Persistent values here usually mean contract drift."
-              style={`${tdBase}; text-align:right; font-variant-numeric:tabular-nums; color:${clientErrors > 0 ? '#b45309' : 'var(--muted)'}; font-weight:${clientErrors > 0 ? 600 : 400}`}
+              style={`${tdBase}; text-align:right; font-variant-numeric:tabular-nums; color:${clientErrors > 0 ? 'var(--warn)' : 'var(--static)'}; font-weight:${clientErrors > 0 ? 600 : 400}`}
             >
               {clientErrors}
             </td>
             <td
-              style={`${tdBase}; text-align:right; font-variant-numeric:tabular-nums; color:${row.errors > 0 ? '#dc2626' : 'var(--muted)'}; font-weight:${row.errors > 0 ? 600 : 400}`}
+              style={`${tdBase}; text-align:right; font-variant-numeric:tabular-nums; color:${row.errors > 0 ? 'var(--err)' : 'var(--static)'}; font-weight:${row.errors > 0 ? 600 : 400}`}
             >
               {row.errors}
             </td>

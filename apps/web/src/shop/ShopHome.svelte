@@ -130,8 +130,8 @@
 
 <style>
   .brewery-image {
-    background: linear-gradient(135deg, #c2410c 0%, #7c2d12 100%);
-    color: rgba(255, 255, 255, 0.92);
+    background: var(--band);
+    color: var(--on-band);
     padding: 18px 16px;
     min-height: 90px;
     display: flex;
@@ -151,8 +151,8 @@
     font: inherit;
   }
   .shop-card-limited {
-    background: rgba(0, 0, 0, 0.35);
-    color: #fef3c7;
+    background: var(--busy);
+    color: var(--on-busy);
     padding: 2px 8px;
     border-radius: 4px;
     font-size: 11px;
@@ -164,8 +164,8 @@
     font-size: 13px;
     font-weight: 500;
   }
-  .shop-card-avail-in { color: #16a34a; }
-  .shop-card-avail-low { color: #ca8a04; }
-  .shop-card-avail-out { color: #dc2626; }
-  .shop-card-avail-unknown { color: #78716c; }
+  .shop-card-avail-in { color: var(--ok); }
+  .shop-card-avail-low { color: var(--warn); }
+  .shop-card-avail-out { color: var(--err); }
+  .shop-card-avail-unknown { color: var(--static); }
 </style>

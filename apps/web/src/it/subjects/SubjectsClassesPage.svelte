@@ -96,7 +96,7 @@
   />
 
   {#if error}
-    <p class="empty" style="color:#dc2626; padding:0 24px">Failed to load: {error}</p>
+    <p class="empty" style="color:var(--err); padding:0 24px">Failed to load: {error}</p>
   {/if}
 
   <div class="sc-body">
@@ -203,19 +203,19 @@
   .sc-tree {
     position: sticky;
     top: 16px;
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--hairline);
     border-radius: 8px;
     overflow: hidden;
-    background: #fff;
+    background: var(--ink);
   }
   .sc-tree-head {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: #6b7280;
+    color: var(--static);
     padding: 10px 12px;
-    background: #f9fafb;
-    border-bottom: 1px solid #e5e7eb;
+    background: var(--ink-raised);
+    border-bottom: 1px solid var(--hairline);
   }
   .sc-kind {
     display: flex;
@@ -226,15 +226,15 @@
     padding: 8px 12px;
     background: none;
     border: none;
-    border-bottom: 1px solid #f3f4f6;
+    border-bottom: 1px solid var(--hairline);
     cursor: pointer;
   }
   .sc-kind:hover {
-    background: #f9fafb;
+    background: var(--ink-raised);
   }
   .sc-kind.active {
-    background: #eef2ff;
-    box-shadow: inset 3px 0 0 #6366f1;
+    background: var(--signal-wash);
+    box-shadow: inset 3px 0 0 var(--signal);
   }
   .sc-root .sc-kind-label {
     font-weight: 600;
@@ -244,11 +244,11 @@
   }
   .sc-kind-label {
     font-size: 13px;
-    color: #111827;
+    color: var(--fog);
   }
   .sc-kind-code {
     font-size: 11px;
-    color: #9ca3af;
+    color: var(--static);
   }
   .sc-detail-head {
     padding: 4px 0 12px;
@@ -259,12 +259,12 @@
   }
   .sc-detail-code {
     font-size: 13px;
-    color: #9ca3af;
+    color: var(--static);
     font-weight: 400;
   }
   .sc-detail-desc {
     margin: 6px 0 0;
-    color: #4b5563;
+    color: var(--static);
     font-size: 13px;
     max-width: 60ch;
   }
@@ -273,10 +273,10 @@
     gap: 16px;
     margin-top: 6px;
     font-size: 12px;
-    color: #6b7280;
+    color: var(--static);
   }
   .sc-dim {
-    color: #d1d5db;
+    color: var(--text-faint);
   }
   .sc-chips {
     display: flex;
@@ -285,13 +285,13 @@
   }
   .sc-chip {
     font-size: 11px;
-    background: #f3f4f6;
+    background: var(--ink-raised);
     border-radius: 4px;
     padding: 1px 6px;
-    color: #374151;
+    color: var(--static);
   }
   .sc-chip-k {
-    color: #9ca3af;
+    color: var(--static);
     margin-right: 4px;
   }
 </style>

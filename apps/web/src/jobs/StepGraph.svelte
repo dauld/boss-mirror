@@ -153,36 +153,36 @@
     }
   }
   .sg-detail {
-    border: 1px solid var(--hairline, #2A3138);
+    border: 1px solid var(--hairline);
     border-radius: 8px;
-    background: var(--card, var(--ink, #12161C));
+    background: var(--card);
     padding: 12px 14px;
     min-width: 0;
   }
   .sg-rail {
-    border: 1px solid var(--hairline, #2A3138);
+    border: 1px solid var(--hairline);
     border-radius: 8px;
     padding: 10px 8px 12px;
     min-width: 0;
   }
   .sg-rail-h {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
     font-weight: 400;
-    letter-spacing: var(--ls-nav, 0.14em);
+    letter-spacing: var(--ls-nav);
     text-transform: uppercase;
-    color: var(--static, #7A838C);
+    color: var(--static);
     margin: 0 0 8px 8px;
   }
   .sg-canvas {
     margin-top: 14px;
   }
   .sg-canvas summary {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
-    letter-spacing: var(--ls-nav, 0.14em);
+    letter-spacing: var(--ls-nav);
     text-transform: uppercase;
-    color: var(--static, #7A838C);
+    color: var(--static);
     cursor: pointer;
     padding: 6px 0;
   }

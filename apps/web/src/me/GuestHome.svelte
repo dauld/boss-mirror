@@ -147,7 +147,7 @@
 
 <style>
   .guest-lede {
-    color: var(--fog, #E8ECEF);
+    color: var(--fog);
     font-size: 15px;
     line-height: 1.65;
     max-width: 64ch;
@@ -168,7 +168,7 @@
     flex-direction: column;
     gap: 6px;
     text-align: left;
-    border: 1px solid var(--hairline, #2A3138);
+    border: 1px solid var(--hairline);
     border-radius: 8px;
     padding: 14px 16px;
     background: none;
@@ -180,7 +180,7 @@
     cursor: default;
   }
   .guest-tour-card:not(.is-static):hover {
-    border-color: var(--signal, #29C7B0);
+    border-color: var(--signal);
   }
   .guest-tour-h {
     font-size: 15px;
@@ -189,7 +189,7 @@
   .guest-tour-p {
     font-size: 14px;
     line-height: 1.6;
-    color: var(--fog, #E8ECEF);
+    color: var(--fog);
   }
 
   .guest-track-title {
@@ -211,7 +211,7 @@
     align-items: center;
     gap: 7px;
     padding-bottom: 8px;
-    border-bottom: 1px solid var(--hairline, #2A3138);
+    border-bottom: 1px solid var(--hairline);
     margin-bottom: 10px;
   }
   /* Lit only where something is standing. An all-lit track would claim
@@ -220,16 +220,16 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--hairline, #2A3138);
+    background: var(--hairline);
     flex: 0 0 auto;
   }
   .guest-stop-dot.lit {
-    background: var(--signal, #29C7B0);
+    background: var(--signal);
   }
   .guest-stop-label {
     font-size: 12px;
     line-height: 1.3;
-    color: var(--fog, #E8ECEF);
+    color: var(--fog);
   }
   .guest-stop-cards {
     display: flex;
@@ -237,8 +237,8 @@
     gap: 8px;
   }
   .guest-packet {
-    border: 1px solid var(--hairline, #2A3138);
-    border-left: 2px solid var(--signal, #29C7B0);
+    border: 1px solid var(--hairline);
+    border-left: 2px solid var(--signal);
     border-radius: 6px;
     padding: 8px 10px;
     display: flex;
@@ -252,17 +252,17 @@
     white-space: nowrap;
   }
   .guest-packet-when {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--static, #7A838C);
+    color: var(--static);
   }
   .guest-stop-empty {
-    color: var(--static, #7A838C);
+    color: var(--static);
     margin: 0;
     font-size: 13px;
   }
   .guest-track-foot {
-    color: var(--static, #7A838C);
+    color: var(--static);
     font-size: 13px;
     line-height: 1.65;
     margin: 14px 0 0;

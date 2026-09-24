@@ -53,19 +53,18 @@
     align-items: center;
     gap: 12px;
     padding: 10px 16px;
-    border: 1px solid var(--accent, #2563eb);
+    border: 1px solid var(--accent);
     border-radius: 8px;
-    background: var(--card, #fff);
-    color: var(--text, #1c1917);
+    background: var(--card);
+    color: var(--text);
     font-size: 13px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
   }
   .update-bar button {
     padding: 4px 12px;
     border: 0;
     border-radius: 5px;
-    background: var(--accent, #2563eb);
-    color: #fff;
+    background: var(--accent);
+    color: var(--on-band);
     font-size: 13px;
     cursor: pointer;
   }

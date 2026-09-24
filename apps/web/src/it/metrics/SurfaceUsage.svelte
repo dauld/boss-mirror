@@ -117,39 +117,39 @@
      shapes (heading, strip, panel, table) are restated here with the
      same tokens rather than reached for across the boundary. */
   .ct-section {
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 12px; letter-spacing: var(--ls-eyebrow, 0.3em);
-    color: var(--signal, #5fd4a8); margin: 28px 0 8px;
+    font-family: var(--font-mono);
+    font-size: 12px; letter-spacing: var(--ls-eyebrow);
+    color: var(--signal); margin: 28px 0 8px;
     display: flex; align-items: center; gap: 12px;
   }
-  .ct-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline, #2a3138); }
-  .ct-quiet { color: var(--static, #7a838c); font-size: 13px; }
+  .ct-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline); }
+  .ct-quiet { color: var(--static); font-size: 13px; }
   .ct-fail {
-    color: var(--warn, #d9a441); border: 1px solid var(--warn, #d9a441);
+    color: var(--warn); border: 1px solid var(--warn);
     padding: 8px 12px; font-size: 13px;
   }
-  .mono { font-family: var(--font-mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
-  .dim { color: var(--static, #7a838c); }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .dim { color: var(--static); }
   .ct-strip {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-    border: 1px solid var(--hairline, #2a3138); margin-bottom: 10px;
+    border: 1px solid var(--hairline); margin-bottom: 10px;
   }
-  .ct-strip > div { padding: 12px 16px; border-right: 1px solid var(--hairline, #2a3138); min-width: 0; }
+  .ct-strip > div { padding: 12px 16px; border-right: 1px solid var(--hairline); min-width: 0; }
   .ct-strip > div:last-child { border-right: 0; }
   .ct-strip .k {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: 0.1em; text-transform: uppercase; color: var(--static, #7a838c);
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: var(--static);
   }
   .ct-strip .v { font-size: 28px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.1; margin-top: 4px; }
-  .ct-strip .v small { font-size: 12px; color: var(--static, #7a838c); font-weight: 400; margin-left: 5px; }
-  .ct-panel { border: 1px solid var(--hairline, #2a3138); padding: 14px 16px; min-width: 0; }
+  .ct-strip .v small { font-size: 12px; color: var(--static); font-weight: 400; margin-left: 5px; }
+  .ct-panel { border: 1px solid var(--hairline); padding: 14px 16px; min-width: 0; }
   .ct-panel .h { font-size: 12px; font-weight: 600; margin-bottom: 8px; }
   .su-actors { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); margin-bottom: 10px; }
   .ct-tbl { overflow-x: auto; }
   .ct-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  .ct-table th { text-align: left; font-weight: 500; color: var(--static, #7a838c); padding: 4px 8px; border-bottom: 1px solid var(--hairline, #2a3138); }
-  .ct-table td { padding: 4px 8px; border-bottom: 1px solid var(--hairline, #2a3138); vertical-align: top; white-space: nowrap; }
+  .ct-table th { text-align: left; font-weight: 500; color: var(--static); padding: 4px 8px; border-bottom: 1px solid var(--hairline); }
+  .ct-table td { padding: 4px 8px; border-bottom: 1px solid var(--hairline); vertical-align: top; white-space: nowrap; }
   .ct-table .num { text-align: right; }
   .su-list { margin: 0; padding-left: 16px; font-size: 12px; columns: 3; column-gap: 24px; }
-  .ct-footnote { color: var(--text-faint, #5c656e); font-size: 12px; max-width: 90ch; margin-top: 20px; }
+  .ct-footnote { color: var(--text-faint); font-size: 12px; max-width: 90ch; margin-top: 20px; }
 </style>

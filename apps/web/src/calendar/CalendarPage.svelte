@@ -142,12 +142,12 @@
         type="button"
         onclick={() => (windowPreset = k)}
         class="step-btn"
-        style={`font-weight:${windowPreset === k ? 600 : 400}; background:${windowPreset === k ? '#e7e5e4' : ''}`}
+        style={`font-weight:${windowPreset === k ? 600 : 400}; background:${windowPreset === k ? 'var(--ink-raised)' : ''}`}
       >
         Next {WINDOW_DAYS[k]} days
       </button>
     {/each}
-    <span style="margin-left:auto; font-size:12px; color:#78716c">
+    <span style="margin-left:auto; font-size:12px; color:var(--static)">
       {from} → {to}
     </span>
   </div>
@@ -166,25 +166,25 @@
         {@const label = block.date === 'unscheduled' ? 'Unscheduled' : formatLongDate(block.date)}
         <section>
           <h3
-            style="font-size:13px; color:#78716c; text-transform:uppercase; letter-spacing:0.4px; margin-bottom:8px; padding-bottom:4px; border-bottom:1px solid #e7e5e4"
+            style="font-size:13px; color:var(--static); text-transform:uppercase; letter-spacing:0.4px; margin-bottom:8px; padding-bottom:4px; border-bottom:1px solid var(--hairline)"
           >
             {label}
-            <span style="color:#a8a29e; font-weight:400">· {block.rows.length}</span>
+            <span style="color:var(--static); font-weight:400">· {block.rows.length}</span>
           </h3>
           <ul style="list-style:none; padding:0; margin:0">
             {#each block.rows as r (r.job_id)}
-              <li style="display:flex; gap:12px; padding:6px 0; border-bottom:1px solid #f5f5f4; font-size:13px">
+              <li style="display:flex; gap:12px; padding:6px 0; border-bottom:1px solid var(--hairline); font-size:13px">
                 <div style="flex:1">
                   <EntityLink kind="job" id={r.job_id} label={r.title} />
                   {#if r.launch_channel}
                     <span
-                      style="margin-left:8px; padding:1px 6px; font-size:11px; background:#e7e5e4; border-radius:3px; color:#57534e"
+                      style="margin-left:8px; padding:1px 6px; font-size:11px; background:var(--ink-raised); border-radius:3px; color:var(--static)"
                     >
                       {r.launch_channel}
                     </span>
                   {/if}
                 </div>
-                <div style="color:#78716c; font-size:12px">
+                <div style="color:var(--static); font-size:12px">
                   {#if r.owner_id}
                     <EntityLink
                       kind="employee"
@@ -196,7 +196,7 @@
                   {/if}
                 </div>
                 <div
-                  style="color:#78716c; font-size:11px; text-transform:uppercase; letter-spacing:0.3px; min-width:96px; text-align:right"
+                  style="color:var(--static); font-size:11px; text-transform:uppercase; letter-spacing:0.3px; min-width:96px; text-align:right"
                 >
                   tier {r.current_tier ?? '—'} · {r.status}
                 </div>

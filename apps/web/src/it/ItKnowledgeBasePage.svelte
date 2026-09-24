@@ -38,7 +38,7 @@
       style="display:block; margin:0 auto; width:max(100%, 1600px); height:auto"
     />
   </div>
-  <div style="font-size:12px; color:#78716c; margin-top:6px; text-align:right">
+  <div style="font-size:12px; color:var(--static); margin-top:6px; text-align:right">
     <a href={src} target="_blank" rel="noopener noreferrer">Open at full size ↗</a>
   </div>
 {/snippet}
@@ -57,18 +57,18 @@
     display: flex;
     gap: 14px;
     align-items: flex-start;
-    border: 1px solid #e7e5e4;
+    border: 1px solid var(--hairline);
     border-radius: 8px;
     padding: 14px 16px;
-    background: #fff;
+    background: var(--ink);
   }
   .layer p {
     margin: 4px 0 0;
     font-size: 14px;
     line-height: 1.55;
-    color: #44403c;
+    color: var(--static);
   }
-  .layer strong { font-size: 15px; color: #1c1917; }
+  .layer strong { font-size: 15px; color: var(--fog); }
   .layer-n {
     flex: 0 0 28px;
     height: 28px;
@@ -77,18 +77,18 @@
     place-items: center;
     font-size: 13px;
     font-weight: 600;
-    color: #1c1917;
+    color: var(--fog);
   }
-  .layer-actors   { border-left: 4px solid #a8a29e; }
-  .layer-actors   .layer-n { background: #f5f5f4; }
-  .layer-protocols { border-left: 4px solid #78716c; }
-  .layer-protocols .layer-n { background: #e7e5e4; }
-  .layer-network  { border-left: 4px solid #44403c; }
-  .layer-network  .layer-n { background: #d6d3d1; }
+  .layer-actors   { border-left: 4px solid var(--hairline); }
+  .layer-actors   .layer-n { background: var(--ink-raised); }
+  .layer-protocols { border-left: 4px solid var(--border-strong); }
+  .layer-protocols .layer-n { background: var(--ink-raised); }
+  .layer-network  { border-left: 4px solid var(--border-strong); }
+  .layer-network  .layer-n { background: var(--ink-raised); }
 
   .arch-diagram {
-    background: #fff;
-    border: 1px solid #e7e5e4;
+    background: var(--ink);
+    border: 1px solid var(--hairline);
     border-radius: 8px;
     padding: 16px;
     overflow: auto;
@@ -105,7 +105,7 @@
     subtitle="The reading frame, then the four architecture diagrams — the reference for how BOSS is put together"
   />
 
-  <div style="background:#dbeafe; border:1px solid #bfdbfe; border-radius:8px; padding:14px 16px; margin-bottom:16px; font-size:14px; line-height:1.55; color:#1c1917">
+  <div style="background:var(--signal-wash); border:1px solid var(--signal); border-radius:8px; padding:14px 16px; margin-bottom:16px; font-size:14px; line-height:1.55; color:var(--fog)">
     <strong style="display:block; margin-bottom:4px">What lives here</strong>
     The reading frame (§0–1) followed by the four architecture diagrams, rendered from
     <code>docs/architecture/*.mmd</code> on every diagram-regen — a
@@ -120,20 +120,20 @@
 
   <nav
     aria-label="Knowledge Base jump nav"
-    style="display:flex; flex-wrap:wrap; gap:8px; padding:12px 16px; margin-bottom:8px; background:#fafaf9; border:1px solid #e7e5e4; border-radius:8px; font-size:13px"
+    style="display:flex; flex-wrap:wrap; gap:8px; padding:12px 16px; margin-bottom:8px; background:var(--ink-raised); border:1px solid var(--hairline); border-radius:8px; font-size:13px"
   >
-    <span style="color:#78716c; margin-right:4px">Jump to:</span>
-    <a href="#it-layers"      style="color:#1c1917">0 · The three layers</a>
-    <span style="color:#d6d3d1">·</span>
-    <a href="#it-framing"     style="color:#1c1917">1 · Execution lens</a>
-    <span style="color:#d6d3d1">·</span>
-    <a href="#it-primitives"  style="color:#1c1917">2 · Primitives</a>
-    <span style="color:#d6d3d1">·</span>
-    <a href="#it-service-map" style="color:#1c1917">3 · Service map</a>
-    <span style="color:#d6d3d1">·</span>
-    <a href="#it-deployment"  style="color:#1c1917">4 · Deployment</a>
-    <span style="color:#d6d3d1">·</span>
-    <a href={href('/it/registry')} style="color:#1c1917">Workflows ↗</a>
+    <span style="color:var(--static); margin-right:4px">Jump to:</span>
+    <a href="#it-layers"      style="color:var(--fog)">0 · The three layers</a>
+    <span style="color:var(--static)">·</span>
+    <a href="#it-framing"     style="color:var(--fog)">1 · Execution lens</a>
+    <span style="color:var(--static)">·</span>
+    <a href="#it-primitives"  style="color:var(--fog)">2 · Primitives</a>
+    <span style="color:var(--static)">·</span>
+    <a href="#it-service-map" style="color:var(--fog)">3 · Service map</a>
+    <span style="color:var(--static)">·</span>
+    <a href="#it-deployment"  style="color:var(--fog)">4 · Deployment</a>
+    <span style="color:var(--static)">·</span>
+    <a href={href('/it/registry')} style="color:var(--fog)">Workflows ↗</a>
   </nav>
 
   <div class="tab-content" style="display:flex; flex-direction:column; gap:24px; padding:16px 0">

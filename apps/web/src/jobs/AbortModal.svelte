@@ -151,7 +151,7 @@
   .am-back {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.55);
+    background: var(--scrim);
     display: flex;
     align-items: flex-start;
     justify-content: center;
@@ -160,44 +160,43 @@
   }
   /* Narrower than DecideModal on purpose: one question, one field. */
   .am {
-    background: var(--card, #12161c);
-    border: 1px solid var(--hairline, #2a3138);
+    background: var(--card);
+    border: 1px solid var(--hairline);
     border-radius: 4px;
     width: min(560px, 100%);
     display: flex;
     flex-direction: column;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
   }
   .am-head {
     display: flex;
     align-items: flex-start;
     gap: 10px;
     padding: 18px 24px 12px;
-    border-bottom: 1px solid var(--hairline, #2a3138);
+    border-bottom: 1px solid var(--hairline);
   }
   .am-head-text { min-width: 0; flex: 1 1 auto; }
   .am-title {
     margin: 0;
     font-size: 1.05rem;
     line-height: 1.35;
-    color: var(--chalk, #f4f7fa);
+    color: var(--fog);
   }
   .am-sub {
     margin: 4px 0 0;
     font-size: 0.8rem;
-    color: var(--fog, #8b97a3);
+    color: var(--fog);
   }
   .am-btn {
     flex: none;
     background: transparent;
-    border: 1px solid var(--hairline, #2a3138);
-    color: var(--fog, #8b97a3);
+    border: 1px solid var(--hairline);
+    color: var(--fog);
     padding: 4px 10px;
     cursor: pointer;
     font: inherit;
     font-size: 0.8rem;
   }
-  .am-btn:hover:not(:disabled) { color: var(--chalk, #f4f7fa); }
+  .am-btn:hover:not(:disabled) { color: var(--fog); }
   .am-body {
     display: flex;
     flex-direction: column;
@@ -207,7 +206,7 @@
   .am-terminal { margin: 0 0 6px; font-size: 13px; color: var(--text); }
   .am-slug { font-family: monospace; font-size: 12px; color: var(--text-dim); }
   .am-choice {
-    border: 1px solid var(--hairline, #2a3138);
+    border: 1px solid var(--hairline);
     border-radius: var(--radius);
     padding: 8px 12px 10px;
     margin: 0 0 6px;

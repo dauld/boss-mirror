@@ -117,19 +117,19 @@
     margin-bottom: 10px;
   }
   .ar-chip {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
     letter-spacing: 0.1em;
     font-variant-numeric: tabular-nums;
-    color: var(--text-dim, #7a838c);
-    border: 1px solid var(--border, #2a3138);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
     padding: 2px 8px;
   }
   .ar-label {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 10.5px;
-    letter-spacing: var(--ls-nav, 0.14em);
-    color: var(--text-dim, #7a838c);
+    letter-spacing: var(--ls-nav);
+    color: var(--text-dim);
     margin: 14px 0 6px;
   }
   .ar-list {
@@ -149,10 +149,10 @@
   }
   .ar-id,
   .ar-branch {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11.5px;
     font-variant-numeric: tabular-nums;
-    color: var(--text-dim, #7a838c);
+    color: var(--text-dim);
     flex: none;
   }
   .ar-title {
@@ -164,10 +164,10 @@
      piece of an item reads as a link that does NOT close, and a
      stated no-item reason reads as prose because that is what it is. */
   .ar-item {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11.5px;
     font-variant-numeric: tabular-nums;
-    color: var(--text-dim, #7a838c);
+    color: var(--text-dim);
     flex: none;
     margin-left: auto;
     overflow: hidden;
@@ -176,7 +176,7 @@
     max-width: 40%;
   }
   .ar-item-part {
-    color: var(--accent, #6ea8d8);
+    color: var(--accent);
   }
   .ar-item-none {
     font-family: inherit;
@@ -185,7 +185,7 @@
   }
   .ar-skip {
     font-size: 12.5px;
-    color: var(--warn, #d9a441);
+    color: var(--warn);
   }
   /* The instrument face: DM Mono, tabular figures, so the columns of
      stamps and durations line up digit for digit. */
@@ -198,14 +198,14 @@
     display: flex;
     justify-content: space-between;
     gap: 12px;
-    border-bottom: 1px solid var(--border, #2a3138);
+    border-bottom: 1px solid var(--border);
     padding: 3px 0;
     font-size: 12.5px;
-    color: var(--text-dim, #7a838c);
+    color: var(--text-dim);
   }
   .ar-num {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
-    color: var(--text, #c7ced6);
+    color: var(--text);
   }
 </style>

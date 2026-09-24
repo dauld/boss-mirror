@@ -98,6 +98,9 @@ export function atlasLayout(
   return { rows, height: cursorY + 20 };
 }
 
+// colour-literal-ok: the department palette is data, kept apart from Enamel's
+// state plates until the Finance/clear collision is decided (a4df741a).
+// Labels sit on these fills in --fog (15.8-16.7:1) and --static (6.1-6.5:1).
 const CATEGORY_COLORS: Record<string, { stroke: string; fill: string }> = {
   production: { stroke: '#3b82f6', fill: '#eff6ff' },
   sales: { stroke: '#10b981', fill: '#ecfdf5' },

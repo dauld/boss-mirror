@@ -217,8 +217,8 @@
     text-align: left;
     font-weight: 600;
     padding: 4px 6px;
-    border-bottom: 1px solid var(--border, #e5e7eb);
-    color: var(--text-muted, #6b7280);
+    border-bottom: 1px solid var(--border);
+    color: var(--static);
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -228,7 +228,7 @@
   }
   .step-line-items td {
     padding: 4px 6px;
-    border-bottom: 1px solid var(--border-soft, #f3f4f6);
+    border-bottom: 1px solid var(--hairline);
   }
   .step-line-items .col-sku { width: 160px; }
   .step-line-items .num {
@@ -237,16 +237,16 @@
     width: 90px;
   }
   .step-line-items .desc {
-    color: var(--text-muted, #6b7280);
+    color: var(--static);
   }
   .step-line-items tr.total {
     font-weight: 600;
   }
   .step-line-items tr.total td {
-    border-top: 1px solid var(--border, #d1d5db);
+    border-top: 1px solid var(--border);
     border-bottom: none;
   }
   .muted {
-    color: var(--text-muted, #6b7280);
+    color: var(--static);
   }
 </style>

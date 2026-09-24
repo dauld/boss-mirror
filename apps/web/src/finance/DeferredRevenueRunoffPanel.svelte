@@ -76,7 +76,7 @@
       {#if d.drift_cents !== 0}
         <div
           role="note"
-          style="margin-bottom:12px; padding:8px 12px; border:1px solid #f59e0b; background:#fffbeb; border-radius:6px; font-size:12px; color:#78350f"
+          style="margin-bottom:12px; padding:8px 12px; border:1px solid var(--busy); background:var(--warn-wash); border-radius:6px; font-size:12px; color:var(--warn)"
         >
           <strong>Drift:</strong>
           the 2200 GL balance and the sum of active schedule remainders
@@ -100,14 +100,14 @@
             </tr>
           {/each}
           {#if d.beyond_horizon_cents !== 0}
-            <tr style="border-top:1px solid #e7e5e4">
-              <td style="font-style:italic; color:#78716c">Beyond {d.horizon_months} months</td>
-              <td style="text-align:right; font-style:italic; color:#78716c">
+            <tr style="border-top:1px solid var(--hairline)">
+              <td style="font-style:italic; color:var(--static)">Beyond {d.horizon_months} months</td>
+              <td style="text-align:right; font-style:italic; color:var(--static)">
                 {formatUsd(d.beyond_horizon_cents)}
               </td>
             </tr>
           {/if}
-          <tr style="border-top:2px solid #e7e5e4">
+          <tr style="border-top:2px solid var(--hairline)">
             <td style="font-weight:700">Total schedules remaining</td>
             <td style="text-align:right; font-weight:700">
               {formatUsd(d.schedules_remaining_cents)}
@@ -121,26 +121,26 @@
 <style>
   .stat {
     padding: 10px 12px;
-    border: 1px solid #e7e5e4;
+    border: 1px solid var(--hairline);
     border-radius: 6px;
-    background: #fafaf9;
+    background: var(--ink-raised);
   }
   .stat-label {
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: #78716c;
+    color: var(--static);
   }
   .stat-value {
     margin-top: 4px;
     font-size: 16px;
     font-weight: 600;
-    color: #1c1917;
+    color: var(--fog);
   }
   .drift-warn {
-    color: #b45309;
+    color: var(--warn);
   }
   .muted {
-    color: #78716c;
+    color: var(--static);
   }
 </style>

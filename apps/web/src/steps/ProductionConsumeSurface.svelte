@@ -208,21 +208,21 @@
     text-align: left;
     font-weight: 600;
     padding: 4px 6px;
-    border-bottom: 1px solid var(--border, #e5e7eb);
-    color: var(--text-muted, #6b7280);
+    border-bottom: 1px solid var(--border);
+    color: var(--static);
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
   .step-line-items td {
     padding: 4px 6px;
-    border-bottom: 1px solid var(--border-soft, #f3f4f6);
+    border-bottom: 1px solid var(--hairline);
   }
   .step-line-items .col-qty { width: 110px; }
   .step-line-items .col-sku { width: 180px; }
   .step-line-items .col-desc {}
   .step-line-items .desc {
-    color: var(--text-muted, #6b7280);
+    color: var(--static);
   }
   .step-line-items input[type="number"] {
     width: 100%;
@@ -231,15 +231,15 @@
     font-size: 13px;
     text-align: right;
     font-variant-numeric: tabular-nums;
-    border: 1px solid var(--border, #d1d5db);
+    border: 1px solid var(--border);
     border-radius: 3px;
   }
   .step-empty {
     padding: 8px 12px;
-    color: var(--text-muted, #9ca3af);
+    color: var(--static);
     font-size: 13px;
     font-style: italic;
-    background: var(--bg-soft, #f9fafb);
+    background: var(--ink-raised);
     border-radius: 4px;
     margin: 6px 0;
   }

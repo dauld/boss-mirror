@@ -116,30 +116,30 @@
   .form-row { margin-bottom: 12px; }
   .form-row label {
     display: block; font-size: 12px; font-weight: 500;
-    color: #44403c; margin-bottom: 4px;
+    color: var(--static); margin-bottom: 4px;
   }
   .form-row input {
-    width: 100%; padding: 8px 10px; border: 1px solid #d6d3d1;
+    width: 100%; padding: 8px 10px; border: 1px solid var(--hairline);
     border-radius: 6px; font-size: 13px; box-sizing: border-box;
   }
-  .form-row input:focus { outline: none; border-color: #1c1917; }
+  .form-row input:focus { outline: none; border-color: var(--border-strong); }
   .submit-btn {
-    background: #1c1917; color: #fff; border: none; border-radius: 6px;
+    background: var(--band); color: var(--on-band); border: none; border-radius: 6px;
     padding: 8px 14px; font-size: 13px; font-weight: 500; cursor: pointer;
   }
-  .submit-btn:hover { background: #44403c; }
+  .submit-btn:hover { background: var(--signal); }
   .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .result { margin-top: 10px; padding: 10px 12px; border-radius: 6px; font-size: 12px; line-height: 1.5; }
-  .result.ok { background: #dcfce7; color: #166534; }
-  .result.err { background: #fee2e2; color: #991b1b; }
+  .result.ok { background: var(--ok-wash); color: var(--ok); }
+  .result.err { background: var(--err-wash); color: var(--err); }
   .token-box {
-    margin-top: 6px; padding: 8px 10px; background: #fff;
-    border: 1px solid #166534; border-radius: 4px;
+    margin-top: 6px; padding: 8px 10px; background: var(--ink);
+    border: 1px solid var(--clear); border-radius: 4px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 13px; word-break: break-all; user-select: all;
   }
   .no-access {
-    background: #fef3c7; border: 1px solid #fde68a; border-radius: 8px;
+    background: var(--warn-wash); border: 1px solid var(--busy); border-radius: 8px;
     padding: 14px 16px; font-size: 13px; line-height: 1.55;
   }
 </style>
@@ -161,7 +161,7 @@
   {:else}
     <div class="stack">
       <Section title="Onboard a new user">
-        <p style="margin: 0 0 16px; font-size: 13px; color: #57534e">
+        <p style="margin: 0 0 16px; font-size: 13px; color: var(--static)">
           Creates a credential row in <code>/var/lib/boss/auth/credentials.toml</code>
           for the email below. The password is hashed with Argon2id; the
           plaintext is never persisted. Share the email + password
@@ -201,7 +201,7 @@
       </Section>
 
       <Section title="Issue a one-time reset token">
-        <p style="margin: 0 0 16px; font-size: 13px; color: #57534e">
+        <p style="margin: 0 0 16px; font-size: 13px; color: var(--static)">
           Returns a 24-character token (1h TTL) the user enters at
           <code>/login</code> (Have a reset token? mode) along with their
           new password. Token is shown once below; only the SHA-256 hash

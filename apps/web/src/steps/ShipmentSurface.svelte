@@ -245,10 +245,10 @@
   }
   .step-tracking li {
     padding: 3px 0;
-    border-bottom: 1px solid var(--border-soft, #f3f4f6);
+    border-bottom: 1px solid var(--hairline);
   }
   .step-tracking .tracking-time {
-    color: var(--text-muted, #6b7280);
+    color: var(--static);
     margin-right: 8px;
     font-variant-numeric: tabular-nums;
   }
@@ -256,10 +256,10 @@
     font-weight: 500;
   }
   .step-tracking .tracking-note {
-    color: var(--text-muted, #6b7280);
+    color: var(--static);
     margin-left: 4px;
   }
   .muted {
-    color: var(--text-muted, #6b7280);
+    color: var(--static);
   }
 </style>

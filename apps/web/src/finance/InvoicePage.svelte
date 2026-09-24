@@ -152,7 +152,7 @@
               <dd>
                 {moneyFmt(taxCents)}
                 {#if invoice.tax_jurisdiction}
-                  <span class="mono" style="margin-left:8px; color:#78716c">
+                  <span class="mono" style="margin-left:8px; color:var(--static)">
                     {invoice.tax_jurisdiction}
                   </span>
                 {/if}
@@ -221,12 +221,12 @@
                   </tr>
                 {/each}
                 <tr>
-                  <td colspan="3" style="color:#78716c">Subtotal (revenue)</td>
+                  <td colspan="3" style="color:var(--static)">Subtotal (revenue)</td>
                   <td class="num">{moneyFmt(lineSumCents)}</td>
                 </tr>
                 {#if taxCents > 0}
                   <tr>
-                    <td colspan="3" style="color:#78716c">
+                    <td colspan="3" style="color:var(--static)">
                       Sales tax
                       {#if invoice.tax_jurisdiction}
                         <span class="mono" style="font-size:11px">{invoice.tax_jurisdiction}</span>

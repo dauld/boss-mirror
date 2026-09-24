@@ -136,7 +136,7 @@
                     height={NODE_H}
                     rx="6"
                     ry="6"
-                    style={`fill: white; stroke: ${c.stroke}; stroke-width: 1.5`}
+                    style={`fill: var(--ink); stroke: ${c.stroke}; stroke-width: 1.5`}
                   />
                   <text
                     class="node-label"
@@ -236,7 +236,7 @@
   .track-label {
     font-size: 13px;
     font-weight: 600;
-    fill: var(--muted, #64748b);
+    fill: var(--static);
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
@@ -256,23 +256,23 @@
   .node-label {
     font-size: 14px;
     font-weight: 600;
-    fill: #0f172a;
+    fill: var(--fog);
   }
   .node-sub {
     font-size: 11px;
-    fill: var(--muted, #64748b);
+    fill: var(--static);
   }
 
   .atlas-note {
     margin: 8px 0 0;
     font-size: 12px;
-    color: var(--muted, #64748b);
+    color: var(--static);
     max-width: 72ch;
   }
   .atlas-stations { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-  .atlas-stations th, .atlas-stations td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border, #d5d2ca); }
-  .atlas-fail { color: var(--danger, #b3402a); font-weight: 600; }
+  .atlas-stations th, .atlas-stations td { text-align: left; padding: 0.3rem 0.6rem; border-bottom: 1px solid var(--border); }
+  .atlas-fail { color: var(--err); font-weight: 600; }
   /* A station omitting a whole kind of work must LOOK like it
      (backlog abda9ab4) — a zero renders plain, a finding does not. */
-  .atlas-unreachable { color: var(--danger, #b3402a); font-weight: 600; }
+  .atlas-unreachable { color: var(--err); font-weight: 600; }
 </style>

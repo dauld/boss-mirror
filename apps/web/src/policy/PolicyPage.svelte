@@ -75,7 +75,7 @@
   />
 
   {#if error}
-    <p class="empty" style="color:#dc2626">Failed to load rules: {error}</p>
+    <p class="empty" style="color:var(--err)">Failed to load rules: {error}</p>
   {/if}
 
   <div style="padding:0 24px 16px; display:flex; gap:12px; align-items:center">
@@ -119,7 +119,7 @@
                       {scopeForDisplay(rule.scope)}
                     </button>
                   {:else}
-                    <span style="color:#888; font-size:12px">—</span>
+                    <span style="color:var(--static); font-size:12px">—</span>
                   {/if}
                 </td>
               {/each}

@@ -389,22 +389,22 @@
     font-size: 14px;
     font-weight: 500;
   }
-  .shop-stock-in { color: #16a34a; }
-  .shop-stock-out { color: #dc2626; }
+  .shop-stock-in { color: var(--ok); }
+  .shop-stock-out { color: var(--err); }
   .shop-order-total {
     display: flex;
     align-items: baseline;
     gap: 12px;
     margin: 12px 0;
     padding: 8px 12px;
-    background: #fafaf9;
+    background: var(--ink-raised);
     border-radius: 4px;
   }
   .shop-order-total .shop-price-big {
     font-size: 20px;
   }
   .shop-order-error {
-    color: #dc2626;
+    color: var(--err);
     font-size: 14px;
     margin: 8px 0;
   }

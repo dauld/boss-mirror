@@ -62,7 +62,7 @@
     display: flex;
     gap: 0.25rem;
     padding: 0.5rem 1.25rem 0;
-    border-bottom: 1px solid var(--border, #d5d2ca);
+    border-bottom: 1px solid var(--border);
     flex-wrap: wrap;
   }
   .it-tabs a {
@@ -75,11 +75,11 @@
     font-size: 0.85rem;
   }
   .it-tabs a:hover {
-    background: var(--surface-2, #efece5);
+    background: var(--ink-raised);
   }
   .it-tabs a.active {
-    border-color: var(--border, #d5d2ca);
-    background: var(--surface-1, #faf8f4);
+    border-color: var(--border);
+    background: var(--ink);
     font-weight: 600;
   }
 </style>

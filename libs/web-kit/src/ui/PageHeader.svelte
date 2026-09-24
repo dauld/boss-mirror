@@ -32,13 +32,13 @@
             <path d="M8 8h16l-2 28H10z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="var(--brew-amber-soft)"/>
             <path d="M9 16h14" stroke="currentColor" stroke-width="0.8"/>
             <path d="M8 8c0-1.5 1.2-3 3-3 1 0 1.5.6 2.4.6.9 0 1.4-.8 2.6-.8 1.2 0 1.7.8 2.6.8.9 0 1.4-.6 2.4-.6 1.8 0 3 1.5 3 3"
-                  stroke="currentColor" stroke-width="1.4" fill="#fff" stroke-linejoin="round"/>
+                  stroke="currentColor" stroke-width="1.4" fill="var(--ink)" stroke-linejoin="round"/>
           </svg>
         {:else if motif === 'tap'}
           <!-- Tap handle — wood paddle on a brass nozzle. -->
           <svg viewBox="0 0 32 40" fill="none" xmlns="http://www.w3.org/2000/svg">
             <rect x="11" y="4" width="10" height="16" rx="2" stroke="currentColor" stroke-width="1.4" fill="var(--brew-amber-soft)"/>
-            <path d="M14 20v6h4v-6" stroke="currentColor" stroke-width="1.4" fill="#fff"/>
+            <path d="M14 20v6h4v-6" stroke="currentColor" stroke-width="1.4" fill="var(--ink)"/>
             <path d="M9 26h14l-3 6H12z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" fill="var(--brew-amber)"/>
             <circle cx="16" cy="36" r="1.5" fill="currentColor"/>
           </svg>
@@ -56,7 +56,7 @@
     <div class="exec-header-text">
       {#if eyebrow}<div class="exec-eyebrow">{eyebrow}</div>{/if}
       <h1 class="exec-title">{title}</h1>
-      {#if subtitle}<p style="color: var(--muted); margin: 4px 0 0">{subtitle}</p>{/if}
+      {#if subtitle}<p style="color: var(--static); margin: 4px 0 0">{subtitle}</p>{/if}
     </div>
   </div>
 </header>

@@ -536,16 +536,16 @@
     font-size: 12px;
   }
   .events-filter span {
-    color: var(--muted, #64748b);
+    color: var(--static);
     font-weight: 500;
   }
   .events-filter input,
   .events-filter select {
     min-width: 160px;
     padding: 4px 6px;
-    border: 1px solid var(--border, #d1d5db);
+    border: 1px solid var(--border);
     border-radius: 4px;
-    background: white;
+    background: var(--ink);
   }
   .events-auto {
     flex-direction: row;
@@ -558,27 +558,27 @@
   }
   .events-freshness {
     font-size: 12px;
-    color: var(--muted, #64748b);
+    color: var(--static);
     margin-left: auto;
   }
   .events-download-btn {
     padding: 6px 12px;
     font-size: 12px;
     font-weight: 500;
-    background: white;
+    background: var(--ink);
     color: inherit;
-    border: 1px solid var(--border, #d1d5db);
+    border: 1px solid var(--border);
     border-radius: 4px;
     cursor: pointer;
   }
   .events-download-btn:hover {
-    background: var(--accent-bg, #eff6ff);
+    background: var(--signal-wash);
   }
   .events-download-panel {
     margin-top: 12px;
     padding: 10px 12px;
-    background: var(--accent-bg, #eff6ff);
-    border: 1px solid var(--border, #d1d5db);
+    background: var(--signal-wash);
+    border: 1px solid var(--border);
     border-radius: 4px;
   }
   .events-download-row {
@@ -591,32 +591,32 @@
     padding: 6px 12px;
     font-size: 12px;
     font-weight: 600;
-    background: #1d4ed8;
-    color: white;
-    border: 1px solid #1e40af;
+    background: var(--signal);
+    color: var(--on-band);
+    border: 1px solid var(--signal);
     border-radius: 4px;
     cursor: pointer;
   }
   .events-download-go:hover {
-    background: #1e40af;
+    background: var(--signal);
   }
   .events-download-cancel {
     padding: 6px 10px;
     font-size: 12px;
     background: transparent;
-    color: var(--muted, #64748b);
+    color: var(--static);
     border: none;
     cursor: pointer;
   }
   .events-download-hint {
     margin: 8px 0 0;
     font-size: 11px;
-    color: var(--muted, #64748b);
+    color: var(--static);
     line-height: 1.5;
   }
   .events-download-hint code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: rgba(15, 23, 42, 0.08);
+    background: var(--wash);
     padding: 1px 4px;
     border-radius: 2px;
   }
@@ -624,10 +624,10 @@
     cursor: pointer;
   }
   .events-table tbody tr.events-row:hover {
-    background: var(--accent-bg, #eff6ff);
+    background: var(--signal-wash);
   }
   .events-table tbody tr.events-row-open {
-    background: var(--accent-bg, #eff6ff);
+    background: var(--signal-wash);
     font-weight: 500;
   }
   .events-table .mono {
@@ -635,8 +635,8 @@
     font-size: 12px;
   }
   .events-payload-row td {
-    background: #0b1020;
-    color: #e2e8f0;
+    background: var(--ink-raised);
+    color: var(--fog);
     padding: 0;
   }
   .events-payload {
@@ -658,7 +658,7 @@
   .events-event-id {
     padding: 4px 16px 10px;
     font-size: 11px;
-    color: #94a3b8;
+    color: var(--static);
   }
 
   .events-stats-note { margin: 0; opacity: 0.8; }

@@ -333,6 +333,11 @@ spec:
                   - bash
                   - -c
                   - |
+                    # Truncated ONCE here, then written O_APPEND by the block
+                    # below AND by dev-claude.sh, which appends its drain
+                    # verdict from inside tmux while this block may still
+                    # hold the file open (backlog 7a581397).
+                    mkdir -p /work/ssh && : > /work/ssh/postStart.log
                     {
                     set -x
                     export DEBIAN_FRONTEND=noninteractive
@@ -550,8 +555,21 @@ spec:
                     # deploy — the session's first prompt is the versioned
                     # standing prompt infra/dev/drain.md, READ AT RUN TIME
                     # with "$(cat …)": the prompt carries backticks and
-                    # quotes, so it is never inlined here. Without the switch,
-                    # or without the file, the boot is exactly what it was.
+                    # quotes, so it is never inlined here. Without the switch
+                    # the boot is exactly what it was.
+                    #
+                    # FROM ORIGIN/MAIN, not the checkout (backlog 7a581397,
+                    # 2026-09-24). The roll that shipped the switch (#606)
+                    # booted idle, silently: the checkout was still at #605
+                    # (the reclaim sidecar fast-forwards hourly) and drain.md
+                    # was new in #606. A train that edits drain.md would boot
+                    # the previous prompt the same way. So the script fetches
+                    # origin (bounded — a dark forge must not hold the boot),
+                    # reads origin/main:infra/dev/drain.md, falls back to the
+                    # checkout's copy, and APPENDS its verdict to
+                    # postStart.log — naming the copy it used, or, when the
+                    # switch is on and nothing could be read, saying so in
+                    # capitals before it starts the session idle.
                     cat > /work/dev-claude.sh <<'DC'
                     #!/usr/bin/env bash
                     export HOME=/work/home
@@ -559,15 +577,28 @@ spec:
                     export RUSTUP_HOME=/usr/local/rustup
                     export CARGO_TARGET_DIR=/scratch/target
                     cd /work/boss
-                    if [ -e /work/home/.config/boss/drain-on-boot ] && [ -s /work/boss/infra/dev/drain.md ]; then
-                      exec claude --remote-control boss-dev "$(cat /work/boss/infra/dev/drain.md)"
+                    log=/work/ssh/postStart.log
+                    if [ -e /work/home/.config/boss/drain-on-boot ]; then
+                      timeout 60 git fetch -q origin >> "$log" 2>&1 \
+                        || echo "dev session: git fetch origin failed (exit $?) - reading the origin/main this checkout last fetched" >> "$log"
+                      from="origin/main at $(git rev-parse --short origin/main 2>/dev/null)"
+                      prompt=$(git show origin/main:infra/dev/drain.md 2>/dev/null)
+                      if [ -z "$prompt" ]; then
+                        from="the checkout's copy at $(git rev-parse --short HEAD 2>/dev/null)"
+                        prompt=$(cat /work/boss/infra/dev/drain.md 2>/dev/null)
+                      fi
+                      if [ -n "$prompt" ]; then
+                        echo "dev session: drain-on-boot is ON - the first prompt is infra/dev/drain.md from $from" >> "$log"
+                        exec claude --remote-control boss-dev "$prompt"
+                      fi
+                      echo "dev session: DRAIN-ON-BOOT IS ON BUT NO DRAIN PROMPT COULD BE READ (not at origin/main:infra/dev/drain.md, not at /work/boss/infra/dev/drain.md) - the session starts IDLE and the drain has NOT resumed" >> "$log"
                     fi
                     exec claude --remote-control boss-dev
                     DC
                     chmod +x /work/dev-claude.sh
                     if [ -x /work/home/.local/bin/claude ] && [ -s /work/home/.claude/.credentials.json ]; then
                       if [ -e /work/home/.config/boss/drain-on-boot ]; then
-                        echo "dev session: drain-on-boot is ON — the session's first prompt is /work/boss/infra/dev/drain.md"
+                        echo "dev session: drain-on-boot is ON — dev-claude.sh fetches origin and appends below which drain.md it read (or that it read none)"
                       else
                         echo "dev session: drain-on-boot is off — the session starts idle (touch /work/home/.config/boss/drain-on-boot to resume the drain on boot)"
                       fi
@@ -579,7 +610,7 @@ spec:
                     else
                       echo "dev session: not started — claude binary or /work/home/.claude/.credentials.json missing; ssh in, run claude once to log in, and the next boot starts it"
                     fi
-                    } > /work/ssh/postStart.log 2>&1 || true
+                    } >> /work/ssh/postStart.log 2>&1 || true
           workingDir: /work
           env:
             # The sidecar, by name rather than by luck. TestDb would

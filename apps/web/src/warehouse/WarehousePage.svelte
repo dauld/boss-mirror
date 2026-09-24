@@ -253,15 +253,15 @@
           <section class="tab-section">
             <h3 style="margin-top:0">
               Refurb pipeline · {s.refurb_wip.total_in_flight.toLocaleString()} in flight ·
-              <span style="color:#065f46">{s.ready_for_sale_count.toLocaleString()}</span>
+              <span style="color:var(--ok)">{s.ready_for_sale_count.toLocaleString()}</span>
               ready for sale
             </h3>
             <div style="display:flex; gap:8px; flex-wrap:wrap">
               {#each s.refurb_wip.by_stage as row (row.stage)}
                 <div
-                  style="flex:1 1 0; min-width:120px; padding:10px 12px; border:1px solid #e7e5e4; border-radius:8px; background:#fafaf9"
+                  style="flex:1 1 0; min-width:120px; padding:10px 12px; border:1px solid var(--hairline); border-radius:8px; background:var(--ink-raised)"
                 >
-                  <div style="font-size:11px; color:#78716c; text-transform:uppercase; letter-spacing:0.4px">
+                  <div style="font-size:11px; color:var(--static); text-transform:uppercase; letter-spacing:0.4px">
                     {row.stage}
                   </div>
                   <div style="font-size:24px; font-weight:600; margin-top:2px">
@@ -283,7 +283,7 @@
                 <dt>Available</dt><dd><strong>{ps.total_available.toLocaleString()}</strong></dd>
                 <dt>Below reorder</dt>
                 <dd>
-                  <strong style={`color:${ps.below_reorder_count > 0 ? '#dc2626' : '#059669'}`}>
+                  <strong style={`color:${ps.below_reorder_count > 0 ? 'var(--err)' : 'var(--ok)'}`}>
                     {ps.below_reorder_count.toLocaleString()}
                   </strong>
                 </dd>
@@ -299,7 +299,7 @@
                 <dt>In transit</dt><dd><strong>{ip.in_transit_count.toLocaleString()}</strong></dd>
                 <dt>Late</dt>
                 <dd>
-                  <strong style={`color:${ip.late_count > 0 ? '#dc2626' : '#059669'}`}>
+                  <strong style={`color:${ip.late_count > 0 ? 'var(--err)' : 'var(--ok)'}`}>
                     {ip.late_count.toLocaleString()}
                   </strong>
                 </dd>
@@ -316,7 +316,7 @@
                 <dt>In transit</dt><dd><strong>{os.in_transit.toLocaleString()}</strong></dd>
                 <dt>Exception</dt>
                 <dd>
-                  <strong style={`color:${os.exception > 0 ? '#dc2626' : '#059669'}`}>
+                  <strong style={`color:${os.exception > 0 ? 'var(--err)' : 'var(--ok)'}`}>
                     {os.exception.toLocaleString()}
                   </strong>
                 </dd>
@@ -451,7 +451,7 @@
           </button>
           {#if createPoStatus}
             <span
-              style={`font-size:12px; color:${createPoStatus.startsWith('Error') ? '#dc2626' : '#16a34a'}`}
+              style={`font-size:12px; color:${createPoStatus.startsWith('Error') ? 'var(--err)' : 'var(--ok)'}`}
             >
               {createPoStatus}
             </span>
@@ -460,11 +460,11 @@
 
         {#if showCreatePo}
           <div
-            style="padding:12px 16px; border:1px solid #e7e5e4; border-radius:8px; margin-bottom:16px; background:#fafaf9"
+            style="padding:12px 16px; border:1px solid var(--hairline); border-radius:8px; margin-bottom:16px; background:var(--ink-raised)"
           >
             <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:end">
               <div>
-                <label for="cpo-vendor" style="display:block; font-size:11px; font-weight:600; color:#78716c; margin-bottom:2px">Vendor</label>
+                <label for="cpo-vendor" style="display:block; font-size:11px; font-weight:600; color:var(--static); margin-bottom:2px">Vendor</label>
                 <input
                   id="cpo-vendor"
                   class="hr-select"
@@ -474,7 +474,7 @@
                 />
               </div>
               <div>
-                <label for="cpo-sku" style="display:block; font-size:11px; font-weight:600; color:#78716c; margin-bottom:2px">Part SKU</label>
+                <label for="cpo-sku" style="display:block; font-size:11px; font-weight:600; color:var(--static); margin-bottom:2px">Part SKU</label>
                 <select id="cpo-sku" class="hr-select" bind:value={createPoSku} style="width:200px">
                   <option value="">Select part...</option>
                   {#each inventory as item (item.part_sku)}
@@ -483,7 +483,7 @@
                 </select>
               </div>
               <div>
-                <label for="cpo-qty" style="display:block; font-size:11px; font-weight:600; color:#78716c; margin-bottom:2px">Qty</label>
+                <label for="cpo-qty" style="display:block; font-size:11px; font-weight:600; color:var(--static); margin-bottom:2px">Qty</label>
                 <input
                   id="cpo-qty"
                   class="hr-select"
@@ -494,7 +494,7 @@
                 />
               </div>
               <div>
-                <label for="cpo-cost" style="display:block; font-size:11px; font-weight:600; color:#78716c; margin-bottom:2px">Unit cost ($)</label>
+                <label for="cpo-cost" style="display:block; font-size:11px; font-weight:600; color:var(--static); margin-bottom:2px">Unit cost ($)</label>
                 <input
                   id="cpo-cost"
                   class="hr-select"

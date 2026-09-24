@@ -231,37 +231,35 @@
     width: 40px;
     height: 40px;
     border-radius: 20px;
-    border: 1px solid #44403c;
-    background: #1c1917;
-    color: #e7e5e4;
+    border: 1px solid var(--border-strong);
+    background: var(--band);
+    color: var(--on-band);
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
     transition: transform 0.12s ease, background 0.12s ease;
   }
   .debug-gear-btn:hover {
     transform: rotate(20deg);
-    background: #292524;
+    background: var(--signal);
   }
   .debug-gear-btn-on {
-    background: #15803d;
-    border-color: #166534;
+    background: var(--clear);
+    border-color: var(--clear);
   }
   .debug-gear-btn-on:hover {
-    background: #166534;
+    background: var(--clear);
   }
 
   .debug-gear-panel {
     width: 320px;
-    background: #fff;
-    border: 1px solid #d6d3d1;
+    background: var(--ink);
+    border: 1px solid var(--hairline);
     border-radius: 8px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
     padding: 12px 14px;
     font-size: 13px;
-    color: #1c1917;
+    color: var(--fog);
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -276,14 +274,14 @@
   .debug-gear-close {
     border: none;
     background: none;
-    color: #78716c;
+    color: var(--static);
     font-size: 20px;
     line-height: 1;
     cursor: pointer;
     padding: 0 4px;
   }
   .debug-gear-close:hover {
-    color: #1c1917;
+    color: var(--fog);
   }
   .debug-gear-toggle {
     display: flex;
@@ -294,7 +292,7 @@
   }
   .debug-gear-actions {
     padding-top: 8px;
-    border-top: 1px solid #f5f5f4;
+    border-top: 1px solid var(--hairline);
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -308,16 +306,16 @@
   .debug-gear-sim-btn {
     padding: 6px 8px;
     font-size: 12px;
-    background: #fafaf9;
-    border: 1px solid #d6d3d1;
+    background: var(--ink-raised);
+    border: 1px solid var(--hairline);
     border-radius: 4px;
-    color: #1c1917;
+    color: var(--fog);
     cursor: pointer;
     text-align: left;
   }
   .debug-gear-sim-btn:hover:not(:disabled) {
-    background: #f0fdf4;
-    border-color: #166534;
+    background: var(--ok-wash);
+    border-color: var(--clear);
   }
   .debug-gear-sim-btn:disabled {
     opacity: 0.5;
@@ -327,8 +325,8 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
     line-height: 1.45;
-    background: #0b1020;
-    color: #e2e8f0;
+    background: var(--ink-raised);
+    color: var(--fog);
     padding: 8px 10px;
     border-radius: 4px;
     max-height: 200px;
@@ -342,7 +340,7 @@
     gap: 8px;
   }
   .debug-gear-log-at {
-    color: #64748b;
+    color: var(--static);
     flex-shrink: 0;
   }
   .debug-gear-log-msg {
@@ -350,25 +348,25 @@
     word-break: break-word;
   }
   .debug-gear-log-err .debug-gear-log-msg {
-    color: #f87171;
+    color: var(--err);
   }
   .debug-gear-log-clear {
     align-self: flex-end;
     font-size: 11px;
     padding: 2px 8px;
     background: none;
-    border: 1px solid #d6d3d1;
+    border: 1px solid var(--hairline);
     border-radius: 3px;
-    color: #78716c;
+    color: var(--static);
     cursor: pointer;
   }
   .debug-gear-log-clear:hover {
-    color: #1c1917;
+    color: var(--fog);
   }
   .debug-gear-ident {
     padding-top: 8px;
-    border-top: 1px solid #f5f5f4;
+    border-top: 1px solid var(--hairline);
     font-size: 11px;
-    color: #a8a29e;
+    color: var(--static);
   }
 </style>

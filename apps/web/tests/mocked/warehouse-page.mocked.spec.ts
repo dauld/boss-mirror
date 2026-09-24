@@ -647,7 +647,7 @@ test.describe('/ux/warehouse — State B: the Create PO form (the one write)', (
     await button(page, 'Submit').click();
 
     await expect(poStatusLine(page)).toHaveText('PO PO-106 created');
-    await expect(poStatusLine(page)).toHaveCSS('color', 'rgb(22, 163, 74)');
+    await expect(poStatusLine(page)).toHaveCSS('color', 'rgb(11, 107, 79)'); // --ok, Enamel's clear (7eb59678)
     await expect(button(page, 'Create PO')).toBeVisible();
     await expect(body(page).getByLabel('Vendor', { exact: true })).toHaveCount(0);
     expect(await settledReads(page, () => seen.reads.length, 6)).toBe(6);
@@ -680,7 +680,7 @@ test.describe('/ux/warehouse — State B: the Create PO form (the one write)', (
     await button(page, 'Submit').click();
 
     await expect(poStatusLine(page)).toHaveText('Error: unknown vendor: v-nobody');
-    await expect(poStatusLine(page)).toHaveCSS('color', 'rgb(220, 38, 38)');
+    await expect(poStatusLine(page)).toHaveCSS('color', 'rgb(200, 40, 61)'); // --err, Enamel's troubled (7eb59678)
     await expect(button(page, 'Cancel')).toBeVisible();
     await expect(body(page).getByLabel('Vendor', { exact: true })).toHaveValue('v-nobody');
     await expect(body(page).getByLabel('Part SKU', { exact: true })).toHaveValue('PKG-CAN-01');

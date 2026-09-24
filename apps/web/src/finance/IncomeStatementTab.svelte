@@ -124,7 +124,7 @@
             </tr>
             {#if d.revenue.length === 0}
               <tr>
-                <td colspan="2" style="padding-left:24px; color:#a8a29e; font-style:italic">
+                <td colspan="2" style="padding-left:24px; color:var(--static); font-style:italic">
                   (no activity)
                 </td>
               </tr>
@@ -132,7 +132,7 @@
               {#each d.revenue as l (l.account_code)}
                 <tr>
                   <td style="padding-left:24px">
-                    <span class="mono" style="margin-right:8px; color:#78716c">
+                    <span class="mono" style="margin-right:8px; color:var(--static)">
                       {l.account_code}
                     </span>
                     {l.account_name}
@@ -141,7 +141,7 @@
                 </tr>
               {/each}
             {/if}
-            <tr style="border-top:1px solid #e7e5e4">
+            <tr style="border-top:1px solid var(--hairline)">
               <td style="padding-left:12px; font-weight:600">Total revenue</td>
               <td style="text-align:right; font-weight:600">{formatUsd(d.total_revenue_cents)}</td>
             </tr>
@@ -151,7 +151,7 @@
             </tr>
             {#if d.cogs.length === 0}
               <tr>
-                <td colspan="2" style="padding-left:24px; color:#a8a29e; font-style:italic">
+                <td colspan="2" style="padding-left:24px; color:var(--static); font-style:italic">
                   (no activity)
                 </td>
               </tr>
@@ -159,7 +159,7 @@
               {#each d.cogs as l (l.account_code)}
                 <tr>
                   <td style="padding-left:24px">
-                    <span class="mono" style="margin-right:8px; color:#78716c">
+                    <span class="mono" style="margin-right:8px; color:var(--static)">
                       {l.account_code}
                     </span>
                     {l.account_name}
@@ -168,12 +168,12 @@
                 </tr>
               {/each}
             {/if}
-            <tr style="border-top:1px solid #e7e5e4">
+            <tr style="border-top:1px solid var(--hairline)">
               <td style="padding-left:12px; font-weight:600">Total COGS</td>
               <td style="text-align:right; font-weight:600">{formatUsd(d.total_cogs_cents)}</td>
             </tr>
 
-            <tr style="border-top:1px solid #e7e5e4">
+            <tr style="border-top:1px solid var(--hairline)">
               <td style="font-weight:700">Gross profit</td>
               <td style="text-align:right; font-weight:700">{formatUsd(d.gross_profit_cents)}</td>
             </tr>
@@ -183,7 +183,7 @@
             </tr>
             {#if d.operating_expenses.length === 0}
               <tr>
-                <td colspan="2" style="padding-left:24px; color:#a8a29e; font-style:italic">
+                <td colspan="2" style="padding-left:24px; color:var(--static); font-style:italic">
                   (no activity)
                 </td>
               </tr>
@@ -191,7 +191,7 @@
               {#each d.operating_expenses as l (l.account_code)}
                 <tr>
                   <td style="padding-left:24px">
-                    <span class="mono" style="margin-right:8px; color:#78716c">
+                    <span class="mono" style="margin-right:8px; color:var(--static)">
                       {l.account_code}
                     </span>
                     {l.account_name}
@@ -200,12 +200,12 @@
                 </tr>
               {/each}
             {/if}
-            <tr style="border-top:1px solid #e7e5e4">
+            <tr style="border-top:1px solid var(--hairline)">
               <td style="padding-left:12px; font-weight:600">Total operating expenses</td>
               <td style="text-align:right; font-weight:600">{formatUsd(d.total_operating_expenses_cents)}</td>
             </tr>
 
-            <tr style="border-top:1px solid #e7e5e4">
+            <tr style="border-top:1px solid var(--hairline)">
               <td style="font-weight:700">Net income</td>
               <td style="text-align:right; font-weight:700">{formatUsd(d.net_income_cents)}</td>
             </tr>

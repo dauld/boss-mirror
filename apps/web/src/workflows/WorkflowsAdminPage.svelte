@@ -52,7 +52,7 @@
       : `${kinds.length} active kinds across ${categoryKeys.length} categories`}
   />
   {#if error}
-    <p class="empty" style="color:#dc2626">Failed to load: {error}</p>
+    <p class="empty" style="color:var(--err)">Failed to load: {error}</p>
   {/if}
 
   <div style="padding:0 24px 16px">
@@ -86,7 +86,7 @@
                   <td>{k.label}</td>
                   <td>
                     {#if k.owning_team === 'platform'}
-                      <span style="color:#888; font-size:12px">system</span>
+                      <span style="color:var(--static); font-size:12px">system</span>
                     {:else}
                       <span class="mono">{k.owning_team}</span>
                     {/if}

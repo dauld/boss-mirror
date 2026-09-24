@@ -216,7 +216,7 @@
           {#if !d.reconciled}
             <div
               role="alert"
-              style="margin:8px 0; padding:10px 14px; border:1px solid #d97706; background:#fefce8; border-radius:6px; font-size:13px; color:#92400e"
+              style="margin:8px 0; padding:10px 14px; border:1px solid var(--busy); background:var(--warn-wash); border-radius:6px; font-size:13px; color:var(--warn)"
             >
               <strong>Reconciliation gap: {formatUsd(d.reconciliation_gap_cents)}</strong>
               — the calculated cash change doesn't match the actual cash-account delta.
@@ -231,20 +231,20 @@
               <tr>
                 <th colspan="2" style="padding-top:12px; font-weight:700">Operating activities</th>
               </tr>
-              <tr style="border-top:1px solid #e7e5e4">
+              <tr style="border-top:1px solid var(--hairline)">
                 <td style="padding-left:12px; font-weight:600">Net income</td>
                 <td style="text-align:right; font-weight:600">{formatUsd(d.net_income_cents)}</td>
               </tr>
               {#if d.operating_activities.length > 0}
                 <tr>
-                  <td colspan="2" style="padding-left:12px; color:#78716c; font-style:italic; font-size:12px">
+                  <td colspan="2" style="padding-left:12px; color:var(--static); font-style:italic; font-size:12px">
                     Cash from operating activities (by source):
                   </td>
                 </tr>
                 {#each d.operating_activities as l (l.account_code)}
                   <tr>
                     <td style="padding-left:24px">
-                      <span class="mono" style="margin-right:8px; color:#78716c">{l.account_code}</span>
+                      <span class="mono" style="margin-right:8px; color:var(--static)">{l.account_code}</span>
                       {l.account_name}
                     </td>
                     <td style="text-align:right">{formatUsd(l.amount_cents)}</td>
@@ -253,14 +253,14 @@
               {/if}
               {#if d.working_capital_adjustments.length > 0}
                 <tr>
-                  <td colspan="2" style="padding-left:12px; color:#78716c; font-style:italic; font-size:12px">
+                  <td colspan="2" style="padding-left:12px; color:var(--static); font-style:italic; font-size:12px">
                     Adjustments for changes in working capital:
                   </td>
                 </tr>
                 {#each d.working_capital_adjustments as l (l.account_code)}
                   <tr>
                     <td style="padding-left:24px">
-                      <span class="mono" style="margin-right:8px; color:#78716c">{l.account_code}</span>
+                      <span class="mono" style="margin-right:8px; color:var(--static)">{l.account_code}</span>
                       {l.account_name}
                     </td>
                     <td style="text-align:right">{formatUsd(l.amount_cents)}</td>
@@ -269,21 +269,21 @@
               {/if}
               {#if d.non_cash_adjustments.length > 0}
                 <tr>
-                  <td colspan="2" style="padding-left:12px; color:#78716c; font-style:italic; font-size:12px">
+                  <td colspan="2" style="padding-left:12px; color:var(--static); font-style:italic; font-size:12px">
                     Non-cash charges:
                   </td>
                 </tr>
                 {#each d.non_cash_adjustments as l (l.account_code)}
                   <tr>
                     <td style="padding-left:24px">
-                      <span class="mono" style="margin-right:8px; color:#78716c">{l.account_code}</span>
+                      <span class="mono" style="margin-right:8px; color:var(--static)">{l.account_code}</span>
                       {l.account_name}
                     </td>
                     <td style="text-align:right">{formatUsd(l.amount_cents)}</td>
                   </tr>
                 {/each}
               {/if}
-              <tr style="border-top:1px solid #e7e5e4">
+              <tr style="border-top:1px solid var(--hairline)">
                 <td style="font-weight:700">Cash from operating activities</td>
                 <td style="text-align:right; font-weight:700">{formatUsd(d.cash_from_operations_cents)}</td>
               </tr>
@@ -293,20 +293,20 @@
               </tr>
               {#if d.investing_activities.length === 0}
                 <tr>
-                  <td colspan="2" style="padding-left:24px; color:#a8a29e; font-style:italic">(none)</td>
+                  <td colspan="2" style="padding-left:24px; color:var(--static); font-style:italic">(none)</td>
                 </tr>
               {:else}
                 {#each d.investing_activities as l (l.account_code)}
                   <tr>
                     <td style="padding-left:24px">
-                      <span class="mono" style="margin-right:8px; color:#78716c">{l.account_code}</span>
+                      <span class="mono" style="margin-right:8px; color:var(--static)">{l.account_code}</span>
                       {l.account_name}
                     </td>
                     <td style="text-align:right">{formatUsd(l.amount_cents)}</td>
                   </tr>
                 {/each}
               {/if}
-              <tr style="border-top:1px solid #e7e5e4">
+              <tr style="border-top:1px solid var(--hairline)">
                 <td style="font-weight:700">Cash from investing activities</td>
                 <td style="text-align:right; font-weight:700">{formatUsd(d.cash_from_investing_cents)}</td>
               </tr>
@@ -316,33 +316,33 @@
               </tr>
               {#if d.financing_activities.length === 0}
                 <tr>
-                  <td colspan="2" style="padding-left:24px; color:#a8a29e; font-style:italic">(none)</td>
+                  <td colspan="2" style="padding-left:24px; color:var(--static); font-style:italic">(none)</td>
                 </tr>
               {:else}
                 {#each d.financing_activities as l (l.account_code)}
                   <tr>
                     <td style="padding-left:24px">
-                      <span class="mono" style="margin-right:8px; color:#78716c">{l.account_code}</span>
+                      <span class="mono" style="margin-right:8px; color:var(--static)">{l.account_code}</span>
                       {l.account_name}
                     </td>
                     <td style="text-align:right">{formatUsd(l.amount_cents)}</td>
                   </tr>
                 {/each}
               {/if}
-              <tr style="border-top:1px solid #e7e5e4">
+              <tr style="border-top:1px solid var(--hairline)">
                 <td style="font-weight:700">Cash from financing activities</td>
                 <td style="text-align:right; font-weight:700">{formatUsd(d.cash_from_financing_cents)}</td>
               </tr>
 
-              <tr style="border-top:1px solid #e7e5e4">
+              <tr style="border-top:1px solid var(--hairline)">
                 <td style="font-weight:700">Net change in cash</td>
                 <td style="text-align:right; font-weight:700">{formatUsd(d.net_change_in_cash_cents)}</td>
               </tr>
-              <tr style="border-top:1px solid #e7e5e4">
+              <tr style="border-top:1px solid var(--hairline)">
                 <td style="padding-left:12px; font-weight:600">Cash at start of period</td>
                 <td style="text-align:right; font-weight:600">{formatUsd(d.cash_start_cents)}</td>
               </tr>
-              <tr style="border-top:1px solid #e7e5e4">
+              <tr style="border-top:1px solid var(--hairline)">
                 <td style="padding-left:12px; font-weight:600">Cash at end of period</td>
                 <td style="text-align:right; font-weight:600">{formatUsd(d.cash_end_cents)}</td>
               </tr>
@@ -359,7 +359,7 @@
           {#if !d.reconciled}
             <div
               role="alert"
-              style="margin:8px 0; padding:10px 14px; border:1px solid #d97706; background:#fefce8; border-radius:6px; font-size:13px; color:#92400e"
+              style="margin:8px 0; padding:10px 14px; border:1px solid var(--busy); background:var(--warn-wash); border-radius:6px; font-size:13px; color:var(--warn)"
             >
               <strong>Reconciliation gap: {formatUsd(d.reconciliation_gap_cents)}</strong>
               — the four cash buckets don't match the GL cash-pool (1000 + 1010)
@@ -374,7 +374,7 @@
               <tr>
                 <th colspan="2" style="padding-top:12px; font-weight:700">Operating cash flows</th>
               </tr>
-              <tr style="border-top:1px solid #e7e5e4">
+              <tr style="border-top:1px solid var(--hairline)">
                 <td style="padding-left:12px">Cash in from customers</td>
                 <td style="text-align:right">{formatUsd(d.cash_in_from_customers_cents)}</td>
               </tr>
@@ -390,15 +390,15 @@
                 <td style="padding-left:12px">Cash out to authorities</td>
                 <td style="text-align:right">({formatUsd(d.cash_out_to_authorities_cents)})</td>
               </tr>
-              <tr style="border-top:1px solid #e7e5e4">
+              <tr style="border-top:1px solid var(--hairline)">
                 <td style="font-weight:700">Net change in cash</td>
                 <td style="text-align:right; font-weight:700">{formatUsd(d.net_change_in_cash_cents)}</td>
               </tr>
-              <tr style="border-top:1px solid #e7e5e4">
-                <td style="padding-left:12px; color:#78716c; font-size:12px">
+              <tr style="border-top:1px solid var(--hairline)">
+                <td style="padding-left:12px; color:var(--static); font-size:12px">
                   GL cash-pool delta (1000 + 1010), for reconciliation
                 </td>
-                <td style="text-align:right; color:#78716c; font-size:12px">
+                <td style="text-align:right; color:var(--static); font-size:12px">
                   {formatUsd(d.gl_cash_pool_delta_cents)}
                 </td>
               </tr>

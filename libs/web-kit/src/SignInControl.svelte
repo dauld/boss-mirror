@@ -62,15 +62,15 @@
      buttons, and it keeps SIGNAL free for state that means something. */
   .signin-btn {
     background: transparent;
-    border: 1px solid var(--hairline, #2a3138);
-    border-radius: var(--radius, 0);
+    border: 1px solid var(--hairline);
+    border-radius: var(--radius);
     padding: 5px 12px;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
     font-weight: 500;
     text-transform: uppercase;
-    letter-spacing: var(--ls-nav, 0.14em);
-    color: var(--fog, #e8ecef);
+    letter-spacing: var(--ls-nav);
+    color: var(--fog);
     text-decoration: none;
     cursor: pointer;
     line-height: 1.4;
@@ -78,17 +78,17 @@
     transition: background 0.1s, color 0.1s, border-color 0.1s;
   }
   .signin-btn:hover {
-    background: var(--fog, #e8ecef);
-    color: var(--void, #0d1014);
-    border-color: var(--fog, #e8ecef);
+    background: var(--fog);
+    color: var(--void);
+    border-color: var(--fog);
   }
   /* The refusal beside the button: the bar's mono voice, in the
      error tone, so a sign-out that did not land looks like one. */
   .signin-refusal {
     margin-left: 8px;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--err, #e2685c);
+    color: var(--err);
     white-space: nowrap;
   }
 </style>

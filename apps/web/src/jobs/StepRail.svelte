@@ -87,13 +87,13 @@
     min-width: 0;
   }
   .rail-row:hover {
-    background: var(--hairline, #2A3138);
+    background: var(--hairline);
   }
   /* The one being worked reads as the anchor, because the wide panel
      to its left is showing it. */
   .rail-row.is-selected {
-    background: var(--hairline, #2A3138);
-    box-shadow: inset 2px 0 0 var(--signal, #29C7B0);
+    background: var(--hairline);
+    box-shadow: inset 2px 0 0 var(--signal);
   }
   /* Siblings of a fork sit in from the spine: "one of these", without
      an edge there is no room to draw. */
@@ -105,15 +105,15 @@
     height: 7px;
     border-radius: 50%;
     flex: 0 0 auto;
-    background: var(--static, #7A838C);
+    background: var(--static);
   }
   /* Status is the lamp, never the label — a rail of coloured words is
      unreadable at this width. */
-  .rail-row.status-completed .rail-lamp { background: var(--ok, #4CAF7D); }
-  .rail-row.status-active .rail-lamp { background: var(--signal, #29C7B0); }
-  .rail-row.status-ready .rail-lamp { background: var(--warn, #E0A458); }
-  .rail-row.status-skipped .rail-lamp { background: transparent; box-shadow: inset 0 0 0 1px var(--static, #7A838C); }
-  .rail-row.status-pending .rail-lamp { background: var(--hairline, #2A3138); box-shadow: inset 0 0 0 1px var(--static, #7A838C); }
+  .rail-row.status-completed .rail-lamp { background: var(--ok); }
+  .rail-row.status-active .rail-lamp { background: var(--signal); }
+  .rail-row.status-ready .rail-lamp { background: var(--warn); }
+  .rail-row.status-skipped .rail-lamp { background: transparent; box-shadow: inset 0 0 0 1px var(--static); }
+  .rail-row.status-pending .rail-lamp { background: var(--hairline); box-shadow: inset 0 0 0 1px var(--static); }
 
   .rail-title {
     font-size: 12px;
@@ -125,7 +125,7 @@
   }
   /* A step nobody will run should not compete with the live ones. */
   .rail-row.status-skipped .rail-title {
-    color: var(--static, #7A838C);
+    color: var(--static);
     text-decoration: line-through;
   }
 </style>

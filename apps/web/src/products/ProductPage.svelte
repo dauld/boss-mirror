@@ -135,18 +135,18 @@
     max-width: 900px;
   }
   .empty {
-    color: #78716c;
+    color: var(--static);
     font-style: italic;
   }
   .err {
-    color: #b91c1c;
+    color: var(--err);
   }
   .meta-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
     gap: 16px;
-    background: #fafaf9;
-    border: 1px solid #e7e5e4;
+    background: var(--ink-raised);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
     padding: 16px;
     margin: 16px 0;
@@ -160,22 +160,22 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.4px;
-    color: #78716c;
+    color: var(--static);
     font-weight: 500;
   }
   .meta-val {
     font-size: 16px;
     font-weight: 500;
-    color: #1c1917;
+    color: var(--fog);
   }
   .meta-val.total {
-    color: #166534;
+    color: var(--ok);
     font-variant-numeric: tabular-nums;
   }
   .section-h {
     font-size: 14px;
     margin: 24px 0 8px;
-    color: #44403c;
+    color: var(--static);
   }
   .spec-list {
     display: grid;
@@ -185,18 +185,18 @@
     font-size: 13px;
   }
   .spec-list dt {
-    color: #78716c;
+    color: var(--static);
     text-transform: capitalize;
   }
   .spec-list dd {
     margin: 0;
-    color: #1c1917;
+    color: var(--fog);
   }
   .inv-table {
     width: 100%;
     border-collapse: collapse;
-    background: #fafaf9;
-    border: 1px solid #e7e5e4;
+    background: var(--ink-raised);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
     overflow: hidden;
   }
@@ -204,15 +204,15 @@
   .inv-table td {
     padding: 8px 12px;
     text-align: left;
-    border-bottom: 1px solid #e7e5e4;
+    border-bottom: 1px solid var(--hairline);
     font-size: 13px;
   }
   .inv-table th {
-    background: #f5f5f4;
+    background: var(--ink-raised);
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.4px;
-    color: #44403c;
+    color: var(--static);
   }
   .inv-table tr:last-child td {
     border-bottom: none;
@@ -225,7 +225,7 @@
     font-weight: 600;
   }
   .muted {
-    color: #78716c;
+    color: var(--static);
   }
   .loc {
     font-family: ui-monospace, monospace;

@@ -653,6 +653,12 @@ pub(crate) struct AbandonedPlace {
     /// The gate-run packet still open with no launcher.
     pub packet: String,
     pub branch: String,
+    /// The head the place was queued at — the packet's `sha`, verbatim
+    /// (empty when it records none). `boss orient` asks main about THIS
+    /// head before it advises a re-gate, because the branch a train
+    /// landed is usually deleted by then and reads Unknown by name
+    /// (backlog e9cdd83f).
+    pub sha: String,
     /// The place's ordering stamp, verbatim — including a stamp that
     /// does not parse, which is itself a reason the run is stranded.
     pub queued_at: String,
@@ -664,7 +670,10 @@ pub(crate) struct AbandonedPlace {
     /// an unfiled car, and the intent is ON the packet — which is the
     /// whole asymmetry 464309ee names: intent recorded where another
     /// actor can read it survives a dead waiter. A re-gate reuses the
-    /// packet and inherits it.
+    /// packet and inherits it — AT THE HEAD IT QUEUED AT, which is why
+    /// the recovery is `--rebase` in the verb and never a hand rebase:
+    /// a moved head matches no packet and files a new one with no
+    /// intent (backlog e9cdd83f).
     pub park_intent: bool,
 }
 
@@ -716,6 +725,11 @@ pub(crate) fn abandoned_places(
                     packet: id.to_string(),
                     branch: md
                         .get("branch")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    sha: md
+                        .get("sha")
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
@@ -2848,6 +2862,13 @@ pub async fn run(
         )
         .await?,
     )?;
+    // DECIDED ON THE HEAD AS FOUND, BEFORE `--rebase` MOVES IT. That
+    // order is what `boss orient`'s recovery for an abandoned place
+    // stands on: `boss gate <branch> --wait --rebase` matches the packet
+    // at the head it queued at, then replays onto main, so the packet
+    // and its `park_*` keys are the ones that run. A hand rebase first
+    // matched nothing and filed a new packet with no intent (backlog
+    // e9cdd83f, 2026-09-24: 91594262 and 03af83b4).
     let reuse = reusable_packet(&open, branch, &sha);
 
     // A REUSED PACKET MAY ALREADY BE GATING — and attaching to it is
@@ -5912,7 +5933,7 @@ mod tests {
     }
 
     fn queued_run(id: &str, at: &str, heartbeat: Option<&str>) -> Value {
-        let mut md = json!({ "branch": "feat/x", QUEUED_AT: at });
+        let mut md = json!({ "branch": "feat/x", "sha": "0448698f", QUEUED_AT: at });
         if let Some(h) = heartbeat {
             md[QUEUE_HEARTBEAT_AT] = json!(h);
         }
@@ -6014,6 +6035,10 @@ mod tests {
             "only the place with no live holder is abandoned"
         );
         assert_eq!(found[0].branch, "feat/x");
+        // The head the place queued at — what `boss orient` asks main
+        // about, because a landed branch is usually a deleted one
+        // (backlog e9cdd83f).
+        assert_eq!(found[0].sha, "0448698f");
         assert_eq!(
             found[0].idle_secs,
             Some(118 * 60),

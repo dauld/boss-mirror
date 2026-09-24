@@ -113,7 +113,7 @@
         {#if !d.balanced}
           <div
             role="alert"
-            style="margin:8px 0; padding:10px 14px; border:1px solid #dc2626; background:#fef2f2; border-radius:6px; font-size:13px; color:#991b1b"
+            style="margin:8px 0; padding:10px 14px; border:1px solid var(--troubled); background:var(--err-wash); border-radius:6px; font-size:13px; color:var(--err)"
           >
             <strong>Imbalance: {formatUsd(d.imbalance_cents)}</strong>
             — the accounting equation isn't holding. Check for a recent miscoded
@@ -128,20 +128,20 @@
             </tr>
             {#if d.assets.length === 0}
               <tr>
-                <td colspan="2" style="padding-left:24px; color:#a8a29e; font-style:italic">(none)</td>
+                <td colspan="2" style="padding-left:24px; color:var(--static); font-style:italic">(none)</td>
               </tr>
             {:else}
               {#each d.assets as l (l.account_code)}
                 <tr>
                   <td style="padding-left:24px">
-                    <span class="mono" style="margin-right:8px; color:#78716c">{l.account_code}</span>
+                    <span class="mono" style="margin-right:8px; color:var(--static)">{l.account_code}</span>
                     {l.account_name}
                   </td>
                   <td style="text-align:right">{formatUsd(l.amount_cents)}</td>
                 </tr>
               {/each}
             {/if}
-            <tr style="border-top:1px solid #e7e5e4">
+            <tr style="border-top:1px solid var(--hairline)">
               <td style="font-weight:700">Total assets</td>
               <td style="text-align:right; font-weight:700">{formatUsd(d.total_assets_cents)}</td>
             </tr>
@@ -153,20 +153,20 @@
             </tr>
             {#if d.liabilities.length === 0}
               <tr>
-                <td colspan="2" style="padding-left:24px; color:#a8a29e; font-style:italic">(none)</td>
+                <td colspan="2" style="padding-left:24px; color:var(--static); font-style:italic">(none)</td>
               </tr>
             {:else}
               {#each d.liabilities as l (l.account_code)}
                 <tr>
                   <td style="padding-left:24px">
-                    <span class="mono" style="margin-right:8px; color:#78716c">{l.account_code}</span>
+                    <span class="mono" style="margin-right:8px; color:var(--static)">{l.account_code}</span>
                     {l.account_name}
                   </td>
                   <td style="text-align:right">{formatUsd(l.amount_cents)}</td>
                 </tr>
               {/each}
             {/if}
-            <tr style="border-top:1px solid #e7e5e4">
+            <tr style="border-top:1px solid var(--hairline)">
               <td style="padding-left:12px; font-weight:600">Total liabilities</td>
               <td style="text-align:right; font-weight:600">{formatUsd(d.total_liabilities_cents)}</td>
             </tr>
@@ -176,25 +176,25 @@
             </tr>
             {#if d.equity.length === 0}
               <tr>
-                <td colspan="2" style="padding-left:24px; color:#a8a29e; font-style:italic">(none)</td>
+                <td colspan="2" style="padding-left:24px; color:var(--static); font-style:italic">(none)</td>
               </tr>
             {:else}
               {#each d.equity as l (l.account_code)}
                 <tr>
                   <td style="padding-left:24px">
-                    <span class="mono" style="margin-right:8px; color:#78716c">{l.account_code}</span>
+                    <span class="mono" style="margin-right:8px; color:var(--static)">{l.account_code}</span>
                     {l.account_name}
                   </td>
                   <td style="text-align:right">{formatUsd(l.amount_cents)}</td>
                 </tr>
               {/each}
             {/if}
-            <tr style="border-top:1px solid #e7e5e4">
+            <tr style="border-top:1px solid var(--hairline)">
               <td style="padding-left:12px; font-weight:600">Total equity</td>
               <td style="text-align:right; font-weight:600">{formatUsd(d.total_equity_cents)}</td>
             </tr>
 
-            <tr style="border-top:1px solid #e7e5e4">
+            <tr style="border-top:1px solid var(--hairline)">
               <td style="font-weight:700">Total liabilities + equity</td>
               <td style="text-align:right; font-weight:700">
                 {formatUsd(d.total_liabilities_cents + d.total_equity_cents)}

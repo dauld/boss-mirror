@@ -49,28 +49,27 @@
   }
   .card {
     max-width: 520px;
-    background: #fff;
-    border: 1px solid #e7e5e4;
+    background: var(--ink);
+    border: 1px solid var(--hairline);
     border-radius: 8px;
     padding: 32px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
   }
   h1 {
     margin: 0 0 16px;
     font-size: 22px;
-    color: #1c1917;
+    color: var(--fog);
   }
   p {
     margin: 0 0 14px;
     line-height: 1.5;
-    color: #44403c;
+    color: var(--static);
   }
   .muted {
-    color: #78716c;
+    color: var(--static);
     font-size: 14px;
   }
   code {
-    background: #fafaf9;
+    background: var(--ink-raised);
     padding: 1px 5px;
     border-radius: 3px;
     font-size: 13px;
@@ -78,14 +77,14 @@
   button.primary {
     margin-top: 8px;
     padding: 8px 16px;
-    background: #1c1917;
-    color: #fafaf9;
+    background: var(--band);
+    color: var(--on-band);
     border: none;
     border-radius: 4px;
     cursor: pointer;
     font-weight: 500;
   }
   button.primary:hover {
-    background: #44403c;
+    background: var(--signal);
   }
 </style>

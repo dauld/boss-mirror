@@ -134,15 +134,15 @@
   .jk-flow {
     width: 100%;
     height: 460px;
-    border: 1px solid #e2e8f0;
+    border: 1px solid var(--hairline);
     border-radius: 8px;
-    background: #fafafa;
+    background: var(--ink-raised);
   }
   .jk-empty {
     display: grid;
     place-items: center;
     height: 100%;
-    color: #94a3b8;
+    color: var(--static);
     font-size: 0.9rem;
   }
   /* Node-type styling via the class set in `build`. :global because the
@@ -156,26 +156,25 @@
     padding: 6px 8px;
   }
   :global(.jk-trigger) {
-    background: #ecfdf5;
-    border-color: #10b981;
+    background: var(--ok-wash);
+    border-color: var(--clear);
   }
   :global(.jk-outcome) {
-    background: #eff6ff;
-    border-color: #3b82f6;
+    background: var(--signal-wash);
+    border-color: var(--signal);
   }
   :global(.jk-fork) {
-    background: #fef3c7;
-    border-color: #f59e0b;
+    background: var(--warn-wash);
+    border-color: var(--busy);
   }
   :global(.jk-work) {
-    background: #ffffff;
-    border-color: #cbd5e1;
+    background: var(--ink);
+    border-color: var(--hairline);
   }
   :global(.jk-problem) {
-    border-color: #dc2626 !important;
-    box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.25);
+    border-color: var(--troubled) !important;
   }
   :global(.jk-selected) {
-    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.55);
+    box-shadow: 0 0 0 2px var(--signal);
   }
 </style>

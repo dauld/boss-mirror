@@ -88,7 +88,7 @@
 </script>
 
 {#if loading}
-  <p style="padding:16px; color:#78716c">Loading purchase orders...</p>
+  <p style="padding:16px; color:var(--static)">Loading purchase orders...</p>
 {:else if loadFailed}
   <p class="empty load-failed" role="alert" style="padding:16px">
     Couldn't load purchase orders — {loadFailed}
@@ -127,7 +127,7 @@
                   <td>{po.placed_on}</td>
                   <td>
                     {#if status === 'approved'}
-                      <span style="color:#16a34a; font-size:12px">Approved</span>
+                      <span style="color:var(--ok); font-size:12px">Approved</span>
                     {:else}
                       <button
                         class="hr-done-btn"

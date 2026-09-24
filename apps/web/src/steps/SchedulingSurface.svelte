@@ -237,6 +237,6 @@
   .step-schedule-missing {
     align-self: center;
     font-size: 0.85em;
-    color: var(--text-muted);
+    color: var(--static);
   }
 </style>

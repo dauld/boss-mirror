@@ -141,7 +141,7 @@
         {action === 'retire' ? 'Retiring…' : 'Retire'}
       </button>
       {#if actionError}
-        <span style="color:#dc2626; font-size:13px">{actionError}</span>
+        <span style="color:var(--err); font-size:13px">{actionError}</span>
       {/if}
     </div>
 
@@ -150,39 +150,39 @@
           <table class="data-table">
             <tbody>
               <tr>
-                <td style="color:#888; width:160px">Kind</td>
+                <td style="color:var(--static); width:160px">Kind</td>
                 <td><span class="mono">{spec.kind}</span></td>
               </tr>
-              <tr><td style="color:#888">Label</td><td>{spec.label}</td></tr>
-              <tr><td style="color:#888">Category</td><td>{spec.category}</td></tr>
+              <tr><td style="color:var(--static)">Label</td><td>{spec.label}</td></tr>
+              <tr><td style="color:var(--static)">Category</td><td>{spec.category}</td></tr>
               <tr>
-                <td style="color:#888">Status</td>
+                <td style="color:var(--static)">Status</td>
                 <td>
                   <StatusChip value={spec.status} tone={statusTone(spec.status)} />
                 </td>
               </tr>
-              <tr><td style="color:#888">Version</td><td>{spec.version}</td></tr>
+              <tr><td style="color:var(--static)">Version</td><td>{spec.version}</td></tr>
               <tr>
-                <td style="color:#888">Frontend bundle</td>
+                <td style="color:var(--static)">Frontend bundle</td>
                 <td><code class="mono" style="font-size:12px">{spec.frontend_url}</code></td>
               </tr>
-              <tr><td style="color:#888">Owner</td><td>{spec.owning_team}</td></tr>
+              <tr><td style="color:var(--static)">Owner</td><td>{spec.owning_team}</td></tr>
               <tr>
-                <td style="color:#888">Authoring Job</td>
+                <td style="color:var(--static)">Authoring Job</td>
                 <td>
                   {#if spec.authoring_job_id}
                     <EntityLink kind="job" id={spec.authoring_job_id} />
                   {:else}
-                    <span style="color:#888">—</span>
+                    <span style="color:var(--static)">—</span>
                   {/if}
                 </td>
               </tr>
               <tr>
-                <td style="color:#888">Created</td>
+                <td style="color:var(--static)">Created</td>
                 <td>{formatDate(spec.created_at)}</td>
               </tr>
               {#if spec.description}
-                <tr><td style="color:#888">Description</td><td>{spec.description}</td></tr>
+                <tr><td style="color:var(--static)">Description</td><td>{spec.description}</td></tr>
               {/if}
             </tbody>
           </table>
@@ -191,7 +191,7 @@
       <Section title="Metadata schema">
           <pre
             class="mono"
-            style="font-size:12px; padding:8px; background:#f5f5f4; border-radius:4px; overflow:auto; max-height:240px"
+            style="font-size:12px; padding:8px; background:var(--ink-raised); border-radius:4px; overflow:auto; max-height:240px"
           >{JSON.stringify(spec.metadata_schema, null, 2)}</pre>
       </Section>
 

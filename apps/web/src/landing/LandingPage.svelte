@@ -54,9 +54,9 @@
     max-width: 1100px;
     margin: 0 auto;
     padding: 1.5rem 1.5rem 3rem;
-    color: #2a1d10;
+    color: var(--fog);
     box-sizing: border-box;
-    font-family: var(--font-display, 'Iowan Old Style', 'Palatino Linotype', Georgia, serif);
+    font-family: var(--font-display);
   }
   .hero {
     margin-bottom: 1.5rem;
@@ -70,18 +70,18 @@
   .tagline {
     font-size: 1.25rem;
     margin: 0 0 1rem;
-    color: #7a3f1f;
+    color: var(--warn);
   }
   .lede {
     font-size: 1rem;
     line-height: 1.55;
     max-width: 60ch;
-    color: #4a392b;
+    color: var(--fog);
   }
   .cta {
     margin-top: 2rem;
     padding-top: 1rem;
-    border-top: 1px solid #c5a880;
+    border-top: 1px solid var(--busy);
     display: flex;
     align-items: baseline;
     justify-content: space-between;
@@ -89,7 +89,7 @@
     font-size: 0.95rem;
   }
   .cta-link {
-    color: #7a3f1f;
+    color: var(--warn);
     text-decoration: none;
     font-weight: 600;
   }
@@ -97,7 +97,7 @@
     text-decoration: underline;
   }
   .docs a {
-    color: #7a6855;
+    color: var(--static);
     font-size: 0.85rem;
     text-decoration: none;
   }

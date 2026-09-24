@@ -88,10 +88,10 @@
 
 <style>
   .step-decision-context {
-    border: 1px solid var(--border, #e7e5e4);
-    border-left: 3px solid var(--accent, #2563eb);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
     border-radius: 6px;
-    background: var(--card, #fff);
+    background: var(--card);
     margin-bottom: 12px;
   }
   .sdc-head {
@@ -110,22 +110,22 @@
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
   .sdc-source {
     font-size: 11px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     flex: 1 1 auto;
   }
   .sdc-toggle {
     font-size: 11px;
-    color: var(--accent, #2563eb);
+    color: var(--accent);
   }
   .sdc-body {
     padding: 0 12px 10px;
     font-size: 13px;
     line-height: 1.6;
-    color: var(--text, #1c1917);
+    color: var(--text);
     word-break: break-word;
     max-height: 22em;
     overflow-y: auto;
@@ -139,14 +139,14 @@
     margin: 0 0 8px;
   }
   .sdc-body :global(pre) {
-    background: var(--bg, #f5f5f4);
+    background: var(--bg);
     padding: 8px 10px;
     border-radius: 5px;
     overflow-x: auto;
     font-size: 12px;
   }
   .sdc-body :global(code) {
-    background: var(--bg, #f5f5f4);
+    background: var(--bg);
     padding: 1px 4px;
     border-radius: 3px;
     font-size: 0.9em;
@@ -158,7 +158,7 @@
   }
   .sdc-body :global(th),
   .sdc-body :global(td) {
-    border: 1px solid var(--border, #e7e5e4);
+    border: 1px solid var(--border);
     padding: 3px 8px;
     text-align: left;
   }

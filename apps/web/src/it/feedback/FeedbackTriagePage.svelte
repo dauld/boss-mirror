@@ -153,23 +153,23 @@
      claim something is wrong, a feature is a claim something is
      missing. Not severity — the board has no severity. */
   .fb-chip-bug {
-    background: #fef2f2;
-    color: #b91c1c;
+    background: var(--err-wash);
+    color: var(--err);
   }
   .fb-chip-feature {
-    background: #eff6ff;
-    color: #1d4ed8;
+    background: var(--signal-wash);
+    color: var(--signal);
   }
   .fb-more {
     font-size: 11px;
-    color: var(--text-dim, var(--static, #7A838C));
+    color: var(--text-dim);
     margin-left: auto;
   }
   .fb-route {
     font: inherit;
     font-size: 11px;
-    background: var(--bg, var(--void, #0D1014));
-    border: 1px solid var(--border, var(--hairline, #2A3138));
+    background: var(--bg);
+    border: 1px solid var(--border);
     border-radius: 3px;
     padding: 1px 6px;
     cursor: pointer;
@@ -185,14 +185,14 @@
     font-size: 12px;
     font-weight: 600;
     padding: 3px 12px;
-    border: 1px solid var(--border, var(--hairline, #2A3138));
+    border: 1px solid var(--border);
     border-radius: 999px;
     background: transparent;
     cursor: pointer;
     color: inherit;
   }
   .fb-view.active {
-    border-color: var(--signal, #5FD4A8);
-    color: var(--signal, #5FD4A8);
+    border-color: var(--signal);
+    color: var(--signal);
   }
 </style>

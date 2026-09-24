@@ -1601,95 +1601,95 @@
 
 <style>
   .yard-root { padding: 0 32px 32px; }
-  .yard-mono { font-family: var(--font-mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
+  .yard-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
   /* The alerts strip: each alert a button to its subject. */
-  .yard-alerts { display: flex; flex-wrap: wrap; gap: var(--s2, 8px); min-height: 30px; margin: 0 0 var(--s3, 12px); }
+  .yard-alerts { display: flex; flex-wrap: wrap; gap: var(--s2); min-height: 30px; margin: 0 0 var(--s3); }
   .yard-alert {
-    display: inline-flex; align-items: center; gap: var(--s2, 8px);
-    padding: 5px 10px 5px 8px; border: 1px solid var(--border-strong, #3a434d);
-    background: var(--ink, #12161c); color: var(--fog, #e8ecef); cursor: pointer;
+    display: inline-flex; align-items: center; gap: var(--s2);
+    padding: 5px 10px 5px 8px; border: 1px solid var(--border-strong);
+    background: var(--ink); color: var(--fog); cursor: pointer;
     text-align: left; font: inherit; font-size: 12.5px; border-radius: 0;
   }
-  .yard-alert.err { border-color: color-mix(in srgb, var(--err, #e2685c) 60%, var(--hairline, #2a3138)); }
-  .yard-alert.warn { border-color: color-mix(in srgb, var(--warn, #d9a441) 55%, var(--hairline, #2a3138)); }
-  .yard-alert time { color: var(--static, #7a838c); font-size: 11px; }
+  .yard-alert.err { border-color: color-mix(in srgb, var(--err) 60%, var(--hairline)); }
+  .yard-alert.warn { border-color: color-mix(in srgb, var(--warn) 55%, var(--hairline)); }
+  .yard-alert time { color: var(--static); font-size: 11px; }
   /* The region's verdict at the head of the entity panel wears the
      alert's own look; it is a reading, not a button. */
-  .yard-region-head { cursor: default; margin-bottom: var(--s3, 12px); }
-  .yard-quiet { color: var(--text-faint, #5c656e); font-size: 12.5px; padding: 6px 0; display: inline-flex; gap: var(--s2, 8px); align-items: center; }
+  .yard-region-head { cursor: default; margin-bottom: var(--s3); }
+  .yard-quiet { color: var(--text-faint); font-size: 12.5px; padding: 6px 0; display: inline-flex; gap: var(--s2); align-items: center; }
 
   /* The small round lamps the strip, the entity panel and the board share. */
-  .yard-lamp-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--static, #7a838c); flex: none; margin-right: 6px; position: relative; top: -1px; }
-  .yard-lamp-dot.ok { background: var(--ok, #4fb98a); box-shadow: 0 0 6px var(--ok, #4fb98a); }
-  .yard-lamp-dot.working { background: var(--signal, #5fd4a8); box-shadow: 0 0 6px var(--signal, #5fd4a8); animation: yard-pulse 1.6s ease-in-out infinite; }
-  .yard-lamp-dot.warn { background: var(--warn, #d9a441); box-shadow: 0 0 6px var(--warn, #d9a441); }
-  .yard-lamp-dot.err { background: var(--err, #e2685c); box-shadow: 0 0 7px var(--err, #e2685c); animation: yard-blink 1s steps(2) infinite; }
-  .yard-lamp-dot.off { background: var(--border-strong, #3a434d); }
+  .yard-lamp-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--static); flex: none; margin-right: 6px; position: relative; top: -1px; }
+  .yard-lamp-dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .yard-lamp-dot.working { background: var(--signal); box-shadow: 0 0 6px var(--signal); animation: yard-pulse 1.6s ease-in-out infinite; }
+  .yard-lamp-dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+  .yard-lamp-dot.err { background: var(--err); box-shadow: 0 0 7px var(--err); animation: yard-blink 1s steps(2) infinite; }
+  .yard-lamp-dot.off { background: var(--border-strong); }
   @keyframes yard-blink { 50% { opacity: 0.25; } }
 
   /* The deck: the board left, the entity panel right; one column when narrow. */
-  .yard-deck { display: grid; grid-template-columns: 3fr 2fr; gap: var(--s3, 12px); margin-top: var(--s3, 12px); }
-  .yard-panel { background: var(--ink, #12161c); border: 1px solid var(--hairline, #2a3138); padding: var(--s4, 16px); min-height: 260px; min-width: 0; }
-  .yard-panel-h { margin: 0; font-size: 11px; letter-spacing: var(--ls-label, 0.1em); text-transform: uppercase; color: var(--static, #7a838c); font-weight: 600; }
-  .yard-entity-title { font-size: 18px; font-weight: 600; margin: var(--s2, 8px) 0 var(--s1, 4px); text-wrap: balance; overflow-wrap: anywhere; }
-  .yard-entity-title.is-silent { color: var(--err, #e2685c); }
-  .yard-entity-sub { color: var(--static, #7a838c); font-size: 13px; margin-bottom: var(--s3, 12px); overflow-wrap: anywhere; }
+  .yard-deck { display: grid; grid-template-columns: 3fr 2fr; gap: var(--s3); margin-top: var(--s3); }
+  .yard-panel { background: var(--ink); border: 1px solid var(--hairline); padding: var(--s4); min-height: 260px; min-width: 0; }
+  .yard-panel-h { margin: 0; font-size: 11px; letter-spacing: var(--ls-label); text-transform: uppercase; color: var(--static); font-weight: 600; }
+  .yard-entity-title { font-size: 18px; font-weight: 600; margin: var(--s2) 0 var(--s1); text-wrap: balance; overflow-wrap: anywhere; }
+  .yard-entity-title.is-silent { color: var(--err); }
+  .yard-entity-sub { color: var(--static); font-size: 13px; margin-bottom: var(--s3); overflow-wrap: anywhere; }
   .yard-dock-facts { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
-  .yard-kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px var(--s4, 16px); font-size: 13px; margin: 0 0 var(--s3, 12px); }
-  .yard-kv dt { color: var(--static, #7a838c); }
+  .yard-kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px var(--s4); font-size: 13px; margin: 0 0 var(--s3); }
+  .yard-kv dt { color: var(--static); }
   .yard-kv dd { margin: 0; overflow-wrap: anywhere; }
-  .yard-kv a { color: var(--signal, #5fd4a8); }
-  .yard-label { font-size: 11px; letter-spacing: var(--ls-label, 0.1em); text-transform: uppercase; color: var(--static, #7a838c); font-weight: 600; margin-top: var(--s3, 12px); }
-  .yard-steps { display: grid; gap: 3px; margin-top: var(--s2, 8px); }
-  .yard-step { display: grid; grid-template-columns: 14px minmax(120px, 1fr) 1.4fr; gap: var(--s2, 8px); align-items: baseline; font-size: 12.5px; }
+  .yard-kv a { color: var(--signal); }
+  .yard-label { font-size: 11px; letter-spacing: var(--ls-label); text-transform: uppercase; color: var(--static); font-weight: 600; margin-top: var(--s3); }
+  .yard-steps { display: grid; gap: 3px; margin-top: var(--s2); }
+  .yard-step { display: grid; grid-template-columns: 14px minmax(120px, 1fr) 1.4fr; gap: var(--s2); align-items: baseline; font-size: 12.5px; }
   .yard-step-btn { background: transparent; border: 0; color: inherit; font: inherit; text-align: left; padding: 2px 0; cursor: pointer; border-radius: 0; }
-  .yard-step-btn:hover, .yard-step-btn:focus-visible { color: var(--signal, #5fd4a8); }
-  .yard-when { color: var(--static, #7a838c); font-size: 11.5px; overflow-wrap: anywhere; }
+  .yard-step-btn:hover, .yard-step-btn:focus-visible { color: var(--signal); }
+  .yard-when { color: var(--static); font-size: 11.5px; overflow-wrap: anywhere; }
   /* A probe is a shell command and an exact string — both have to be
      readable in full and copyable, so they wrap rather than truncate. */
-  .yard-probe-row { display: grid; grid-template-columns: 56px 1fr; gap: var(--s2, 8px); align-items: baseline;
+  .yard-probe-row { display: grid; grid-template-columns: 56px 1fr; gap: var(--s2); align-items: baseline;
     font-size: 11.5px; padding-left: 22px; }
-  .yard-probe-k { color: var(--static, #7a838c); text-transform: uppercase; letter-spacing: var(--ls-label, 0.1em); font-size: 10px; }
-  .yard-probe { color: var(--fog, #e8ecef); overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; }
-  .yard-verbs { display: flex; gap: var(--s2, 8px); flex-wrap: wrap; margin-top: var(--s4, 16px); }
+  .yard-probe-k { color: var(--static); text-transform: uppercase; letter-spacing: var(--ls-label); font-size: 10px; }
+  .yard-probe { color: var(--fog); overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; }
+  .yard-verbs { display: flex; gap: var(--s2); flex-wrap: wrap; margin-top: var(--s4); }
   .yard-verbs button, .yard-verb-link {
-    background: transparent; color: var(--fog, #e8ecef); border: 1px solid var(--border-strong, #3a434d);
-    padding: 5px 10px; font: inherit; font-size: 11px; letter-spacing: var(--ls-label, 0.1em);
+    background: transparent; color: var(--fog); border: 1px solid var(--border-strong);
+    padding: 5px 10px; font: inherit; font-size: 11px; letter-spacing: var(--ls-label);
     text-transform: uppercase; font-weight: 600; cursor: pointer; text-decoration: none; border-radius: 0;
   }
   .yard-verbs button:hover, .yard-verbs button:focus-visible, .yard-verb-link:hover, .yard-verb-link:focus-visible {
-    color: var(--signal, #5fd4a8); border-color: var(--signal, #5fd4a8);
+    color: var(--signal); border-color: var(--signal);
   }
-  .yard-link { background: transparent; border: 0; padding: 0; font: inherit; color: var(--signal, #5fd4a8); cursor: pointer; text-align: left; }
-  .yard-stranded-branch { color: var(--warn, #d9a441); font-weight: 600; overflow-wrap: anywhere; }
-  .yard-held-branch { color: var(--static, #7a838c); font-weight: 600; overflow-wrap: anywhere; }
+  .yard-link { background: transparent; border: 0; padding: 0; font: inherit; color: var(--signal); cursor: pointer; text-align: left; }
+  .yard-stranded-branch { color: var(--warn); font-weight: 600; overflow-wrap: anywhere; }
+  .yard-held-branch { color: var(--static); font-weight: 600; overflow-wrap: anywhere; }
 
   .yard-section {
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 12px; letter-spacing: var(--ls-eyebrow, 0.3em);
-    color: var(--signal, #5FD4A8); margin: 28px 0 8px;
+    font-family: var(--font-mono);
+    font-size: 12px; letter-spacing: var(--ls-eyebrow);
+    color: var(--signal); margin: 28px 0 8px;
     display: flex; align-items: center; gap: 12px;
   }
-  .yard-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline, #2A3138); }
-  .yard-n { color: var(--static, #7A838C); }
+  .yard-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline); }
+  .yard-n { color: var(--static); }
   /* Station facts in the dock's header: discipline stays quiet
      (static grey, same mono caps), the WIP advisory wears --warn —
      the one state color, present only when the queue exceeds its
      declared bandwidth. */
-  .yard-discipline { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--static, #7A838C); letter-spacing: var(--ls-nav, 0.14em); text-transform: uppercase; }
-  .yard-wip { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--warn, #d9a441); border: 1px solid var(--warn, #d9a441);
+  .yard-discipline { font-family: var(--font-mono); font-size: 11px; color: var(--static); letter-spacing: var(--ls-nav); text-transform: uppercase; }
+  .yard-wip { font-family: var(--font-mono); font-size: 11px; color: var(--warn); border: 1px solid var(--warn);
     padding: 1px 7px; letter-spacing: 0.1em; }
   /* The walk upstream: the chip grammar exactly (mono caps, hairline,
      radius 0, --static) — an instrument, not a call to action. It
      brightens to --signal on hover and focus. */
   .yard-upstream {
     font: inherit;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
-    color: var(--static, #7A838C);
+    color: var(--static);
     background: transparent;
-    border: 1px solid var(--hairline, #2A3138);
+    border: 1px solid var(--hairline);
     border-radius: 0;
     padding: 2px 8px;
     cursor: pointer;
@@ -1697,38 +1697,38 @@
     transition: color 120ms ease, border-color 120ms ease;
   }
   .yard-upstream:hover, .yard-upstream:focus-visible {
-    color: var(--signal, #5FD4A8); border-color: var(--signal, #5FD4A8);
+    color: var(--signal); border-color: var(--signal);
   }
-  .yard-board { width: 100%; border-collapse: collapse; background: var(--card, var(--ink, #12161C));
-    border: 1px solid var(--hairline, #2A3138); font-size: 14px; }
-  .yard-board th { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: var(--ls-nav, 0.14em); text-transform: uppercase; font-weight: 400;
-    color: var(--static, #7A838C); text-align: left; padding: 8px 12px;
-    border-bottom: 1px solid var(--hairline, #2A3138); }
-  .yard-board td { padding: 7px 12px; border-bottom: 1px solid var(--hairline, #2A3138); }
+  .yard-board { width: 100%; border-collapse: collapse; background: var(--card);
+    border: 1px solid var(--hairline); font-size: 14px; }
+  .yard-board th { font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: var(--ls-nav); text-transform: uppercase; font-weight: 400;
+    color: var(--static); text-align: left; padding: 8px 12px;
+    border-bottom: 1px solid var(--hairline); }
+  .yard-board td { padding: 7px 12px; border-bottom: 1px solid var(--hairline); }
   .yard-board tr:last-child td { border-bottom: none; }
-  .yard-trainblock { border: 1px solid var(--hairline, #2A3138);
-    background: var(--card, var(--ink, #12161C)); margin-bottom: 12px; }
+  .yard-trainblock { border: 1px solid var(--hairline);
+    background: var(--card); margin-bottom: 12px; }
   .yard-trainhead { display: flex; align-items: center; gap: 12px; padding: 9px 12px;
-    border-bottom: 1px solid var(--hairline, #2A3138); font-size: 14px; flex-wrap: wrap; }
+    border-bottom: 1px solid var(--hairline); font-size: 14px; flex-wrap: wrap; }
   /* The title takes its own line in the panel; the chips wrap beneath
      it rather than squeezing the name to an ellipsis. */
   .yard-trainname { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; }
   /* The flatbed: consist cards sit on VOID so the packets read as
      cargo loaded onto the train, the same cards that wait in the dock. */
   .yard-consist { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px;
-    background: var(--bg, var(--void, #0D1014)); }
+    background: var(--bg); }
   .yard-dock { display: grid; gap: 10px;
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
   /* Trouble reads LOUDER than the phase chip beside it: the whole
      defect this fixes was a wedged train looking like a moving one. */
   .yard-trouble {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
     letter-spacing: 0.04em;
     padding: 1px 6px;
-    border: 1px solid var(--err, #b91c1c);
-    color: var(--err, #b91c1c);
+    border: 1px solid var(--err);
+    color: var(--err);
     border-radius: 2px;
     text-transform: uppercase;
   }
@@ -1737,111 +1737,111 @@
      The chip that replaces it reads in the warn tone because the
      request is pending, not done: the conductor acts, this page asks. */
   .yard-cancel-btn {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
     padding: 1px 8px;
-    border: 1px solid var(--hairline, #2A3138);
+    border: 1px solid var(--hairline);
     border-radius: 2px;
     background: transparent;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     cursor: pointer;
   }
   .yard-cancel-btn:hover:not(:disabled), .yard-cancel-btn:focus-visible {
-    color: var(--err, #e2685c); border-color: var(--err, #e2685c);
+    color: var(--err); border-color: var(--err);
   }
-  .yard-cancel-btn.is-confirm { color: var(--err, #e2685c); border-color: var(--err, #e2685c); }
+  .yard-cancel-btn.is-confirm { color: var(--err); border-color: var(--err); }
   .yard-cancel-btn:disabled { opacity: 0.5; cursor: default; }
   .yard-cancel-chip {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
     letter-spacing: 0.04em;
     padding: 1px 6px;
-    border: 1px solid var(--warn, #d9a441);
-    color: var(--warn, #d9a441);
+    border: 1px solid var(--warn);
+    color: var(--warn);
     border-radius: 2px;
     white-space: nowrap;
   }
-  .yard-cancel-chip.is-refused { border-color: var(--static, #7A838C); color: var(--static, #7A838C); }
+  .yard-cancel-chip.is-refused { border-color: var(--static); color: var(--static); }
   .yard-cancel-form {
     display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
-    padding: 8px 12px; border-top: 1px solid var(--hairline, #2A3138);
+    padding: 8px 12px; border-top: 1px solid var(--hairline);
   }
-  .yard-cancel-label { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: 0.1em; color: var(--static, #7A838C); text-transform: uppercase; }
+  .yard-cancel-label { font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.1em; color: var(--static); text-transform: uppercase; }
   .yard-cancel-reason {
     flex: 1 1 240px; min-width: 160px;
     font: inherit; font-size: 12.5px; padding: 3px 8px;
-    background: var(--bg, var(--void, #0D1014)); color: var(--text, #C7CED6);
-    border: 1px solid var(--hairline, #2A3138); border-radius: 2px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--hairline); border-radius: 2px;
   }
-  .yard-cancel-err { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    color: var(--err, #e2685c); flex-basis: 100%; }
-  .yard-chip { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: 0.1em; border: 1px solid var(--hairline, #2A3138); padding: 2px 8px; }
-  .yard-lamp { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: 0.1em; border: 1px solid var(--hairline, #2A3138); padding: 2px 8px; }
-  .yard-lamp.ok  { color: var(--ok, #4fb98a); border-color: var(--ok, #4fb98a); }
-  .yard-lamp.err { color: var(--err, #e2685c); border-color: var(--err, #e2685c); }
-  .yard-lamp.run { color: var(--warn, #d9a441); border-color: var(--warn, #d9a441); }
+  .yard-cancel-err { font-family: var(--font-mono); font-size: 11px;
+    color: var(--err); flex-basis: 100%; }
+  .yard-chip { font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.1em; border: 1px solid var(--hairline); padding: 2px 8px; }
+  .yard-lamp { font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.1em; border: 1px solid var(--hairline); padding: 2px 8px; }
+  .yard-lamp.ok  { color: var(--ok); border-color: var(--ok); }
+  .yard-lamp.err { color: var(--err); border-color: var(--err); }
+  .yard-lamp.run { color: var(--warn); border-color: var(--warn); }
   /* Approach states borrow the lamp palette: a red gate IS an error
      lamp, a live gate a running one; green-unparked and publishing
      stay muted — inbound, not yet the dock's business. */
-  .yard-appr-state { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
+  .yard-appr-state { font-family: var(--font-mono); font-size: 11px;
     letter-spacing: 0.1em; white-space: nowrap; }
-  .yard-appr-state[data-state='gated-red'] { color: var(--err, #e2685c); }
-  .yard-appr-state[data-state='gated-green'] { color: var(--ok, #4fb98a); }
-  .yard-appr-state[data-state='publishing'] { color: var(--static, #7A838C); }
+  .yard-appr-state[data-state='gated-red'] { color: var(--err); }
+  .yard-appr-state[data-state='gated-green'] { color: var(--ok); }
+  .yard-appr-state[data-state='publishing'] { color: var(--static); }
   /* A run that died before a verdict: amber, not red. Nothing was
      judged, so it is a question to re-ask, not a failure to fix. */
-  .yard-appr-state[data-state='gate-lost'] { color: var(--warn, #d9a441); }
+  .yard-appr-state[data-state='gate-lost'] { color: var(--warn); }
   /* A HELD car: brake deliberately on. Not the ok-green of a gated
      green (which reads "ready — forgotten?"), not the warn of a running
      gate, not the err of a red: a boxed lamp on a dimmed row, with the
      reason where the note goes. Parked-brake-on, not stuck. */
-  .yard-appr-state[data-state='held'] { border: 1px solid var(--static, #7A838C);
+  .yard-appr-state[data-state='held'] { border: 1px solid var(--static);
     padding: 1px 6px; }
-  .yard-approach.is-held td { color: var(--static, #7A838C); }
+  .yard-approach.is-held td { color: var(--static); }
   .yard-approach.is-held .yard-appr-state,
-  .yard-approach.is-held .yard-hold-note { color: var(--text, #C7CED6); }
+  .yard-approach.is-held .yard-hold-note { color: var(--text); }
   .yard-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%;
-    background: var(--signal, #5FD4A8); margin-right: 8px;
+    background: var(--signal); margin-right: 8px;
     animation: yard-pulse 1.4s ease-in-out infinite; }
   @keyframes yard-pulse { 50% { opacity: 0.35; } }
-  .yard-stamp { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
-    color: var(--static, #7A838C); font-variant-numeric: tabular-nums; }
+  .yard-stamp { font-family: var(--font-mono); font-size: 12px;
+    color: var(--static); font-variant-numeric: tabular-nums; }
   /* The ETA chip. An estimate reads brighter than the phase-only
      state, and never brighter than the live dot — it is a median of
      what recent trains did, not a promise about this one. */
-  .yard-eta { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: 0.1em; color: var(--static, #7A838C); padding: 2px 8px;
-    border: 1px solid var(--hairline, #2A3138); font-variant-numeric: tabular-nums;
+  .yard-eta { font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.1em; color: var(--static); padding: 2px 8px;
+    border: 1px solid var(--hairline); font-variant-numeric: tabular-nums;
     white-space: nowrap; }
-  .yard-eta.est { color: var(--text, #C7CED6); }
+  .yard-eta.est { color: var(--text); }
   /* The server-measured estimate: brighter than a phase-only chip
      because it IS a measurement, and red once the train is past the
      slowest arrival on record — a state past its own threshold has to
      look past it (CLAUDE.md §Diagnosis). */
-  .yard-eta-why { display: block; color: var(--static, #7A838C); font-size: 11px; }
-  .yard-eta.is-measured { color: var(--text, #C7CED6); letter-spacing: 0.04em; }
-  .yard-eta.is-measured.late { color: var(--alarm, #E5484D); border-color: var(--alarm, #E5484D); }
+  .yard-eta-why { display: block; color: var(--static); font-size: 11px; }
+  .yard-eta.is-measured { color: var(--text); letter-spacing: 0.04em; }
+  .yard-eta.is-measured.late { color: var(--err); border-color: var(--err); }
   /* The converge wait, as elapsed time — an active signal in the
      signal-green idiom, not the muted arrival stamp. */
-  .yard-since { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: 0.1em; color: var(--signal, #5FD4A8); font-variant-numeric: tabular-nums;
+  .yard-since { font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.1em; color: var(--signal); font-variant-numeric: tabular-nums;
     white-space: nowrap; }
   /* The arrivals row is a link to the train's landing report. */
   .yard-arrival { cursor: pointer; }
-  .yard-arrival:hover { background: var(--bg, var(--void, #0D1014)); }
+  .yard-arrival:hover { background: var(--bg); }
   .yard-board a { color: inherit; text-decoration: none; }
-  .yard-board a:hover, .yard-board a:focus-visible { color: var(--signal, #5FD4A8); }
+  .yard-board a:hover, .yard-board a:focus-visible { color: var(--signal); }
   /* Cancelled trains: kept in the world, kept out of the arrivals
      board. One muted line each. */
-  .yard-cancelled { margin-top: 10px; font-size: 12.5px; color: var(--static, #7A838C);
+  .yard-cancelled { margin-top: 10px; font-size: 12.5px; color: var(--static);
     display: flex; flex-direction: column; gap: 4px; }
   .yard-cancelled a { color: inherit; text-decoration: none; }
-  .yard-cancelled a:hover, .yard-cancelled a:focus-visible { color: var(--signal, #5FD4A8); }
+  .yard-cancelled a:hover, .yard-cancelled a:focus-visible { color: var(--signal); }
   .yard-scoreboard {
     display: flex;
     flex-wrap: wrap;
@@ -1851,7 +1851,7 @@
   .yard-stat {
     flex: 1 1 140px;
     padding: 10px 12px;
-    border: 1px solid var(--line, #2a2f3a);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
   }
   .yard-stat.is-provisional { opacity: 0.75; }
@@ -1863,69 +1863,69 @@
   .yard-awaiting-car {
     font-size: 12px;
     padding: 4px 8px;
-    border: 1px solid var(--line, #2a2f3a);
+    border: 1px solid var(--hairline);
     border-radius: 4px;
     text-decoration: none;
   }
-  .yard-empty { color: var(--static, #78716c); padding: 12px 0; font-size: 14px; }
+  .yard-empty { color: var(--static); padding: 12px 0; font-size: 14px; }
   /* Sub-headers inside the entity panel: quieter than a section
      header, the same mono-caps grammar. */
   .yard-gates-head {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: var(--ls-nav, 0.14em); text-transform: uppercase;
-    color: var(--static, #7A838C); margin: 14px 0 8px;
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: var(--ls-nav); text-transform: uppercase;
+    color: var(--static); margin: 14px 0 8px;
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   }
-  .yard-gates-n { color: var(--static, #7A838C); text-transform: none; letter-spacing: 0; }
+  .yard-gates-n { color: var(--static); text-transform: none; letter-spacing: 0; }
   /* The garage: gated-red cars, one row each. The err lamp on the
      branch, the failing check beside it. */
   .yard-garage { list-style: none; padding: 0; margin: 0;
-    border: 1px solid var(--hairline, #2A3138); background: var(--card, var(--ink, #12161C)); }
+    border: 1px solid var(--hairline); background: var(--card); }
   .yard-garage-row { display: flex; align-items: center; gap: 12px; padding: 8px 12px;
-    border-bottom: 1px solid var(--hairline, #2A3138); font-size: 13px; flex-wrap: wrap; }
+    border-bottom: 1px solid var(--hairline); font-size: 13px; flex-wrap: wrap; }
   .yard-garage-row:last-child { border-bottom: none; }
-  .yard-garage-branch { color: var(--err, #e2685c); font-weight: 600;
+  .yard-garage-branch { color: var(--err); font-weight: 600;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
-  .yard-garage-check { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
-    color: var(--static, #7A838C); }
+  .yard-garage-check { font-family: var(--font-mono); font-size: 12px;
+    color: var(--static); }
   /* The conductor: the garage's card + hairline grammar, one reading a
      row. Readings wear the lamp palette (ok / warn / err / muted). A
      SILENT conductor turns the border err — while it is silent, every
      section it writes is last-known-good, not current, and the whole
      block has to say so. */
-  .yard-conductor { border: 1px solid var(--hairline, #2A3138);
-    background: var(--card, var(--ink, #12161C)); padding: 4px 0; }
-  .yard-conductor.is-silent { border-color: var(--err, #e2685c); }
+  .yard-conductor { border: 1px solid var(--hairline);
+    background: var(--card); padding: 4px 0; }
+  .yard-conductor.is-silent { border-color: var(--err); }
   .yard-cond-row { display: flex; align-items: baseline; gap: 12px; padding: 5px 12px;
     font-size: 13px; flex-wrap: wrap; }
-  .yard-cond-k { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10px;
-    letter-spacing: 0.14em; text-transform: uppercase; color: var(--static, #7A838C);
+  .yard-cond-k { font-family: var(--font-mono); font-size: 10px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--static);
     flex: 0 0 72px; }
-  .yard-cond-v { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px;
-    font-variant-numeric: tabular-nums; color: var(--text, #C7CED6); min-width: 0; }
-  .yard-cond-v[data-tone='ok'] { color: var(--ok, #4fb98a); }
-  .yard-cond-v[data-tone='warn'] { color: var(--warn, #d9a441); }
-  .yard-cond-v[data-tone='err'] { color: var(--err, #e2685c); }
-  .yard-cond-v[data-tone='muted'] { color: var(--static, #7A838C); }
-  .yard-cond-row.is-blocked .yard-cond-v { color: var(--err, #e2685c); }
-  .yard-flow { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: var(--ls-nav, 0.14em); color: var(--static, #7A838C);
-    border-top: 1px solid var(--hairline, #2A3138); margin-top: 28px; padding-top: 12px; }
-  .yard-flow em { color: var(--signal, #5FD4A8); font-style: normal; }
+  .yard-cond-v { font-family: var(--font-mono); font-size: 12px;
+    font-variant-numeric: tabular-nums; color: var(--text); min-width: 0; }
+  .yard-cond-v[data-tone='ok'] { color: var(--ok); }
+  .yard-cond-v[data-tone='warn'] { color: var(--warn); }
+  .yard-cond-v[data-tone='err'] { color: var(--err); }
+  .yard-cond-v[data-tone='muted'] { color: var(--static); }
+  .yard-cond-row.is-blocked .yard-cond-v { color: var(--err); }
+  .yard-flow { font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: var(--ls-nav); color: var(--static);
+    border-top: 1px solid var(--hairline); margin-top: 28px; padding-top: 12px; }
+  .yard-flow em { color: var(--signal); font-style: normal; }
 
   .yard-deck-lower { grid-template-columns: 1fr 1fr; }
-  .yard-since-muted { color: var(--static, #7a838c); }
+  .yard-since-muted { color: var(--static); }
   /* The converge card: the run's one line, its consist, and the
      unwired tail named as such. Trouble is red, not merely dim. */
-  .yard-converge-line { font-size: 13px; margin: var(--s2, 8px) 0; }
-  .yard-converge-line.is-trouble { color: var(--err, #b91c1c); font-weight: 600; }
-  .yard-converge-silent { font-size: 12px; margin: 0 0 var(--s2, 8px); color: var(--err, #b91c1c); }
+  .yard-converge-line { font-size: 13px; margin: var(--s2) 0; }
+  .yard-converge-line.is-trouble { color: var(--err); font-weight: 600; }
+  .yard-converge-silent { font-size: 12px; margin: 0 0 var(--s2); color: var(--err); }
   .yard-converge-silent .yard-trouble { margin-right: 6px; }
-  .yard-consist { display: flex; gap: 3px; margin: var(--s2, 8px) 0 4px; min-height: 34px; }
+  .yard-consist { display: flex; gap: 3px; margin: var(--s2) 0 4px; min-height: 34px; }
   .yard-wagon {
     flex-basis: 0;
     min-width: 44px;
-    border: 1px solid var(--signal, #5fd4a8);
+    border: 1px solid var(--signal);
     border-radius: 3px;
     padding: 3px 6px;
     display: grid;
@@ -1934,17 +1934,17 @@
     overflow: hidden;
     white-space: nowrap;
   }
-  .yard-wagon-stage { color: var(--static, #7a838c); letter-spacing: 0.06em; text-transform: uppercase; font-size: 10px; }
-  .yard-consist-total { font-size: 12px; margin-bottom: var(--s3, 12px); }
-  .yard-converge-tail { margin-top: var(--s2, 8px); }
+  .yard-wagon-stage { color: var(--static); letter-spacing: 0.06em; text-transform: uppercase; font-size: 10px; }
+  .yard-consist-total { font-size: 12px; margin-bottom: var(--s3); }
+  .yard-converge-tail { margin-top: var(--s2); }
   .yard-converge-tail code { font-size: 11px; overflow-wrap: anywhere; }
   .yard-converge-unwired {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
     letter-spacing: 0.04em;
     padding: 1px 6px;
-    border: 1px solid var(--warn, #d9a441);
-    color: var(--warn, #d9a441);
+    border: 1px solid var(--warn);
+    color: var(--warn);
     border-radius: 2px;
   }
   @media (max-width: 1000px) { .yard-deck { grid-template-columns: 1fr; } }

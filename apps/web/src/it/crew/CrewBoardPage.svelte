@@ -569,29 +569,29 @@
     padding: 0 1.25rem 3rem;
   }
   .crew-quiet {
-    color: var(--muted, #6b675e);
+    color: var(--static);
     font-size: 0.85rem;
   }
   .crew-fail {
-    color: var(--danger, #a3302a);
+    color: var(--err);
     font-size: 0.85rem;
-    background: var(--danger-bg, #fbf0ef);
-    border-left: 3px solid var(--danger, #a3302a);
+    background: var(--err-wash);
+    border-left: 3px solid var(--err);
     padding: 0.5rem 0.75rem;
     margin: 0.5rem 0;
   }
   .crew-section {
     font-size: 0.7rem;
     letter-spacing: 0.12em;
-    color: var(--muted, #6b675e);
-    border-bottom: 1px solid var(--border, #d5d2ca);
+    color: var(--static);
+    border-bottom: 1px solid var(--border);
     padding-bottom: 0.3rem;
     margin: 1.75rem 0 0.75rem;
   }
   .crew-note {
     font-size: 0.74rem;
     line-height: 1.5;
-    color: var(--muted, #6b675e);
+    color: var(--static);
     max-width: 62rem;
     margin: 0.75rem 0 0;
   }
@@ -604,7 +604,7 @@
     overflow-x: auto;
   }
   .crew-stage {
-    border: 1px solid var(--border, #d5d2ca);
+    border: 1px solid var(--border);
     border-radius: 3px;
     padding: 0.4rem;
     min-width: 9rem;
@@ -618,7 +618,7 @@
   .crew-stage-label {
     font-size: 0.66rem;
     letter-spacing: 0.1em;
-    color: var(--muted, #6b675e);
+    color: var(--static);
   }
   .crew-stage-count {
     font-size: 0.95rem;
@@ -626,7 +626,7 @@
   }
   .crew-stage-blank {
     font-size: 0.72rem;
-    color: var(--muted, #6b675e);
+    color: var(--static);
     font-style: italic;
     margin: 0;
   }
@@ -634,17 +634,17 @@
     display: flex;
     flex-direction: column;
     gap: 0.1rem;
-    border-left: 3px solid var(--accent, #4a7c59);
+    border-left: 3px solid var(--accent);
     padding: 0.3rem 0.4rem;
     margin-bottom: 0.35rem;
-    background: var(--surface-2, #f6f4ef);
+    background: var(--ink-raised);
   }
   .crew-car.troubled {
-    border-left-color: var(--danger, #a3302a);
-    background: var(--danger-bg, #fbf0ef);
+    border-left-color: var(--err);
+    background: var(--err-wash);
   }
   .crew-car-branch {
-    font-family: var(--mono, ui-monospace, monospace);
+    font-family: var(--mono);
     font-size: 0.68rem;
     overflow-wrap: anywhere;
   }
@@ -653,7 +653,7 @@
   }
   .crew-car-detail {
     font-size: 0.67rem;
-    color: var(--muted, #6b675e);
+    color: var(--static);
   }
   .crew-garage {
     margin-top: 0.75rem;
@@ -663,7 +663,7 @@
     display: block;
     font-size: 0.66rem;
     letter-spacing: 0.1em;
-    color: var(--danger, #a3302a);
+    color: var(--err);
     margin-bottom: 0.3rem;
   }
 
@@ -674,7 +674,7 @@
     gap: 0.6rem;
   }
   .crew-card {
-    border: 1px solid var(--border, #d5d2ca);
+    border: 1px solid var(--border);
     border-radius: 3px;
     padding: 0.55rem 0.65rem;
   }
@@ -696,20 +696,20 @@
     padding: 0.08rem 0.3rem;
     border-radius: 2px;
     white-space: nowrap;
-    background: var(--surface-2, #f6f4ef);
-    color: var(--muted, #6b675e);
+    background: var(--ink-raised);
+    color: var(--static);
   }
   .crew-lane-agent {
-    background: #e8f0fb;
-    color: #2a5a8f;
+    background: var(--signal-wash);
+    color: var(--signal);
   }
   .crew-lane-human {
-    background: #eef7ea;
-    color: #2f6b3a;
+    background: var(--ok-wash);
+    color: var(--ok);
   }
   .crew-lane-automation {
-    background: #f4f0fa;
-    color: #5d4a8f;
+    background: var(--ink-raised);
+    color: var(--signal);
   }
   .crew-card-figs {
     display: flex;
@@ -728,7 +728,7 @@
   }
   .crew-fig-l {
     font-size: 0.64rem;
-    color: var(--muted, #6b675e);
+    color: var(--static);
     line-height: 1.2;
   }
   .crew-fig-l em {
@@ -737,31 +737,31 @@
   }
   .crew-card-last {
     font-size: 0.68rem;
-    color: var(--muted, #6b675e);
+    color: var(--static);
   }
   .crew-unknown {
     font-style: italic;
   }
   .crew-when {
-    color: var(--fg, #2b2823);
+    color: var(--fog);
   }
   .crew-holding {
     list-style: none;
     margin: 0.4rem 0 0;
     padding: 0.4rem 0 0;
-    border-top: 1px solid var(--border, #d5d2ca);
+    border-top: 1px solid var(--border);
     font-size: 0.7rem;
   }
   .crew-holding li {
     margin-bottom: 0.2rem;
   }
   .crew-holding-meta {
-    color: var(--muted, #6b675e);
+    color: var(--static);
     display: block;
     font-size: 0.65rem;
   }
   .crew-holding-more {
-    color: var(--muted, #6b675e);
+    color: var(--static);
     font-style: italic;
   }
 
@@ -777,13 +777,13 @@
     font-size: 0.64rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--muted, #6b675e);
-    border-bottom: 1px solid var(--border, #d5d2ca);
+    color: var(--static);
+    border-bottom: 1px solid var(--border);
     padding: 0.25rem 0.5rem 0.25rem 0;
   }
   .crew-table td {
     padding: 0.3rem 0.5rem 0.3rem 0;
-    border-bottom: 1px solid var(--border-subtle, #eceae4);
+    border-bottom: 1px solid var(--hairline);
     vertical-align: top;
   }
   .crew-num {
@@ -791,11 +791,11 @@
     white-space: nowrap;
   }
   .crew-silent {
-    color: var(--danger, #a3302a);
+    color: var(--err);
     font-weight: 600;
   }
   .crew-floor {
     font-style: italic;
-    color: var(--muted, #6b675e);
+    color: var(--static);
   }
 </style>

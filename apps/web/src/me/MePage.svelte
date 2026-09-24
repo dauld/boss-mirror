@@ -630,16 +630,16 @@
     font-size: 11px;
     font-weight: 600;
     padding: 2px 10px;
-    border: 1px solid var(--accent, #0284c7);
-    color: var(--accent, #0284c7);
+    border: 1px solid var(--accent);
+    color: var(--accent);
     background: transparent;
     border-radius: 4px;
     cursor: pointer;
   }
   .myday-claim-btn:hover,
   .myday-retry-btn:hover {
-    background: var(--accent, #0284c7);
-    color: #fff;
+    background: var(--accent);
+    color: var(--on-band);
   }
   /* Fetch failure is words, never a mimed empty queue. The stale note
      rides above a kept last-good view; the fetch-error block stands in
@@ -650,7 +650,7 @@
     justify-content: space-between;
     gap: 8px;
     padding: 8px 12px;
-    border: 1px solid var(--warn, #d9a441);
+    border: 1px solid var(--warn);
     border-radius: 6px;
     font-size: 13px;
     margin: 0 0 12px 0;
@@ -659,7 +659,7 @@
     font-size: 11px;
     font-weight: 600;
     padding: 2px 10px;
-    border: 1px solid var(--border, #d6d3d1);
+    border: 1px solid var(--border);
     color: inherit;
     background: transparent;
     border-radius: 4px;
@@ -674,8 +674,8 @@
   }
   .myday-claim-note {
     padding: 8px 12px;
-    background: var(--bg, #f5f5f4);
-    border: 1px solid var(--border, #d6d3d1);
+    background: var(--bg);
+    border: 1px solid var(--border);
     border-radius: 6px;
     font-size: 13px;
     margin: 0 0 12px 0;
@@ -683,7 +683,7 @@
   .myday-inflight-note {
     margin-top: 8px;
     font-size: 12px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
 
   /* Card + outcome side by side, the same shape the claim row uses. */
@@ -710,7 +710,7 @@
     align-items: center;
     gap: 7px;
     padding-bottom: 8px;
-    border-bottom: 1px solid var(--hairline, #2A3138);
+    border-bottom: 1px solid var(--hairline);
     margin-bottom: 10px;
   }
   /* Lit only where something is standing. */
@@ -718,22 +718,22 @@
     width: 7px;
     height: 7px;
     border-radius: 50%;
-    background: var(--hairline, #2A3138);
+    background: var(--hairline);
     flex: 0 0 auto;
   }
   .watch-stop-dot.lit {
-    background: var(--signal, #29C7B0);
+    background: var(--signal);
   }
   .watch-stop-label {
     font-size: 12px;
     line-height: 1.3;
-    color: var(--fog, #E8ECEF);
+    color: var(--fog);
   }
   .watch-stop-card {
     margin-bottom: 8px;
   }
   .watch-stop-empty {
-    color: var(--static, #7A838C);
+    color: var(--static);
     margin: 0;
     font-size: 13px;
   }
@@ -743,15 +743,15 @@
   .watch-offtrack {
     margin-top: 16px;
     padding-top: 12px;
-    border-top: 1px solid var(--hairline, #2A3138);
+    border-top: 1px solid var(--hairline);
   }
   .watch-offtrack-h {
     display: block;
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11px;
-    letter-spacing: var(--ls-nav, 0.14em);
+    letter-spacing: var(--ls-nav);
     text-transform: uppercase;
-    color: var(--static, #7A838C);
+    color: var(--static);
     margin-bottom: 8px;
   }
   .watch-row {
@@ -767,7 +767,7 @@
   }
   .watch-window {
     font-size: 12px;
-    color: var(--static, #7a838c);
+    color: var(--static);
     margin: 0 0 8px 0;
   }
   /* Mono + caps, matching the packet card's own chip treatment; only
@@ -779,36 +779,36 @@
      warn past 3 days, err past 14 — crossing a threshold changes how
      the row reads, not only the number on it (3bc896be q2). */
   .myday-age {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 10px;
-    letter-spacing: var(--ls-label, 0.1em);
+    letter-spacing: var(--ls-label);
     text-transform: uppercase;
     white-space: nowrap;
-    color: var(--static, #7a838c);
+    color: var(--static);
   }
   .myday-age-aging {
-    color: var(--warn, #d9a441);
+    color: var(--warn);
   }
   .myday-age-stale {
-    color: var(--err, #e2685c);
+    color: var(--err);
     font-weight: 600;
   }
   .watch-outcome {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 10px;
-    letter-spacing: var(--ls-label, 0.1em);
+    letter-spacing: var(--ls-label);
     text-transform: uppercase;
     padding: 1px 6px;
     border: 1px solid currentColor;
     white-space: nowrap;
   }
   .watch-ok {
-    color: var(--ok, #4fb98a);
+    color: var(--ok);
   }
   .watch-warn {
-    color: var(--warn, #d9a441);
+    color: var(--warn);
   }
   .watch-static {
-    color: var(--static, #7a838c);
+    color: var(--static);
   }
 </style>

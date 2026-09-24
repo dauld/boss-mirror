@@ -85,13 +85,13 @@
   onkeydown={(e) => {
     if (e.key === 'Escape') onClose();
   }}
-  style="position:fixed; inset:0; background:rgba(0,0,0,0.3); display:flex; align-items:center; justify-content:center; z-index:100"
+  style="position:fixed; inset:0; background:var(--scrim); display:flex; align-items:center; justify-content:center; z-index:100"
 >
   <div
     role="document"
     onclick={(e) => e.stopPropagation()}
     onkeydown={(e) => e.stopPropagation()}
-    style="background:#fff; border-radius:8px; padding:24px; min-width:420px; max-width:600px; box-shadow:0 10px 30px rgba(0,0,0,0.2)"
+    style="background:var(--ink); border-radius:8px; padding:24px; min-width:420px; max-width:600px"
   >
     <h3 style="margin:0 0 12px">
       Edit: <span class="mono">{rule.role}</span> · {rule.resource} · {rule.action}
@@ -115,7 +115,7 @@
       ></textarea>
     </label>
 
-    {#if err}<p style="color:#dc2626; font-size:13px">{err}</p>{/if}
+    {#if err}<p style="color:var(--err); font-size:13px">{err}</p>{/if}
 
     <div style="display:flex; justify-content:flex-end; gap:8px">
       <button type="button" class="wb-btn" onclick={onClose} disabled={saving}>Cancel</button>

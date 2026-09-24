@@ -103,9 +103,9 @@
   .mcp-panel {
     margin-top: 8px;
     padding: 12px;
-    border: 1px solid #e7e5e4;
+    border: 1px solid var(--hairline);
     border-radius: 6px;
-    background: #fafaf9;
+    background: var(--ink-raised);
     min-width: 320px;
   }
   .mcp-row {
@@ -118,34 +118,34 @@
     flex-direction: column;
     gap: 4px;
     font-size: 12px;
-    color: #44403c;
+    color: var(--static);
   }
   .mcp-label input {
     padding: 4px 6px;
-    border: 1px solid #d6d3d1;
+    border: 1px solid var(--hairline);
     border-radius: 4px;
-    background: white;
+    background: var(--ink);
   }
   .mcp-note {
     margin: 10px 0 0;
     font-size: 12px;
-    color: #78716c;
+    color: var(--static);
     line-height: 1.4;
   }
   .mcp-ok {
     margin: 8px 0 0;
     font-size: 12px;
-    color: #15803d;
+    color: var(--ok);
   }
   .mcp-err {
     margin: 8px 0 0;
     font-size: 12px;
-    color: #b91c1c;
+    color: var(--err);
   }
   .mcp-warn-list {
     margin: 4px 0 0 18px;
     padding: 0;
     font-size: 12px;
-    color: #b45309;
+    color: var(--warn);
   }
 </style>

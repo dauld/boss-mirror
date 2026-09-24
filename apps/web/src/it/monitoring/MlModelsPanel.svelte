@@ -99,15 +99,15 @@
         >
           {#each models as m (m.id)}
             <div
-              style="border:1px solid #374151; border-radius:6px; padding:12px; background:#111827"
+              style="border:1px solid var(--hairline); border-radius:6px; padding:12px; background:var(--ink)"
             >
               <div style="display:flex; justify-content:space-between; margin-bottom:6px">
-                <strong style="color:#e5e7eb">{m.name}</strong>
+                <strong style="color:var(--fog)">{m.name}</strong>
                 <StatusChip value={m.status} tone={statusTone(m.status)} />
               </div>
               <dl
                 class="kv"
-                style="display:grid; grid-template-columns:auto 1fr; row-gap:3px; column-gap:8px; font-size:12px; margin:0; color:#cbd5e1"
+                style="display:grid; grid-template-columns:auto 1fr; row-gap:3px; column-gap:8px; font-size:12px; margin:0; color:var(--fog)"
               >
                 <dt>kind</dt><dd>{m.kind}</dd>
                 <dt>version</dt><dd class="mono">{m.version}</dd>
@@ -116,7 +116,7 @@
                   <dd>
                     {formatAccuracy(m.accuracy, m.accuracy_metric)}
                     {#if m.accuracy_metric}
-                      <span style="color:#64748b"> ({m.accuracy_metric})</span>
+                      <span style="color:var(--static)"> ({m.accuracy_metric})</span>
                     {/if}
                   </dd>
                 {/if}
@@ -131,7 +131,7 @@
               </dl>
               {#if m.description}
                 <p
-                  style="font-size:11px; color:#94a3b8; margin-top:8px; margin-bottom:0; line-height:1.4"
+                  style="font-size:11px; color:var(--static); margin-top:8px; margin-bottom:0; line-height:1.4"
                 >
                   {m.description}
                 </p>

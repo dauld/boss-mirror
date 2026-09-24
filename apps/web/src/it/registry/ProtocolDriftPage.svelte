@@ -141,7 +141,7 @@
   {:else if !ready || ready.total === 0}
     <p class="pd-notice">
       No protocol-drift packet exists yet — the 05:20 measurement has not filed. The first run was expected
-      2026-09-15 05:20Z on boss-gcp (infra/protocol-drift.sh, train #376); until a packet carries a
+      2026-09-15 05:20Z on boss-gcp (infra/protocol-drift.sh, train 376); until a packet carries a
       measurement this tab has nothing it can honestly draw, and an empty table would read as agreement.
     </p>
   {:else if !newest}
@@ -341,60 +341,60 @@
 <style>
   .pd-root { padding: 0 32px 32px; }
   .pd-section {
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 12px; letter-spacing: var(--ls-eyebrow, 0.3em);
-    color: var(--signal, #5fd4a8); margin: 28px 0 8px;
+    font-family: var(--font-mono);
+    font-size: 12px; letter-spacing: var(--ls-eyebrow);
+    color: var(--signal); margin: 28px 0 8px;
     display: flex; align-items: center; gap: 12px;
   }
-  .pd-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline, #2a3138); }
-  .pd-quiet { color: var(--static, #7a838c); font-size: 13px; }
+  .pd-section::after { content: ''; flex: 1; border-top: 1px solid var(--hairline); }
+  .pd-quiet { color: var(--static); font-size: 13px; }
   .pd-fail {
-    color: var(--warn, #d9a441); border: 1px solid var(--warn, #d9a441);
+    color: var(--warn); border: 1px solid var(--warn);
     padding: 8px 12px; font-size: 13px;
   }
   /* Not a failure: the cadence has not run yet, and the page says so
      in its own voice rather than the failure's. */
   .pd-notice {
-    color: var(--fog, #e8ecef); border: 1px solid var(--hairline, #2a3138);
+    color: var(--fog); border: 1px solid var(--hairline);
     padding: 8px 12px; font-size: 13px; max-width: 90ch;
   }
-  .mono { font-family: var(--font-mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
-  .ok { color: var(--ok, #4fb98a); }
-  .warn { color: var(--warn, #d9a441); }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
 
   .pd-strip {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-    border: 1px solid var(--hairline, #2a3138);
+    border: 1px solid var(--hairline);
   }
-  .pd-strip > div { padding: 12px 16px; border-right: 1px solid var(--hairline, #2a3138); min-width: 0; }
+  .pd-strip > div { padding: 12px 16px; border-right: 1px solid var(--hairline); min-width: 0; }
   .pd-strip > div:last-child { border-right: 0; }
   .pd-strip .k {
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px;
-    letter-spacing: 0.1em; text-transform: uppercase; color: var(--static, #7a838c);
+    font-family: var(--font-mono); font-size: 11px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: var(--static);
   }
   .pd-strip .v { font-size: 28px; font-weight: 500; font-variant-numeric: tabular-nums; line-height: 1.1; margin-top: 4px; }
   .pd-strip .v.small { font-size: 14px; line-height: 1.5; font-weight: 400; }
-  .pd-strip .v small { font-size: 12px; color: var(--static, #7a838c); font-weight: 400; margin-left: 5px; }
+  .pd-strip .v small { font-size: 12px; color: var(--static); font-weight: 400; margin-left: 5px; }
 
   .pd-tbl { overflow-x: auto; }
   .pd-table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 760px; }
-  .pd-table th { text-align: left; font-weight: 500; color: var(--static, #7a838c); padding: 4px 8px; border-bottom: 1px solid var(--hairline, #2a3138); }
-  .pd-table td { padding: 6px 8px; border-bottom: 1px solid var(--hairline, #2a3138); vertical-align: top; white-space: nowrap; }
-  .pd-table td small { display: block; color: var(--static, #7a838c); font-size: 11px; }
+  .pd-table th { text-align: left; font-weight: 500; color: var(--static); padding: 4px 8px; border-bottom: 1px solid var(--hairline); }
+  .pd-table td { padding: 6px 8px; border-bottom: 1px solid var(--hairline); vertical-align: top; white-space: nowrap; }
+  .pd-table td small { display: block; color: var(--static); font-size: 11px; }
   .pd-table .num { text-align: right; }
   /* Published since the measurement: still the packet's row, drawn as
      history rather than as work. */
-  .pd-table tr.superseded td { color: var(--text-faint, #5c656e); }
-  .pd-table tr.superseded .excerpt { color: var(--text-faint, #5c656e); }
+  .pd-table tr.superseded td { color: var(--text-faint); }
+  .pd-table tr.superseded .excerpt { color: var(--text-faint); }
   .pd-table .excerpt {
     white-space: pre-wrap; overflow-wrap: anywhere; max-width: 40ch;
-    font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; color: var(--fog, #e8ecef);
+    font-family: var(--font-mono); font-size: 11px; color: var(--fog);
   }
 
   .pd-context { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
   .pd-context .h { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-  .pd-context .h small { display: block; font-weight: 400; font-size: 11px; color: var(--static, #7a838c); }
+  .pd-context .h small { display: block; font-weight: 400; font-size: 11px; color: var(--static); }
   .pd-list { margin: 0; padding-left: 16px; font-size: 12px; }
-  .pd-footnote { color: var(--text-faint, #5c656e); font-size: 12px; max-width: 90ch; margin-top: 20px; }
-  .pd-approve-note { color: var(--static, #7a838c); font-size: 12px; max-width: 90ch; margin: 0 0 10px; }
+  .pd-footnote { color: var(--text-faint); font-size: 12px; max-width: 90ch; margin-top: 20px; }
+  .pd-approve-note { color: var(--static); font-size: 12px; max-width: 90ch; margin: 0 0 10px; }
 </style>

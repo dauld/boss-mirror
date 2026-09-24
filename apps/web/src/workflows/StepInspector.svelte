@@ -246,9 +246,9 @@
   .jk-inspector {
     width: 320px;
     flex: 0 0 320px;
-    border: 1px solid #e2e8f0;
+    border: 1px solid var(--hairline);
     border-radius: 8px;
-    background: #fff;
+    background: var(--ink);
     padding: 12px;
     display: flex;
     flex-direction: column;
@@ -265,22 +265,22 @@
   .jk-insp-title {
     font-size: 13px;
     font-weight: 600;
-    color: #334155;
+    color: var(--static);
   }
   .jk-insp-x {
     width: 24px;
     height: 24px;
-    border: 1px solid #e2e8f0;
+    border: 1px solid var(--hairline);
     border-radius: 6px;
-    background: #f8fafc;
+    background: var(--ink-raised);
     cursor: pointer;
     font-size: 14px;
     line-height: 1;
   }
   .jk-insp-problem {
-    color: #991b1b;
-    background: #fef2f2;
-    border: 1px solid #fecaca;
+    color: var(--err);
+    background: var(--err-wash);
+    border: 1px solid var(--troubled);
     border-radius: 6px;
     font-size: 12px;
     padding: 5px 8px;
@@ -292,16 +292,16 @@
     font-size: 12px;
   }
   .jk-field-label {
-    color: #475569;
+    color: var(--static);
     font-weight: 500;
   }
   .jk-field-hint {
-    color: #94a3b8;
+    color: var(--static);
     font-weight: 400;
     margin-left: 4px;
   }
   .jk-field-hint code {
-    background: #f1f5f9;
+    background: var(--ink-raised);
     padding: 0 3px;
     border-radius: 3px;
     font-size: 11px;
@@ -311,7 +311,7 @@
   .jk-field textarea {
     padding: 5px 7px;
     font-size: 13px;
-    border: 1px solid #cbd5e1;
+    border: 1px solid var(--hairline);
     border-radius: 5px;
     width: 100%;
     box-sizing: border-box;
@@ -339,7 +339,7 @@
     resize: vertical;
   }
   .jk-meta-error {
-    color: #dc2626;
+    color: var(--err);
     font-size: 11px;
   }
   .jk-insp-remove {
@@ -347,10 +347,10 @@
     align-self: flex-start;
     font-size: 12px;
     padding: 5px 12px;
-    border: 1px solid #fecaca;
+    border: 1px solid var(--troubled);
     border-radius: 6px;
-    background: #fef2f2;
-    color: #b91c1c;
+    background: var(--err-wash);
+    color: var(--err);
     cursor: pointer;
   }
 </style>

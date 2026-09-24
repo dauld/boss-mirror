@@ -345,13 +345,13 @@
   }
   .sde-hint {
     font-size: 12px;
-    color: #666;
+    color: var(--static);
     line-height: 1.5;
     max-width: 720px;
   }
   .sde-hint code,
   .sde-grammar code {
-    background: #f3f4f6;
+    background: var(--ink-raised);
     padding: 0 4px;
     border-radius: 3px;
     font-size: 11px;
@@ -360,18 +360,18 @@
   .sde-add-step {
     font-size: 12px;
     padding: 4px 10px;
-    border: 1px solid #d4d4d4;
+    border: 1px solid var(--hairline);
     border-radius: 6px;
-    background: #fafafa;
+    background: var(--ink-raised);
     cursor: pointer;
     white-space: nowrap;
   }
   .sde-grammar {
     font-size: 12px;
-    color: #555;
+    color: var(--static);
     line-height: 1.6;
-    background: #f9fafb;
-    border: 1px solid #eee;
+    background: var(--ink-raised);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
     padding: 8px 10px;
   }
@@ -384,10 +384,10 @@
     gap: 12px;
   }
   .sde-step {
-    border: 1px solid #e5e5e5;
+    border: 1px solid var(--hairline);
     border-radius: 8px;
     padding: 12px;
-    background: #fff;
+    background: var(--ink);
   }
   .sde-step-top {
     display: flex;
@@ -398,8 +398,8 @@
   .sde-step-num {
     font-size: 12px;
     font-weight: 600;
-    color: #78716c;
-    background: #f5f5f4;
+    color: var(--static);
+    background: var(--ink-raised);
     border-radius: 999px;
     width: 22px;
     height: 22px;
@@ -415,9 +415,9 @@
   .sde-step-remove {
     width: 26px;
     height: 26px;
-    border: 1px solid #e0e0e0;
+    border: 1px solid var(--hairline);
     border-radius: 6px;
-    background: #fafafa;
+    background: var(--ink-raised);
     cursor: pointer;
     font-size: 13px;
   }
@@ -426,7 +426,7 @@
     cursor: not-allowed;
   }
   .sde-step-remove {
-    color: #b91c1c;
+    color: var(--err);
   }
   .sde-field-grid {
     display: grid;
@@ -443,11 +443,11 @@
     grid-column: 1 / -1;
   }
   .sde-field-label {
-    color: #444;
+    color: var(--static);
     font-weight: 500;
   }
   .sde-field-hint {
-    color: #999;
+    color: var(--static);
     font-weight: 400;
     margin-left: 4px;
   }
@@ -456,7 +456,7 @@
   .sde-field textarea {
     padding: 5px 7px;
     font-size: 13px;
-    border: 1px solid #d4d4d4;
+    border: 1px solid var(--hairline);
     border-radius: 5px;
     width: 100%;
     box-sizing: border-box;
@@ -482,13 +482,13 @@
     resize: vertical;
   }
   .sde-meta-error {
-    color: #dc2626;
+    color: var(--err);
     font-size: 11px;
   }
   .sde-warn {
-    color: #92400e;
-    background: #fffbeb;
-    border: 1px solid #fde68a;
+    color: var(--warn);
+    background: var(--warn-wash);
+    border: 1px solid var(--busy);
     border-radius: 5px;
     font-size: 12px;
     padding: 4px 8px;
@@ -498,8 +498,8 @@
     margin-top: 0;
   }
   .sde-json {
-    background: #0f172a;
-    color: #e2e8f0;
+    background: var(--ink-raised);
+    color: var(--fog);
     padding: 12px;
     border-radius: 8px;
     font-size: 12px;

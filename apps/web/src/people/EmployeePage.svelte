@@ -180,7 +180,7 @@
                   <Link to={entityHref('employee', m.id)}>
                     {m.name}
                   </Link>
-                  <span style="color:#78716c"> · {humanizeClassCode(m.role)}</span>
+                  <span style="color:var(--static)"> · {humanizeClassCode(m.role)}</span>
                 </li>
               {/each}
             </ol>

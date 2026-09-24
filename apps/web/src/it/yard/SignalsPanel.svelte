@@ -41,29 +41,29 @@
   .head {
     margin: 0;
     font-size: 11px;
-    letter-spacing: var(--ls-label, 0.1em);
+    letter-spacing: var(--ls-label);
     text-transform: uppercase;
-    color: var(--static, #7a838c);
+    color: var(--static);
     font-weight: 600;
     display: flex;
     justify-content: space-between;
-    gap: var(--s3, 12px);
+    gap: var(--s3);
   }
-  .head small { font-weight: 500; letter-spacing: var(--ls-label, 0.1em); color: var(--text-faint, #5c656e); }
-  .mono { font-family: var(--font-mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
-  .list { margin-top: var(--s2, 8px); display: grid; }
+  .head small { font-weight: 500; letter-spacing: var(--ls-label); color: var(--text-faint); }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+  .list { margin-top: var(--s2); display: grid; }
   .sig {
-    display: grid; grid-template-columns: 68px 1fr; gap: var(--s3, 12px); align-items: baseline;
+    display: grid; grid-template-columns: 68px 1fr; gap: var(--s3); align-items: baseline;
     font: inherit; font-size: 12.5px; color: inherit; text-align: left; padding: 4px 0;
-    border: 0; border-top: 1px solid var(--hairline, #2a3138); background: transparent; cursor: pointer; border-radius: 0;
+    border: 0; border-top: 1px solid var(--hairline); background: transparent; cursor: pointer; border-radius: 0;
     min-width: 0;
   }
   .sig span { overflow-wrap: anywhere; }
-  .sig:hover, .sig:focus-visible { background: var(--wash, rgba(232, 236, 239, 0.04)); }
-  .sig time { color: var(--static, #7a838c); }
-  .sig .who { color: var(--signal, #5fd4a8); }
-  .sig.hand .who { color: var(--warn, #d9a441); }
-  .sig.warn .who { color: var(--warn, #d9a441); }
-  .sig.err .who { color: var(--err, #e2685c); }
-  .empty { color: var(--text-faint, #5c656e); font-size: 12px; padding: 6px 0; }
+  .sig:hover, .sig:focus-visible { background: var(--wash); }
+  .sig time { color: var(--static); }
+  .sig .who { color: var(--signal); }
+  .sig.hand .who { color: var(--warn); }
+  .sig.warn .who { color: var(--warn); }
+  .sig.err .who { color: var(--err); }
+  .empty { color: var(--text-faint); font-size: 12px; padding: 6px 0; }
 </style>

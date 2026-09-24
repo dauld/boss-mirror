@@ -208,10 +208,10 @@
 
 <style>
   .runs-card {
-    border: 1px solid var(--border, #e7e5e4);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 14px 16px;
-    background: var(--card, #fff);
+    background: var(--card);
     margin-bottom: 12px;
   }
   .runs-head {
@@ -226,7 +226,7 @@
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     margin: 0;
     font-weight: 600;
   }
@@ -239,15 +239,15 @@
     font-size: 12px;
     padding: 2px 9px;
     border-radius: 4px;
-    border: 1px solid var(--border, #e7e5e4);
-    background: var(--bg, #f5f5f4);
+    border: 1px solid var(--border);
+    background: var(--bg);
     color: inherit;
     cursor: pointer;
   }
   .runs-tab-on {
-    background: #0f766e;
-    border-color: #0f766e;
-    color: #fff;
+    background: var(--signal);
+    border-color: var(--signal);
+    color: var(--on-band);
   }
   .runs-scroll {
     overflow-x: auto;
@@ -260,14 +260,14 @@
   .runs-table th {
     text-align: right;
     font-weight: 600;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     padding: 4px 8px;
-    border-bottom: 1px solid var(--border, #e7e5e4);
+    border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
   .runs-table td {
     padding: 5px 8px;
-    border-bottom: 1px solid var(--border, #f5f5f4);
+    border-bottom: 1px solid var(--border);
     white-space: nowrap;
   }
   .runs-left {
@@ -290,25 +290,25 @@
   .runs-when {
     margin-left: 8px;
     font-size: 11px;
-    color: var(--text-dim, #a8a29e);
+    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
   .runs-foot {
-    color: var(--text-dim, #78716c);
-    border-top: 1px solid var(--border, #e7e5e4);
+    color: var(--text-dim);
+    border-top: 1px solid var(--border);
     font-weight: 600;
   }
   .runs-note {
     margin: 8px 0 0;
     font-size: 11px;
-    color: var(--text-dim, #a8a29e);
+    color: var(--text-dim);
     line-height: 1.5;
   }
   .runs-msg {
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     font-size: 13px;
   }
   .runs-err {
-    color: #b91c1c;
+    color: var(--err);
   }
 </style>

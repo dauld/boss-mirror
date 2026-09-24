@@ -111,8 +111,8 @@
 
 <style>
   .packet {
-    background: var(--card, var(--ink, #12161c));
-    border: 1px solid var(--hairline, #2a3138);
+    background: var(--card);
+    border: 1px solid var(--hairline);
     border-left: 3px solid var(--pk);
     padding: 8px 12px;
     min-width: 0;
@@ -151,7 +151,7 @@
     padding: 0 2px;
     font-size: 15px;
     line-height: 1;
-    color: var(--static, #7a838c);
+    color: var(--static);
     opacity: 0.55;
     transition:
       opacity 120ms ease,
@@ -160,22 +160,22 @@
   .pk-dismiss:hover,
   .pk-dismiss:focus-visible {
     opacity: 1;
-    color: var(--text, #1b1f23);
+    color: var(--text);
     outline: none;
   }
   .pk-kind {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 10px;
-    letter-spacing: var(--ls-nav, 0.14em);
+    letter-spacing: var(--ls-nav);
     text-transform: uppercase;
-    color: var(--pk);
+    color: var(--static);
   }
   .pk-sim {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 10px;
     letter-spacing: 0.14em;
-    color: var(--static, #7a838c);
-    border: 1px dashed var(--static, #7a838c);
+    color: var(--static);
+    border: 1px dashed var(--static);
     padding: 0 5px;
   }
   .pk-title {
@@ -192,27 +192,27 @@
     min-width: 0;
   }
   .pk-branch {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 11.5px;
-    color: var(--static, #7a838c);
+    color: var(--static);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .pk-tag {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 10px;
     letter-spacing: 0.08em;
-    color: var(--static, #7a838c);
-    border: 1px solid var(--hairline, #2a3138);
+    color: var(--static);
+    border: 1px solid var(--hairline);
     padding: 0 5px;
     flex: none;
   }
   .pk-skip,
   .pk-struck {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
     font-size: 10.5px;
-    color: var(--warn, #d9a441);
+    color: var(--warn);
     margin-top: 4px;
     letter-spacing: 0.05em;
   }

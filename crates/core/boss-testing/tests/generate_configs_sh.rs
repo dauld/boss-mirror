@@ -217,88 +217,385 @@ fn the_jobs_api_validates_subject_kinds_on_the_port_boss_ports_gives_it() {
     );
 }
 
-// ---------------------------------------------------------------------
-// Which URLs the jobs API is told (backlog 839ba062, CLAUDE.md §9a). The
-// set of `*_api_url` fields JobsApiConfig declares and the set this
-// generator writes into boss-jobs-api.toml are one fact in two files, and
-// they drifted both ways in one day: calendar_api_url (aa6b4b5c) and
-// subject_kinds_api_url (b224ab3c) were declared and never written, so
-// what each switches on was off on every instance with one log line to
-// say so; and four more (people, assets, locations, inventory) were
-// declared and read by NOTHING, under a comment claiming a checker needed
-// them — which is how b224ab3c was asked to write them. Held equal here,
-// in both directions. No boot refusal: a boot guard that refuses to start
-// takes the system of record down; this is caught at the gate instead.
-
-/// Fields JobsApiConfig declares that the generator deliberately does
-/// not write, each with its reason. Empty: every URL the jobs API can be
-/// told is one a container pod tells it.
-const JOBS_URLS_NOT_WRITTEN: &[(&str, &str)] = &[];
-
-/// The `*_api_url` fields of `JobsApiConfig`, read off the struct with
-/// `syn` — the declaration itself, not a grep of its text.
-fn jobs_api_config_urls() -> BTreeSet<String> {
-    let path = repo_root().join("crates/core/boss-jobs/src/jobs_config.rs");
-    let src =
+/// The PTO endpoint (backlog 6777fecf, found by the equality pin below):
+/// boss-people-api answers 503 on POST /api/people/pto unless it is told
+/// where the calendar listens, and this generator never told it.
+#[test]
+fn the_people_api_reaches_the_calendar_on_the_port_boss_ports_gives_it() {
+    let path = generate("people-calendar", &[]).join("boss-people-api.toml");
+    let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let file = syn::parse_file(&src).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
-    let config = file
+    let cfg: toml::Value = toml::from_str(&text)
+        .unwrap_or_else(|e| panic!("{} is not TOML: {e}\n{text}", path.display()));
+    // 7020 is the stub table's calendar row and no other service's.
+    assert_eq!(
+        cfg.get("calendar_api_url").and_then(|v| v.as_str()),
+        Some("http://127.0.0.1:7020"),
+        "boss-people-api must be told where boss-calendar-api listens, or PTO answers 503: \
+         {cfg:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Which URLs each service is told (backlogs 839ba062 then 6777fecf,
+// CLAUDE.md §9a). The set of `*_api_url` fields a service's config
+// struct declares and the set this generator writes into its toml are
+// one fact in two files, and for the jobs API they drifted both ways in
+// one day: calendar_api_url (aa6b4b5c) and subject_kinds_api_url
+// (b224ab3c) were declared and never written, so what each switches on
+// was off on every instance with one log line to say so; and four more
+// (people, assets, locations, inventory) were declared and read by
+// NOTHING, under a comment claiming a checker needed them — which is how
+// b224ab3c was asked to write them. 839ba062 pinned the jobs API alone;
+// the same pair exists for every service block below, so one table holds
+// every block the generator writes, in both directions. No boot refusal:
+// a boot guard that refuses to start takes the system of record down;
+// this is caught at the gate instead.
+
+/// What a generated toml is read by.
+enum Reader {
+    /// The binary whose `--config` defaults to this toml deserializes
+    /// it into `name`, a struct declared at top level of `file`. Found
+    /// by reading each binary's `load`/`toml::from_str` call, and held
+    /// to that binary below: its source must name both the struct and
+    /// `/etc/<toml>`.
+    Struct {
+        bin: &'static str,
+        file: &'static str,
+        name: &'static str,
+    },
+    /// No binary reads the file — its configuration comes from the
+    /// environment. Held below: the binary names no `/etc/<toml>`, and
+    /// the file may carry no `*_api_url` key, because one there would
+    /// configure nothing.
+    Unread {
+        bin: &'static str,
+        why: &'static str,
+    },
+}
+
+/// Every file generate-configs.sh writes, and what reads it. A new block
+/// without a row here fails `every_service_is_told_exactly_the_urls_its_config_declares`.
+const SERVICES: &[(&str, Reader)] = &[
+    (
+        "boss-shipping-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-shipping/src/bin/boss_shipping_api.rs",
+            file: "crates/modules/boss-shipping/src/shipping_config.rs",
+            name: "ShippingApiConfig",
+        },
+    ),
+    (
+        "boss-messages-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-messages/src/bin/boss_messages_api.rs",
+            file: "crates/modules/boss-messages/src/messages_config.rs",
+            name: "MessagesApiConfig",
+        },
+    ),
+    (
+        "boss-inventory-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-inventory/src/bin/boss_inventory_api.rs",
+            file: "crates/modules/boss-inventory/src/inventory_config.rs",
+            name: "InventoryApiConfig",
+        },
+    ),
+    (
+        "boss-commerce-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-commerce/src/bin/boss_commerce_api.rs",
+            file: "crates/modules/boss-commerce/src/commerce_config.rs",
+            name: "CommerceApiConfig",
+        },
+    ),
+    (
+        "boss-people-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-people/src/bin/boss_people_api.rs",
+            file: "crates/modules/boss-people/src/people_config.rs",
+            name: "PeopleApiConfig",
+        },
+    ),
+    (
+        "boss-accounts-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-accounts/src/bin/boss_accounts_api.rs",
+            file: "crates/modules/boss-accounts/src/accounts_api_config.rs",
+            name: "AccountsApiConfig",
+        },
+    ),
+    (
+        "boss-assets-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-assets/src/bin/boss_assets_api.rs",
+            file: "crates/modules/boss-assets/src/asset_config.rs",
+            name: "AssetsApiConfig",
+        },
+    ),
+    (
+        "boss-catalog-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-catalog/src/bin/boss_catalog_api.rs",
+            file: "crates/modules/boss-catalog/src/kb_config.rs",
+            name: "KbApiConfig",
+        },
+    ),
+    (
+        "boss-calendar-api.toml",
+        Reader::Struct {
+            bin: "crates/core/boss-calendar/src/bin/boss_calendar_api.rs",
+            file: "crates/core/boss-calendar/src/calendar_config.rs",
+            name: "CalendarApiConfig",
+        },
+    ),
+    (
+        "boss-jobs-api.toml",
+        Reader::Struct {
+            bin: "crates/core/boss-jobs/src/bin/boss_jobs_api.rs",
+            file: "crates/core/boss-jobs/src/jobs_config.rs",
+            name: "JobsApiConfig",
+        },
+    ),
+    (
+        "boss-ml-api.toml",
+        Reader::Struct {
+            bin: "crates/orchestrators/boss-ml-api/src/main.rs",
+            file: "crates/core/boss-ml/src/config.rs",
+            name: "MlApiConfig",
+        },
+    ),
+    (
+        "boss-ledger-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-ledger/src/bin/boss_ledger_api.rs",
+            file: "crates/modules/boss-ledger/src/config.rs",
+            name: "LedgerApiConfig",
+        },
+    ),
+    (
+        "boss-content-api.toml",
+        Reader::Struct {
+            bin: "crates/core/boss-content/src/bin/boss_content_api.rs",
+            file: "crates/core/boss-content/src/config.rs",
+            name: "ContentApiConfig",
+        },
+    ),
+    (
+        "boss-policy-api.toml",
+        Reader::Unread {
+            bin: "crates/core/boss-policy/src/bin/boss_policy_api.rs",
+            why: "boss-policy-api reads BOSS_POSTGRES_URL and BOSS_POLICY_PORT from the \
+                  environment and takes no --config",
+        },
+    ),
+    (
+        "boss-classes-api.toml",
+        Reader::Struct {
+            bin: "crates/core/boss-classes/src/bin/boss_classes_api.rs",
+            file: "crates/core/boss-classes/src/classes_config.rs",
+            name: "ClassesApiConfig",
+        },
+    ),
+    (
+        "boss-locations-api.toml",
+        Reader::Struct {
+            bin: "crates/core/boss-locations/src/bin/boss_locations_api.rs",
+            file: "crates/core/boss-locations/src/locations_config.rs",
+            name: "LocationsApiConfig",
+        },
+    ),
+    (
+        "boss-subject-kinds-api.toml",
+        Reader::Struct {
+            bin: "crates/core/boss-subject-kinds/src/bin/boss_subject_kinds_api.rs",
+            file: "crates/core/boss-subject-kinds/src/subject_kinds_config.rs",
+            name: "SubjectKindsApiConfig",
+        },
+    ),
+    (
+        "boss-events-api.toml",
+        Reader::Struct {
+            bin: "crates/core/boss-events/src/bin/boss_events_api.rs",
+            file: "crates/core/boss-events/src/events_api_config.rs",
+            name: "EventsApiConfig",
+        },
+    ),
+    (
+        "boss-products-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-products/src/bin/boss_products_api.rs",
+            file: "crates/modules/boss-products/src/config.rs",
+            name: "ProductsApiConfig",
+        },
+    ),
+    (
+        "boss-campaigns-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-campaigns/src/bin/boss_campaigns_api.rs",
+            file: "crates/modules/boss-campaigns/src/bin/boss_campaigns_api.rs",
+            name: "Config",
+        },
+    ),
+    (
+        "boss-customers-api.toml",
+        Reader::Struct {
+            bin: "crates/modules/boss-customers/src/bin/boss_customers_api.rs",
+            file: "crates/modules/boss-customers/src/bin/boss_customers_api.rs",
+            name: "Config",
+        },
+    ),
+    (
+        "boss-dispatcher.toml",
+        Reader::Unread {
+            bin: "crates/orchestrators/boss-dispatcher-handlers/src/bin/boss_dispatcher.rs",
+            why: "boss-dispatcher builds DispatcherConfig::default(), which reads BOSS_*_URL \
+                  from the environment and falls back to boss_ports::url for each",
+        },
+    ),
+];
+
+/// `(toml, field, reason)`: fields a config struct declares that the
+/// generator deliberately does not write. Each must still be declared,
+/// must not be written, and must say why.
+const URLS_NOT_WRITTEN: &[(&str, &str, &str)] = &[(
+    "boss-people-api.toml",
+    "subject_kinds_api_url",
+    "boss-people-api builds the client into PeopleApiState.subject_kinds and no handler \
+     reads it: http.rs says the validator never fires, scaffolding for a Subject::Custom \
+     write the people surface does not accept. Writing it would log \"SubjectKind registry \
+     validation enabled\" for a check that does not run (backlog 6777fecf).",
+)];
+
+fn read(rel: &str) -> String {
+    let path = repo_root().join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The `*_api_url` fields of struct `name` in `file`, read off the
+/// declaration with `syn` — not a grep of its text. Panics when the
+/// struct is absent or has no named field, so a moved struct cannot
+/// make the equality below vacuous.
+fn declared_urls(file: &str, name: &str) -> BTreeSet<String> {
+    let parsed = syn::parse_file(&read(file)).unwrap_or_else(|e| panic!("parse {file}: {e}"));
+    let fields: Vec<String> = parsed
         .items
         .iter()
         .find_map(|item| match item {
-            syn::Item::Struct(s) if s.ident == "JobsApiConfig" => Some(s),
+            syn::Item::Struct(s) if s.ident == name => Some(s),
             _ => None,
         })
-        .unwrap_or_else(|| panic!("no struct JobsApiConfig in {}", path.display()));
-    config
+        .unwrap_or_else(|| panic!("no struct {name} in {file}"))
         .fields
         .iter()
         .filter_map(|f| f.ident.as_ref().map(ToString::to_string))
-        .filter(|name| name.ends_with("_api_url"))
+        .collect();
+    assert!(
+        fields.iter().any(|f| f == "http_bind"),
+        "{name} in {file}: the parse found no http_bind, so it is not the service config \
+         this row claims: {fields:?}"
+    );
+    fields
+        .into_iter()
+        .filter(|f| f.ends_with("_api_url"))
         .collect()
 }
 
 #[test]
-fn the_jobs_api_is_told_exactly_the_urls_its_config_declares() {
-    let declared = jobs_api_config_urls();
-    // Control: a parser that found no struct would make both checks
-    // below vacuous.
-    assert!(
-        declared.contains("classes_api_url"),
-        "the struct parse found no known field: {declared:?}"
+fn every_service_is_told_exactly_the_urls_its_config_declares() {
+    let etc = generate("url-equality", &[]);
+    // Every file the generator wrote has a row, and every row a file.
+    let generated: BTreeSet<String> = std::fs::read_dir(&etc)
+        .unwrap_or_else(|e| panic!("read {}: {e}", etc.display()))
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let tabled: BTreeSet<String> = SERVICES.iter().map(|(t, _)| t.to_string()).collect();
+    assert_eq!(
+        generated, tabled,
+        "SERVICES must name every file generate-configs.sh writes, and only those"
     );
-    for (field, reason) in JOBS_URLS_NOT_WRITTEN {
+    for (toml_name, field, reason) in URLS_NOT_WRITTEN {
         assert!(
-            declared.contains(*field),
-            "{field} is excused ({reason}) but JobsApiConfig no longer declares it"
+            !reason.trim().is_empty(),
+            "{toml_name} {field}: an excuse needs a reason"
         );
     }
-    let expected: BTreeSet<String> = declared
-        .iter()
-        .filter(|f| !JOBS_URLS_NOT_WRITTEN.iter().any(|(n, _)| n == f))
-        .cloned()
-        .collect();
-    let cfg = jobs_config("jobs-url-equality");
-    let written: BTreeSet<String> = cfg
-        .as_table()
-        .unwrap_or_else(|| panic!("boss-jobs-api.toml is not a table: {cfg:?}"))
-        .keys()
-        .filter(|k| k.ends_with("_api_url"))
-        .cloned()
-        .collect();
-    let unwritten: Vec<&String> = expected.difference(&written).collect();
+
+    let mut failures = Vec::new();
+    let mut declared_total = 0;
+    for (toml_name, reader) in SERVICES {
+        let text = std::fs::read_to_string(etc.join(toml_name))
+            .unwrap_or_else(|e| panic!("read {toml_name}: {e}"));
+        let cfg: toml::Value =
+            toml::from_str(&text).unwrap_or_else(|e| panic!("{toml_name} is not TOML: {e}"));
+        let written: BTreeSet<String> = cfg
+            .as_table()
+            .unwrap_or_else(|| panic!("{toml_name} is not a table"))
+            .keys()
+            .filter(|k| k.ends_with("_api_url"))
+            .cloned()
+            .collect();
+        let etc_path = format!("\"/etc/{toml_name}\"");
+        let declared = match reader {
+            Reader::Struct { bin, file, name } => {
+                let bin_src = read(bin);
+                assert!(
+                    bin_src.contains(&etc_path) && bin_src.contains(name),
+                    "{bin} must default --config to {etc_path} and load {name} — \
+                     the row for {toml_name} names the wrong reader"
+                );
+                declared_urls(file, name)
+            }
+            Reader::Unread { bin, why } => {
+                assert!(
+                    !read(bin).contains(&etc_path),
+                    "{bin} names {etc_path} now, so the row saying nothing reads \
+                     {toml_name} ({why}) is stale: map it to the struct it loads"
+                );
+                BTreeSet::new()
+            }
+        };
+        declared_total += declared.len();
+        let excused: BTreeSet<String> = URLS_NOT_WRITTEN
+            .iter()
+            .filter(|(t, _, _)| t == toml_name)
+            .map(|(_, f, _)| f.to_string())
+            .collect();
+        for field in excused.difference(&declared) {
+            failures.push(format!(
+                "{toml_name}: {field} is excused in URLS_NOT_WRITTEN but its config no \
+                 longer declares it — drop the excuse"
+            ));
+        }
+        for field in excused.intersection(&written) {
+            failures.push(format!(
+                "{toml_name}: {field} is excused in URLS_NOT_WRITTEN but the generator \
+                 writes it — drop the excuse"
+            ));
+        }
+        for field in declared.difference(&written) {
+            if !excused.contains(field) {
+                failures.push(format!(
+                    "{toml_name}: its config declares {field} and generate-configs.sh does \
+                     not write it, so whatever it switches on is off on every container pod \
+                     (aa6b4b5c, b224ab3c). Write it in the block, delete the field, or \
+                     excuse it in URLS_NOT_WRITTEN with the reason"
+                ));
+            }
+        }
+        for field in written.difference(&declared) {
+            failures.push(format!(
+                "{toml_name}: generate-configs.sh writes {field}, which its reader does not \
+                 declare: the loader ignores unknown keys, so it is a line under /etc that \
+                 configures nothing"
+            ));
+        }
+    }
+    // Control: a table whose parses all came back empty would pass the
+    // checks above vacuously. The jobs API alone declares three.
     assert!(
-        unwritten.is_empty(),
-        "JobsApiConfig declares {unwritten:?} and generate-configs.sh does not write them, so \
-         whatever each one switches on is off on every container pod (aa6b4b5c, b224ab3c). \
-         Write each in the jobs block, delete the field, or excuse it in \
-         JOBS_URLS_NOT_WRITTEN with the reason"
+        declared_total >= 3,
+        "the struct parses found {declared_total} *_api_url fields in all"
     );
-    let unread: Vec<&String> = written.difference(&expected).collect();
-    assert!(
-        unread.is_empty(),
-        "generate-configs.sh writes {unread:?} into boss-jobs-api.toml, which JobsApiConfig \
-         does not declare (or excuses): the loader ignores unknown keys, so each is a line \
-         under /etc that configures nothing"
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

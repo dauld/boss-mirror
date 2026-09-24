@@ -346,14 +346,14 @@
     flex-direction: column;
     gap: 4px;
     font-size: 12px;
-    color: var(--text-dim, #666);
+    color: var(--text-dim);
   }
   .v-field-wide {
     grid-column: 1 / -1;
   }
   .v-field em {
     font-style: normal;
-    color: #999;
+    color: var(--static);
   }
   .v-field input,
   .v-field select {
@@ -371,17 +371,17 @@
     gap: 6px;
   }
   .v-chip {
-    border: 1px solid var(--border, #e7e5e4);
-    background: var(--card, #fff);
+    border: 1px solid var(--border);
+    background: var(--card);
     border-radius: 999px;
     padding: 3px 10px;
     font-size: 12px;
     cursor: pointer;
   }
   .v-chip-on {
-    background: #1c1917;
-    color: #fff;
-    border-color: #1c1917;
+    background: var(--band);
+    color: var(--on-band);
+    border-color: var(--border-strong);
   }
   .v-actions {
     grid-column: 1 / -1;
@@ -403,25 +403,25 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-dim, #78716c);
-    border: 1px solid var(--border, #e7e5e4);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 1px 6px;
   }
   .v-tag-shared {
-    border-color: #15803d;
-    color: #15803d;
+    border-color: var(--clear);
+    color: var(--ok);
   }
   .v-filter {
     font-size: 12px;
-    background: var(--bg, #f5f5f4);
+    background: var(--bg);
     padding: 2px 6px;
     border-radius: 4px;
   }
   .v-del {
     background: none;
     border: none;
-    color: #b91c1c;
+    color: var(--err);
     font: inherit;
     font-size: 12px;
     cursor: pointer;
@@ -431,7 +431,7 @@
     margin: 0 0 8px;
   }
   .v-trunc {
-    color: #b45309;
+    color: var(--warn);
     font-weight: 600;
   }
   .v-scroll {
@@ -444,7 +444,7 @@
   }
   .v-table th,
   .v-table td {
-    border-bottom: 1px solid var(--border, #e7e5e4);
+    border-bottom: 1px solid var(--border);
     padding: 5px 10px;
     text-align: left;
     white-space: nowrap;
@@ -453,7 +453,7 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
   .v-list {
     margin: 0;
@@ -461,10 +461,10 @@
     font-size: 13px;
   }
   .v-msg {
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     font-size: 14px;
   }
   .v-err {
-    color: #b91c1c;
+    color: var(--err);
   }
 </style>

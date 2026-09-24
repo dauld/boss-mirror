@@ -79,65 +79,65 @@
   .head {
     margin: 0;
     font-size: 11px;
-    letter-spacing: var(--ls-label, 0.1em);
+    letter-spacing: var(--ls-label);
     text-transform: uppercase;
-    color: var(--static, #7a838c);
+    color: var(--static);
     font-weight: 600;
     display: flex;
     justify-content: space-between;
-    gap: var(--s3, 12px);
+    gap: var(--s3);
   }
   .head small {
     font-weight: 500;
-    letter-spacing: var(--ls-label, 0.1em);
-    color: var(--text-faint, #5c656e);
+    letter-spacing: var(--ls-label);
+    color: var(--text-faint);
   }
   .scroll { overflow-x: auto; }
-  .board { width: 100%; border-collapse: collapse; margin-top: var(--s3, 12px); font-size: 12.5px; }
+  .board { width: 100%; border-collapse: collapse; margin-top: var(--s3); font-size: 12.5px; }
   .board th {
     text-align: left;
     font-size: 10.5px;
-    letter-spacing: var(--ls-label, 0.1em);
+    letter-spacing: var(--ls-label);
     text-transform: uppercase;
-    color: var(--text-faint, #5c656e);
+    color: var(--text-faint);
     font-weight: 600;
     padding: 4px 8px 6px 0;
-    border-bottom: 1px solid var(--hairline, #2a3138);
+    border-bottom: 1px solid var(--hairline);
   }
-  .board td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--hairline, #2a3138); vertical-align: top; }
+  .board td { padding: 6px 8px 6px 0; border-bottom: 1px solid var(--hairline); vertical-align: top; }
   .row { cursor: pointer; outline: none; }
-  .row:hover td, .row:focus-visible td { background: var(--wash, rgba(232, 236, 239, 0.04)); }
-  .row.selected td { background: color-mix(in srgb, var(--signal, #5fd4a8) 10%, transparent); }
-  .row.landed td { color: var(--static, #7a838c); }
+  .row:hover td, .row:focus-visible td { background: var(--wash); }
+  .row.selected td { background: color-mix(in srgb, var(--signal) 10%, transparent); }
+  .row.landed td { color: var(--static); }
   .car { font-weight: 500; }
-  .car small { display: block; color: var(--static, #7a838c); font-weight: 400; overflow-wrap: anywhere; }
-  .mono { font-family: var(--font-mono, ui-monospace, monospace); font-variant-numeric: tabular-nums; }
+  .car small { display: block; color: var(--static); font-weight: 400; overflow-wrap: anywhere; }
+  .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
   .where { white-space: nowrap; }
   .status { display: flex; gap: 6px; align-items: baseline; }
   .status .lamp { position: relative; top: -1px; }
-  .since { color: var(--static, #7a838c); white-space: nowrap; }
+  .since { color: var(--static); white-space: nowrap; }
   .sep td { padding: 8px 0 2px; border: 0; }
   .label {
     font-size: 11px;
-    letter-spacing: var(--ls-label, 0.1em);
+    letter-spacing: var(--ls-label);
     text-transform: uppercase;
-    color: var(--static, #7a838c);
+    color: var(--static);
     font-weight: 600;
   }
-  .empty { color: var(--text-faint, #5c656e); font-size: 12px; }
+  .empty { color: var(--text-faint); font-size: 12px; }
   .lamp {
     display: inline-block;
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--static, #7a838c);
+    background: var(--static);
     flex: none;
   }
-  .lamp.ok { background: var(--ok, #4fb98a); box-shadow: 0 0 6px var(--ok, #4fb98a); }
-  .lamp.working { background: var(--signal, #5fd4a8); box-shadow: 0 0 6px var(--signal, #5fd4a8); animation: pulse 1.6s ease-in-out infinite; }
-  .lamp.warn { background: var(--warn, #d9a441); box-shadow: 0 0 6px var(--warn, #d9a441); }
-  .lamp.err { background: var(--err, #e2685c); box-shadow: 0 0 7px var(--err, #e2685c); animation: blink 1s steps(2) infinite; }
-  .lamp.off { background: var(--border-strong, #3a434d); }
+  .lamp.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+  .lamp.working { background: var(--signal); box-shadow: 0 0 6px var(--signal); animation: pulse 1.6s ease-in-out infinite; }
+  .lamp.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+  .lamp.err { background: var(--err); box-shadow: 0 0 7px var(--err); animation: blink 1s steps(2) infinite; }
+  .lamp.off { background: var(--border-strong); }
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
   @keyframes blink { 50% { opacity: 0.25; } }
   @media (prefers-reduced-motion: reduce) { .lamp { animation: none !important; } }

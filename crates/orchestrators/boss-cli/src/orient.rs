@@ -17,7 +17,7 @@
 
 use anyhow::Result;
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::gate::{AbandonedPlace, abandoned_places, api, queue_order};
 // The one rows helper: a read that is not a list refuses rather than
@@ -442,14 +442,26 @@ fn held_greens(gate_runs: &[Value], car_branches: &BTreeSet<String>) -> Vec<(Str
 ///
 /// Each line carries what the operator's next move needs: the branch,
 /// the packet, how long nobody has held it, whether a car is owed, and
-/// the verb that recovers it. The recovery is the BARE verb on purpose —
-/// a re-gate REUSES the open packet (`reusable_packet`) and an empty
-/// `ParkIntent` stamps nothing, so the `park_*` keys already on the
-/// packet survive; only a branch that has LANDED has them cleared
+/// the verb that recovers it. The recovery carries no `--park-*` flag on
+/// purpose — a re-gate REUSES the open packet (`reusable_packet`) and an
+/// empty `ParkIntent` stamps nothing, so the `park_*` keys already on
+/// the packet survive; only a branch that has LANDED has them cleared
 /// (610537b2). Pinned by gate.rs's
 /// `a_bare_regate_stamps_nothing_so_a_reused_packets_intent_survives`,
 /// because this is advice a tired operator will follow verbatim.
-fn abandoned_report(places: &[AbandonedPlace]) -> Vec<String> {
+///
+/// IT CARRIES `--rebase`, AND A LANDED PLACE GETS NO RECOVERY AT ALL
+/// (backlog e9cdd83f, 2026-09-24). The bare verb this line printed was
+/// refused for its base — the waiters had died before train #601 moved
+/// main — and the hand rebase that followed moved the head, so the next
+/// `boss gate` matched no packet and filed two NEW gate-runs with no
+/// intent. `--rebase` replays inside the verb after the packet is
+/// matched. And orient went on advising a re-gate of both after their
+/// branches had landed, which with park intent is the twin-car trap:
+/// `landed` names, by packet, the places whose work main already holds
+/// ([`superseded_by_main`]), and each is reported as superseded, with
+/// what closes it and no verb to run.
+fn abandoned_report(places: &[AbandonedPlace], landed: &BTreeMap<String, String>) -> Vec<String> {
     if places.is_empty() {
         return Vec::new();
     }
@@ -481,15 +493,55 @@ fn abandoned_report(places: &[AbandonedPlace]) -> Vec<String> {
             "    {branch}  packet {}  {idle}{owed}",
             &p.packet[..8.min(p.packet.len())],
         ));
-        if !p.branch.is_empty() {
+        if let Some(how) = landed.get(&p.packet) {
+            // Closed by the conductor's reap of a gate-run past its Job
+            // deadline, measured on opened_at — the one path that closed
+            // both of 2026-09-24's (as lost, 04:30Z). Named, not run:
+            // this verb is read-only.
             out.push(format!(
-                "      recover: boss gate {} --wait  — reuses this packet and keeps its \
-                 park intent (a bare re-gate stamps nothing over it)",
+                "      LANDED — {how}: superseded, nothing to recover. Do not re-gate it \
+                 (with park intent that files a twin car); the conductor settles the packet \
+                 as lost once it is {}h old.",
+                crate::train::GATE_DEADLINE_HOURS
+            ));
+        } else if !p.branch.is_empty() {
+            out.push(format!(
+                "      recover: boss gate {} --wait --rebase  — reuses this packet and keeps \
+                 its park intent; --rebase replays onto origin/main INSIDE the verb, after \
+                 the packet is matched on the head it queued at (a hand rebase first moves \
+                 the head and files a new packet with no intent)",
                 p.branch
             ));
         }
     }
     out
+}
+
+/// PURE: has main already taken the work an abandoned place queued?
+/// The `how` of the landing when it has, `None` otherwise.
+///
+/// `verdict_for` is `boss merged`'s rules applied to one target (the
+/// adapter in [`run`] is `merged::verdict(&merged::observe(..))`), and
+/// the words are `gate::landing`'s — the one tested merged-check and the
+/// one phrasing, called rather than re-derived (26b3d203). Asked of the
+/// QUEUED head first, because a train deletes the branches it lands and
+/// a deleted branch reads Unknown by name; then of the branch, because a
+/// head that moved on and landed supersedes the one queued. Only a
+/// Merged answer supersedes — Unknown is "could not tell", never "no",
+/// and leaves the recovery in place, where `boss gate`'s own landed
+/// guard still stands between it and a twin.
+fn superseded_by_main(
+    place: &AbandonedPlace,
+    verdict_for: impl Fn(&str) -> crate::merged::Verdict,
+) -> Option<String> {
+    // `origin/<branch>` is what `resolve_sha` records when the forge did
+    // not answer — a name, not a head, so it is not asked about.
+    let head =
+        (!place.sha.is_empty() && !place.sha.starts_with("origin/")).then_some(place.sha.as_str());
+    let branch = (!place.branch.is_empty()).then_some(place.branch.as_str());
+    head.into_iter().chain(branch).find_map(|target| {
+        crate::gate::landing(&verdict_for(target), &[], &place.branch, &place.sha).map(|l| l.how)
+    })
 }
 
 fn bases_behind(checks: &[(String, Option<i32>)]) -> Vec<&str> {
@@ -1297,7 +1349,28 @@ pub async fn run(all: bool) -> Result<()> {
             println!("    {}", queued_lane_line(g, &trains));
         }
     }
-    for line in abandoned_report(&abandoned) {
+    // Which of them main already holds — asked only when there is a
+    // strand, after the same quiet fetch of main `boss gate`'s landed
+    // guard makes, so the content comparison has main's objects. Every
+    // probe may fail, and a failure is Unknown: the place keeps its
+    // recovery rather than being called landed (backlog e9cdd83f).
+    let landed: BTreeMap<String, String> = if abandoned.is_empty() {
+        BTreeMap::new()
+    } else {
+        let _ = crate::git_auth::command()
+            .args(["fetch", "--quiet", "origin", "main"])
+            .status();
+        abandoned
+            .iter()
+            .filter_map(|p| {
+                superseded_by_main(p, |target| {
+                    crate::merged::verdict(&crate::merged::observe(".", "origin", target))
+                })
+                .map(|how| (p.packet.clone(), how))
+            })
+            .collect()
+    };
+    for line in abandoned_report(&abandoned, &landed) {
         println!("{line}");
     }
 
@@ -2460,13 +2533,17 @@ mod tests {
     /// nobody has held it, and the recovery that keeps the park intent.
     #[test]
     fn an_abandoned_place_is_reported_as_troubled_with_its_recovery() {
-        let lines = abandoned_report(&[AbandonedPlace {
-            packet: "fafe8ba4-0000-0000-0000-000000000000".to_string(),
-            branch: "fix/two-operator-verbs-stop-lying".to_string(),
-            queued_at: "2026-09-10T22:40:00Z".to_string(),
-            idle_secs: Some(11 * 60),
-            park_intent: true,
-        }]);
+        let lines = abandoned_report(
+            &[AbandonedPlace {
+                packet: "fafe8ba4-0000-0000-0000-000000000000".to_string(),
+                branch: "fix/two-operator-verbs-stop-lying".to_string(),
+                sha: "0448698fcfef9aa8728f9b3381c1de2a89911447".to_string(),
+                queued_at: "2026-09-10T22:40:00Z".to_string(),
+                idle_secs: Some(11 * 60),
+                park_intent: true,
+            }],
+            &BTreeMap::new(),
+        );
         let all = lines.join("\n");
         assert!(all.contains("ABANDONED"), "{all}");
         assert!(all.contains("fix/two-operator-verbs-stop-lying"), "{all}");
@@ -2482,12 +2559,138 @@ mod tests {
         );
     }
 
+    /// THE RECOVERY REBASES IN THE SAME VERB (backlog e9cdd83f). A waiter
+    /// that died has usually been dead long enough for main to move, and
+    /// the bare re-gate this line used to print was then refused for its
+    /// base. Rebasing by hand moved the head, and the next `boss gate`
+    /// matched no open packet (`reusable_packet` keys on the head), so it
+    /// filed a NEW gate-run with no `park_*` keys beside the old one —
+    /// measured 2026-09-24 on 91594262 and 03af83b4, repaired by hand.
+    /// `--rebase` replays inside the verb AFTER the packet is matched on
+    /// the head it queued at, so the packet and its intent are the ones
+    /// that run.
+    #[test]
+    fn a_recovery_rebases_inside_the_verb_so_the_packet_and_its_intent_are_kept() {
+        let lines = abandoned_report(
+            &[AbandonedPlace {
+                packet: "91594262-0000-0000-0000-000000000000".to_string(),
+                branch: "fix/x".to_string(),
+                sha: "0448698fcfef9aa8728f9b3381c1de2a89911447".to_string(),
+                queued_at: "2026-09-24T01:26:24Z".to_string(),
+                idle_secs: Some(160 * 60),
+                park_intent: true,
+            }],
+            &BTreeMap::new(),
+        );
+        let all = lines.join("\n");
+        assert!(
+            all.contains("recover: boss gate fix/x --wait --rebase"),
+            "the recovery replays onto main in the verb, never by hand: {all}"
+        );
+    }
+
+    /// A LANDED STRAND IS SUPERSEDED, NOT RECOVERABLE (backlog e9cdd83f).
+    /// On 2026-09-24 orient went on advising a re-gate of 91594262 and
+    /// 03af83b4 after both branches had landed; following that line with
+    /// park intent is how a twin car is filed (610537b2). The place is
+    /// still reported — it is an open packet — but as superseded, with
+    /// what closes it, and no verb to run.
+    #[test]
+    fn an_abandoned_place_whose_work_landed_is_superseded_with_no_recovery() {
+        let place = AbandonedPlace {
+            packet: "03af83b4-0000-0000-0000-000000000000".to_string(),
+            branch: "fix/a-car-names-every-item-it-answers".to_string(),
+            sha: "27ebe999aaaa".to_string(),
+            queued_at: "2026-09-24T01:24:28Z".to_string(),
+            idle_secs: Some(160 * 60),
+            park_intent: true,
+        };
+        let landed = BTreeMap::from([(
+            place.packet.clone(),
+            "main already holds its version of every file it changed".to_string(),
+        )]);
+        let all = abandoned_report(&[place], &landed).join("\n");
+        assert!(all.contains("03af83b4"), "still reported: {all}");
+        assert!(all.contains("LANDED"), "{all}");
+        assert!(
+            all.contains("main already holds its version of every file it changed"),
+            "names how it was judged landed: {all}"
+        );
+        assert!(
+            !all.contains("recover:"),
+            "no re-gate for landed work: {all}"
+        );
+        assert!(
+            all.contains(&format!("{}h", crate::train::GATE_DEADLINE_HOURS)),
+            "names what closes it: {all}"
+        );
+    }
+
+    /// LANDED IS JUDGED BY `boss merged`'s RULES, on the head the place
+    /// queued at and then on the branch — never re-derived here. The
+    /// queued head is asked first because a branch deleted by the train
+    /// that landed it reads Unknown by ref; the branch second because a
+    /// head that moved on and landed supersedes the one queued. Only a
+    /// Merged answer supersedes: NotMerged and Unknown leave the recovery
+    /// in place, where the gate's own landed guard still stands.
+    #[test]
+    fn superseded_asks_the_queued_head_then_the_branch_and_only_merged_counts() {
+        use crate::merged::{How, Verdict};
+        let place = AbandonedPlace {
+            packet: "p".to_string(),
+            branch: "fix/x".to_string(),
+            sha: "0448698f".to_string(),
+            queued_at: String::new(),
+            idle_secs: None,
+            park_intent: true,
+        };
+        let asked = std::cell::RefCell::new(Vec::new());
+        let by_head = superseded_by_main(&place, |t| {
+            asked.borrow_mut().push(t.to_string());
+            if t == "0448698f" {
+                Verdict::Merged(How::ContentPresent)
+            } else {
+                Verdict::NotMerged
+            }
+        });
+        assert!(by_head.is_some());
+        assert_eq!(asked.borrow().as_slice(), ["0448698f"]);
+
+        let by_branch = superseded_by_main(&place, |t| {
+            if t == "fix/x" {
+                Verdict::Merged(How::Ancestor)
+            } else {
+                Verdict::Unknown("branch absent".into())
+            }
+        });
+        assert!(by_branch.is_some());
+
+        assert_eq!(
+            superseded_by_main(&place, |_| Verdict::Unknown("no main".into())),
+            None
+        );
+        assert_eq!(superseded_by_main(&place, |_| Verdict::NotMerged), None);
+
+        // A symbolic head (`origin/<branch>`, what `resolve_sha` records
+        // when the forge could not answer) is not a head to ask about.
+        let symbolic = AbandonedPlace {
+            sha: "origin/fix/x".to_string(),
+            ..place.clone()
+        };
+        let asked = std::cell::RefCell::new(Vec::new());
+        let _ = superseded_by_main(&symbolic, |t| {
+            asked.borrow_mut().push(t.to_string());
+            Verdict::NotMerged
+        });
+        assert_eq!(asked.borrow().as_slice(), ["fix/x"]);
+    }
+
     /// NO STRAND, NO SECTION — and no alarm language for a healthy
     /// queue. An empty report prints nothing: the queue lane above
     /// already says how many places are held.
     #[test]
     fn a_healthy_queue_reports_no_abandoned_section() {
-        assert!(abandoned_report(&[]).is_empty());
+        assert!(abandoned_report(&[], &BTreeMap::new()).is_empty());
     }
 
     /// A RECOVERY LINE THAT NAMES NO BRANCH IS NOT ADVICE. A packet with
@@ -2496,13 +2699,17 @@ mod tests {
     /// would run `boss gate  --wait` and fail on an empty argument.
     #[test]
     fn a_place_with_no_branch_is_named_without_a_verb_to_run() {
-        let lines = abandoned_report(&[AbandonedPlace {
-            packet: "c0ffee00-0000-0000-0000-000000000000".to_string(),
-            branch: String::new(),
-            queued_at: "2026-09-10T22:40:00Z".to_string(),
-            idle_secs: Some(600),
-            park_intent: false,
-        }]);
+        let lines = abandoned_report(
+            &[AbandonedPlace {
+                packet: "c0ffee00-0000-0000-0000-000000000000".to_string(),
+                branch: String::new(),
+                sha: String::new(),
+                queued_at: "2026-09-10T22:40:00Z".to_string(),
+                idle_secs: Some(600),
+                park_intent: false,
+            }],
+            &BTreeMap::new(),
+        );
         let all = lines.join("\n");
         assert!(
             all.contains("c0ffee00"),
@@ -2517,13 +2724,17 @@ mod tests {
     /// than guessed.
     #[test]
     fn an_unreadable_place_is_reported_without_inventing_an_age() {
-        let lines = abandoned_report(&[AbandonedPlace {
-            packet: "deadbeef-0000-0000-0000-000000000000".to_string(),
-            branch: "fix/x".to_string(),
-            queued_at: "yesterday".to_string(),
-            idle_secs: None,
-            park_intent: false,
-        }]);
+        let lines = abandoned_report(
+            &[AbandonedPlace {
+                packet: "deadbeef-0000-0000-0000-000000000000".to_string(),
+                branch: "fix/x".to_string(),
+                sha: String::new(),
+                queued_at: "yesterday".to_string(),
+                idle_secs: None,
+                park_intent: false,
+            }],
+            &BTreeMap::new(),
+        );
         let all = lines.join("\n");
         assert!(
             all.contains("unreadable") || all.contains("unknown"),

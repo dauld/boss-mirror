@@ -669,8 +669,8 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    background: var(--bg, #f5f5f4);
-    border: 1px solid var(--border, #e7e5e4);
+    background: var(--bg);
+    border: 1px solid var(--border);
     border-radius: 8px;
     padding: 12px;
     /* A column must be a target worth aiming at even with nothing in
@@ -679,8 +679,8 @@
     min-height: 160px;
   }
   .tb-col-over {
-    border-color: #78716c;
-    background: var(--card, #fff);
+    border-color: var(--border-strong);
+    background: var(--card);
   }
   .tb-col-head {
     display: flex;
@@ -693,39 +693,39 @@
   }
   .tb-count {
     font-size: 11px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
   .tb-col-hint {
     font-size: 11px;
-    color: var(--text-dim, #a8a29e);
+    color: var(--text-dim);
     margin: 0 0 4px;
   }
   .tb-col-empty {
     margin: 0;
     font-size: 11px;
-    color: var(--text-dim, #a8a29e);
+    color: var(--text-dim);
     font-style: italic;
   }
   .tb-drop-zone {
     margin: 0;
     padding: 14px 10px;
-    border: 1px dashed var(--text-dim, #a8a29e);
+    border: 1px dashed var(--text-dim);
     border-radius: 6px;
     text-align: center;
     font-size: 12px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
   .tb-drop-zone-over {
-    border-color: #1c1917;
+    border-color: var(--border-strong);
     border-style: solid;
-    color: #1c1917;
-    background: var(--card, #fff);
+    color: var(--fog);
+    background: var(--card);
   }
 
   .tb-card {
-    background: var(--card, #fff);
-    border: 1px solid var(--border, #e7e5e4);
+    background: var(--card);
+    border: 1px solid var(--border);
     border-radius: 6px;
     padding: 10px;
     display: flex;
@@ -744,7 +744,7 @@
   @media (prefers-reduced-motion: reduce) {
     .tb-card-dragging {
       opacity: 1;
-      outline: 2px dashed #78716c;
+      outline: 2px dashed var(--border-strong);
     }
   }
   .tb-card-title {
@@ -758,13 +758,13 @@
     gap: 8px;
     flex-wrap: wrap;
     font-size: 11px;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
   }
   .tb-by {
     margin-left: auto;
   }
   .tb-finding {
-    border-left: 2px solid #0f766e;
+    border-left: 2px solid var(--signal);
     padding-left: 8px;
     display: flex;
     flex-direction: column;
@@ -778,13 +778,13 @@
   }
   .tb-finding-by {
     font-size: 10px;
-    color: var(--text-dim, #a8a29e);
+    color: var(--text-dim);
   }
   .tb-finding-input {
     font: inherit;
     font-size: 12px;
     padding: 6px;
-    border: 1px solid var(--border, #e7e5e4);
+    border: 1px solid var(--border);
     border-radius: 4px;
     resize: vertical;
     width: 100%;
@@ -793,7 +793,7 @@
   .tb-agent {
     margin: 0;
     font-size: 11px;
-    color: #b45309;
+    color: var(--warn);
   }
   .tb-actions {
     display: flex;
@@ -805,8 +805,8 @@
     font-size: 12px;
     padding: 3px 6px;
     border-radius: 4px;
-    border: 1px solid var(--border, #e7e5e4);
-    background: var(--card, #fff);
+    border: 1px solid var(--border);
+    background: var(--card);
     color: inherit;
     flex: 1 1 auto;
     min-width: 0;
@@ -816,15 +816,15 @@
     font-size: 12px;
     padding: 3px 8px;
     border-radius: 4px;
-    border: 1px solid var(--border, #e7e5e4);
-    background: var(--bg, #f5f5f4);
+    border: 1px solid var(--border);
+    background: var(--bg);
     color: inherit;
     cursor: pointer;
   }
   .tb-btn-primary {
-    background: #1c1917;
-    color: #fff;
-    border-color: #1c1917;
+    background: var(--band);
+    color: var(--on-band);
+    border-color: var(--border-strong);
   }
   .tb-btn:disabled {
     opacity: 0.5;
@@ -839,17 +839,17 @@
     white-space: nowrap;
   }
   .tb-msg {
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     font-size: 14px;
   }
   .tb-err {
-    color: #b91c1c;
+    color: var(--err);
   }
   /* A footnote, not a banner. It answers a question someone might
      have; it is not news. */
   .tb-note {
     margin: 12px 2px 0;
-    color: var(--text-dim, #78716c);
+    color: var(--text-dim);
     font-size: 12px;
   }
   .tb-note a {

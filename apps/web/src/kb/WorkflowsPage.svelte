@@ -112,7 +112,7 @@
   />
 
   {#if error}
-    <p class="empty" style="color:#dc2626; padding:0 24px">Failed to load: {error}</p>
+    <p class="empty" style="color:var(--err); padding:0 24px">Failed to load: {error}</p>
   {/if}
 
   <div class="wf-toolbar">
@@ -186,7 +186,7 @@
     max-width: 520px;
     padding: 8px 10px;
     font-size: 14px;
-    border: 1px solid #e5e5e5;
+    border: 1px solid var(--hairline);
     border-radius: 6px;
   }
   .catalog :global(a.wf-new) {
@@ -195,13 +195,13 @@
     font-size: 14px;
     font-weight: 600;
     border-radius: 6px;
-    background: var(--brew-amber, #d97706);
-    color: #fff;
+    background: var(--signal);
+    color: var(--on-band);
     text-decoration: none;
     white-space: nowrap;
   }
   .catalog :global(a.wf-new:hover) {
-    background: var(--brew-malt, #b45309);
+    background: var(--fog);
   }
   .kb-workflow-list {
     list-style: none;
@@ -210,7 +210,7 @@
   }
   .kb-workflow-row {
     padding: 12px 0;
-    border-bottom: 1px solid #f3f4f6;
+    border-bottom: 1px solid var(--hairline);
   }
   .kb-workflow-row:last-child {
     border-bottom: none;
@@ -226,29 +226,29 @@
     font-weight: 500;
   }
   .kb-workflow-label {
-    color: #374151;
+    color: var(--static);
     font-size: 14px;
   }
   .kb-workflow-tiers {
-    color: #78716c;
+    color: var(--static);
     font-size: 12px;
     margin-left: auto;
   }
   .kb-workflow-live {
-    color: #b45309;
-    background: #fef3c7;
+    color: var(--warn);
+    background: var(--warn-wash);
     padding: 2px 8px;
     border-radius: 999px;
     font-size: 12px;
     font-weight: 500;
   }
   .kb-workflow-meta {
-    color: #6b7280;
+    color: var(--static);
     font-size: 12px;
     margin-top: 4px;
   }
   .kb-workflow-desc {
-    color: #4b5563;
+    color: var(--static);
     font-size: 13px;
     margin: 6px 0 0;
     line-height: 1.45;

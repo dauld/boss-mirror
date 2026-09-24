@@ -149,14 +149,14 @@
     margin-bottom: 16px;
   }
   .empty {
-    color: #78716c;
+    color: var(--static);
     font-style: italic;
   }
   .prod-table {
     width: 100%;
     border-collapse: collapse;
-    background: #fafaf9;
-    border: 1px solid #e7e5e4;
+    background: var(--ink-raised);
+    border: 1px solid var(--hairline);
     border-radius: 6px;
     overflow: hidden;
   }
@@ -164,13 +164,13 @@
   .prod-table td {
     padding: 8px 12px;
     text-align: left;
-    border-bottom: 1px solid #e7e5e4;
+    border-bottom: 1px solid var(--hairline);
     font-size: 13px;
   }
   .prod-table th {
-    background: #f5f5f4;
+    background: var(--ink-raised);
     font-weight: 600;
-    color: #44403c;
+    color: var(--static);
     font-size: 11px;
     letter-spacing: 0.4px;
     text-transform: uppercase;
@@ -183,7 +183,7 @@
     font-variant-numeric: tabular-nums;
   }
   .muted {
-    color: #78716c;
+    color: var(--static);
   }
   .retired {
     opacity: 0.5;
