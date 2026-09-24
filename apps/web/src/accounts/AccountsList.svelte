@@ -10,6 +10,7 @@
   // is deferred to the session rewrite tracked in phase-1 trade-ins.
 
   import { navigate, href } from '../router';
+  import { rowLink } from '@boss/web-kit/ui/RowLink';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import { formatMoney } from '@boss/web-kit/ui/money';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
@@ -299,10 +300,7 @@
           <tbody>
             {#each visible as r (r.account.id)}
               {@const to = entityHref('account', r.account.id)}
-              <tr
-                class="data-table-row-link"
-                onclick={() => navigate(to)}
-              >
+              <tr use:rowLink={{ onActivate: () => navigate(to), label: `Account ${r.account.name}` }}>
                 <td>
                   <strong>
                     <EntityLink

@@ -19,7 +19,8 @@
     type PurchaseOrder,
     type StockStatus,
   } from './types';
-  import { href } from '../router';
+  import { rowLink } from '@boss/web-kit/ui/RowLink';
+  import { href, navigate } from '../router';
   import { getLabel } from '@boss/web-kit/session/manifest.svelte';
 
   type RowKind = 'ingredient' | 'packaging' | 'spare' | 'consumable';
@@ -186,7 +187,7 @@
   <div class="catalog-layout">
     <aside class="catalog-filters">
       <FilterGroup label="Search">
-          <SearchInput bind:value={query} placeholder="SKU, name…" />
+          <SearchInput bind:value={query} placeholder="SKU, name…" label="Search" />
       </FilterGroup>
 
       <FilterGroup label="Stock status">
@@ -261,7 +262,12 @@
           </thead>
           <tbody>
             {#each sortedVisible as r (r.item.part_sku)}
-              <tr class="data-table-row-link">
+              <tr
+                use:rowLink={{
+                  onActivate: () => navigate(entityHref('part', r.item.part_sku)),
+                  label: `${r.name} (${r.item.part_sku})`,
+                }}
+              >
                 <td class="mono">
                   <Link to={entityHref('part', r.item.part_sku)}>
                     {r.item.part_sku}

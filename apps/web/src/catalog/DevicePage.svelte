@@ -313,7 +313,6 @@
                 <!-- rowLink pilot: the whole row opens the part's
                      inventory page (same target PartsList rows use). -->
                 <tr
-                  class="data-table-row-link"
                   use:rowLink={{
                     onActivate: () => navigate(entityHref('part', p.part_sku)),
                     label: `${p.name} (${p.part_sku})`,

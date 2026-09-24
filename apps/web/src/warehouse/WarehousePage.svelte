@@ -30,7 +30,8 @@
     okRead,
     type ReadState,
   } from '../data/readState';
-  import { href } from '../router';
+  import { rowLink } from '@boss/web-kit/ui/RowLink';
+  import { href, navigate } from '../router';
 
   type Tab = 'overview' | 'inventory' | 'receiving';
   const TABS: ReadonlyArray<{ id: Tab; label: string }> = [
@@ -371,7 +372,12 @@
               </thead>
               <tbody>
                 {#each s.parts_stock.below_reorder_items as r (r.part_sku)}
-                  <tr class="data-table-row-link">
+                  <tr
+                    use:rowLink={{
+                      onActivate: () => navigate(entityHref('part', r.part_sku)),
+                      label: `Part ${r.part_sku}`,
+                    }}
+                  >
                     <td class="mono">
                       <Link to={entityHref('part', r.part_sku)}>
                         {r.part_sku}
@@ -428,7 +434,12 @@
             </thead>
             <tbody>
               {#each invSorted as r (r.item.part_sku)}
-                <tr class="data-table-row-link">
+                <tr
+                  use:rowLink={{
+                    onActivate: () => navigate(entityHref('part', r.item.part_sku)),
+                    label: `Part ${r.item.part_sku}`,
+                  }}
+                >
                   <td class="mono">
                     <Link to={entityHref('part', r.item.part_sku)}>
                       {r.item.part_sku}
@@ -559,7 +570,13 @@
             </thead>
             <tbody>
               {#each poVisible as po (po.id)}
-                <tr id={`po-${po.id}`} class="data-table-row-link">
+                <tr
+                  id={`po-${po.id}`}
+                  use:rowLink={{
+                    onActivate: () => navigate(entityHref('po', po.id)),
+                    label: `Purchase order ${po.id}`,
+                  }}
+                >
                   <td class="mono"><EntityLink kind="po" id={po.id} /></td>
                   <td><EntityLink kind="vendor" id={po.vendor} /></td>
                   <td>{po.status.replace(/-/g, ' ')}</td>

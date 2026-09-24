@@ -20,7 +20,8 @@
     type CodeFilter,
   } from './utils';
   import { classesFor } from '@boss/web-kit/session/classes.svelte';
-  import { href } from '../router';
+  import { rowLink } from '@boss/web-kit/ui/RowLink';
+  import { href, navigate } from '../router';
 
   /// Status: a status code, `null` for the rows with no status yet
   /// ("unknown"), or All. Department: a department code, `null` for the
@@ -254,7 +255,12 @@
           </thead>
           <tbody>
             {#each sortedVisible as e (e.id)}
-              <tr class="data-table-row-link">
+              <tr
+                use:rowLink={{
+                  onActivate: () => navigate(entityHref('employee', e.id)),
+                  label: `${e.name} (${e.id})`,
+                }}
+              >
                 <td class="mono">
                   <Link to={entityHref('employee', e.id)}>
                     {e.id}

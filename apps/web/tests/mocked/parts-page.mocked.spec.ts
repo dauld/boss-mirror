@@ -398,14 +398,15 @@ test.describe('/ux/parts — State B: the search input', () => {
     expect(seen.writes.map((r) => `${r.method()} ${r.url()}`)).toEqual([]);
   });
 
-  // Gap 10 (2361ac45), second half: "Search" is a div, not a <label>, so
-  // the input's only name is its placeholder.
-  test('the "Search" group label is not a label element', async ({ page }) => {
+  // Gap 10 (2361ac45), second half, fixed: the "Search" group heading is
+  // still a div, and the input carries the name itself (aria-label), so
+  // it no longer leans on its placeholder.
+  test('the search input is named "Search"', async ({ page }) => {
     await installParts(page);
     await mountParts(page);
-    await expect(body(page).locator('label')).toHaveCount(0);
-    await expect(body(page).getByLabel('Search', { exact: true })).toHaveCount(0);
-    await expect(search(page)).toHaveAttribute('type', 'search');
+    await expect(body(page).getByLabel('Search', { exact: true })).toHaveCount(1);
+    await expect(body(page).getByRole('searchbox', { name: 'Search', exact: true })).toHaveAttribute('type', 'search');
+    await expect(search(page)).toHaveAttribute('aria-label', 'Search');
   });
 });
 
@@ -432,17 +433,47 @@ test.describe('/ux/parts — State B: the SKU link, and back', () => {
     await expect(skuColumn(page)).toHaveText(SKUS);
   });
 
-  // Gap 10 (2361ac45): every row is styled as a link (data-table-row-link:
-  // pointer cursor, hover wash) but only the SKU cell navigates.
-  test('a click on the row outside the SKU cell goes nowhere', async ({ page }) => {
+  // Gap 10 (2361ac45), fixed: the row was styled as a link
+  // (data-table-row-link: pointer cursor, hover wash) but only the SKU
+  // cell navigated. It is a rowLink now — the whole row, and the keyboard.
+  const gasketRow = (page: Page) =>
+    body(page).locator('tbody tr', {
+      has: page.getByRole('link', { name: 'SP-GASKET-01', exact: true }),
+    });
+
+  test('a click anywhere else on the row lands on the same part once, and one Back returns', async ({ page }) => {
     await installParts(page);
     await mountParts(page);
-    const row = body(page).locator('tbody tr').first();
+    const row = gasketRow(page);
     await expect(row).toHaveClass(/data-table-row-link/);
+    await expect(row).toHaveAttribute('role', 'link');
+    const depth = await page.evaluate(() => window.history.length);
     await row.locator('td').nth(1).click();
-    await row.locator('td').nth(7).click();
-    await page.waitForTimeout(300);
-    expect(new URL(page.url()).pathname).toBe(PATH);
+    await expect.poll(() => new URL(page.url()).pathname).toBe(`${PATH}/SP-GASKET-01`);
+    expect(await page.evaluate(() => window.history.length)).toBe(depth + 1);
+    await expect(page.locator('h1.detail-title')).toHaveText('Tri-clamp gasket');
+
+    await page.goBack();
+    await expect.poll(() => new URL(page.url()).pathname).toBe(PATH);
+    await expect(skuColumn(page)).toHaveText(SKUS);
+  });
+
+  test('Enter on a focused row opens its part', async ({ page }) => {
+    await installParts(page);
+    await mountParts(page);
+    const row = gasketRow(page);
+    await row.focus();
+    await page.keyboard.press('Enter');
+    await expect.poll(() => new URL(page.url()).pathname).toBe(`${PATH}/SP-GASKET-01`);
+  });
+
+  test('a click on the SKU link pushes one history entry, not two', async ({ page }) => {
+    await installParts(page);
+    await mountParts(page);
+    const depth = await page.evaluate(() => window.history.length);
+    await body(page).getByRole('link', { name: 'SP-GASKET-01', exact: true }).click();
+    await expect.poll(() => new URL(page.url()).pathname).toBe(`${PATH}/SP-GASKET-01`);
+    expect(await page.evaluate(() => window.history.length)).toBe(depth + 1);
   });
 });
 

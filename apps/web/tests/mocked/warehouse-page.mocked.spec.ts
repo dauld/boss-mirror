@@ -511,6 +511,23 @@ test.describe('/ux/warehouse — State B: every link lands on a catalogued route
     await expect.poll(() => new URL(page.url()).pathname).toBe(PATH);
   });
 
+  // The rows wore data-table-row-link and did nothing off their links
+  // (2361ac45, decided 2026-09-24): every one is a rowLink now.
+  test('a click on a row off its links opens that row, on every tab', async ({ page }) => {
+    await installWarehouse(page);
+    await mountWarehouse(page);
+
+    await tab(page, 'Inventory').click();
+    await body(page).locator('.list-section tbody tr').first().locator('td').nth(2).click();
+    await expect.poll(() => new URL(page.url()).pathname).toMatch(/^\/ux\/parts\//);
+    await page.goBack();
+    await expect.poll(() => new URL(page.url()).pathname).toBe(PATH);
+
+    await tab(page, 'Receiving').click();
+    await body(page).locator('.list-section tbody tr').first().locator('td').nth(2).click();
+    await expect.poll(() => new URL(page.url()).pathname).toBe('/ux/purchase-orders/PO-101');
+  });
+
   // Gap 12 (481d7939): the department's packets are not linked from the
   // page — no link on any tab goes to the department jobs view.
   test('no link on any tab goes to the department jobs view', async ({ page }) => {
@@ -536,7 +553,7 @@ test.describe('/ux/warehouse — State B: every link lands on a catalogued route
     await installWarehouse(page);
     await installTenantManifest(page, { ...MODULES_ON, parts: false });
     await mountWarehouse(page);
-    await body(page).locator('section.tab-section').last().getByRole('link', { name: 'PKG-CAN-01' }).click();
+    await body(page).locator('section.tab-section').last().getByRole('link', { name: 'PKG-CAN-01', exact: true }).click();
     await expect.poll(() => new URL(page.url()).pathname).toBe(`${ROUTE_CATALOG.parts.path}/PKG-CAN-01`);
     await expect(page.locator('.module-disabled strong')).toHaveText('Ingredients & parts');
   });

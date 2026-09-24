@@ -228,7 +228,11 @@
       {#if loading}
         <div class="dx-msg">Loading dispatcher rules…</div>
       {:else if error}
-        <div class="dx-msg dx-err">Couldn’t load rules: {error}</div>
+        <!-- load-failed + role=alert: the shared failure marker the outage
+             crawl asserts (tests/mocked/_routes.ts FAILURE_MARKER). The
+             rules list, which makes the same read, learned it in cae1a377;
+             this page was left in the crawl's SILENT map (backlog d7732e88). -->
+        <div class="dx-msg dx-err load-failed" role="alert">Couldn’t load rules: {error}</div>
       {:else if cascade.nodes.length === 0}
         <div class="dx-msg">No dispatcher rules are loaded.</div>
       {:else}

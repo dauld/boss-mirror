@@ -379,6 +379,132 @@ async fn registry_section<S: Declared + serde::de::DeserializeOwned>(
     section_lines(registry, specs.len(), not_live, &flagged, &unread)
 }
 
+/// The directory the converge mounts as the `step-plugins` ConfigMap —
+/// every `*.js` directly in it, nothing else
+/// (`infra/forge/cluster-deploy-runner.sh`, `converge_step_plugins`) —
+/// and so the only files the gateway can serve at `/plugins/<name>`.
+const SERVED_BUNDLES: &str = "infra/step-plugins";
+
+/// The bundle names the converge mounts: the `*.js` files directly in
+/// `dir`, by file name, sorted — the same glob the runner builds its
+/// `--from-file` list from, so a README beside them is not a bundle.
+fn served_bundles(dir: &Path) -> std::io::Result<Vec<String>> {
+    let mut out: Vec<String> = std::fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".js"))
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+/// The step-plugin registry read from its LIVE end (backlog 230f7156).
+///
+/// The per-row judgement above starts from the FILE: it walks the
+/// bundle and asks the lineage of each kind it declares. That leaves
+/// two questions nothing asked. A live row no file authors — made by
+/// hand at `/it/registry/step-plugins`, or left behind by a deleted
+/// file — is never read, and a fresh instance will not have it. And a
+/// live ACTIVE row names the bundle the SPA fetches in preference to
+/// its built-in surface (`StepSurface.svelte`, `hasActivePluginFor`),
+/// but the gateway can serve only what the converge mounted from
+/// `infra/step-plugins/*.js`; a row naming anything else is a step
+/// that renders broken, only once deployed. The lint
+/// `step-plugin-bundle-exists.sh` holds the TREE's rows to the tree's
+/// bundles; this holds the LIVE rows to them. It reads the tree, not
+/// the gateway — `/plugins/<name>` is session-gated, so an operator
+/// read answers 401 for a present and a missing bundle alike and
+/// cannot tell them apart — which is the converged tree only when this
+/// checkout is (orient's FRESHNESS says whether it is).
+///
+/// Pure, so the words are pinned without a socket: `live` is what
+/// `GET /api/jobs/step-plugins` answered (active rows only), `authored`
+/// the kinds the bundle declares, `bundles` what [`served_bundles`]
+/// found.
+pub(crate) fn step_plugin_live_lines(
+    live: &[boss_jobs::step_plugins::StepPluginSpec],
+    authored: &[String],
+    bundles: &[String],
+) -> Vec<String> {
+    if live.is_empty() {
+        return vec![
+            "\n  BUNDLES — step-plugins live: 0 active row(s) answered — not judged; an empty \
+             registry is also what a wrong target answers"
+                .to_string(),
+        ];
+    }
+    let unauthored: Vec<String> = live
+        .iter()
+        .filter(|p| !authored.contains(&p.kind))
+        .map(|p| {
+            format!(
+                "    UNAUTHORED — step-plugins/{} v{}: live, and no \
+                 {STEP_PLUGINS_BUNDLE}/*.toml declares it — a fresh instance will not have it",
+                p.kind, p.version
+            )
+        })
+        .collect();
+    let unserved: Vec<String> = live
+        .iter()
+        .filter(|p| !bundles.contains(&p.frontend_url))
+        .map(|p| {
+            format!(
+                "    UNSERVED — step-plugins/{} v{} names {}, which {SERVED_BUNDLES}/ does not \
+                 hold — the converge mounts only that directory, so the gateway 404s it and \
+                 the step renders broken where the SPA prefers the plugin",
+                p.kind, p.version, p.frontend_url
+            )
+        })
+        .collect();
+    if unauthored.is_empty() && unserved.is_empty() {
+        return vec![format!(
+            "\n  BUNDLES — step-plugins live: {} active row(s), every one authored by a file \
+             under {STEP_PLUGINS_BUNDLE}/ and naming a bundle {SERVED_BUNDLES}/ holds",
+            live.len()
+        )];
+    }
+    let mut out = vec![format!(
+        "\n  BUNDLES — step-plugins live: {} active row(s), {} authored by no file, {} naming a \
+         bundle {SERVED_BUNDLES}/ does not hold (230f7156):",
+        live.len(),
+        unauthored.len(),
+        unserved.len()
+    )];
+    out.extend(unauthored);
+    out.extend(unserved);
+    out
+}
+
+/// orient's live-end half for step plugins: the active rows, the kinds
+/// this checkout's bundle authors and the bundles it would mount, put
+/// through [`step_plugin_live_lines`]. Never fatal — what cannot be
+/// read prints why, and the approach still prints.
+async fn step_plugin_live_section(http: &reqwest::Client) -> Vec<String> {
+    let skipped = |why: String| vec![format!("\n  BUNDLES — step-plugins live: skipped: {why}")];
+    let root = match crate::brief::repo_root() {
+        Ok(root) => root,
+        Err(e) => return skipped(format!("{e}")),
+    };
+    let authored: Vec<String> =
+        match boss_jobs::seed_loader::load_step_plugins(root.join(STEP_PLUGINS_BUNDLE)) {
+            Ok(specs) => specs.into_iter().map(|p| p.kind).collect(),
+            Err(e) => return skipped(format!("could not read {STEP_PLUGINS_BUNDLE}: {e}")),
+        };
+    let bundles = match served_bundles(&root.join(SERVED_BUNDLES)) {
+        Ok(b) => b,
+        Err(e) => return skipped(format!("could not read {SERVED_BUNDLES}: {e}")),
+    };
+    match live_lineage::<boss_jobs::step_plugins::StepPluginSpec>(http, "/api/jobs/step-plugins")
+        .await
+    {
+        Ok(live) => step_plugin_live_lines(&live, &authored, &bundles),
+        Err(e) => skipped(format!(
+            "GET /api/jobs/step-plugins: {e:#} (not judged; an unread registry is not agreement)"
+        )),
+    }
+}
+
 /// orient's BUNDLES section: every versioned bundle whose registry
 /// answers its lineage — cadence (where the collision was measured),
 /// stations and step plugins (the sweep, 5449111c). Delivery policy
@@ -386,7 +512,9 @@ async fn registry_section<S: Declared + serde::de::DeserializeOwned>(
 /// (`/api/delivery/policy/{name}`), and a lineage read as one row
 /// would call a superseded declaration "behind" when it is the
 /// operator's own history — so it waits for a versions route rather
-/// than being judged from half the facts.
+/// than being judged from half the facts. Step plugins are then read
+/// once more from the LIVE end — unauthored rows and bundles the tree
+/// would not mount (230f7156), see [`step_plugin_live_lines`].
 pub(crate) async fn bundles_section(http: &reqwest::Client) -> Vec<String> {
     use boss_jobs::seed_loader::{load_cadence_rules, load_stations, load_step_plugins};
     let mut out = registry_section(
@@ -417,6 +545,7 @@ pub(crate) async fn bundles_section(http: &reqwest::Client) -> Vec<String> {
         )
         .await,
     );
+    out.extend(step_plugin_live_section(http).await);
     out
 }
 
@@ -424,6 +553,7 @@ pub(crate) async fn bundles_section(http: &reqwest::Client) -> Vec<String> {
 mod tests {
     use super::*;
     use boss_jobs::cadence::CadenceRuleSpec;
+    use boss_jobs::step_plugins::StepPluginSpec;
     use serde_json::json;
 
     /// A cadence row as the wire carries it — the live lineage's shape
@@ -563,6 +693,94 @@ mod tests {
         assert!(text.contains("CONTRADICTS live v7"), "{text}");
         assert!(text.contains("declare v8"), "{text}");
         assert!(text.contains("boss orient"), "{text}");
+    }
+
+    /// A live step-plugin row as `GET /api/jobs/step-plugins` answers it:
+    /// active, and naming the bundle the gateway serves it from.
+    fn live_plugin(kind: &str, version: i32, url: &str) -> StepPluginSpec {
+        let mut p = StepPluginSpec::draft(kind, kind, "generic", url, json!({}));
+        p.version = version;
+        p.status = boss_jobs::registry::WorkflowStatus::Active;
+        p
+    }
+
+    fn names(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// Backlog 230f7156: the per-row judgement above starts from the
+    /// FILE, so a live row no file authors is never read, and nothing
+    /// asked whether the bundle a live row names is one the converge
+    /// mounts. Both are named, per row, from the live end.
+    #[test]
+    fn a_live_plugin_row_no_file_authors_or_whose_bundle_the_tree_lacks_is_named() {
+        let live = [
+            live_plugin("sign-off", 3, "sign-off.js"),
+            live_plugin("hand-made", 2, "hand-made.js"),
+            live_plugin("checklist", 1, "checklist-v2.js"),
+        ];
+        let text = step_plugin_live_lines(
+            &live,
+            &names(&["sign-off", "checklist"]),
+            &names(&["sign-off.js", "checklist.js"]),
+        )
+        .join("\n");
+        assert!(text.contains("3 active row(s)"), "{text}");
+        assert!(text.contains("1 authored by no file"), "{text}");
+        assert!(text.contains("2 naming a bundle"), "{text}");
+        assert!(
+            text.contains("UNAUTHORED — step-plugins/hand-made v2"),
+            "{text}"
+        );
+        assert!(
+            text.contains("UNSERVED — step-plugins/hand-made v2 names hand-made.js"),
+            "{text}"
+        );
+        assert!(
+            text.contains("UNSERVED — step-plugins/checklist v1 names checklist-v2.js"),
+            "{text}"
+        );
+        assert!(!text.contains("step-plugins/sign-off"), "{text}");
+    }
+
+    /// Agreement is said with its count, so a reader can tell twelve
+    /// rows agreeing from a read that returned nothing — which is what
+    /// a wrong target answers, and is never folded into agreement.
+    #[test]
+    fn live_plugin_agreement_is_counted_and_an_empty_registry_is_not_agreement() {
+        let live = [live_plugin("sign-off", 3, "sign-off.js")];
+        let quiet = step_plugin_live_lines(&live, &names(&["sign-off"]), &names(&["sign-off.js"]))
+            .join("\n");
+        assert!(quiet.contains("1 active row(s)"), "{quiet}");
+        assert!(quiet.contains("every one authored"), "{quiet}");
+        assert!(!quiet.contains("UNSERVED") && !quiet.contains("UNAUTHORED"));
+        let empty =
+            step_plugin_live_lines(&[], &names(&["sign-off"]), &names(&["sign-off.js"])).join("\n");
+        assert!(empty.contains("0 active row(s)"), "{empty}");
+        assert!(empty.contains("not judged"), "{empty}");
+    }
+
+    /// The bundle set is the converge's own glob: `*.js` directly in
+    /// `infra/step-plugins/` (infra/forge/cluster-deploy-runner.sh), so
+    /// the README beside them is not a bundle, and every live row's
+    /// bundle in THIS tree is one of them.
+    #[test]
+    fn the_served_bundles_are_the_js_files_the_converge_mounts() {
+        let root = crate::brief::repo_root().expect("repo root");
+        let bundles = served_bundles(&root.join(SERVED_BUNDLES)).unwrap();
+        assert!(bundles.iter().any(|b| b == "sign-off.js"), "{bundles:?}");
+        assert!(bundles.iter().all(|b| b.ends_with(".js")), "{bundles:?}");
+        let authored = boss_jobs::seed_loader::load_step_plugins(root.join(STEP_PLUGINS_BUNDLE))
+            .unwrap()
+            .into_iter()
+            .map(|mut p| {
+                p.status = boss_jobs::registry::WorkflowStatus::Active;
+                p
+            })
+            .collect::<Vec<_>>();
+        let kinds: Vec<String> = authored.iter().map(|p| p.kind.clone()).collect();
+        let text = step_plugin_live_lines(&authored, &kinds, &bundles).join("\n");
+        assert!(text.contains("every one authored"), "{text}");
     }
 
     /// The packet's sweep (5449111c): stations and step plugins declare

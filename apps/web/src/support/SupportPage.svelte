@@ -24,7 +24,8 @@
   import type { Account as AccountRow } from '../accounts/types';
   import TierChip from '../accounts/TierChip.svelte';
   import { shortId } from '../data/ids';
-  import { href } from '../router';
+  import { rowLink } from '@boss/web-kit/ui/RowLink';
+  import { href, navigate } from '../router';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
   import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
@@ -343,7 +344,12 @@
           </thead>
           <tbody>
             {#each activeSorted as r (r.job.id)}
-              <tr class="data-table-row-link">
+              <tr
+                use:rowLink={{
+                  onActivate: () => navigate(entityHref('job', r.job.id)),
+                  label: r.job.title,
+                }}
+              >
                 <td class="mono">
                   <Link to={entityHref('job', r.job.id)}>
                     {shortId(r.job.id)}
@@ -411,7 +417,12 @@
           </thead>
           <tbody>
             {#each healthSorted as r (r.account.id)}
-              <tr class="data-table-row-link">
+              <tr
+                use:rowLink={{
+                  onActivate: () => navigate(entityHref('account', r.account.id)),
+                  label: `Account ${r.account.name ?? r.account.id}`,
+                }}
+              >
                 <td>
                   <Link to={entityHref('account', r.account.id)}>
                     {r.account.name ?? r.account.id}

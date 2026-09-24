@@ -5,6 +5,8 @@
   // panel that we're deferring to phase 2.
 
   import { navigate, href } from '../router';
+  import Link from '@boss/web-kit/ui/Link.svelte';
+  import { rowLink } from '@boss/web-kit/ui/RowLink';
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import OverflowBanner from '@boss/web-kit/ui/OverflowBanner.svelte';
@@ -177,21 +179,13 @@
           <tbody>
             {#each visible as d (d.asset_id)}
               <tr
-                class="data-table-row-link"
-                onclick={() =>
-                  navigate(entityHref('asset', d.asset_id))}
+                use:rowLink={{
+                  onActivate: () => navigate(entityHref('asset', d.asset_id)),
+                  label: `Asset ${d.asset_id}`,
+                }}
               >
                 <td class="mono">
-                  <a
-                    href={entityHref('asset', d.asset_id)}
-                    onclick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      navigate(entityHref('asset', d.asset_id));
-                    }}
-                  >
-                    {d.asset_id}
-                  </a>
+                  <Link to={entityHref('asset', d.asset_id)}>{d.asset_id}</Link>
                 </td>
                 <td class="mono">{d.sku ?? '—'}</td>
                 <td>{PHASE_LABEL[d.phase]}</td>

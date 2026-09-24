@@ -18,6 +18,8 @@
   import { departmentLabel } from '@boss/web-kit/nav';
   import { departments } from '@boss/web-kit/session/departments.svelte';
   import { href, navigate } from '../router';
+  import Link from '@boss/web-kit/ui/Link.svelte';
+  import { rowLink } from '@boss/web-kit/ui/RowLink';
   import { shortId } from '../data/ids';
   import type { Remote } from '../data/remote';
   import { subjectLabel, subjectPath, type Job } from '../jobs/types';
@@ -116,32 +118,14 @@
     </thead>
     <tbody>
       {#each list as j (j.id)}
-        <tr class="data-table-row-link" onclick={() => navigate(entityHref('job', j.id))}>
+        <tr use:rowLink={{ onActivate: () => navigate(entityHref('job', j.id)), label: j.title }}>
           <td class="mono">
-            <a
-              href={entityHref('job', j.id)}
-              onclick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                navigate(entityHref('job', j.id));
-              }}
-            >
-              {shortId(j.id)}
-            </a>
+            <Link to={entityHref('job', j.id)}>{shortId(j.id)}</Link>
           </td>
           <td>{j.kind}</td>
           <td>{j.title}</td>
           <td class="mono">
-            <a
-              href={href(subjectPath(j.subject))}
-              onclick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                navigate(href(subjectPath(j.subject)));
-              }}
-            >
-              {subjectLabel(j.subject)}
-            </a>
+            <Link to={href(subjectPath(j.subject))}>{subjectLabel(j.subject)}</Link>
           </td>
           <td>{j.status}</td>
           <td>{j.priority}</td>
