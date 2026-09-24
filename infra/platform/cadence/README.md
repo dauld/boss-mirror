@@ -46,6 +46,15 @@ report says so — `behind the live lineage (vN active), untouched` — as
 information, never a refusal. The conductor's loop reads the LIVE
 active rows over `/api/cadence/rules` and is untouched by this bundle.
 
+**So bump from the LIVE newest, never from the file** (backlog
+5449111c). A file behind live turns "bump the version" into a version
+that already exists live with other columns: on 2026-09-21 the boarding
+cooldown was bumped 6 -> 7 from this directory while live was already
+at v7, gated green, landed, and changed nothing. `boss orient`'s
+BUNDLES section says "bundle vN, live vM" for every file here, and
+`boss gate` refuses to launch a car that changes a row the live lineage
+will not take as written — naming the version that would publish.
+
 **Published by `boss-platform-workflow-seed`**, the same binary and
 the same `--seed-path` every launcher already passes, after the
 workflows, stations and step plugins: the cadence bundle is the

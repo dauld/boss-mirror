@@ -2951,6 +2951,24 @@ pub async fn run(
         crate::freshness::BaseGuard::Refuse(why) => bail!("{why}"),
     }
 
+    // NOR IS A BUNDLE ROW THE LIVE LINEAGE WILL NOT TAKE (5449111c).
+    // The gate reads only files, so a version bumped from a file that
+    // sits behind live gates green and lands with no effect — the
+    // boarding cooldown, 3ec04168. Read here, after the sha and its base
+    // are final, and only for rows the car changes; an unread lineage
+    // proceeds, said. See `bundle_lineage::judge_car`.
+    let bundles =
+        crate::bundle_lineage::judge_car(&http, Path::new("."), &base_obs.base, &sha).await;
+    for u in &bundles.unread {
+        eprintln!("boss gate: bundle row not judged against its live lineage — {u}");
+    }
+    if !bundles.refused.is_empty() {
+        bail!(
+            "{}",
+            crate::bundle_lineage::car_refusal(&sha, &bundles.refused)
+        );
+    }
+
     // A RE-GATE AT AN UNCHANGED HEAD RECORDS WHAT IT RE-GATES. Read
     // here, AFTER the sha is final (a `--rebase` moves it, and a moved
     // head is the author's fix, not a re-gate), and before the packet,
