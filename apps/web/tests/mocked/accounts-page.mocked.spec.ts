@@ -18,7 +18,8 @@
 //   controls — 1 search input; tier buttons: All + 3 tiers (4);
 //            state buttons: All states + one per distinct state; one
 //            account link per row, and the row itself navigates to the
-//            same place (so a click on the link navigates TWICE); up to
+//            same place (the link owns its own click, so that is ONE
+//            navigation — backlog 18890a16); up to
 //            3 OverflowBanners (accounts, devices, service jobs — none
 //            for invoices).
 //
@@ -441,12 +442,13 @@ async function installDetail(page: Page, id: string, row: ReturnType<typeof acco
 }
 
 test.describe('/ux/accounts — the account link, the row, and back', () => {
-  // UNFILED: the link sits inside a row that navigates on click, and
-  // Link.svelte prevents the default but does not stop the click
-  // bubbling, so ONE click on the name navigates twice — two history
-  // entries for the same account — and the first Back lands on the
-  // account again. It takes two Backs to return to the list.
-  test('every row links its account under the catalogued accounts path; following one lands on it, and Back takes two presses', async ({ page }) => {
+  // Backlog 18890a16: the link sits inside a row that navigates on
+  // click, and Link.svelte prevented the default without stopping the
+  // click bubbling, so ONE click on the name navigated twice — two
+  // history entries for the same account — and the first Back landed
+  // on the account again. The link now owns its click: one entry, one
+  // Back.
+  test('every row links its account under the catalogued accounts path; following one lands on it once, and one Back returns', async ({ page }) => {
     await installFleet(page);
     await installDetail(page, 'acct-zed', ZED);
     await mountFleet(page);
@@ -464,14 +466,30 @@ test.describe('/ux/accounts — the account link, the row, and back', () => {
     await body(page).getByRole('link', { name: 'Zed Taproom', exact: true }).click();
     await expect.poll(() => new URL(page.url()).pathname).toBe(`${PATH}/acct-zed`);
     await expect(page.locator('h1.exec-title')).toHaveText('Zed Taproom');
-    expect(await page.evaluate(() => window.history.length)).toBe(depth + 2);
-
-    await page.goBack();
-    await expect.poll(() => new URL(page.url()).pathname).toBe(`${PATH}/acct-zed`);
-    await expect(page.locator('h1.exec-title')).toHaveText('Zed Taproom');
+    expect(await page.evaluate(() => window.history.length)).toBe(depth + 1);
 
     await page.goBack();
     await expect.poll(() => new URL(page.url()).pathname).toBe(PATH);
+    await expect(nameColumn(page)).toHaveText(FLEET_NAMES);
+  });
+
+  // The modified-click half of the same bubbling: a ctrl/cmd-click on
+  // the name is the browser's open-in-new-tab, which Link lets through
+  // — and the row, reached by the same click, used to navigate THIS
+  // tab as well. The link's click is the link's alone either way.
+  test('a modified click on the account link leaves this tab on the list', async ({ page }) => {
+    await installFleet(page);
+    await installDetail(page, 'acct-zed', ZED);
+    await mountFleet(page);
+
+    const depth = await page.evaluate(() => window.history.length);
+    const popup = page.context().waitForEvent('page');
+    await body(page)
+      .getByRole('link', { name: 'Zed Taproom', exact: true })
+      .click({ modifiers: ['ControlOrMeta'] });
+    await (await popup).close();
+    expect(new URL(page.url()).pathname).toBe(PATH);
+    expect(await page.evaluate(() => window.history.length)).toBe(depth);
     await expect(nameColumn(page)).toHaveText(FLEET_NAMES);
   });
 
