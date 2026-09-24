@@ -173,14 +173,6 @@ jobs        = true   # Jobs + Steps; the coordination primitive
 people      = true   # Employees + Accounts + Vendors
 finance     = true   # GL + invoices + A/R + payroll
 messages    = true   # Inbox: DMs + system signals
-calendar    = false  # The "Release calendar" sidebar entry shows
-                     # forward-scheduled marketing-launch / tap-launch /
-                     # seasonal-release Jobs with explicit release_date
-                     # metadata. The brewery operates event-driven —
-                     # Workflows fire on Poisson schedules, no
-                     # forward-dated launch calendar. The reservations
-                     # primitive (used by /me/calendar for assignee
-                     # scheduling) is a separate surface and stays on.
 qa          = true   # QA & Compliance hub — already brewery-themed
                      # (Batch QC + Compliance + Equipment PM tabs).
                      # Used-device-shop variant of /qa stops existing

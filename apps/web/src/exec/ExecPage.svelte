@@ -1,12 +1,15 @@
 <script lang="ts">
   // Executive overview — port of apps/web/src/exec/ExecPage.tsx.
   //
-  // Inlines the six panels (Assets, Mix, Jobs, LaunchCalendar,
-  // TechUtilization, RiskScore) because each one is small and they
-  // share the dashboard-card layout. Keeping them together here
-  // trades a bit of file length for a much shorter import graph.
+  // Inlines its panels because each one is small and they share the
+  // dashboard-card layout. Keeping them together here trades a bit of
+  // file length for a much shorter import graph. The launch-calendar
+  // panel and the people read that named its owners retired with the
+  // second example tenant (design 2ea444f5, backlog a8991c86): no
+  // Workflow on the live instance or in the example tenant we keep
+  // produces a launch date, so the panel only ever said nothing was
+  // launching.
 
-  import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import Link from '@boss/web-kit/ui/Link.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import { formatMoney } from '@boss/web-kit/ui/money';
@@ -17,12 +20,6 @@
     type CommerceSummary,
   } from '../finance/api';
   import { getLabel } from '@boss/web-kit/session/manifest.svelte';
-  import {
-    failedRead,
-    okRead,
-    readStateOfResponse,
-    type ReadState,
-  } from '../data/readState';
 
   // --- Shared formatting ---------------------------------------------------
 
@@ -50,31 +47,10 @@
 
   let summary = $state<CommerceSummary | null>(null);
   let summaryLoading = $state(true);
-  let empNames = $state<Map<string, string>>(new Map());
-  // The people read only names the launch owners, so a failure degrades
-  // those names to ids rather than failing a panel — but it says so.
-  // Until backlog 223ebcd6 a refusal was parsed as `[]` and a network
-  // error was ignored, and the owners silently became ids.
-  let peopleRead = $state<ReadState>(okRead);
 
   $effect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        const pResp = await fetch('/api/people');
-        const read = readStateOfResponse('/api/people', pResp);
-        const pBody = read.kind === 'ok' ? await pResp.json() : [];
-        if (!cancelled) {
-          const m = new Map<string, string>();
-          for (const e of pBody as Array<{ id: string; name: string }>) {
-            m.set(e.id, e.name);
-          }
-          empNames = m;
-          peopleRead = read;
-        }
-      } catch (e) {
-        if (!cancelled) peopleRead = failedRead(e instanceof Error ? e.message : String(e));
-      }
       try {
         const s = await loadCommerceSummary();
         if (!cancelled) {
@@ -175,55 +151,6 @@
 
   let jobTop = $derived(jobSummary ? jobSummary.by_kind.slice(0, 5) : []);
   let jobMaxCount = $derived(Math.max(...jobTop.map((r) => r.count), 1));
-
-  // --- Launch calendar panel ----------------------------------------------
-
-  type LaunchCalendarRow = {
-    job_id: string;
-    title: string;
-    owner_id: string | null;
-    launch_date: string | null;
-    launch_channel: string | null;
-  };
-
-  let launches = $state<LaunchCalendarRow[]>([]);
-  let launchesLoading = $state(true);
-  /// Non-null when the panel's load failed — rendered instead of the
-  /// empty state (packet 3fba9c35, the false-empty sweep).
-  let launchesFailed = $state<string | null>(null);
-
-  $effect(() => {
-    let cancelled = false;
-    (async () => {
-      const today = appNow();
-      const from = today.toISOString().slice(0, 10);
-      const toD = new Date(today);
-      toD.setDate(toD.getDate() + 30);
-      const to = toD.toISOString().slice(0, 10);
-      try {
-        const qs = new URLSearchParams({ from, to });
-        const r = await fetch(`/api/jobs/launch-calendar?${qs.toString()}`);
-        if (r.ok) {
-          const body = (await r.json()) as { data?: LaunchCalendarRow[] };
-          if (!cancelled) {
-            launches = Array.isArray(body?.data) ? body.data : [];
-            launchesFailed = null;
-          }
-        } else {
-          if (!cancelled) launchesFailed = `HTTP ${r.status}`;
-        }
-      } catch (e) {
-        if (!cancelled) launchesFailed = e instanceof Error ? e.message : String(e);
-      }
-      if (!cancelled) launchesLoading = false;
-    })();
-    return () => {
-      cancelled = true;
-    };
-  });
-
-  let scheduled = $derived(launches.filter((r) => r.launch_date !== null));
-  let unscheduled = $derived(launches.length - scheduled.length);
 
   // --- Finished-goods inventory panel ------------------------------------
   // Replaces the legacy "Tech utilization" panel which keyed on service-
@@ -402,60 +329,6 @@
           <Link to={href('/ux/jobs')}>
             View all jobs →
           </Link>
-        </div>
-      {/if}
-    </section>
-
-    <section class="exec-card exec-card-wide">
-      <h2>Launches — next 30 days</h2>
-      {#if launchesLoading && launches.length === 0}
-        <p class="empty">Loading…</p>
-      {:else if launchesFailed}
-        <p class="empty load-failed" role="alert">
-          Couldn't load launches — {launchesFailed}
-        </p>
-      {:else if launches.length === 0}
-        <p class="empty">No marketing motions launching in the next 30 days.</p>
-      {:else}
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th style="width:100px">Date</th>
-              <th>Motion</th>
-              <th style="width:120px">Channel</th>
-              <th style="width:140px">Owner</th>
-            </tr>
-          </thead>
-          <tbody>
-            {#each scheduled.slice(0, 8) as r (r.job_id)}
-              <tr>
-                <td class="mono" style="font-size:12px; color:var(--static)">{r.launch_date}</td>
-                <td><EntityLink kind="job" id={r.job_id} label={r.title} /></td>
-                <td style="font-size:12px; color:var(--static)">{r.launch_channel ?? '—'}</td>
-                <td style="font-size:12px">
-                  {#if r.owner_id}
-                    <EntityLink
-                      kind="employee"
-                      id={r.owner_id}
-                      label={empNames.get(r.owner_id)}
-                    />
-                  {:else}
-                    —
-                  {/if}
-                </td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-        {#if peopleRead.kind === 'failed'}
-          <p class="load-failed" role="alert" style="font-size:12px">
-            Couldn't load owner names — {peopleRead.error}. Owners show as ids.
-          </p>
-        {/if}
-        <div style="margin-top:8px; font-size:12px; color:var(--static)">
-          {#if scheduled.length > 8}+{scheduled.length - 8} more · {/if}
-          {#if unscheduled > 0}{unscheduled} unscheduled · {/if}
-          <a href={href('/ux/calendar')}>Open full calendar →</a>
         </div>
       {/if}
     </section>

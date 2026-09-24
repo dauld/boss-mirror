@@ -185,10 +185,6 @@ name = "the_claim_clears_the_run_edge_when_the_holder_changes_pg"
 required-features = ["postgres"]
 
 [[test]]
-name = "the_launch_calendar_reads_a_property_not_a_kind"
-required-features = ["postgres"]
-
-[[test]]
 name = "step_terminal_refusal"
 required-features = ["postgres"]
 

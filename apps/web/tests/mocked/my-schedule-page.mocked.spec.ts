@@ -130,9 +130,11 @@ test.describe('/ux/calendar/me — State A, the calendar module off (the live in
       await expect(page.locator('.week-col-empty')).toHaveCount(7);
       // The app tab is the schedule row's own app, not Production.
       await expect(page.locator('.perspective-tabs [aria-current="page"]')).toHaveText('Home');
-      // Whichever sidebar row is lit, it is never the Release calendar's.
+      // The Release calendar row it used to light is gone: /ux/calendar
+      // retired with the second example tenant (design 2ea444f5).
+      expect(Object.values(ROUTE_CATALOG).map((r) => r.path)).not.toContain('/ux/calendar');
       await expect(
-        page.locator('.shell-nav-item-active', { hasText: ROUTE_CATALOG.calendar.label }),
+        page.locator('.shell-nav-item-active', { hasText: 'Release calendar' }),
       ).toHaveCount(0);
 
       expect(await settledReads(page, () => seen.reads.length, 1)).toBe(1);

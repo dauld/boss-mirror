@@ -513,9 +513,14 @@ async fn list_every<R: JobsRepository + 'static, B: EventBus + 'static>(
 /// still in receiving or has crossed into marshalling (design 62de32ae
 /// decision 4). The steps come from `open`, the open packets this pass
 /// already read; a row that page did not carry is read on its own, so a
-/// packet is never judged on steps nobody read. A closed row carries
-/// none — it stands in no region. `None` on any failed read: an unread
-/// intake is troubled, never an empty one.
+/// packet is never judged on steps nobody read. A CLOSED row (every one
+/// closed within two windows) carries its steps too: it stands in no
+/// region, but its intake step's completion is a crossing of the
+/// receiving -> marshalling border ([`regions::taken_in_at`]), and a
+/// packet taken in and closed inside the window would otherwise be a
+/// crossing nobody counted — the rail used to count the close instead,
+/// a different event on most kinds (design 62de32ae). `None` on any
+/// failed read: an unread intake is troubled, never an empty one.
 async fn read_inbound<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &Arc<JobsApiState<R, B>>,
     filter: &JobFilter,
@@ -529,12 +534,9 @@ async fn read_inbound<R: JobsRepository + 'static, B: EventBus + 'static>(
         .collect();
     let mut out = Vec::with_capacity(rows.len());
     for job in rows {
-        let steps = if job.status != JobStatus::Open {
-            Vec::new()
-        } else if let Some(steps) = steps_of.get(&job.id.to_string()) {
-            (*steps).clone()
-        } else {
-            state.jobs.list_steps(&job.id).await.ok()?
+        let steps = match steps_of.get(&job.id.to_string()) {
+            Some(steps) if job.status == JobStatus::Open => (*steps).clone(),
+            _ => state.jobs.list_steps(&job.id).await.ok()?,
         };
         out.push((job, steps));
     }

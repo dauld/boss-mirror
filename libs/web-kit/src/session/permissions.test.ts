@@ -54,7 +54,7 @@ describe('canSeeRoute — a role whose Class row declares surfaces sees exactly 
   });
   test('an empty declaration is a declaration: only the always-on routes', () => {
     const none = row('bartender', { surfaces: [] });
-    expect(canSeeRoute('bartender', 'calendar', none)).toBe(false);
+    expect(canSeeRoute('bartender', 'schedule', none)).toBe(false);
     expect(canSeeRoute('bartender', 'inbox', none)).toBe(true);
   });
 });

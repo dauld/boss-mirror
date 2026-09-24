@@ -9,7 +9,8 @@
   // receiver, confirm." Both ack lights up → step done.
 
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
-  import type { Employee } from '../people/types';
+  import { loadPersonOrTeamNames, personIdsOf } from '../data/ownerNames';
+  import { okRead, type ReadState } from '../data/readState';
   import { putStep } from './stepWrite';
 
   type StepData = {
@@ -55,25 +56,29 @@
   });
   let terminal = $derived(_isTerminal(step.status));
 
-  let employees = $state<Employee[]>([]);
-
+  // Names the two ends, one row each, and says so when a name cannot
+  // load. Until backlog 1e73bd93 this read the WHOLE roster, a refusal
+  // became `[]` and a network error was caught and dropped, so a person
+  // silently became an id. Either end may be a TEAM or a role rather
+  // than a person (the StepType's own "Person or team"), and the people
+  // service answers one 404 — "not a person", which is an answer, so
+  // loadPersonOrTeamNames keeps its id as the label and paints nothing.
+  let empNames = $state<ReadonlyMap<string, string>>(new Map());
+  let namesRead = $state<ReadState>(okRead);
+  let endsKey = $derived(personIdsOf([fromId, toId]).join('\n'));
   $effect(() => {
+    const ids = endsKey ? endsKey.split('\n') : [];
     let cancelled = false;
-    fetch('/api/people')
-      .then((r) => (r.ok ? r.json() : []))
-      .then((roster: Employee[]) => {
-        if (!cancelled) employees = roster;
-      })
-      .catch(() => {});
+    (async () => {
+      const out = await loadPersonOrTeamNames(ids);
+      if (!cancelled) {
+        empNames = out.names;
+        namesRead = out.read;
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  });
-
-  let empNames = $derived.by(() => {
-    const m = new Map<string, string>();
-    for (const e of employees) m.set(e.id, e.name ?? "");
-    return m;
   });
 
 
@@ -120,6 +125,12 @@
     <span class="step-kind-label">{step.kind}</span>
     <span class="step-status step-status-{step.status}">{step.status}</span>
   </div>
+
+  {#if namesRead.kind === 'failed'}
+    <p class="load-failed" role="alert">
+      Couldn't load the names on this handoff — {namesRead.error}. People show as ids.
+    </p>
+  {/if}
 
   <div class="step-handoff-pair">
     <div class="step-handoff-side">

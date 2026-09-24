@@ -5,6 +5,8 @@
   import { appNow } from '@boss/web-kit/sim-clock';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import { formatActor, isHumanActor } from '../data/actor';
+  import { loadOwnerNames, personIdsOf } from '../data/ownerNames';
+  import { okRead, type ReadState } from '../data/readState';
   import { createAccountNote } from './api';
   import type { AccountNote } from './types';
   import { session } from '@boss/web-kit/session/session.svelte';
@@ -16,29 +18,37 @@
 
   type Kind = 'note' | 'call' | 'meeting' | 'email' | 'interaction';
 
-  let empNames = $state<Map<string, string>>(new Map());
+  let empNames = $state<ReadonlyMap<string, string>>(new Map());
+  let namesRead = $state<ReadState>(okRead);
   let appended = $state<AccountNote[]>([]);
   let draft = $state('');
   let kind = $state<Kind>('note');
   let posting = $state(false);
   let error = $state<string | null>(null);
 
+  let merged = $derived([...appended, ...notes]);
+
+  // Names only the people who wrote the ten notes shown, one row each,
+  // and says so when a name cannot load. Until backlog 1e73bd93 this
+  // read the WHOLE roster and dropped a refusal or a network error, so
+  // the authors silently became ids. Machine authors are never asked
+  // about (see ../data/ownerNames.ts). Keyed on the id list as a string
+  // so posting a note by an author already shown does not re-ask.
+  let authorKey = $derived(personIdsOf(merged.slice(0, 10).map((n) => n.actor_id)).join('\n'));
   $effect(() => {
+    const ids = authorKey ? authorKey.split('\n') : [];
+    let cancelled = false;
     (async () => {
-      try {
-        const r = await fetch('/api/people');
-        if (!r.ok) return;
-        const roster = (await r.json()) as Array<{ id: string; name: string }>;
-        const m = new Map<string, string>();
-        for (const e of roster) m.set(e.id, e.name);
-        empNames = m;
-      } catch {
-        // Ignore.
+      const out = await loadOwnerNames(ids);
+      if (!cancelled) {
+        empNames = out.names;
+        namesRead = out.read;
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   });
-
-  let merged = $derived([...appended, ...notes]);
   let canPost = $derived(draft.trim().length > 0 && !posting);
 
   let actorId = $derived(
@@ -111,6 +121,11 @@
     {#if merged.length === 0}
       <p class="empty">No notes logged.</p>
     {:else}
+      {#if namesRead.kind === 'failed'}
+        <p class="empty load-failed" role="alert">
+          Couldn't load who wrote these notes — {namesRead.error}. Authors show as ids.
+        </p>
+      {/if}
       <ul class="pp-note-list">
         {#each merged.slice(0, 10) as n (n.id)}
           <li class="pp-note-item">

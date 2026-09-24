@@ -656,8 +656,10 @@ mod tests {
         // kind, so the credential broker's rule can target
         // `step.done.credential-rotation` instead of firing on every
         // `task` — the same reasoning as `gate-verdict` before it).
+        // 47 since `marketing-launch` retired with the launch calendar
+        // (design 2ea444f5, backlog a8991c86).
         let reg = StepRegistry::v1();
-        assert_eq!(reg.all().len(), 48);
+        assert_eq!(reg.all().len(), 47);
     }
 
     /// The reason `scope-declaration` is registered at all.
@@ -1054,8 +1056,8 @@ mod tests {
         let v = all_v1_types();
         assert_eq!(
             v.len(),
-            48,
-            "step_types.toml should have 48 [[step_type]] blocks"
+            47,
+            "step_types.toml should have 47 [[step_type]] blocks"
         );
     }
 

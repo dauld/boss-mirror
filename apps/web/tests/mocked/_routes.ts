@@ -26,7 +26,7 @@ export const ROUTES: ReadonlyArray<string> = [
   // operator surfaces are re-rooted under /ux/*.
   '/', '/ux/me', '/ux/inbox', '/ux/views', '/ux/jobs', '/ux/accounts', '/ux/vendors', '/ux/people', '/ux/parts',
   '/ux/products', '/ux/shipping', '/ux/assets', '/ux/catalog',
-  '/ux/marketing-assets', '/ux/marketing-assets/ma-1', '/ux/calendar', '/ux/calendar/me',
+  '/ux/marketing-assets', '/ux/marketing-assets/ma-1', '/ux/calendar/me',
   '/ux/support', '/ux/service', '/ux/qa', '/ux/hr', '/ux/sales',
   '/ux/shop', '/ux/manual',
   // The IT department — six surfaces, families as tabs (1f6d55e0).

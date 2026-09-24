@@ -24,7 +24,9 @@
 # infra/postgres/example-reference-rows.sh's, derived from the
 # example tenants' own seeds in this checkout (examples/*/seeds/
 # classes.*, locations.toml, chart_of_accounts.toml, tax.toml,
-# tenant.toml) —
+# tenant.toml), and from infra/postgres/retired-examples/ — the rows a
+# retired example's seeds carried that the migrations still seed
+# (backlog a8991c86, car 6) —
 # the same derivation init.sh runs on a fresh instance's first boot,
 # so the two doors cannot disagree about what is an example row.
 #

@@ -1604,35 +1604,6 @@ required_roles = []
   description = "Confirmed failure mode / decision from the call"
 
 [[step_type]]
-kind = "marketing-launch"
-label = "Marketing Launch"
-category = "admin"
-ux = "expanded"
-version = 1
-description = "Calendar-visible launch date for a marketing motion. Dedicated kind (separate from generic `scheduling`) so the launch-calendar projection can query by step kind and the launch-calendar UX plugin has a stable mount point."
-typical_duration_hours = 2.0
-typical_duration_jitter = 0.5
-required_roles = []
-
-  [[step_type.fields]]
-  name = "launch_date"
-  field_type = "date"
-  required = false
-  description = "Calendar-visible launch date"
-
-  [[step_type.fields]]
-  name = "launch_channel"
-  field_type = "string"
-  required = false
-  description = "Channel (email/webinar/paid-social/event)"
-
-  [[step_type.fields]]
-  name = "notes"
-  field_type = "string"
-  required = false
-  description = "Launch-day notes"
-
-[[step_type]]
 kind = "marketing-attribution"
 label = "Marketing Attribution"
 category = "admin"

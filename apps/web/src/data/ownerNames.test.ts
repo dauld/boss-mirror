@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { loadOwnerNames, ownerIdsOf, personIdsOf } from './ownerNames';
+import { loadOwnerNames, loadPersonOrTeamNames, ownerIdsOf, personIdsOf } from './ownerNames';
 
 // Backlog 0268a829 (page audit 0ceeffa6, /ux/calendar GAP 8). The
 // calendar named its owners by fetching the WHOLE roster, and a refusal
@@ -131,5 +131,44 @@ describe('naming the owners shown', () => {
     const out = await loadOwnerNames(['emp-a'], fn);
     expect(out.read).toEqual({ kind: 'ok' });
     expect(out.names.has('emp-a')).toBe(false);
+  });
+});
+
+// Backlog 1e73bd93, the last car. A handoff's ends are a person OR a
+// team (the StepType's own field descriptions), and every seeded
+// handoff names a team or a role. The people service answers such an id
+// 404 "no employee with ID …" — an answer, not an outage — so reading
+// it as a failure would paint a false line on every brewery handoff.
+describe('naming ids that may be a person or a team', () => {
+  test('a 404 is "not a person": the read worked, the id is the label', async () => {
+    const { fn } = fakeFetch({
+      '/api/people/emp-a': { status: 200, body: { id: 'emp-a', name: 'Ada' } },
+      '/api/people/shipping-clerk': { status: 404, body: 'no employee with ID shipping-clerk' },
+    });
+    const out = await loadPersonOrTeamNames(['emp-a', 'shipping-clerk'], fn);
+    expect(out.read).toEqual({ kind: 'ok' });
+    expect(out.names.get('emp-a')).toBe('Ada');
+    expect(out.names.has('shipping-clerk')).toBe(false);
+  });
+
+  test('any other refusal is still a failure that names its read', async () => {
+    const { fn } = fakeFetch({
+      '/api/people/emp-a': { status: 503, body: 'people down' },
+      '/api/people/shipping-clerk': { status: 404, body: 'no employee with ID shipping-clerk' },
+    });
+    const out = await loadPersonOrTeamNames(['emp-a', 'shipping-clerk'], fn);
+    expect(out.read).toEqual({ kind: 'failed', error: '/api/people/emp-a: HTTP 503' });
+  });
+
+  test('a network error is a failure too', async () => {
+    const { fn } = fakeFetch({ '/api/people/emp-a': new Error('connection reset') });
+    const out = await loadPersonOrTeamNames(['emp-a'], fn);
+    expect(out.read).toEqual({ kind: 'failed', error: '/api/people/emp-a: connection reset' });
+  });
+
+  test('an owner read keeps treating a 404 as a failed read — only a person-or-team id may be a team', async () => {
+    const { fn } = fakeFetch({ '/api/people/emp-gone': { status: 404, body: 'no employee with ID emp-gone' } });
+    const out = await loadOwnerNames(['emp-gone'], fn);
+    expect(out.read).toEqual({ kind: 'failed', error: '/api/people/emp-gone: HTTP 404' });
   });
 });

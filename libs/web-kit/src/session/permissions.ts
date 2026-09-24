@@ -31,7 +31,7 @@ export type RouteName =
   | 'shop' | 'exec' | 'catalog' | 'accounts' | 'assets' | 'sales' | 'service'
   | 'parts' | 'products' | 'finance' | 'people' | 'qa' | 'warehouse' | 'support'
   | 'system-monitoring' | 'inbox' | 'shipping' | 'views' | 'system-feedback'
-  | 'vendors' | 'marketing-assets' | 'calendar' | 'schedule' | 'jobs'
+  | 'vendors' | 'marketing-assets' | 'schedule' | 'jobs'
   // Platform-administration surfaces. Same `permKey: 'it'` gate
   // as the legacy ADMIN footer; these route names exist so a role's
   // Class row can name the surfaces in `metadata.surfaces` per the
@@ -67,7 +67,7 @@ export type RouteName =
 export const ROUTES: ReadonlyArray<RouteName> = [
   'shop', 'exec', 'catalog', 'accounts', 'assets', 'sales', 'service',
   'parts', 'products', 'finance', 'people', 'qa', 'warehouse', 'support', 'system-monitoring',
-  'shipping', 'vendors', 'marketing-assets', 'calendar',
+  'shipping', 'vendors', 'marketing-assets',
   'schedule', 'jobs',
   'policy', 'workflows', 'system-step-plugins', 'system-dispatcher',
   'system-dispatcher-rules', 'system-dispatcher-rule', 'system-design', 'system-yard', 'system-estate', 'system-subjects', 'system-kb', 'auth-admin',

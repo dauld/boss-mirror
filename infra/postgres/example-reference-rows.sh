@@ -50,6 +50,22 @@
 # the bare schema, what remains is exactly what the platform's own
 # baseline, workflows and schema defaults name.
 #
+# A RETIRED EXAMPLE'S MIGRATION ROWS STAY CANDIDATES (backlog a8991c86,
+# car 6). The migrations outlive the examples they seeded for: when the
+# used-device shop was retired (David, 2026-09-24), 01-registries.sql
+# still seeded its roles, departments, account types, `warehouse-zone`
+# and companies row on every instance, and a candidate set read only
+# from examples/ would have stopped naming them the day that directory
+# was deleted — rows nobody is asked about, on every fresh instance.
+# So the set is also read from retired-examples/<name>/ beside this
+# script, in the same shape (tenant.toml for the companies row, seeds/
+# for the rest) and with the same readers, holding ONLY the rows the
+# migrations seed — the one list here that is declared rather than read
+# off a live seed, and so pinned to the migration by
+# example_reference_rows_sh.rs and example_reference_rows_sql.rs. A
+# retired example is not an example: `boot` keeps rows only for a
+# tenant under examples/.
+#
 # THE INSTANCE'S OWN TENANT IS SUBTRACTED FIRST (backlog 86835bf9).
 # Measured 2026-09-18 on the first --for-real run on prod (ops-request
 # 8522ad76): the candidate set is derived from the example seeds BY
@@ -128,6 +144,11 @@
 #   BOSS_EXAMPLES_DIR   the examples directory (default: the one beside
 #                       this script's checkout — /opt/boss/examples in
 #                       the image, <checkout>/examples on the forge)
+#   BOSS_RETIRED_EXAMPLES_DIR  the retired examples (default:
+#                       retired-examples/ beside this script, which the
+#                       image ships with it — infra/postgres is copied
+#                       whole). Missing is a refusal (exit 4); empty is
+#                       no retired example.
 
 set -uo pipefail
 
@@ -138,6 +159,7 @@ CANNOT_ANSWER=4
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$SELF_DIR/../.." && pwd)"
 EXAMPLES="${BOSS_EXAMPLES_DIR:-$REPO/examples}"
+RETIRED="${BOSS_RETIRED_EXAMPLES_DIR:-$SELF_DIR/retired-examples}"
 
 USAGE="usage: $ME seeds [<tenant-dir>] | plan-sql <tenant-dir> | delete-sql <tenant-dir> | boot <tenant-dir>"
 MODE="${1:-}"
@@ -188,10 +210,11 @@ toml_blocks() { # <file> <header>
         END { flush() }' "$1" | jq -s .
 }
 
-# The example tenants: every examples/<name>/ holding a manifest.
-example_dirs() {
+# Every <root>/<name>/ holding a manifest: the example tenants under
+# $EXAMPLES, the retired ones under $RETIRED.
+tenant_dirs() { # <root>
     local d
-    for d in "$EXAMPLES"/*/; do
+    for d in "$1"/*/; do
         d="${d%/}"
         [ -n "$(tenant_id_of "$d")" ] && printf '%s\n' "$d"
     done
@@ -256,7 +279,15 @@ seed_sets() {
         [ -n "$d" ] || continue
         one=$(dir_sets "$d" "$EXAMPLES") || return 1
         all=$(jq -c --argjson one "$one" '. + [$one]' <<<"$all")
-    done < <(example_dirs)
+    done < <(tenant_dirs "$EXAMPLES")
+    # A retired example's rows are named from the directory above
+    # $RETIRED, so a source reads retired-examples/<name>/… and never
+    # passes for a live example's.
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        one=$(dir_sets "$d" "$(dirname "$RETIRED")") || return 1
+        all=$(jq -c --argjson one "$one" '. + [$one]' <<<"$all")
+    done < <(tenant_dirs "$RETIRED")
     # Duplicates across tenants (both carry `ceo`) collapse.
     jq -c '{
         classes: (map(.classes) | add | unique_by([.subject_kind, .code]) | sort_by([.subject_kind, .code])),
@@ -329,11 +360,12 @@ if [ "$MODE" = boot ]; then
             echo "keep: tenant $ID is an example (${d#"$EXAMPLES"/}) — its own rows"
             exit 3
         fi
-    done < <(example_dirs)
+    done < <(tenant_dirs "$EXAMPLES")
     echo "evict: tenant $ID is not an example — the example rows are residue"
     exit 0
 fi
 
+[ -d "$RETIRED" ] || { say "CANNOT ANSWER — no retired-examples directory at $RETIRED, so a retired example's migration rows would silently stop being candidates"; exit "$CANNOT_ANSWER"; }
 SEED_JSON=$(seed_sets) || { say "CANNOT ANSWER — could not read the seed key sets under $EXAMPLES"; exit "$CANNOT_ANSWER"; }
 empty=$(printf '%s' "$SEED_JSON" | jq -r 'to_entries[] | select(.key != "sources" and (.value | length) == 0) | .key')
 if [ -n "$empty" ]; then

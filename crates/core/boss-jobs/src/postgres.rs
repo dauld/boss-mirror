@@ -6,9 +6,7 @@ use boss_core::partition::Partition;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::port::{
-    AssignmentRow, JobFilter, JobScope, JobsError, JobsRepository, LaunchCalendarRow,
-};
+use crate::port::{AssignmentRow, JobFilter, JobScope, JobsError, JobsRepository};
 
 pub struct PgJobs {
     pool: PgPool,
@@ -2170,107 +2168,6 @@ impl JobsRepository for PgJobs {
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
         Ok(rows)
-    }
-
-    async fn list_launch_calendar(
-        &self,
-        from: chrono::NaiveDate,
-        to: chrono::NaiveDate,
-    ) -> Result<Vec<LaunchCalendarRow>, JobsError> {
-        // Every live (draft/open) Job joined to each of its
-        // launch steps (the ones carrying launch_date), one row per
-        // launch step. The Job's kind is not read: a packet is on the
-        // calendar because a step carries the `launch_date` field the
-        // StepType registry declares, never because its kind is a name
-        // spelled here (backlog 649b3303 — this read filtered on a
-        // tenant Workflow kind, `marketing-motion`, in Tier 1). The join
-        // is therefore INNER: a Job with no launch step is not a launch.
-        // We pull the launch_date + launch_channel out of step metadata
-        // in SQL so the caller doesn't have to fetch the step rows
-        // separately.
-        // `current_tier` mirrors the computation in
-        // `jobs_tier_distribution` (min non-done sort_order; -1 when
-        // everything is terminal).
-        //
-        // The date window is applied inclusively on both ends. Motions
-        // whose launch step has no date yet (launch_date IS NULL) are
-        // intentionally returned — the UI buckets them under
-        // "unscheduled" at the top of the list.
-        #[derive(sqlx::FromRow)]
-        struct Row {
-            id: uuid::Uuid,
-            title: String,
-            owner_id: String,
-            subject_id: String,
-            status: String,
-            current_tier: Option<i32>,
-            launch_date: Option<chrono::NaiveDate>,
-            launch_channel: Option<String>,
-        }
-        let rows: Vec<Row> = sqlx::query_as::<_, Row>(
-            r#"
-            WITH launches AS (
-              SELECT
-                s.job_id,
-                -- jsonb -> text then cast to date is tolerant of both
-                -- string values ("2026-05-15") and missing keys.
-                NULLIF(s.metadata ->> 'launch_date', '')::date AS launch_date,
-                NULLIF(s.metadata ->> 'launch_channel', '')    AS launch_channel
-              FROM steps s
-              -- property, not kind: the launch step is whichever step
-              -- carries a launch_date (no-step-kind-match rule)
-              WHERE s.metadata ? 'launch_date'
-            ),
-            tiers AS (
-              SELECT j.id AS job_id,
-                     COALESCE(
-                       MIN(s.sort_order) FILTER (
-                         WHERE s.status IN ('pending','ready','active')
-                       ),
-                       -1
-                     ) AS current_tier
-              FROM jobs j
-              LEFT JOIN steps s ON s.job_id = j.id
-              GROUP BY j.id
-            )
-            SELECT j.id,
-                   j.title,
-                   j.owner_id,
-                   j.subject_id,
-                   j.status,
-                   t.current_tier,
-                   l.launch_date,
-                   l.launch_channel
-            FROM jobs j
-            JOIN launches l      ON l.job_id = j.id
-            LEFT JOIN tiers t    ON t.job_id = j.id
-            WHERE j.status NOT IN ('closed','cancelled')
-              AND (
-                l.launch_date IS NULL
-                OR l.launch_date BETWEEN $1 AND $2
-              )
-            ORDER BY l.launch_date NULLS FIRST, j.title
-            "#,
-        )
-        .bind(from)
-        .bind(to)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| JobsError::Storage(e.to_string()))?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| LaunchCalendarRow {
-                job_id: JobId::from_uuid(r.id),
-                title: r.title,
-                owner_id: Some(r.owner_id),
-                subject_id: Some(r.subject_id),
-                status: parse_job_status(&r.status),
-                current_tier: r.current_tier,
-                launch_date: r.launch_date,
-                launch_channel: r.launch_channel,
-            })
-            .collect())
     }
 
     async fn resolve_blockers(

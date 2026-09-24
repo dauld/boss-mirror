@@ -204,26 +204,6 @@ pub enum JobScope {
     AccountIn(Vec<String>),
 }
 
-/// One row in the launch-calendar projection. Flat shape the frontend
-/// renders directly — the caller doesn't need to fetch the full Job.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct LaunchCalendarRow {
-    pub job_id: JobId,
-    pub title: String,
-    pub owner_id: Option<String>,
-    pub subject_id: Option<String>,
-    pub status: JobStatus,
-    /// Min sort_order of any non-done step = current tier. Null means
-    /// every step is terminal but the Job isn't closed yet.
-    pub current_tier: Option<i32>,
-    /// `launch_date` from the launch step's metadata (the step carrying
-    /// the field — `marketing-launch` declares it).
-    /// Null when the step exists but the date hasn't been set yet.
-    pub launch_date: Option<chrono::NaiveDate>,
-    /// Channel label from the launch step ("email" / "webinar" / etc.).
-    pub launch_channel: Option<String>,
-}
-
 /// One cohort's block in the per-kind terminal report — Tier 1 of
 /// the experiments program (docs/design/network-experiments.md):
 /// measure what version pinning already records. The version
@@ -1323,21 +1303,6 @@ pub trait JobsRepository: Send + Sync {
         &self,
         status: Option<JobStatus>,
     ) -> Result<Vec<(String, i32, i64)>, JobsError>;
-
-    /// Projection backing the launch-calendar surface and the exec
-    /// next-30-days panel per examples/used-device-shop/design/marketing-needs.md E2. Returns one
-    /// row per launch step — any step carrying the `launch_date` field
-    /// (the StepType registry declares it on `marketing-launch`) — on
-    /// every open/in-flight Job, whatever the Job's kind, so the caller
-    /// can render a forward calendar. No kind is named here (backlog
-    /// 649b3303). `from` / `to` bound the launch_date window; launch
-    /// steps with no date yet are returned with `launch_date = None` so
-    /// the UI can bucket them under "unscheduled".
-    async fn list_launch_calendar(
-        &self,
-        from: chrono::NaiveDate,
-        to: chrono::NaiveDate,
-    ) -> Result<Vec<LaunchCalendarRow>, JobsError>;
 
     // ----- Cross-job dependency resolution (D10) -----
 

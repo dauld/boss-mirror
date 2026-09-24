@@ -135,7 +135,6 @@ export type Route =
   | { kind: 'dispatcherRulesList' }
   | { kind: 'dispatcherRuleEdit'; ruleName: string }
   | { kind: 'inbox' }
-  | { kind: 'calendar' }
   | { kind: 'myCalendar' }
   | { kind: 'schedule' }
   | { kind: 'exec' }
@@ -290,7 +289,6 @@ export function parseRoute(pathname: string): Route {
   if (p === '/support') return { kind: 'support' };
 
   if (p === '/calendar/me') return { kind: 'myCalendar' };
-  if (p === '/calendar') return { kind: 'calendar' };
   if (p === '/service/schedule') return { kind: 'schedule' };
   if (p === '/exec') return { kind: 'exec' };
   const deptM = p.match(/^\/departments\/([^/]+)$/);

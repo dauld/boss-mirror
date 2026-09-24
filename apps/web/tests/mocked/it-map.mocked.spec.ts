@@ -86,12 +86,13 @@ const BORDERS_PAYLOAD = {
       why: 'the workflow registry that names the inbound kinds could not be read',
     }),
     // The shop floor split this hop in two (backlog 94c6ffd0): a run
-    // OPENS on a packet, and its car PARKS some hours later.
+    // OPENS on a packet, and its branch takes a bay once built — then
+    // parks on green (design 62de32ae decision 3).
     rail('marshalling', 'shop-floor'),
-    rail('shop-floor', 'dock'),
-    rail('dock', 'gates'),
+    rail('shop-floor', 'gates'),
+    rail('gates', 'dock'),
     // Traffic waiting and the machine silent past its declared cadence.
-    rail('gates', 'track', {
+    rail('dock', 'track', {
       crossing: 'a car boarded a train',
       rate: { metric: 'crossings', unit: 'per day', current: 24, previous: 18, samples: 24, previous_samples: 18 },
       waiting: 3,
@@ -128,15 +129,17 @@ test('the world paints a territory per region in one SVG, along the flow, with t
   await expect(territories).toHaveCount(TERRITORIES.length);
   const names = await territories.evaluateAll((els) => els.map((el) => el.getAttribute('data-region')));
   expect(new Set(names)).toEqual(new Set(TERRITORIES.map((t) => t.name)));
-  // The flow reads left to right: each territory on the line starts
-  // right of the one packets leave to reach it.
+  // The flow reads left to right in the order a car walks it (design
+  // 62de32ae decision 3): gated BEFORE it parks on the dock.
   const xOf = async (name: string) =>
-    Number(await svg.locator(`.territory[data-region="${name}"] rect`).getAttribute('x'));
-  const line = ['receiving', 'marshalling', 'shop-floor', 'dock', 'gates', 'track', 'arrivals', 'shed'];
+    Number(await svg.locator(`.territory[data-region="${name}"] rect`).first().getAttribute('x'));
+  const line = ['receiving', 'marshalling', 'shop-floor', 'gates', 'dock', 'track', 'arrivals', 'shed'];
   const xs = await Promise.all(line.map(xOf));
   expect([...xs].sort((a, b) => a - b)).toEqual(xs);
   // The borders are drawn: one rail per declared hop, the garage fed by both gates and track.
-  await expect(svg.locator('[data-border="gates→track"]')).toHaveCount(1);
+  await expect(svg.locator('[data-border="shop-floor→gates"]')).toHaveCount(1);
+  await expect(svg.locator('[data-border="gates→dock"]')).toHaveCount(1);
+  await expect(svg.locator('[data-border="dock→track"]')).toHaveCount(1);
   await expect(svg.locator('[data-border="gates→garage"]')).toHaveCount(1);
   await expect(svg.locator('[data-border="track→garage"]')).toHaveCount(1);
 
@@ -251,24 +254,50 @@ test('a border carries its traffic, what waits on it and the machine that moves 
   // The boarding rail: three waiting, a heavy traffic band from the
   // measured rate, and the machine's lamp lit because IT declared the
   // cadence it has been silent past.
-  const boarding = svg.locator('.crossing[data-crossing="gates→track"]');
+  const boarding = svg.locator('.crossing[data-crossing="dock→track"]');
   await expect(boarding).toHaveAttribute('data-state', 'troubled');
   await expect(boarding).toHaveAttribute('data-waiting', '3');
-  await expect(boarding).toContainText('3');
-  await expect(boarding).toContainText('24/d');
-  await expect(boarding.locator('.glyph.err')).toHaveCount(1);
-  await expect(svg.locator('[data-traffic="gates→track"]')).toHaveAttribute('data-density', 'heavy');
-  // Everything the rail knows is on the hover — a border does not need
-  // a second surface to explain its own number.
-  const title = await boarding.locator('title').textContent();
-  expect(title).toContain('one crossing = a car boarded a train');
-  expect(title).toContain('24 vs 18 /day');
-  expect(title).toContain('fix/a-car — parked, waiting for the boarding depth');
-  expect(title).toContain('train-board-on-dock-depth · SILENT 180m');
+  await expect(boarding.locator('text.token-count')).toHaveText('3');
+  await expect(boarding.locator('text.rate')).toHaveText('24/d');
+  await expect(boarding.locator('.machine-lamp.err')).toHaveCount(1);
+  await expect(svg.locator('[data-traffic="dock→track"]')).toHaveAttribute('data-density', 'heavy');
+  // BORDERS ARE DRAWN, NOT TOOLTIPPED (design 62de32ae decision 6): the
+  // machine's name and its status are WRITTEN on the rail, with no
+  // hover title standing in for them.
+  await expect(boarding.locator('text.machine-name')).toHaveText(['train-board-on-dock-', 'depth']);
+  await expect(boarding.locator('text.machine-status')).toHaveText('SILENT 180m');
+  await expect(boarding.locator('title')).toHaveCount(0);
+  // And the rail is as wide as its rate: 24 a day draws wider than 2.
+  const widthOf = async (key: string) =>
+    Number(await svg.locator(`path.rail[data-rail="${key}"]`).getAttribute('data-width'));
+  expect(await widthOf('dock→track')).toBeGreaterThan(await widthOf('gates→dock'));
+
+  // A click opens the crossing INLINE, under the map: everything the
+  // rail knows, where it can be read, touched and screenshotted.
+  await expect(page.locator('.crossing-panel')).toHaveCount(0);
+  await boarding.click();
+  const panel = page.locator('.crossing-panel[data-panel="dock→track"]');
+  await expect(panel).toBeVisible();
+  await expect(boarding).toHaveAttribute('aria-expanded', 'true');
+  await expect(panel).toContainText('a car boarded a train');
+  await expect(panel).toContainText('24 vs 18 /day');
+  await expect(panel).toContainText('fix/a-car — parked, waiting for the boarding depth');
+  await expect(panel).toContainText('train-board-on-dock-depth · SILENT 180m');
+  await expect(panel).toContainText('its own firing in cadence_firings');
+  await expect(panel).toContainText('2026-09-19 04:00 UTC · 1h ago');
+  // Three wait and the server listed one: the panel says so rather
+  // than under-reporting the queue.
+  await expect(panel).toContainText('+2 more waiting, not listed');
+  // Another rail's click swaps the panel; the same rail's closes it.
+  await svg.locator('.crossing[data-crossing="gates→dock"]').click();
+  await expect(page.locator('.crossing-panel[data-panel="gates→dock"]')).toBeVisible();
+  await expect(panel).toHaveCount(0);
+  await svg.locator('.crossing[data-crossing="gates→dock"]').click();
+  await expect(page.locator('.crossing-panel')).toHaveCount(0);
 
   // The activity summary, bubbled up to the high-level view.
   await expect(page.locator('.yard-flow').first()).toContainText('crossings in 24h');
-  await expect(page.locator('.yard-flow').first()).toContainText('troubled: receiving → marshalling, gates → track');
+  await expect(page.locator('.yard-flow').first()).toContainText('troubled: receiving → marshalling, dock → track');
 });
 
 test('a border the server could not measure reads unknown, never zero', async ({ page }) => {
@@ -285,9 +314,14 @@ test('a border the server could not measure reads unknown, never zero', async ({
     'data-density',
     'unknown',
   );
-  const title = await blind.locator('title').textContent();
-  expect(title).toContain('rate: no reading');
-  expect(title).toContain('waiting: no reading');
+  // Opened, the crossing says the same: no reading, and which read
+  // failed — never a zero.
+  await blind.click();
+  const panel = page.locator('.crossing-panel[data-panel="receiving→marshalling"]');
+  await expect(panel).toContainText('the workflow registry that names the inbound kinds could not be read');
+  await expect(panel.locator('dd').nth(1)).toHaveText('no reading');
+  await expect(panel).toContainText('waiting: no reading');
+  await expect(panel).toContainText('nothing crossed in the two windows read');
   // And the summary counts it as unread rather than dropping it.
   await expect(page.locator('.yard-flow').first()).toContainText('1 border unread');
 });

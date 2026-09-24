@@ -2160,7 +2160,11 @@ are not edited — an applied file is history and `migrate.sh` refuses
 a changed checksum — so the rows still land in every database the
 converge creates, and they leave by two doors that read ONE
 derivation, `infra/postgres/example-reference-rows.sh`, whose
-candidate set is read from the example seeds and never typed: on a
+candidate set is read from the example seeds and never typed — and,
+for an example that has been retired while the migrations still seed
+its rows, from `infra/postgres/retired-examples/<name>/` in the same
+shape, a declared list held equal to the migration by a test (the
+used-device shop's, backlog `a8991c86` car 6, 2026-09-24): on a
 fresh instance's FIRST start `boss-init` evicts them before any
 service starts when the declared tenant (`BOSS_TENANT_DIR`, the same
 directory the launcher publishes) is not an example — an example

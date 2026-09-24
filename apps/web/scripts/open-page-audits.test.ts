@@ -31,8 +31,10 @@ describe('the roster is the catalog', () => {
     // the Marshalling Yard became catalog rows, so their two paths —
     // routed all along, as Operate tabs — joined the march. 48 since
     // backlog 3071e235 (2026-09-24): the dispatcher rule editor stopped
-    // sharing the rules list's path.
-    expect(paths.length).toBe(48);
+    // sharing the rules list's path. 47 since design 2ea444f5
+    // (2026-09-24): /ux/calendar left the catalog with the
+    // second example tenant, so its audit (0ceeffa6) is withdrawn.
+    expect(paths.length).toBe(47);
   });
 
   it('a parameterised catalog path is a page the march audits', () => {

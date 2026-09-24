@@ -1,0 +1,11 @@
+# The used-device shop, a RETIRED example tenant — not a tenant.
+#
+# infra/postgres/example-reference-rows.sh reads this directory with the
+# readers it uses for examples/<name>/, so this manifest's one job is
+# `[meta] tenant_id`: the companies row 01-registries.sql seeds for the
+# shop on every instance ('used-device-shop'), which stays a candidate
+# for eviction after examples/used-device-shop is deleted (backlog
+# a8991c86, car 6). The rows beside it are in seeds/classes.toml; why
+# they live here is written there.
+[meta]
+tenant_id = "used-device-shop"

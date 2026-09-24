@@ -268,9 +268,6 @@ exists.sh` refuses a row whose JS is absent from this directory.
 | File | Kind | What it does |
 |---|---|---|
 | `checklist.js` | `checklist` | Generic per-item-checked walkthrough; first v1 surface to land via the plugin path. |
-| `marketing-brief.js` | `marketing-brief` | Brief body + target audience + per-employee acknowledgement tracker. |
-| `marketing-launch.js` | `marketing-launch` | Editable launch date + channel + notes, with an embedded ±14-day neighbor calendar. |
-| `marketing-attribution.js` | `marketing-attribution` | Read-only rollup of linked opportunities / revenue influenced / brief ack rate over the configured measurement window. |
 | `sr-triage.js` | `sr-triage` | Mandatory intake fields (account, device, failure, priority) + optional Jira key + triage decision (dispatch / remote / parts-only). |
 | `diagnostic-call.js` | `diagnostic-call` | Call log: schedule, channel, join URL, attendees, notes, optional recording URL. |
 | `review-design.js` | `review-design` | Design-doc-review surface: per-`### Qn:` resolution textareas; gates completion on every open question having a recorded resolution, saved onto the step. |

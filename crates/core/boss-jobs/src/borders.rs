@@ -48,7 +48,7 @@
 //! `silent` stays null for it, and the trouble reading it DOES support
 //! needs no heartbeat: work is waiting, and the machine has not fired
 //! since the oldest of it arrived. [`judge`] asks that of the
-//! shop-floor → dock rail, whose stranded greens carry their own
+//! gates → dock rail, whose stranded greens carry their own
 //! arrival instant, and a rail with nothing waiting is never troubled
 //! however long it has been quiet.
 //!
@@ -66,8 +66,9 @@ use serde_json::Value;
 use crate::regions::{
     Instant, RegionInputs, RegionState, Trend, Windows, awaiting_proof, closed_at, count_split,
     find_step, marshalling_view, meta_instant, opened_at, parse_instant, plural, rate_trend,
-    receiving_standing, released_awaiting_repair, shed_place, step_done_at,
+    receiving_standing, released_awaiting_repair, shed_place, step_done_at, taken_in_at,
 };
+use crate::stranded::is_train_gate;
 use crate::yard::{SILENT_AFTER_INTERVALS, TrainBlock};
 
 /// How many hold reasons a border carries. The `waiting` COUNT is
@@ -123,15 +124,23 @@ pub struct BorderSpec {
     pub machine_kind: MachineKind,
 }
 
-/// The nine borders of the world layout, in flow order then the two
-/// garage feeders — the same set and order as
-/// `apps/web/src/it/yard/world.ts::BORDERS`, pinned equal by
-/// `borders.test.ts`.
+/// The ten borders of the world layout: the line in flow order, then
+/// the crossing out to the mirror and the garage's two feeders — the
+/// same set and order as `apps/web/src/it/yard/world.ts::BORDERS`,
+/// pinned equal by `borders.test.ts`.
 ///
-/// The line reads receiving -> marshalling -> shop-floor -> dock ->
-/// gates -> track -> arrivals -> shed, so `dock -> gates` is a branch
-/// TAKING a bay (a first gate or a re-gate) and `gates -> track` is a
-/// green car boarding a train.
+/// THE LINE IS THE ORDER A CAR WALKS IT (design 62de32ae decision 3,
+/// decided 2026-09-24): receiving -> marshalling -> shop-floor -> gates
+/// -> dock -> track -> arrivals -> shed. A branch built on the shop
+/// floor takes a bay (`shop-floor -> gates`), a green parks as a car
+/// (`gates -> dock`), and the car boards a train (`dock -> track`).
+/// Until then the line put the dock BEFORE the gates, and the three
+/// rails' own crossings contradicted it: "a car parked on a green gate"
+/// arrived at the dock from the shop floor, "a branch taking a bay"
+/// left the DOCK, and the cars "held on the dock" stood at the
+/// gates -> track border — so a car followed across the map walked
+/// backwards through two regions (review of 2026-09-24, finding 3).
+/// `the_line_chains_in_the_order_a_car_walks_it` pins the chain.
 ///
 /// THE SHOP FLOOR SPLIT ONE HOP IN TWO (backlog 94c6ffd0). What used
 /// to be `marshalling -> dock` counted the car parking and said
@@ -144,7 +153,7 @@ pub const BORDERS: [BorderSpec; 10] = [
     BorderSpec {
         from: "receiving",
         to: "marshalling",
-        crossing: "an inbound packet triaged",
+        crossing: "an inbound packet taken in — its intake step completed",
         machine: "the receiving desk",
         machine_kind: MachineKind::Actors,
     },
@@ -157,13 +166,6 @@ pub const BORDERS: [BorderSpec; 10] = [
     },
     BorderSpec {
         from: "shop-floor",
-        to: "dock",
-        crossing: "a car filed and parked on a green gate",
-        machine: "auto-park-on-gate-green",
-        machine_kind: MachineKind::DispatcherRule,
-    },
-    BorderSpec {
-        from: "dock",
         to: "gates",
         crossing: "a gate-run opened — a branch taking a bay",
         machine: "the gate runner",
@@ -171,6 +173,13 @@ pub const BORDERS: [BorderSpec; 10] = [
     },
     BorderSpec {
         from: "gates",
+        to: "dock",
+        crossing: "a green gate parked as a car on the dock",
+        machine: "auto-park-on-gate-green",
+        machine_kind: MachineKind::DispatcherRule,
+    },
+    BorderSpec {
+        from: "dock",
         to: "track",
         crossing: "a car boarded a train",
         machine: "train-board-on-dock-depth",
@@ -437,17 +446,23 @@ fn outcome(j: &Job) -> &str {
 fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
     let status = r.status;
     match (spec.from, spec.to) {
-        // inbound -> triaged. A backlog-item's triage step completing IS
-        // its close (the backlog-item close mechanic), so a closed
-        // inbound packet is one taken in; the handler's inbound read
-        // covers the open ones and those closed within two windows.
+        // inbound -> taken in. One crossing per packet whose intake
+        // step completed, stamped when it completed (`taken_in_at`, the
+        // same rule that draws the line between the two regions — design
+        // 62de32ae decision 4). It counted inbound CLOSURES until
+        // 2026-09-24, which is a different event on most kinds: a
+        // user-feedback is taken in at triage and closes days later
+        // after its build, and a packet withdrawn untriaged closes
+        // without ever crossing. The handler's inbound read carries the
+        // steps of the open rows and of those closed within two
+        // windows, which covers every intake either window can hold.
         ("receiving", "marshalling") => {
             let Some(inbound) = r.inbound else {
                 return Flow::unread(
                     "the workflow registry that names the inbound kinds could not be read",
                 );
             };
-            let stamps: Vec<Instant> = inbound.iter().filter_map(|(j, _)| closed_at(j)).collect();
+            let stamps: Vec<Instant> = inbound.iter().filter_map(|(_, s)| taken_in_at(s)).collect();
             let today = r.now.date_naive();
             // What waits here is RECEIVING's own count — the packets not
             // yet taken in — and never a packet the next border also
@@ -521,12 +536,43 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                 .collect();
             Flow::of(w, stamps, standing.len(), holds)
         }
-        // being built -> parked: the packet became a car standing on
-        // the dock, which is the car's `gate` (park) step completing.
-        // What waits is a green that never became a car — held on
-        // purpose, with its reason, or stranded, which is a fix about
-        // to be rebuilt blind.
-        ("shop-floor", "dock") => {
+        // being built -> gated: a branch built on the shop floor taking
+        // a bay. What waits is the line for a slot, in its own order.
+        // A TRAIN's gate (design 128b5496, `is_train_gate`) runs in the
+        // same bays, but its branch came off the track, not the shop
+        // floor, so it is neither a crossing of this rail nor a packet
+        // waiting at it — the track shows it as the train at its gate.
+        ("shop-floor", "gates") => {
+            let stamps: Vec<Instant> = r
+                .gate_runs
+                .iter()
+                .filter(|g| !is_train_gate(&g.metadata))
+                .filter_map(|g| meta_instant(&g.metadata, "opened_at").or_else(|| opened_at(g)))
+                .collect();
+            let capacity = status.gates.capacity;
+            let queued: Vec<&crate::yard::QueuedGate> = status
+                .gates
+                .queued
+                .iter()
+                .filter(|q| q.train.is_none())
+                .collect();
+            let holds = queued
+                .iter()
+                .map(|q| {
+                    hold(
+                        &q.branch,
+                        format!("{} in line for one of {capacity} bays", ordinal(q.position)),
+                    )
+                })
+                .collect();
+            Flow::of(w, stamps, queued.len(), holds)
+        }
+        // gated green -> parked: the green became a car standing on the
+        // dock, which is the car's `gate` (park) step completing. What
+        // waits is a green that never became a car — held on purpose,
+        // with its reason, or stranded, which is a fix about to be
+        // rebuilt blind.
+        ("gates", "dock") => {
             let stamps: Vec<Instant> = r
                 .cars
                 .iter()
@@ -571,32 +617,10 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
             });
             Flow::of(w, stamps, waiting, holds).waiting_since(oldest)
         }
-        // A branch taking a bay. What waits is the line for a slot, in
-        // its own order.
-        ("dock", "gates") => {
-            let stamps: Vec<Instant> = r
-                .gate_runs
-                .iter()
-                .filter_map(|g| meta_instant(&g.metadata, "opened_at").or_else(|| opened_at(g)))
-                .collect();
-            let capacity = status.gates.capacity;
-            let holds = status
-                .gates
-                .queued
-                .iter()
-                .map(|q| {
-                    hold(
-                        &q.branch,
-                        format!("{} in line for one of {capacity} bays", ordinal(q.position)),
-                    )
-                })
-                .collect();
-            Flow::of(w, stamps, status.gates.queued.len(), holds)
-        }
         // parked -> boarded: one crossing per CAR the train collected,
         // stamped at the train's `collect`. What waits is the dock — the
         // cars ready to board, and the ones an operator has braked.
-        ("gates", "track") => {
+        ("dock", "track") => {
             let mut stamps: Vec<Instant> = Vec::new();
             for (j, steps) in r.open_trains.iter().chain(r.closed_trains.iter()) {
                 let Some(collect) = step_done_at(find_step(
@@ -712,9 +736,13 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
         // border is a run the gate never judged: "we do not know" is not
         // a verdict, and nothing moves it on its own.
         ("gates", "garage") => {
+            // A red TRAIN gate strikes the train and the cars aboard it,
+            // which the track -> garage rail counts; it sends no car of
+            // its own here (the garage lane makes the same exclusion).
             let stamps: Vec<Instant> = r
                 .gate_runs
                 .iter()
+                .filter(|g| !is_train_gate(&g.metadata))
                 .filter(|g| g.metadata.get("outcome").and_then(Value::as_str) == Some("failed"))
                 .filter_map(closed_at)
                 .collect();
@@ -935,8 +963,8 @@ fn machine_of(spec: &BorderSpec, inputs: &BorderInputs<'_>, now: Instant) -> Mac
     }
 }
 
-/// The map's rails. Pure: rows in, nine borders out, in [`BORDERS`]
-/// order.
+/// The map's rails. Pure: rows in, one border per declared rail out,
+/// in [`BORDERS`] order.
 pub fn borders(inputs: &BorderInputs<'_>) -> Borders {
     let r = inputs.regions;
     let w = Windows::of(r.now, r.window_hours);
@@ -1336,7 +1364,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&[]),
         });
-        let b = only(&out, "gates", "track");
+        let b = only(&out, "dock", "track");
         assert_eq!(b.state, RegionState::Troubled);
         assert_eq!(b.waiting, None);
         assert!(b.why.contains("loading-dock"), "why: {}", b.why);
@@ -1373,7 +1401,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&[]),
         });
-        let b = only(&out, "gates", "track");
+        let b = only(&out, "dock", "track");
         let why_of = |what: &str| {
             b.holds
                 .iter()
@@ -1395,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn a_car_parking_is_one_crossing_of_the_shop_floor_dock_border() {
+    fn a_car_parking_is_one_crossing_of_the_gates_dock_border() {
         let status = empty_status();
         let car = job("ship-a-change", "a car", JobStatus::Open, json!({}));
         let steps = vec![step(
@@ -1424,7 +1452,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&[]),
         });
-        let b = only(&out, "shop-floor", "dock");
+        let b = only(&out, "gates", "dock");
         assert_eq!(b.rate.samples, 1);
         assert_eq!(b.rate.previous_samples, 1);
         assert_eq!(b.rate.current, Some(1.0));
@@ -1541,7 +1569,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&[]),
         });
-        let dispatcher = only(&out, "shop-floor", "dock");
+        let dispatcher = only(&out, "gates", "dock");
         assert_eq!(dispatcher.machine.kind, "dispatcher-rule");
         assert_eq!(dispatcher.machine.last_fired, None);
         assert_eq!(
@@ -1554,7 +1582,7 @@ mod tests {
             dispatcher.machine.why
         );
         // A cadence machine the registry does not hold is named, not blank.
-        let cadence = only(&out, "gates", "track");
+        let cadence = only(&out, "dock", "track");
         assert_eq!(cadence.machine.kind, "cadence");
         assert!(
             cadence.machine.why.contains("no rule named"),
@@ -1568,7 +1596,7 @@ mod tests {
             dispatcher_firings: Some(&[]),
         });
         assert!(
-            only(&unread, "gates", "track")
+            only(&unread, "dock", "track")
                 .machine
                 .why
                 .contains("could not be read")
@@ -1600,7 +1628,7 @@ mod tests {
             firings: Some(&firings),
             dispatcher_firings: Some(&[]),
         });
-        let border = only(&out, "gates", "track");
+        let border = only(&out, "dock", "track");
         assert_eq!(border.waiting, Some(2));
         assert_eq!(border.machine.silent, Some(true));
         assert_eq!(border.machine.silent_for_minutes, Some(180));
@@ -1621,7 +1649,7 @@ mod tests {
             firings: Some(&fresh),
             dispatcher_firings: Some(&[]),
         });
-        let border = only(&ok, "gates", "track");
+        let border = only(&ok, "dock", "track");
         assert_eq!(border.machine.silent, Some(false));
         assert_eq!(border.state, RegionState::Clear);
         assert!(border.holds.iter().all(|h| !h.why.is_empty()));
@@ -1660,7 +1688,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&[]),
         });
-        let b = only(&out, "shop-floor", "dock");
+        let b = only(&out, "gates", "dock");
         let held = status.held.len() + status.stranded.len();
         assert_eq!(b.waiting, Some(held));
         if held > 0 {
@@ -1700,14 +1728,14 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&[]),
         });
-        let b = only(&out, "gates", "track");
+        let b = only(&out, "dock", "track");
         assert_eq!(b.waiting, Some(MAX_HOLDS + 5));
         assert_eq!(b.holds.len(), MAX_HOLDS);
     }
 
     #[test]
     fn a_dispatcher_rules_firing_is_read_from_its_own_record() {
-        // b14afc48: the shop-floor -> dock rail's machine is the
+        // b14afc48: the gates -> dock rail's machine is the
         // dispatcher rule auto-park-on-gate-green, and until
         // `dispatcher_firings` existed it could only answer 'nothing
         // records a dispatcher rule's firings' — the most automated hop
@@ -1723,7 +1751,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&fired),
         });
-        let b = only(&out, "shop-floor", "dock");
+        let b = only(&out, "gates", "dock");
         assert_eq!(b.machine.kind, "dispatcher-rule");
         assert_eq!(
             b.machine.last_fired.as_deref(),
@@ -1757,7 +1785,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: None,
         });
-        let m = &only(&unread, "shop-floor", "dock").machine;
+        let m = &only(&unread, "gates", "dock").machine;
         assert_eq!(m.last_fired, None);
         assert_eq!(m.silent, None);
         assert!(m.why.contains("could not be read"), "why: {}", m.why);
@@ -1771,7 +1799,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&never),
         });
-        let m = &only(&out, "shop-floor", "dock").machine;
+        let m = &only(&out, "gates", "dock").machine;
         assert_eq!(m.last_fired, None);
         assert!(m.why.contains("has never fired"), "why: {}", m.why);
     }
@@ -1827,7 +1855,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&fired(Some("2026-09-19T07:00:00Z"))),
         });
-        let b = only(&out, "shop-floor", "dock");
+        let b = only(&out, "gates", "dock");
         assert_eq!(b.state, RegionState::Troubled);
         assert!(b.why.contains("has not fired since"), "why: {}", b.why);
         // The half this must NOT do: no interval was invented for an
@@ -1842,7 +1870,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&fired(Some("2026-09-19T11:00:00Z"))),
         });
-        assert_eq!(only(&ok, "shop-floor", "dock").state, RegionState::Clear);
+        assert_eq!(only(&ok, "gates", "dock").state, RegionState::Clear);
     }
 
     #[test]
@@ -1864,7 +1892,7 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&fired(Some("2026-09-19T07:00:00Z"))),
         });
-        let b = only(&out, "shop-floor", "dock");
+        let b = only(&out, "gates", "dock");
         assert_eq!(b.waiting, Some(1), "it still stands at the border");
         assert_eq!(
             b.state,
@@ -1903,9 +1931,251 @@ mod tests {
             firings: Some(&[]),
             dispatcher_firings: Some(&fired(Some("2026-09-19T07:00:00Z"))),
         });
-        let b = only(&out, "shop-floor", "dock");
+        let b = only(&out, "gates", "dock");
         assert_eq!(b.waiting, Some(1));
         assert_eq!(b.state, RegionState::Clear, "why: {}", b.why);
+    }
+
+    /// THE FLOW ORDER (design 62de32ae decision 3). The line's rails,
+    /// read in declared order, chain end to end — each rail leaves the
+    /// territory the one before it arrived at — through the eight
+    /// regions a car walks: built on the shop floor, gated, parked on
+    /// the dock, boarded, arrived, proven. The map drew the dock BEFORE
+    /// the gates until 2026-09-24, so a car followed across it walked
+    /// backwards through two regions; the rails' own definitions said
+    /// otherwise the whole time.
+    #[test]
+    fn the_line_chains_in_the_order_a_car_walks_it() {
+        let sidings = ["garage", "publish"];
+        let line: Vec<&BorderSpec> = BORDERS
+            .iter()
+            .filter(|b| !sidings.contains(&b.to))
+            .collect();
+        let mut walked = vec![line[0].from];
+        for pair in line.windows(2) {
+            assert_eq!(
+                pair[0].to, pair[1].from,
+                "{} -> {} is not followed by a rail out of {}",
+                pair[0].from, pair[0].to, pair[0].to
+            );
+        }
+        walked.extend(line.iter().map(|b| b.to));
+        assert_eq!(
+            walked,
+            [
+                "receiving",
+                "marshalling",
+                "shop-floor",
+                "gates",
+                "dock",
+                "track",
+                "arrivals",
+                "shed"
+            ]
+        );
+        // And the sidings hang where the design put them: the garage
+        // under gates (judged red) and track (a red train), publish off
+        // arrivals.
+        let sides: Vec<(&str, &str)> = BORDERS
+            .iter()
+            .filter(|b| sidings.contains(&b.to))
+            .map(|b| (b.from, b.to))
+            .collect();
+        assert_eq!(
+            sides,
+            [
+                ("arrivals", "publish"),
+                ("gates", "garage"),
+                ("track", "garage")
+            ]
+        );
+    }
+
+    /// A gate-run as `boss gate` files it: `opened_at` stamped, a
+    /// branch, open; `train` set when the conductor filed it for a
+    /// train's assembled tree (design 128b5496).
+    fn gate_run(branch: &str, opened_at: &str, train: Option<&str>, outcome: Option<&str>) -> Job {
+        let mut md = json!({ "branch": branch, "opened_at": opened_at });
+        if let Some(t) = train {
+            md["train_gate"] = json!(true);
+            md["train"] = json!(t);
+        }
+        let status = match outcome {
+            Some(o) => {
+                md["outcome"] = json!(o);
+                md["closed_at"] = json!(opened_at);
+                JobStatus::Closed
+            }
+            None => JobStatus::Open,
+        };
+        job("gate-run", branch, status, md)
+    }
+
+    /// THE HOP OUT OF THE SHOP FLOOR (design 62de32ae decision 3): a
+    /// branch built there taking a bay is one crossing. A TRAIN's own
+    /// gate runs in the same bays but came from the track, not the shop
+    /// floor, so it is neither a crossing of this rail nor something
+    /// waiting at it.
+    #[test]
+    fn a_gate_run_opening_is_one_crossing_from_the_shop_floor_and_a_trains_gate_is_not() {
+        let runs = vec![
+            gate_run("fix/a-car", "2026-09-19T09:00:00Z", None, None),
+            gate_run("train/42", "2026-09-19T10:00:00Z", Some("train-42"), None),
+        ];
+        let status = empty_status();
+        let inputs = region_inputs(&status, &[], &[], &runs, Some(&[]), Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let b = only(&out, "shop-floor", "gates");
+        assert_eq!(
+            b.rate.samples, 1,
+            "the car's gate crossed; the train's did not"
+        );
+        assert_eq!(
+            b.last_crossed.as_deref(),
+            Some(t("2026-09-19T09:00:00Z").to_rfc3339().as_str())
+        );
+        assert_eq!(b.machine.kind, "gate-runner");
+    }
+
+    /// A red TRAIN gate strikes the train, not a car: what reaches the
+    /// garage from the gates is a car's branch judged red (the garage
+    /// lane makes the same exclusion, `yard::garage_of`).
+    #[test]
+    fn a_red_trains_gate_sends_no_car_to_the_garage() {
+        let runs = vec![
+            gate_run(
+                "fix/a-red-car",
+                "2026-09-19T09:00:00Z",
+                None,
+                Some("failed"),
+            ),
+            gate_run(
+                "train/42",
+                "2026-09-19T10:00:00Z",
+                Some("train-42"),
+                Some("failed"),
+            ),
+        ];
+        let status = empty_status();
+        let inputs = region_inputs(&status, &[], &[], &runs, Some(&[]), Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        assert_eq!(only(&out, "gates", "garage").rate.samples, 1);
+    }
+
+    /// THE CROSSING INTO MARSHALLING IS AN INTAKE (design 62de32ae
+    /// decision 4, car B's `taken_in` rule): one crossing per inbound
+    /// packet whose intake step completed in the window, stamped when
+    /// it completed. A CLOSE is not a crossing — a packet taken in last
+    /// week and closed today crossed last week, and one closed without
+    /// ever being taken in never crossed at all. Until this, the rail
+    /// counted inbound closures.
+    #[test]
+    fn an_intake_completing_is_one_crossing_into_marshalling_and_a_close_is_not() {
+        let item = |title: &str, status: JobStatus, closed: Option<&str>| {
+            let md = match closed {
+                Some(c) => json!({ "closed_at": c }),
+                None => json!({}),
+            };
+            job("backlog-item", title, status, md)
+        };
+        let admitted = |j: &Job| {
+            let mut s = step(
+                j,
+                "submitted",
+                StepStatus::Completed,
+                Some("2026-09-10T08:00:00Z"),
+            );
+            s.kind = crate::regions::TRIGGER_STEP_KIND.to_string();
+            s
+        };
+        // Taken in this morning, still open (waiting on its build).
+        let a = item("taken in today", JobStatus::Open, None);
+        let a_steps = vec![
+            admitted(&a),
+            step(
+                &a,
+                "triage",
+                StepStatus::Completed,
+                Some("2026-09-19T08:00:00Z"),
+            ),
+            step(&a, "build", StepStatus::Ready, None),
+        ];
+        // Taken in this morning and closed on the same act.
+        let b = item(
+            "triaged and closed today",
+            JobStatus::Closed,
+            Some("2026-09-19T09:00:00Z"),
+        );
+        let b_steps = vec![
+            admitted(&b),
+            step(
+                &b,
+                "triage",
+                StepStatus::Completed,
+                Some("2026-09-19T09:00:00Z"),
+            ),
+        ];
+        // Taken in a week ago; its close today is not a crossing.
+        let c = item(
+            "taken in last week",
+            JobStatus::Closed,
+            Some("2026-09-19T10:00:00Z"),
+        );
+        let c_steps = vec![
+            admitted(&c),
+            step(
+                &c,
+                "triage",
+                StepStatus::Completed,
+                Some("2026-09-12T10:00:00Z"),
+            ),
+            step(
+                &c,
+                "build",
+                StepStatus::Completed,
+                Some("2026-09-19T10:00:00Z"),
+            ),
+        ];
+        // Closed without anything taking it in: it never crossed.
+        let d = item("withdrawn", JobStatus::Closed, Some("2026-09-19T11:00:00Z"));
+        let d_steps = vec![admitted(&d)];
+        // Still standing in receiving.
+        let e = item("untriaged", JobStatus::Open, None);
+        let e_steps = vec![admitted(&e), step(&e, "triage", StepStatus::Ready, None)];
+        let inbound = vec![
+            (a, a_steps),
+            (b, b_steps),
+            (c, c_steps),
+            (d, d_steps),
+            (e, e_steps),
+        ];
+        let status = empty_status();
+        let inputs = region_inputs(&status, &[], &[], &[], Some(&inbound), Some(&[]));
+        let out = borders(&BorderInputs {
+            regions: &inputs,
+            firings: Some(&[]),
+            dispatcher_firings: Some(&[]),
+        });
+        let rail = only(&out, "receiving", "marshalling");
+        assert_eq!(rail.rate.samples, 2, "two intakes completed today");
+        assert_eq!(
+            rail.rate.previous_samples, 0,
+            "last week's is outside both windows"
+        );
+        assert_eq!(
+            rail.last_crossed.as_deref(),
+            Some(t("2026-09-19T09:00:00Z").to_rfc3339().as_str()),
+            "the newest INTAKE, not the newest close"
+        );
+        assert_eq!(rail.waiting, Some(1), "only the untriaged one stands");
     }
 
     #[test]

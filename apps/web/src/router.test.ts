@@ -52,7 +52,10 @@ describe('parseRoute — every specific path matches its specific case', () => {
     ['/ux/shipments/ship-1', { kind: 'shipmentDetail', shipmentId: 'ship-1' }],
     ['/ux/support', { kind: 'support' }],
     // Calendar / scheduling
-    ['/ux/calendar', { kind: 'calendar' }],
+    // The launch calendar retired with the second example tenant
+    // (design 2ea444f5, backlog a8991c86): /ux/calendar is an unknown
+    // path now and takes the catch-all; /ux/calendar/me is untouched.
+    ['/ux/calendar', { kind: 'home' }],
     ['/ux/calendar/me', { kind: 'myCalendar' }],
     ['/ux/service/schedule', { kind: 'schedule' }],
     // Exec (User Experiences)

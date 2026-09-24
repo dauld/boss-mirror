@@ -276,7 +276,7 @@ pub const CONTRACT: &[Entry] = &[
                 init` writes the hosted default `data` explicitly, and a name the map lacks is \
                 INVALID; a479faf7, design 01c3cc3f); `[modules] <module> = bool` — a module \
                 is ON only when listed true, a missing key is off (ce68f137); the SPA reads \
-                `calendar`, `equipment`, `exec`, `finance`, `marketing-assets`, `parts`, `qa`, \
+                `equipment`, `exec`, `finance`, `marketing-assets`, `parts`, `qa`, \
                 `shipping`, `shop`, `sim`, `support`, `warehouse`; `[labels] <dotted.key> = str`; \
                 `[gateway] public_reads = [path, ...]` — the API reads the instance answers WITHOUT \
                 a session, from the four the gateway can offer (`/api/workflows`, `/api/jobs/summary`, \

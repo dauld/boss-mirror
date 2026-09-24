@@ -50,7 +50,10 @@
 #   - an existing field may not be REMOVED (the UNION validator stops
 #     requiring it, other consumers — sim faker, surfaces — stop
 #     seeing it; removal is a contract change that belongs behind the
-#     versioned path, not a restart).
+#     versioned path, not a restart);
+#   - a kind may not be removed while it declares a required field; a
+#     kind that required nothing may leave (2026-09-24, a8991c86) —
+#     its steps then validate permissively, which only loosens.
 # A brand-new kind may declare anything: nothing in flight carries it.
 # required -> optional stays legal — loosening strands nobody.
 #
@@ -175,12 +178,38 @@ enum_widens() {
     return 0
 }
 
+# Kinds that LEAVE and may: on the trunk, absent here, and declaring no
+# required field there. An unknown kind validates permissively, so a
+# kind that required nothing tightens no in-flight step when it goes,
+# and it withdraws no promise either — nothing was promised present at
+# done. A kind with a required field still may not leave (below): a
+# rule or surface reading its done metadata was promised that field.
+# Added 2026-09-24 for the `marketing-launch` kind, retired with the
+# launch calendar (design 2ea444f5, backlog a8991c86) — until then a
+# kind could never leave the bundle at all. Whether anything is still
+# IN FLIGHT on a leaving kind is the car's measurement, not this
+# lint's: the tree cannot see the live registry, and it matters — the
+# dispatcher reads an unknown kind as decision-shaped, so an in-flight
+# step of a removed kind would be routed to a person.
+retiring=$(awk -F'\t' '
+    NR == FNR { if ($3 == "KIND") here[$1] = 1; next }
+    $3 == "KIND" && !($1 in here) { gone[$1] = 1 }
+    $3 != "KIND" && $4 == "true"  { req[$1] = 1 }
+    END { for (k in gone) if (!(k in req)) print k }
+' <(printf '%s\n' "$head_rows") <(printf '%s\n' "$base_rows"))
+
 while IFS=$'\t' read -r kind field ftype freq; do
     [ -n "$kind" ] || continue
+    if grep -qxF "$kind" <<< "$retiring"; then
+        [ "$ftype" = "KIND" ] &&
+            echo "steptype-bundle-ratchet: kind \`$kind\` leaves the bundle — it required no field, so no in-flight step tightens"
+        continue
+    fi
     if [ "$ftype" = "KIND" ]; then
-        # A kind existing on trunk must still exist: removal changes
-        # the contract of every in-flight step of that kind (unknown
-        # kinds validate permissively) through the unversioned door.
+        # A kind existing on trunk must still exist unless it required
+        # nothing (above): removal changes the contract of every
+        # in-flight step of that kind (unknown kinds validate
+        # permissively) through the unversioned door.
         # Here-strings, not `printf | grep -q`: under pipefail a `grep -q`
         # that exits at its match SIGPIPEs the multi-line writer and the
         # pipeline reports 141 for a row that IS present — here a false
@@ -188,7 +217,7 @@ while IFS=$'\t' read -r kind field ftype freq; do
         # new kind (measured in a-kind-bundle-does-not-tighten, 28af807c).
         if ! grep -qxF "$(printf '%s\t-\tKIND\t-' "$kind")" <<< "$head_rows"; then
             say "steptype-bundle-ratchet: kind \`$kind\` exists on the trunk and is removed here." \
-                " In-flight steps of that kind lose their contract at the next restart;" \
+                " It declares a required field, which every reader of its done metadata was promised;" \
                 " retire behaviour through the versioned workflow path instead (cdc23602)."
         fi
         continue

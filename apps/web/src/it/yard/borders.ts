@@ -11,8 +11,9 @@
 // reason, the machine's silence and the border's clear/attention/troubled
 // state are all the server's (boss_jobs::borders); this module parses
 // them ONCE and turns them into words. The only thing it decides is how
-// THICK to draw a rail (`densityOf`), which is presentation — the
-// number itself is always printed beside it.
+// to DRAW a rail — how wide (`railWidth`) and at what pace its traffic
+// runs (`densityOf`) — which is presentation: the number itself is
+// always printed beside it.
 //
 // AND THE RULE UNDER ALL OF IT: a border whose flow the server could
 // not compute renders as UNKNOWN, never as zero. `waiting: null` prints
@@ -184,10 +185,59 @@ export function waitingText(b: Border): string {
  *  and `boss orient` branch on the same fact rather than on a phrase
  *  copied between them. */
 export function machineText(m: Machine): string {
-  if (m.kind === 'actors') return `${m.name} · worked by actors`;
-  if (m.silent === true) return `${m.name} · SILENT ${m.silent_for_minutes ?? '?'}m`;
-  if (m.silent_for_minutes !== null) return `${m.name} · fired ${m.silent_for_minutes}m ago`;
-  return `${m.name} · no firing recorded`;
+  return `${m.name} · ${machineStatus(m)}`;
+}
+
+/** The status half of `machineText`, alone — the line the rail writes
+ *  under the machine's name, beside its lamp (design 62de32ae decision
+ *  6: the machine's name and lamp written ON the rail). */
+export function machineStatus(m: Machine): string {
+  if (m.kind === 'actors') return 'worked by actors';
+  if (m.silent === true) return `SILENT ${m.silent_for_minutes ?? '?'}m`;
+  if (m.silent_for_minutes !== null) return `fired ${m.silent_for_minutes}m ago`;
+  return 'no firing recorded';
+}
+
+/** The widest a rail draws, in world units. */
+export const RAIL_MAX_WIDTH = 8;
+
+/** How WIDE the rail draws (design 62de32ae decision 6: rail width
+ *  follows rate). PRESENTATION ONLY — the rate is printed beside it.
+ *  Logarithmic, because the live rates span three orders (a few
+ *  arrivals a day beside hundreds of intakes) and a linear width would
+ *  draw every rail but one as a hairline. An empty rail is a hairline;
+ *  an UNMEASURED one is drawn at a thin measured width in the dotted
+ *  `unknown` band, so it can never read as the empty one. */
+export function railWidth(perDay: number | null): number {
+  if (perDay === null) return 2;
+  if (perDay <= 0) return 1.5;
+  return Math.min(RAIL_MAX_WIDTH, 2 + 2 * Math.log10(1 + perDay));
+}
+
+/** When the rail last crossed, in the stack's own clock (UTC — the
+ *  whole estate runs on it, so the panel says so rather than guessing
+ *  a reader's zone), and how long before the read that was. A read
+ *  that carried no `now` gets the stamp alone: an age measured against
+ *  a clock nobody sent is not an age. */
+export function crossedText(b: Border, now: string): string {
+  if (b.last_crossed === null) return 'nothing crossed in the two windows read';
+  const at = new Date(b.last_crossed);
+  if (Number.isNaN(at.getTime())) return b.last_crossed;
+  const stamp = `${at.toISOString().slice(0, 10)} ${at.toISOString().slice(11, 16)} UTC`;
+  const read = new Date(now);
+  if (now === '' || Number.isNaN(read.getTime())) return stamp;
+  const minutes = Math.max(0, Math.floor((read.getTime() - at.getTime()) / 60_000));
+  const ago = minutes < 60 ? `${minutes}m` : minutes < 48 * 60 ? `${Math.floor(minutes / 60)}h` : `${Math.floor(minutes / 1440)}d`;
+  return `${stamp} · ${ago} ago`;
+}
+
+/** What waits that the holds list does not name: the server bounds the
+ *  LIST (`MAX_HOLDS`), never the count, so a panel that showed only the
+ *  list would under-report the queue. */
+export function unlistedText(b: Border): string {
+  if (b.waiting === null) return '';
+  const more = b.waiting - b.holds.length;
+  return more > 0 ? `+${more} more waiting, not listed` : '';
 }
 
 /** How thick the rail draws. PRESENTATION ONLY — the rate itself is

@@ -131,7 +131,7 @@
     finance: ['finance', 'vendors'],
     warehouse: ['warehouse', 'parts'],
     distribution: ['shipping'],
-    production: ['products', 'calendar'],
+    production: ['products'],
     maintenance: ['catalog', 'assets'],
     people: ['people'],
   };

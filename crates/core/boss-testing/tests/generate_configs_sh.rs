@@ -165,7 +165,8 @@ fn no_files_root_leaves_the_file_store_off() {
 // The service it points at runs in the same container on every tenant:
 // the launcher gates boss-calendar-api on no module (tenant-modules.sh
 // `service_module` lists none for it), so a tenant's `calendar = false`
-// hides the SPA's Release calendar entry and nothing else.
+// hid the SPA's Release calendar entry and nothing else — and since that
+// page retired (design 2ea444f5, 2026-09-24) it hides nothing.
 
 /// Parse boss-jobs-api.toml from a generator run with no extra env.
 fn jobs_config(case: &str) -> toml::Value {

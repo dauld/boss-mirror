@@ -38,6 +38,7 @@
   } from './types';
   import { href } from '../router';
   import { okRead, readStateOfResponse, type ReadState } from '../data/readState';
+  import { loadOwnerNames, personIdsOf } from '../data/ownerNames';
 
   let { vendorLookup } = $props<{ vendorLookup: string }>();
 
@@ -48,7 +49,7 @@
   let loadFailed = $state<string | null>(null);
   let pos = $state<PurchaseOrder[]>([]);
   let vendorInvoices = $state<VendorInvoice[]>([]);
-  let empNames = $state<Map<string, string>>(new Map());
+  let empNames = $state<ReadonlyMap<string, string>>(new Map());
   let contacts = $state<VendorContact[]>([]);
   let interactions = $state<VendorInteraction[]>([]);
   let team = $state<VendorAccountTeamMember[]>([]);
@@ -67,41 +68,32 @@
     vendors.find((v) => v.id === lookup) ?? vendors.find((v) => v.name === lookup),
   );
 
-  // Base data — vendors, POs, invoices, employees. Fetched once per
-  // lookup change.
+  // Base data — vendors, POs, invoices. Fetched once per lookup change.
+  // The employees' names are read below, for the people shown.
   $effect(() => {
     void lookup;
     let cancelled = false;
     loading = true;
     (async () => {
       try {
-        const [vResp, pResp, iResp, peopleResp] = await Promise.all([
+        const [vResp, pResp, iResp] = await Promise.all([
           fetch('/api/inventory/vendors'),
           fetch('/api/inventory/orders'),
           fetch('/api/inventory/vendor-invoices'),
-          fetch('/api/people'),
         ]);
         const vRead = readStateOfResponse('/api/inventory/vendors', vResp);
         const pRead = readStateOfResponse('/api/inventory/orders', pResp);
         const iRead = readStateOfResponse('/api/inventory/vendor-invoices', iResp);
-        const eRead = readStateOfResponse('/api/people', peopleResp);
         const vBody = vRead.kind === 'ok' ? await vResp.json() : [];
         const pBody = pRead.kind === 'ok' ? await pResp.json() : [];
         const iBody = iRead.kind === 'ok' ? await iResp.json() : [];
-        const peopleBody = eRead.kind === 'ok' ? await peopleResp.json() : [];
         if (!cancelled) {
           loadFailed = vRead.kind === 'failed' ? vRead.error : null;
           posRead = pRead;
           billsRead = iRead;
-          peopleRead = eRead;
           vendors = Array.isArray(vBody) ? vBody : (vBody.data ?? []);
           pos = Array.isArray(pBody) ? pBody : (pBody.data ?? []);
           vendorInvoices = Array.isArray(iBody) ? iBody : (iBody.data ?? []);
-          const names = new Map<string, string>();
-          for (const e of peopleBody as Array<{ id: string; name: string }>) {
-            names.set(e.id, e.name);
-          }
-          empNames = names;
           loading = false;
         }
       } catch (e) {
@@ -132,6 +124,35 @@
         interactions = i;
         team = t;
         contracts = k;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  // Names only the employees the page shows — the account team, the
+  // active contracts' signers and the people behind the twenty
+  // interactions listed — one row each, and the failure line below names
+  // the row that failed. Until backlog 1e73bd93 this was a read of the
+  // WHOLE roster riding the vendor's own Promise.all. Machine actors (a
+  // dispatch rule logging an interaction) are never asked about (see
+  // ../data/ownerNames.ts).
+  let peopleKey = $derived(
+    personIdsOf([
+      ...team.map((m) => m.employee_id),
+      ...contracts.filter((c) => c.status === 'active').map((c) => c.signed_by_employee_id),
+      ...interactions.slice(0, 20).map((i) => i.actor_id),
+    ]).join('\n'),
+  );
+  $effect(() => {
+    const ids = peopleKey ? peopleKey.split('\n') : [];
+    let cancelled = false;
+    (async () => {
+      const out = await loadOwnerNames(ids);
+      if (!cancelled) {
+        empNames = out.names;
+        peopleRead = out.read;
       }
     })();
     return () => {

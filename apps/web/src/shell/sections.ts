@@ -161,7 +161,6 @@ const SECTION_FOR_KIND: Readonly<Record<Route['kind'], string>> = {
   shipmentDetail: 'shipping',
   support: 'support',
   qa: 'qa',
-  calendar: 'calendar',
   // /ux/calendar/me is the `schedule` row's own path (Home, "My
   // schedule"). It lit `calendar` until 2026-09-24, so it highlighted
   // Release calendar and was gated on the calendar module — off on the

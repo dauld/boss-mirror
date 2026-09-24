@@ -1,5 +1,7 @@
-// Naming the owners the launch calendar shows — and saying so when it
-// cannot.
+// Naming the few people a page shows — and saying so when it cannot.
+// Written for the launch calendar's owners; that page retired with the
+// second example tenant (design 2ea444f5, backlog a8991c86), and the
+// pages below that name a handful of people read through it still.
 //
 // WHY THIS IS A MODULE (backlog 0268a829, page audit 0ceeffa6 GAP 8,
 // 2026-09-23). The page fetched the WHOLE employee roster to name the
@@ -68,11 +70,36 @@ export async function loadOwnerNames(
   ids: ReadonlyArray<string>,
   fetchFn: Fetch = (url) => fetch(url),
 ): Promise<OwnerNames> {
+  return readNames(ids, fetchFn, false);
+}
+
+/// Names for ids that may be a person OR a team — a handoff's `from_id`
+/// and `to_id`, which the handoff StepType declares "Person or team",
+/// and which every seeded handoff fills with a team or a role
+/// (`inventory-clerk` → `shipping-clerk`). The people service answers
+/// such an id 404 "no employee with ID …": the read WORKED and said
+/// "not a person", so the id is its own label and nothing failed.
+/// Every other refusal and every network error is still a failure
+/// (backlog 1e73bd93). An owner or an actor id is always a person, so
+/// `loadOwnerNames` keeps reading a 404 there as a failed read.
+export async function loadPersonOrTeamNames(
+  ids: ReadonlyArray<string>,
+  fetchFn: Fetch = (url) => fetch(url),
+): Promise<OwnerNames> {
+  return readNames(ids, fetchFn, true);
+}
+
+async function readNames(
+  ids: ReadonlyArray<string>,
+  fetchFn: Fetch,
+  notFoundIsNotAPerson: boolean,
+): Promise<OwnerNames> {
   const results = await Promise.all(
     ids.map(async (id): Promise<{ id: string; name?: string; read: ReadState }> => {
       const url = `/api/people/${encodeURIComponent(id)}`;
       try {
         const resp = await fetchFn(url);
+        if (notFoundIsNotAPerson && resp.status === 404) return { id, read: okRead };
         const read = readStateOfResponse(url, resp);
         if (read.kind === 'failed') return { id, read };
         const body = (await resp.json()) as { name?: string | null } | null;

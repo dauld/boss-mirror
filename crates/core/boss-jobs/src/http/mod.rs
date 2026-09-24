@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::events;
 use crate::in_memory::compute_job_status;
 use crate::policy_glue::scope_matches;
-use crate::port::{DepartmentFilter, JobFilter, JobScope, JobsRepository, LaunchCalendarRow};
+use crate::port::{DepartmentFilter, JobFilter, JobScope, JobsRepository};
 use crate::registry::{WorkflowError, WorkflowRegistry, WorkflowSpec};
 use crate::step_plugins::{StepPluginError, StepPluginRegistry, StepPluginSpec};
 use crate::step_registry::StepRegistry;
@@ -249,7 +249,6 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
             "/api/jobs/phase-distribution",
             get(jobs_phase_distribution::<R, B>),
         )
-        .route("/api/jobs/launch-calendar", get(launch_calendar::<R, B>))
         .route("/api/jobs/assignments", get(list_assignments::<R, B>))
         // The queue-age lens (2a0b034e): how long every outstanding
         // obligation — ready/active step on an open packet — has

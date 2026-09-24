@@ -60,7 +60,7 @@ fn user_header(role: &str) -> String {
 }
 
 /// The boarding rule, declaring a 30-minute heartbeat — what the
-/// gates -> track border's machine is judged silent against.
+/// dock -> track border's machine is judged silent against.
 fn depth_rule() -> CadenceRuleRow {
     CadenceRuleRow {
         name: "train-board-on-dock-depth".into(),
@@ -112,11 +112,12 @@ fn app() -> (axum::Router, Arc<InMemoryJobs>, Arc<dyn CadenceRepository>) {
     let cadence: Arc<dyn CadenceRepository> = Arc::new(InMemoryCadence::new(vec![depth_rule()]));
     let delivery: Arc<dyn DeliveryPolicyRepository> = Arc::new(InMemoryDeliveryPolicy::new(vec![]));
     // The dispatcher's firing record (b14afc48): auto-park-on-gate-green
-    // fired an hour before NOW, which is what the shop-floor -> dock
+    // fired an hour before NOW, which is what the gates -> dock
     // border must answer with instead of the old "nothing records it".
     // (That hop was marshalling -> dock until backlog 94c6ffd0 put the
-    // shop floor between the two — the same crossing, the same machine,
-    // one territory further along.)
+    // shop floor between the two, and shop-floor -> dock until design
+    // 62de32ae put the gates before the dock — the same crossing, the
+    // same machine, each time drawn where a car actually makes it.)
     let dispatcher_firings: Arc<dyn DispatcherFiringsRepository> =
         Arc::new(InMemoryDispatcherFirings::new(vec![(
             "auto-park-on-gate-green".to_string(),
@@ -296,9 +297,9 @@ async fn every_border_carries_its_flow_its_queue_and_its_machine() {
     assert_eq!(v["window_hours"], 24);
     assert_eq!(v["now"], NOW);
 
-    // The dock has a car on it that has not boarded: the gates -> track
+    // The dock has a car on it that has not boarded: the dock -> track
     // border is holding traffic, with the record's own reason on it.
-    let boarding = border(&v, "gates", "track");
+    let boarding = border(&v, "dock", "track");
     assert_eq!(boarding["waiting"], 1, "{boarding}");
     assert_eq!(boarding["state"], "clear");
     let hold = &boarding["holds"][0];
@@ -324,7 +325,7 @@ async fn the_machine_is_read_from_its_own_firing_record_and_silence_is_trouble()
     // Never fired: the border says so, and says nothing about silence —
     // "cannot tell" must not render as "fine".
     let (_, v) = get(&app, "operator", "/api/yard/borders").await;
-    let boarding = border(&v, "gates", "track");
+    let boarding = border(&v, "dock", "track");
     assert_eq!(boarding["machine"]["name"], "train-board-on-dock-depth");
     assert_eq!(boarding["machine"]["kind"], "cadence");
     assert_eq!(boarding["machine"]["last_fired"], Value::Null);
@@ -345,7 +346,7 @@ async fn the_machine_is_read_from_its_own_firing_record_and_silence_is_trouble()
         .await
         .unwrap();
     let (_, v) = get(&app, "operator", "/api/yard/borders").await;
-    let boarding = border(&v, "gates", "track");
+    let boarding = border(&v, "dock", "track");
     assert_eq!(
         boarding["machine"]["last_fired"],
         "2026-09-19T09:00:00+00:00"
@@ -367,7 +368,7 @@ async fn the_machine_is_read_from_its_own_firing_record_and_silence_is_trouble()
     // ran. Its silence stays unjudged: an event rule declares no
     // heartbeat, and a `silent: false` here would be a machine drawn
     // healthy on no evidence.
-    let parked = border(&v, "shop-floor", "dock");
+    let parked = border(&v, "gates", "dock");
     assert_eq!(parked["machine"]["kind"], "dispatcher-rule");
     assert_eq!(
         parked["machine"]["last_fired"], "2026-09-19T11:00:00+00:00",
@@ -399,7 +400,7 @@ async fn a_window_that_cannot_be_read_is_refused_and_a_denied_caller_gets_a_well
     let (status, v) = get(&app, "nobody", "/api/yard/borders").await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["borders"].as_array().unwrap().len(), BORDERS.len());
-    let boarding = border(&v, "gates", "track");
+    let boarding = border(&v, "dock", "track");
     assert_eq!(boarding["waiting"], 0);
     assert_eq!(boarding["state"], "clear");
 }

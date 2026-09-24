@@ -11,7 +11,17 @@
 //!     examples/*/seeds/classes.{json,toml}, every `[[location]]` id,
 //!     every `[[account]]` code, every tenant id — counted here by an
 //!     independent read of the same files, so an extraction that
-//!     silently dropped a file would show as a count.
+//!     silently dropped a file would show as a count. The same goes
+//!     for infra/postgres/retired-examples/*/, the rows a RETIRED
+//!     example's seeds carried that the migrations still seed.
+//!   * A RETIRED EXAMPLE'S MIGRATION ROWS OUTLIVE IT (backlog a8991c86,
+//!     car 6). 01-registries.sql seeds the used-device shop's 26 roles,
+//!     ten departments, three account types, one location kind and a
+//!     companies row on every instance and cannot be edited, so when
+//!     examples/used-device-shop is deleted those rows must stay
+//!     candidates. The list that keeps them names only rows the
+//!     migration seeds, with the migration's own member_attribute, and
+//!     a tree without the example still carries every one of them.
 //!   * THE PLATFORM'S ROWS ARE IN NO EXAMPLE SEED. The set is what an
 //!     instance may lose, so the rows the platform's own baseline and
 //!     schema need (the bootstrap admin's role/department/location,
@@ -42,10 +52,15 @@
 //!     the same BOSS_TENANT_DIR and tenant mount the boss container has.
 
 use boss_testing::{create_dir, repo_root, scratch_dir, write_file};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SCRIPT: &str = "infra/postgres/example-reference-rows.sh";
+/// Where a retired example's migration-seeded rows are declared — beside
+/// the script, so it ships wherever the script does (the image copies
+/// infra/postgres whole).
+const RETIRED: &str = "infra/postgres/retired-examples";
 
 fn run(args: &[&str], examples: Option<&Path>) -> (i32, String, String) {
     let mut cmd = Command::new("bash");
@@ -87,14 +102,17 @@ fn toml_headers(p: &Path, header: &str) -> usize {
         .count()
 }
 
-/// (subject_kind, code) of every class row an example seed carries,
-/// read with the product's own TOML/JSON parsers rather than the
-/// script's awk — the independent read.
+/// (subject_kind, code) of every class row an example seed — live or
+/// retired — carries, read with the product's own TOML/JSON parsers
+/// rather than the script's awk — the independent read.
 fn seeded_classes() -> Vec<(String, String)> {
     let mut rows = Vec::new();
-    let examples = repo_root().join("examples");
-    for entry in std::fs::read_dir(&examples).unwrap() {
-        let d = entry.unwrap().path();
+    let root = repo_root();
+    let dirs = [root.join("examples"), root.join(RETIRED)]
+        .into_iter()
+        .flat_map(|r| std::fs::read_dir(r).unwrap())
+        .map(|e| e.unwrap().path());
+    for d in dirs {
         let json = d.join("seeds/classes.json");
         if json.is_file() {
             let v: serde_json::Value =
@@ -188,9 +206,165 @@ fn seeds_is_the_example_tenants_own_rows_counted_independently() {
         "brewery/seeds/chart_of_accounts.toml",
         "brewery/seeds/tax.toml",
         "used-device-shop/seeds/classes.toml",
+        "retired-examples/used-device-shop/seeds/classes.toml",
     ] {
         assert!(sources.contains(&s), "sources names {s}: {sources:?}");
     }
+}
+
+/// Every (subject_kind, member_attribute, code) an `INSERT INTO classes
+/// (subject_kind, code, display_name, member_attribute, …)` statement of
+/// 01-registries.sql seeds — read from the migration's text, the way
+/// psql would see each tuple: the quoted fields in column order.
+fn migration_classes() -> BTreeSet<(String, String, String)> {
+    let sql = std::fs::read_to_string(repo_root().join("infra/postgres/schema/01-registries.sql"))
+        .unwrap();
+    let mut rows = BTreeSet::new();
+    let mut inside = false;
+    for line in sql.lines().map(str::trim) {
+        if line
+            .starts_with("INSERT INTO classes (subject_kind, code, display_name, member_attribute")
+        {
+            inside = true;
+            continue;
+        }
+        if inside && line.starts_with('(') {
+            // Odd pieces of a split on the quote are the quoted fields:
+            // subject_kind, code, display_name, member_attribute.
+            let q: Vec<&str> = line.split('\'').collect();
+            rows.insert((q[1].to_string(), q[7].to_string(), q[3].to_string()));
+        }
+        if line.ends_with(';') {
+            inside = false;
+        }
+    }
+    assert!(
+        rows.len() > 100,
+        "the reader found the migration's class tuples ({} of them) — a reader that found none would certify nothing",
+        rows.len()
+    );
+    rows
+}
+
+/// The ids 01-registries.sql's `INSERT INTO companies` seeds.
+fn migration_companies() -> BTreeSet<String> {
+    let sql = std::fs::read_to_string(repo_root().join("infra/postgres/schema/01-registries.sql"))
+        .unwrap();
+    let stmt = sql
+        .split("INSERT INTO companies (id, name) VALUES")
+        .nth(1)
+        .expect("01-registries.sql seeds companies")
+        .split(';')
+        .next()
+        .unwrap();
+    stmt.lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with('('))
+        .map(|l| l.split('\'').nth(1).unwrap().to_string())
+        .collect()
+}
+
+/// An examples directory shaped like the tree after the used-device
+/// shop's deletion (car 7): the brewery alone.
+fn examples_without_the_device_shop(name: &str) -> PathBuf {
+    let e = scratch_dir(&format!("example-reference-rows-car7-{name}"));
+    std::os::unix::fs::symlink(repo_root().join("examples/brewery"), e.join("brewery")).unwrap();
+    e
+}
+
+#[test]
+fn the_retired_device_shop_rows_are_the_ones_its_migration_seeds_and_outlive_its_example() {
+    let root = repo_root();
+    let dir = root.join(RETIRED).join("used-device-shop");
+    let classes: toml::Value =
+        toml::from_str(&std::fs::read_to_string(dir.join("seeds/classes.toml")).unwrap()).unwrap();
+    let retired: BTreeSet<(String, String, String)> = classes["class"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["subject_kind"].as_str().unwrap().to_string(),
+                r["member_attribute"].as_str().unwrap().to_string(),
+                r["code"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+
+    // Every row it names is a row the migration seeds, under the same
+    // member_attribute — nothing invented, nothing mis-keyed.
+    let migration = migration_classes();
+    let invented: Vec<_> = retired.difference(&migration).collect();
+    assert!(
+        invented.is_empty(),
+        "the retired list names rows 01-registries.sql does not seed: {invented:?}"
+    );
+    // And it names every one the car-0 measure counted (2026-09-24): 26
+    // roles, ten departments, three account types, one location kind.
+    // Together with the fresh-schema run in example_reference_rows_sql.rs
+    // (without examples/used-device-shop, what remains is exactly what
+    // the platform names), this is the equality: the rows not kept by
+    // the platform nor carried by the brewery are all here, and nothing
+    // here is not the migration's.
+    let count = |kind: &str, attr: &str| {
+        retired
+            .iter()
+            .filter(|(k, a, _)| k == kind && a == attr)
+            .count()
+    };
+    assert_eq!(count("employee", "role"), 26);
+    assert_eq!(count("employee", "department"), 10);
+    assert_eq!(count("account", "type"), 3);
+    assert_eq!(count("location", "kind"), 1);
+    assert_eq!(retired.len(), 40, "and nothing else: {retired:?}");
+
+    let manifest = std::fs::read_to_string(dir.join("tenant.toml")).unwrap();
+    assert!(
+        manifest.contains("\ntenant_id = \"used-device-shop\"\n"),
+        "the manifest names the companies row: {manifest}"
+    );
+    assert!(migration_companies().contains("used-device-shop"));
+
+    // Car 7's tree: the example is gone, and every row is still a
+    // candidate — the hazard the measure recorded, closed.
+    let examples = examples_without_the_device_shop("seeds");
+    let (rc, out, err) = run(&["seeds"], Some(&examples));
+    assert_eq!(rc, 0, "{err}");
+    let v: serde_json::Value = serde_json::from_str(out.trim()).unwrap();
+    let keys: BTreeSet<String> = class_keys(&v).into_iter().collect();
+    for (kind, _, code) in &retired {
+        assert!(
+            keys.contains(&format!("{kind}:{code}")),
+            "{kind}:{code} is a candidate without examples/used-device-shop"
+        );
+    }
+    assert_eq!(strs(&v, "companies"), ["brewery", "used-device-shop"]);
+    assert!(
+        strs(&v, "sources")
+            .contains(&"retired-examples/used-device-shop/seeds/classes.toml".to_string()),
+        "{out}"
+    );
+    // A retired example is not an example: its tenant id is not one
+    // `boot` keeps the rows for.
+    let t = scratch_dir("example-reference-rows-retired-id");
+    write(
+        &t.join("tenant.toml"),
+        "[meta]\ntenant_id = \"used-device-shop\"\n",
+    );
+    let (rc, out, _) = run(&["boot", t.to_str().unwrap()], Some(&examples));
+    assert_eq!(rc, 0, "{out}");
+    assert!(out.starts_with("evict: tenant used-device-shop"), "{out}");
+
+    // A missing list is a refusal, never a smaller set (CLAUDE.md
+    // §Doors: a wrong path answers instead of erroring).
+    let out = Command::new("bash")
+        .arg(root.join(SCRIPT))
+        .arg("seeds")
+        .env("BOSS_RETIRED_EXAMPLES_DIR", "/nonexistent/retired")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("/nonexistent/retired"));
 }
 
 /// The rows the platform itself needs, derived from the files that

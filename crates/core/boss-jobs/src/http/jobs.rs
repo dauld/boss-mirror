@@ -543,46 +543,6 @@ pub(super) async fn jobs_live<R: JobsRepository + 'static, B: EventBus + 'static
     .into_response()
 }
 
-#[derive(Deserialize)]
-pub(super) struct LaunchCalendarQuery {
-    /// ISO date (YYYY-MM-DD); defaults to today (UTC).
-    from: Option<chrono::NaiveDate>,
-    /// ISO date (YYYY-MM-DD); defaults to `from + 90 days`.
-    to: Option<chrono::NaiveDate>,
-}
-
-/// Launch-calendar projection per examples/used-device-shop/design/marketing-needs.md E2. Returns one
-/// row per launch step (any step carrying `launch_date`) on every
-/// open/in-flight Job, with the step's date + channel and the Job's
-/// current tier — whatever the Job's kind (backlog 649b3303). Frontend renders at `/calendar` (standalone) and in the exec
-/// dashboard next-30-days panel.
-pub(super) async fn launch_calendar<R: JobsRepository + 'static, B: EventBus + 'static>(
-    State(state): State<Arc<JobsApiState<R, B>>>,
-    Query(q): Query<LaunchCalendarQuery>,
-) -> Response {
-    let from = q
-        .from
-        .unwrap_or(boss_clock_client::now_from(&state.clock).await.date_naive());
-    let to = q.to.unwrap_or_else(|| from + chrono::Duration::days(90));
-    match state.jobs.list_launch_calendar(from, to).await {
-        Ok(rows) => {
-            #[derive(Serialize)]
-            struct Out {
-                data: Vec<LaunchCalendarRow>,
-                from: chrono::NaiveDate,
-                to: chrono::NaiveDate,
-            }
-            Json(Out {
-                data: rows,
-                from,
-                to,
-            })
-            .into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
 /// Return the public kebab-case string for a JobStatus.
 /// Mirrors the DB storage format used by the adapters.
 pub(super) fn job_status_str_public(s: JobStatus) -> &'static str {

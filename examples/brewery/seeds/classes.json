@@ -26,7 +26,6 @@
       "surfaces": [
         "exec",
         "marketing-assets",
-        "calendar",
         "jobs",
         "people",
         "policy",
@@ -392,7 +391,6 @@
       "surfaces": [
         "exec",
         "marketing-assets",
-        "calendar",
         "jobs"
       ]
     }
@@ -405,7 +403,6 @@
     "sort_order": 101,
     "metadata": {
       "surfaces": [
-        "calendar",
         "jobs",
         "marketing-assets"
       ]
@@ -419,8 +416,7 @@
     "sort_order": 102,
     "metadata": {
       "surfaces": [
-        "marketing-assets",
-        "calendar"
+        "marketing-assets"
       ]
     }
   },
@@ -432,7 +428,6 @@
     "sort_order": 110,
     "metadata": {
       "surfaces": [
-        "calendar",
         "schedule"
       ]
     }
@@ -445,7 +440,6 @@
     "sort_order": 111,
     "metadata": {
       "surfaces": [
-        "calendar",
         "schedule"
       ]
     }

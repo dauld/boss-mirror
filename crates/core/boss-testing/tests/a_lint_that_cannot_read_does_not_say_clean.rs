@@ -655,6 +655,83 @@ fn steptype_bundle_ratchet_allows_a_widened_enum_and_still_refuses_a_shrunk_one(
     );
 }
 
+/// Every `[[step_type]]` block of a bundle as `(text, declares a
+/// required field)`, a block running to the next header or the end of
+/// the file — read out of the real bundle so the cases below cannot
+/// drift from its idiom.
+fn kind_blocks(bundle: &str) -> Vec<(String, bool)> {
+    let mut blocks: Vec<String> = Vec::new();
+    for line in bundle.split_inclusive('\n') {
+        if line.starts_with("[[step_type]]") {
+            blocks.push(String::new());
+        }
+        if let Some(b) = blocks.last_mut() {
+            b.push_str(line);
+        }
+    }
+    blocks
+        .into_iter()
+        .map(|b| {
+            let required = b.lines().any(|l| l.trim() == "required = true");
+            (b, required)
+        })
+        .collect()
+}
+
+/// A KIND WHOSE EVERY FIELD IS OPTIONAL MAY LEAVE (backlog a8991c86,
+/// design 2ea444f5: the `marketing-launch` kind retires with the launch
+/// calendar). An unknown kind validates permissively, so removing a kind
+/// that required nothing retightens no in-flight step, and it breaks no
+/// reader either: a kind that required nothing never promised any field
+/// would be present at done. A kind that declared a required field is
+/// still refused — a dispatcher rule or surface reading its done
+/// metadata was promised that field, and the removal withdraws the
+/// promise through the unversioned door, the same reason the ratchet
+/// refuses removing one field.
+///
+/// Both halves are pinned: without the first the retirement is refused,
+/// without the second a kind with a completion contract leaves silently.
+#[test]
+fn steptype_bundle_ratchet_lets_an_all_optional_kind_leave_and_keeps_a_required_one() {
+    let lint = "steptype-bundle-ratchet";
+
+    let fx = Fixture::new("steptype-retire-optional");
+    let path = fx.dir.join("crates/core/boss-jobs/seeds/step_types.toml");
+    let bundle = std::fs::read_to_string(&path).expect("readable");
+    let (optional, _) = kind_blocks(&bundle)
+        .into_iter()
+        .find(|(b, required)| !required && b.contains("[[step_type.fields]]"))
+        .expect("the bundle declares a kind whose every field is optional");
+    boss_testing::write_file(&path, &bundle.replacen(&optional, "", 1));
+    fx.commit("retire an all-optional kind");
+    let (code, out) = fx.run(lint, "", false);
+    assert_eq!(
+        code, 0,
+        "a kind that required nothing strands no in-flight step when it leaves, so the \
+         ratchet must let it through:\n{out}"
+    );
+
+    let fx = Fixture::new("steptype-retire-required");
+    let path = fx.dir.join("crates/core/boss-jobs/seeds/step_types.toml");
+    let bundle = std::fs::read_to_string(&path).expect("readable");
+    let (required, _) = kind_blocks(&bundle)
+        .into_iter()
+        .find(|(_, required)| *required)
+        .expect("the bundle declares a kind with a required field");
+    boss_testing::write_file(&path, &bundle.replacen(&required, "", 1));
+    fx.commit("remove a kind with a required field");
+    let (code, out) = fx.run(lint, "", false);
+    assert_eq!(
+        code, 1,
+        "a kind that required a field promised it to every reader of its done metadata; \
+         removing the kind withdraws that promise with no version to pin against:\n{out}"
+    );
+    assert!(
+        out.contains("is removed here"),
+        "the failure must say what it refused:\n{out}"
+    );
+}
+
 #[test]
 fn a_new_style_has_a_caller_reads_the_tree_or_says_it_could_not() {
     let fx = Fixture::new("a-new-style-has-a-caller");

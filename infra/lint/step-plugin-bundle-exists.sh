@@ -12,9 +12,15 @@
 # `infra/platform/step-plugins/<kind>.toml`, which the seed publishes
 # insert-if-missing at every start; the seven migrations that declared
 # rows before that day stay as history and still produce rows on a
-# fresh database. Both are read here: a bundle file whose JS is missing
-# is the same broken step as a migration's, and a migration row whose
-# JS was deleted is still live on every deployment that ran it.
+# fresh database. Only the bundle is read here, because the bundle IS
+# the set of rows the migrations leave active: boss-jobs'
+# the_step_plugins_bundle_is_the_migrations_pg.rs holds the two equal,
+# kind for kind and column for column, on a database built from the
+# schema. Until 2026-09-24 this lint also scraped every `.js` literal
+# out of every migration, which counted a row a LATER migration had
+# retired as live — so the first plugin retirement (the three
+# marketing plugins, design 2ea444f5, backlog a8991c86, retired by
+# 20260924141548) was refused for deleting JS no active row names.
 #
 # WHAT THE FAILURE LOOKS LIKE. The SPA prefers a plugin over its
 # built-in surface whenever the registry has an active row for a step's
@@ -31,7 +37,7 @@
 # is the normal order for authoring one, and `checklist.js`/`sign-off.js`
 # back kinds the SPA renders inline.
 #
-# WHAT IT DOES NOT DO. It reads the migrations, not a live database, so
+# WHAT IT DOES NOT DO. It reads the tree, not a live database, so
 # it cannot see a row inserted by hand or a bundle missing from a built
 # image. It catches the authoring mistake at the point it enters the
 # tree, which is where it is cheap.
@@ -40,26 +46,18 @@ set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 # shellcheck source=infra/lint/lib/scanned.sh
 . infra/lint/lib/scanned.sh || exit 3
-SCHEMA="infra/postgres/schema"
 ROWS="infra/platform/step-plugins"
 BUNDLES="infra/step-plugins"
-[ -d "$SCHEMA" ] || { echo "step-plugin-bundle-exists: $SCHEMA not found" >&2; exit 1; }
 [ -d "$ROWS" ] || { echo "step-plugin-bundle-exists: $ROWS not found" >&2; exit 1; }
 [ -d "$BUNDLES" ] || { echo "step-plugin-bundle-exists: $BUNDLES not found" >&2; exit 1; }
 
-# Pull the frontend_url from every INSERT INTO step_plugins (the seeds
-# are hand-written with the value list on its own lines, so the bundle
-# name is the lone single-quoted token ending in .js) and from every
-# bundle row's `frontend_url = "<name>.js"` line.
-urls=$( {
-    grep -rhoE "'[A-Za-z0-9._/-]+\.js'" "$SCHEMA"/*.sql 2>/dev/null | tr -d "'"
-    grep -hoE '^frontend_url *= *"[A-Za-z0-9._/-]+\.js"' "$ROWS"/*.toml 2>/dev/null \
-        | sed -E 's/^frontend_url *= *"//; s/"$//'
-} | sort -u)
+# Pull every bundle row's `frontend_url = "<name>.js"` line.
+urls=$(grep -hoE '^frontend_url *= *"[A-Za-z0-9._/-]+\.js"' "$ROWS"/*.toml 2>/dev/null \
+    | sed -E 's/^frontend_url *= *"//; s/"$//' | sort -u)
 
 count=$(printf '%s\n' "$urls" | grep -c . || true)
 if [ "$count" -lt 1 ]; then
-    echo "step-plugin-bundle-exists: found no .js references in $SCHEMA or $ROWS —" >&2
+    echo "step-plugin-bundle-exists: found no .js references in $ROWS —" >&2
     echo "  the scrape broke, so a green result would mean nothing." >&2
     exit 1
 fi

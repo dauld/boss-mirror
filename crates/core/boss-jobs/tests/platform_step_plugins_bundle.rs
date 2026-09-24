@@ -17,9 +17,12 @@
 //! `StepPluginSpec` does not serialize to TOML (TOML has no null) — and
 //! the loader refuses a file named for a kind it does not hold, a file
 //! holding two, a status other than `active`, and a version below 1.
-//! The twelve kinds below are the ones the migrations seeded; a plugin
-//! added later is a file dropped in, a JS bundle beside the others, and
-//! a line here.
+//! The migrations seeded twelve kinds; the three marketing plugins
+//! (brief, launch, attribution) served only the used-device-shop
+//! tenant's `marketing-motion` and were retired with its launch
+//! calendar on 2026-09-24 (design 2ea444f5, backlog a8991c86), so nine
+//! remain. A plugin added later is a file dropped in, a JS bundle
+//! beside the others, and a line here.
 
 use boss_jobs::seed_loader::{bundle_files, load_step_plugins};
 use boss_jobs::step_plugin_seed::{platform_step_plugins_path, step_plugin_js_path};
@@ -61,15 +64,12 @@ fn the_bundle_is_one_file_per_kind() {
             "correction-verdict",
             "diagnostic-call",
             "incident-review",
-            "marketing-attribution",
-            "marketing-brief",
-            "marketing-launch",
             "review-design",
             "scope-declaration",
             "sign-off",
             "sr-triage",
         ],
-        "the twelve platform step plugins the migrations seeded, and no other"
+        "the nine platform step plugins the migrations leave active, and no other"
     );
 }
 

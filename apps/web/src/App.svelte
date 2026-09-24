@@ -72,7 +72,6 @@
   import DesignReviewPage from './it/design/DesignReviewPage.svelte';
   import ExperimentsPage from './it/experiments/ExperimentsPage.svelte';
   import InboxPage from './inbox/InboxPage.svelte';
-  import CalendarPage from './calendar/CalendarPage.svelte';
   import MyCalendarPage from './calendar/MyCalendarPage.svelte';
   import SchedulePage from './schedule/SchedulePage.svelte';
   import ExecPage from './exec/ExecPage.svelte';
@@ -424,8 +423,6 @@
       <ProtocolDriftPage />
     {:else if route.kind === 'inbox'}
       <InboxPage />
-    {:else if route.kind === 'calendar'}
-      <CalendarPage />
     {:else if route.kind === 'myCalendar'}
       <MyCalendarPage />
     {:else if route.kind === 'schedule'}
