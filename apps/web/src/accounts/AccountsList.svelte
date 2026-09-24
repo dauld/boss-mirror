@@ -220,7 +220,6 @@
     eyebrow="Customers"
     title={`${accounts.length} accounts`}
     subtitle={subtitleLine}
-    motif="tap"
   />
 
   {#if isCapped(accountsPage)}

@@ -238,7 +238,7 @@
         Couldn't load the step-surface registry — showing the generic
         surface for now.
       </span>
-      <button class="step-btn" onclick={retryRegistries}>Retry</button>
+      <button class="btn" onclick={retryRegistries}>Retry</button>
     </div>
   {/if}
   <!-- Non-plugin surfaces get the packet's case rendered above the

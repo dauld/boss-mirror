@@ -557,41 +557,36 @@ a:hover { color: var(--fog); }
 .omnibox-result-label { font-weight: 500; white-space: nowrap; }
 .omnibox-result-detail { color: var(--static); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* The page header is Enamel's title (backlog 6f471ff6, car 1): the round-2
+   board's composed page runs band -> label -> uppercase title + subtitle,
+   with no rule under it. The amber rule and the diamond eyebrow it
+   replaces were Design Language v1.0's taproom accents, and Enamel keeps
+   amber for focus alone. */
 .exec-header {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  margin-bottom: 32px;
-  padding-bottom: 18px;
-  /* Brewery accent: amber-malt rule under every page header instead
-     of a flat stone border. Subtle taproom signature without
-     touching the data tables below. */
-  border-bottom: 2px solid var(--brew-amber);
-  gap: 32px;
+  margin-bottom: var(--s6);
+  gap: var(--s6);
 }
+/* The board's small label: mono 11px caps, tracked .1em, muted. */
 .exec-eyebrow {
-  font-size: 11px;
-  font-weight: 600;
+  font: 400 11px var(--font-mono);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  /* Brewery accent: roasted-malt brown on the eyebrow ribbons so the
-     page-classification tag reads as part of the brand chrome rather
-     than another piece of muted UI text. */
-  color: var(--brew-malt);
-  margin-bottom: 6px;
+  letter-spacing: var(--ls-label);
+  color: var(--static);
+  margin-bottom: var(--s2);
 }
-.exec-eyebrow::before {
-  content: '◆ ';
-  color: var(--brew-amber);
-  margin-right: 0.15em;
-}
+/* The board's page title: Overpass 900, uppercase, tracked .01em, 26px. */
 .exec-title {
-  font-family: var(--font-display);
-  font-size: 32px;
-  font-weight: 600;
+  font-family: var(--font-body);
+  font-size: 26px;
+  font-weight: 900;
+  line-height: 1.1;
+  text-transform: uppercase;
   margin: 0;
-  letter-spacing: -0.005em;
-  color: var(--brew-malt-dark);
+  letter-spacing: 0.01em;
+  color: var(--fog);
 }
 .exec-subtitle {
   font-size: 15px;
@@ -1846,18 +1841,6 @@ a:hover { color: var(--fog); }
 .om-rel-verb { font-size: 12px; color: var(--static); font-style: italic; }
 .om-rel-detail { font-size: 13px; color: var(--static); line-height: 1.5; }
 
-/* =======================================================================
-   Shared button styles (used by Design and Sim pages)
-   ======================================================================= */
-
-.wb-btn {
-  padding: 6px 16px; border-radius: var(--radius); border: none; font-size: 13px;
-  cursor: pointer; font-weight: 500;
-}
-.wb-btn-primary { background: var(--accent); color: var(--void); }
-.wb-btn-primary:hover { opacity: 0.9; }
-.wb-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-
 /* =============================================================================
    My Day — Job cards
    ========================================================================== */
@@ -2190,26 +2173,36 @@ a:hover { color: var(--fog); }
   background: var(--wash);
 }
 /* Enamel's button: tracked caps in a 2px frame. The frame is ink, so a
-   secondary button reads as a sign rather than a hairline box. */
-.btn {
-  padding: 6px 12px;
+   secondary button reads as a sign rather than a hairline box. The values
+   are the round-2 board's `.btn` (backlog 6f471ff6, car 1): 13px, 800,
+   11px 18px, line-height 1; primary filled with the action blue; danger in
+   troubled words and frame; disabled .45; small 12.5px at 7px 12px.
+
+   The old names are aliases on the SAME rules, never a second look. The
+   step plugins (infra/step-plugins/*.js) are bundles served beside the app
+   and still write .step-btn*, and three IT surfaces are left to the IT map
+   cars; every other component names .btn itself. A sign-off's approve is
+   the action that moves the packet on, so it is the primary; its reject is
+   the danger button. */
+.btn, .step-btn, .wb-btn {
+  padding: 11px 18px;
   border-radius: var(--radius);
   border: var(--frame) solid var(--border-strong);
   background: var(--card);
   font-family: inherit;
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
   text-transform: uppercase;
   letter-spacing: var(--ls-button);
   cursor: pointer;
   color: var(--text);
 }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-sm { padding: 3px 8px; font-size: 11px; }
-.btn-primary { background: var(--accent); color: var(--void); border-color: var(--accent); }
-.btn-primary:hover { background: var(--signal); }
-.btn-danger-outline { color: var(--err); border-color: var(--err); }
-.btn-danger-outline:hover { background: var(--err-wash); }
+.btn:disabled, .step-btn:disabled, .wb-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-sm { padding: 7px 12px; font-size: 12.5px; }
+.btn-primary, .step-btn-primary, .step-btn-approve { background: var(--accent); color: var(--void); border-color: var(--accent); }
+.btn-danger-outline, .step-btn-reject { color: var(--err); border-color: var(--err); }
+.btn-danger-outline:hover, .step-btn-reject:hover { background: var(--err-wash); }
 
 /* Subject-page deep-link actions: "Create a Job for this …".
    Sits under PageHeader on every Subject detail page (Account,
@@ -2779,17 +2772,7 @@ button.manual-tree-node {
 
 /* Action buttons */
 .step-actions { display: flex; gap: 8px; margin-top: 8px; }
-.step-btn {
-  padding: 6px 14px; border: 1px solid var(--border); border-radius: var(--radius);
-  font-size: 13px; background: var(--card); color: var(--text);
-  cursor: pointer; transition: border-color 0.15s;
-}
-.step-btn:hover { border-color: var(--accent); }
-.step-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.step-btn-primary { background: var(--accent); color: var(--void); border-color: var(--accent); }
-.step-btn-primary:hover { background: var(--signal); }
-.step-btn-approve { background: var(--ok); color: var(--void); border-color: var(--ok); }
-.step-btn-reject { background: var(--err); color: var(--void); border-color: var(--err); }
+/* .step-btn and its variants are aliases on Enamel's .btn — see there. */
 
 /* Approval result */
 .step-approval-result { padding: 12px; border-radius: var(--radius); font-size: 14px; }

@@ -34,7 +34,7 @@
     daysEndingOn,
     failedStep,
     inboundKinds,
-    loadKind,
+    loadEveryPage,
     loadWorkflows,
     readings,
     waiting,
@@ -59,9 +59,10 @@
    *  from the same rows, so a packet that closed inside the window
    *  counts as having left even if it arrived before it. */
   const WINDOW_DAYS = 8;
-  /** One page per kind. The busiest kind (backlog-item) ran 270 in a
-   *  week when this was written; a kind past this is reported, not
-   *  silently cut (a-limit-is-not-a-filter). */
+  /** The page each read asks for. Every kind is read page after page to
+   *  its total (`loadEveryPage`): backlog-item ran 822 in the window on
+   *  2026-09-24, past the one page of 500 this used to read, and every
+   *  count below was a floor (design 62de32ae decision 4). */
   const PAGE = 500;
 
   let today = $state<string>(new Date().toISOString().slice(0, 10));
@@ -80,7 +81,7 @@
     registry = { kind: 'ready', data: kinds };
     // One read per kind, together: each is small, and the registry
     // says how many there are.
-    const pages = await Promise.all(kinds.map((k) => loadKind(k, WINDOW_DAYS, PAGE)));
+    const pages = await Promise.all(kinds.map((k) => loadEveryPage(k, WINDOW_DAYS, PAGE)));
     const failed = pages.find((p) => p.kind === 'failed');
     if (failed && failed.kind === 'failed') {
       rows = failed;

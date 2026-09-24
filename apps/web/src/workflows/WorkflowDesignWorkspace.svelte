@@ -272,7 +272,7 @@
       <div class="wf-actions">
         <button
           type="button"
-          class="wb-btn"
+          class="btn"
           onclick={markAuthored}
           disabled={!actionable(authorStep) || acting !== null}
           title="Mark the spec as authored and advance"
@@ -281,7 +281,7 @@
         </button>
         <button
           type="button"
-          class="wb-btn"
+          class="btn"
           onclick={validateAndAdvance}
           disabled={!actionable(validateStep) || acting !== null}
           title="Run the dry-run lint; advance only if the spec is viable"
@@ -290,7 +290,7 @@
         </button>
         <button
           type="button"
-          class="wb-btn"
+          class="btn"
           onclick={approve}
           disabled={!actionable(approveStep) || acting !== null}
           title={`Stamp the ${APPROVE_ROLE} sign-off and advance`}
@@ -299,7 +299,7 @@
         </button>
         <button
           type="button"
-          class="wb-btn wb-btn-primary"
+          class="btn btn-primary"
           onclick={publish}
           disabled={!actionable(publishStep) || acting !== null}
           title="Complete the publish step — writes the kind to the registry and emits jobs.kind.published"

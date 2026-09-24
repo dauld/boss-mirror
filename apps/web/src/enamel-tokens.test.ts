@@ -340,3 +340,113 @@ describe('styles.css states a colour only in its token blocks', () => {
     expect(hits).toEqual([]);
   });
 });
+
+/** The page header is Enamel's title (backlog 6f471ff6, car 1). Until this
+ *  car PageHeader — on 76 pages — still wore Design Language v1.0: a 32px
+ *  mixed-case title in malt, a diamond eyebrow and an amber rule, with hop,
+ *  glass, tap and barrel glyphs on four hubs. The round-2 board sets the
+ *  page title in Overpass 900, uppercase, tracked .01em, 26px, and amber is
+ *  focus and nothing else (the fold: "the one amber outside a state"). */
+describe('the page header is Enamel’s title, not the brewery’s', () => {
+  it('sets the title in Overpass 900, uppercase, 26px, tracked .01em, in night ink', () => {
+    expect(decl('.exec-title', 'font-family')).toBe('var(--font-body)');
+    expect(decl('.exec-title', 'font-weight')).toBe('900');
+    expect(decl('.exec-title', 'text-transform')).toBe('uppercase');
+    expect(decl('.exec-title', 'font-size')).toBe('26px');
+    expect(decl('.exec-title', 'letter-spacing')).toBe('0.01em');
+    expect(decl('.exec-title', 'color')).toBe('var(--fog)');
+  });
+
+  it('labels the page with the board’s small label, not a diamond ribbon', () => {
+    expect(decl('.exec-eyebrow', 'font')).toBe('400 11px var(--font-mono)');
+    expect(decl('.exec-eyebrow', 'letter-spacing')).toBe('var(--ls-label)');
+    expect(decl('.exec-eyebrow', 'color')).toBe('var(--static)');
+    expect(rules.has('.exec-eyebrow::before')).toBe(false);
+  });
+
+  it('draws no amber rule under the header', () => {
+    expect(decl('.exec-header', 'border-bottom')).toBeUndefined();
+  });
+
+  it('carries no brewery motif and reads no brewery token', () => {
+    const header = readFileSync(
+      join(import.meta.dir, '../../../libs/web-kit/src/ui/PageHeader.svelte'),
+      'utf8',
+    );
+    expect(header).not.toMatch(/motif|--brew-/);
+  });
+});
+
+/** Enamel's button (backlog 6f471ff6, car 1): the board's `.btn` is 13px,
+ *  weight 800, uppercase, tracked .06em, padding 11px 18px, line-height 1,
+ *  in a 2px frame — primary filled with the action blue, secondary white in
+ *  an ink frame, danger white with troubled words in a troubled frame,
+ *  disabled at .45, small at 12.5px with 7px 12px padding. Before this car
+ *  `.btn` was 12px/700 at 6px 12px, and only 14 class lists wore it while
+ *  `.step-btn` (34, a 1px hairline in mixed case) and `.wb-btn` (31,
+ *  frameless) drew the rest. */
+describe('the button is Enamel’s', () => {
+  it('is 13px, 800, uppercase, tracked, in a 2px ink frame', () => {
+    expect(decl('.btn', 'font-size')).toBe('13px');
+    expect(decl('.btn', 'font-weight')).toBe('800');
+    expect(decl('.btn', 'text-transform')).toBe('uppercase');
+    expect(decl('.btn', 'letter-spacing')).toBe('var(--ls-button)');
+    expect(decl('.btn', 'padding')).toBe('11px 18px');
+    expect(decl('.btn', 'line-height')).toBe('1');
+    expect(decl('.btn', 'border')).toBe('var(--frame) solid var(--border-strong)');
+    expect(decl('.btn', 'border-radius')).toBe('var(--radius)');
+    expect(decl('.btn', 'color')).toBe('var(--text)');
+  });
+
+  it('fills the primary with the action blue', () => {
+    expect(decl('.btn-primary', 'background')).toBe('var(--accent)');
+    expect(decl('.btn-primary', 'border-color')).toBe('var(--accent)');
+  });
+
+  it('draws danger as troubled words in a troubled frame', () => {
+    expect(resolve('--err')).toBe('#C8283D'); // the troubled plate's red
+    expect(decl('.btn-danger-outline', 'color')).toBe('var(--err)');
+    expect(decl('.btn-danger-outline', 'border-color')).toBe('var(--err)');
+  });
+
+  it('dims disabled to .45 and sets small at 12.5px', () => {
+    expect(decl('.btn:disabled', 'opacity')).toBe('0.45');
+    expect(decl('.btn-sm', 'font-size')).toBe('12.5px');
+    expect(decl('.btn-sm', 'padding')).toBe('7px 12px');
+  });
+
+  // The step plugins (infra/step-plugins/*.js) are bundles served beside
+  // the app and still name the old classes, so each old name is the SAME
+  // rule as the Enamel one it became — never a second look.
+  const ALIAS: ReadonlyArray<readonly [string, string]> = [
+    ['.step-btn', '.btn'],
+    ['.step-btn-primary', '.btn-primary'],
+    ['.step-btn-approve', '.btn-primary'],
+    ['.step-btn-reject', '.btn-danger-outline'],
+    ['.wb-btn', '.btn'],
+  ];
+  for (const [old, now] of ALIAS) {
+    it(`${old} is ${now}`, () => {
+      expect(rules.get(now)).toBeDefined();
+      expect(rules.get(old)).toEqual(rules.get(now));
+    });
+  }
+
+  it('no component outside the IT department names a legacy button class', () => {
+    // The IT surfaces are left to the IT map cars (c3105b2a) that are
+    // rebuilding them; every other page names the Enamel class itself.
+    const LEFT = [
+      'it/design/DesignReviewPage.svelte',
+      'it/step-plugins/StepPluginDetailPage.svelte',
+      'it/yard/FloorDeck.svelte',
+    ];
+    const glob = new Bun.Glob('**/*.svelte');
+    const roots = [import.meta.dir, join(import.meta.dir, '../../../libs/web-kit/src')];
+    const naming = roots.flatMap((root) =>
+      [...glob.scanSync(root)].filter((file) =>
+        /\b(?:step|wb)-btn\b/.test(readFileSync(join(root, file), 'utf8')),
+      ),
+    );
+    expect(naming.sort()).toEqual(LEFT);
+  });
+});

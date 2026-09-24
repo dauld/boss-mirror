@@ -232,7 +232,7 @@
 
     <div class="v-actions">
       <button
-        class="wb-btn"
+        class="btn"
         type="button"
         disabled={saving || draftTitle.trim().length === 0 || !viewerId}
         onclick={create}
@@ -272,7 +272,7 @@
           <code class="v-filter">{v.filter}</code>
         {/if}
         <span class="v-spacer"></span>
-        <button class="wb-btn" type="button" onclick={() => run(v)} disabled={running[v.id]}>
+        <button class="btn" type="button" onclick={() => run(v)} disabled={running[v.id]}>
           {running[v.id] ? 'Running…' : 'Run'}
         </button>
         {#if v.owner_id === viewerId}

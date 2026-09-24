@@ -172,7 +172,26 @@ export type InboundRow = Readonly<{
   channel: Channel;
   channelBasis: 'recorded' | 'derived';
   ready: ReadonlyArray<ReadyStep>;
+  /** An actor has picked it up: a step other than its trigger has
+   *  completed ([`takenIn`]). From then on it is marshalling's, not
+   *  standing here (design 62de32ae decision 4). */
+  takenIn: boolean;
 }>;
+
+/** THE INTAKE RULE — `regions.rs::taken_in`, the server's partition
+ *  between receiving and marshalling, read the same way here so the
+ *  receiving floor stands what the region's header counts. The intake
+ *  step is the first step after the trigger, read off the step kinds:
+ *  a `triage`, a `decide`, whatever a protocol put first. The trigger
+ *  completes at admission, so it takes nothing in; a skipped step is
+ *  not a completed one. Measured 2026-09-24: 216 of 232 open
+ *  backlog-items were triaged and waiting on `build`, and this board
+ *  stood every one of them. */
+export const TRIGGER_STEP_KIND = 'trigger';
+
+export function takenIn(steps: ReadonlyArray<Readonly<Record<string, unknown>>>): boolean {
+  return steps.some((s) => s.status === 'completed' && s.kind !== TRIGGER_STEP_KIND);
+}
 
 export type JobsPage = Readonly<{ rows: ReadonlyArray<InboundRow>; total: number }>;
 
@@ -206,6 +225,7 @@ export function parseJobsPage(raw: unknown): JobsPage {
             who: str(s.assignee_id),
             failed: failedVerb(s.metadata),
           })),
+        takenIn: takenIn(steps),
       },
     ];
   });
@@ -297,10 +317,13 @@ export function arrivalsByDay(
 export type WaitingRow = InboundRow &
   Readonly<{ age: number; band: AgeBand; holder: Holder }>;
 
-/** Every open packet, oldest first. */
+/** A packet standing in receiving: open, and not yet taken in. */
+export const standsHere = (r: InboundRow): boolean => r.status === 'open' && !r.takenIn;
+
+/** Every packet standing in receiving, oldest first. */
 export function waiting(rows: ReadonlyArray<InboundRow>, today: string): ReadonlyArray<WaitingRow> {
   return rows
-    .filter((r) => r.status === 'open')
+    .filter(standsHere)
     .map((r) => {
       const age = ageDays(r.openedOn, today);
       return { ...r, age, band: ageBand(age), holder: holderOf(r) };
@@ -361,9 +384,39 @@ export function loadKind(
   kind: string,
   windowDays: number,
   limit: number,
+  offset = 0,
 ): Promise<Exclude<Remote<JobsPage>, { kind: 'loading' }>> {
   return fetchRemote(
-    `/api/jobs?kind=${encodeURIComponent(kind)}&simulated=false&closed_within=${windowDays}&limit=${limit}`,
+    `/api/jobs?kind=${encodeURIComponent(kind)}&simulated=false&closed_within=${windowDays}&limit=${limit}&offset=${offset}`,
     parseJobsPage,
   );
+}
+
+/** EVERY packet of one kind in the window, page after page until the
+ *  server's `total` — a limit is not a filter (design 62de32ae
+ *  decision 4). This board read one page of 500 and, measured
+ *  2026-09-24, backlog-item had 822 in the window: every count below
+ *  it was a floor, said in a notice nobody reads as a number. A row a
+ *  shifting page repeats is kept once. Any page failing fails the
+ *  whole read — half a kind is not a kind. */
+export async function loadEveryPage(
+  kind: string,
+  windowDays: number,
+  pageSize: number,
+  load: typeof loadKind = loadKind,
+): Promise<Exclude<Remote<JobsPage>, { kind: 'loading' }>> {
+  const read = async (
+    offset: number,
+    got: ReadonlyArray<InboundRow>,
+  ): Promise<Exclude<Remote<JobsPage>, { kind: 'loading' }>> => {
+    const page = await load(kind, windowDays, pageSize, offset);
+    if (page.kind === 'failed') return page;
+    const seen = new Set(got.map((r) => r.id));
+    const rows = [...got, ...page.data.rows.filter((r) => !seen.has(r.id))];
+    const next = offset + page.data.rows.length;
+    return page.data.rows.length === 0 || next >= page.data.total
+      ? { kind: 'ready', data: { rows, total: page.data.total } }
+      : read(next, rows);
+  };
+  return read(0, []);
 }

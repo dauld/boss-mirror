@@ -223,16 +223,16 @@
       <div class="step-actions">
         {#if isPending(step.status)}
           <button
-            class="step-btn step-btn-primary"
+            class="btn btn-primary"
             onclick={() => save('active')}
             disabled={saving}
           >Start work</button>
         {:else if step.status === 'active'}
-          <button class="step-btn" onclick={() => save()} disabled={saving}>
+          <button class="btn" onclick={() => save()} disabled={saving}>
             Save progress
           </button>
           <button
-            class="step-btn step-btn-primary"
+            class="btn btn-primary"
             onclick={() => save('completed')}
             disabled={saving}
           >Mark complete</button>

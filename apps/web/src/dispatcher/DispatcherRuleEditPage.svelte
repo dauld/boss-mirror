@@ -263,7 +263,7 @@
     <div style="padding:0 24px 16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap">
       <button
         type="button"
-        class="wb-btn"
+        class="btn"
         onclick={runValidate}
         disabled={action !== null}
         title="Dry-run the draft against the dispatcher parser"
@@ -272,7 +272,7 @@
       </button>
       <button
         type="button"
-        class="wb-btn wb-btn-primary"
+        class="btn btn-primary"
         onclick={runSaveDraft}
         disabled={action !== null}
         title="Persist a new draft version (validated server-side)"
@@ -281,7 +281,7 @@
       </button>
       <button
         type="button"
-        class="wb-btn"
+        class="btn"
         onclick={runPublish}
         disabled={!hasDraft || action !== null}
         title={hasDraft ? 'Activate the latest draft' : 'No draft to publish'}
@@ -290,7 +290,7 @@
       </button>
       <button
         type="button"
-        class="wb-btn"
+        class="btn"
         onclick={runRetire}
         disabled={!hasActive || action !== null}
         title={hasActive ? 'Retire the active version' : 'No active version to retire'}
@@ -381,7 +381,7 @@
                 />
                 <button
                   type="button"
-                  class="wb-btn"
+                  class="btn"
                   onclick={() => removeDoRow(i)}
                   title="Remove this step"
                 >
@@ -406,7 +406,7 @@
                     />
                     <button
                       type="button"
-                      class="wb-btn"
+                      class="btn"
                       onclick={() => removeArg(i, ai)}
                       title="Remove this arg"
                     >
@@ -415,13 +415,13 @@
                   </div>
                 {/each}
                 <div>
-                  <button type="button" class="wb-btn" onclick={() => addArg(i)}>+ arg</button>
+                  <button type="button" class="btn" onclick={() => addArg(i)}>+ arg</button>
                 </div>
               </div>
             </div>
           {/each}
           <div>
-            <button type="button" class="wb-btn" onclick={addDoRow}>+ do step</button>
+            <button type="button" class="btn" onclick={addDoRow}>+ do step</button>
           </div>
         </div>
       </Section>

@@ -56,7 +56,7 @@
   {/if}
 
   <div style="padding:0 24px 16px">
-    <Link to={href('/it/registry/new')} className="wb-btn wb-btn-primary">
+    <Link to={href('/it/registry/new')} className="btn btn-primary">
       + Create new kind
     </Link>
   </div>

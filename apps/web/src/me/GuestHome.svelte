@@ -68,7 +68,6 @@
     eyebrow={greeting}
     title="Welcome to Algedonic Ales"
     subtitle="A working brewery you can walk around in"
-    motif="glass"
   />
 
   <p class="guest-lede">

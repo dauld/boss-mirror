@@ -64,7 +64,7 @@
        7d9df2fe, design ff1c3615): a product rule made in the SPA was
        retired by the dispatcher's boot seed at the next restart. -->
   <div style="padding:0 24px 16px; display:flex; gap:12px; align-items:center">
-    <Link to={href('/it/registry/rules/new')} className="wb-btn wb-btn-primary">
+    <Link to={href('/it/registry/rules/new')} className="btn btn-primary">
       + New rule
     </Link>
     <span style="font-size:13px">

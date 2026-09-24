@@ -189,7 +189,7 @@
   </Section>
 
   <div style="padding:0 24px 24px; display:flex; gap:12px; align-items:center">
-    <button type="button" class="wb-btn wb-btn-primary" onclick={start} disabled={starting}>
+    <button type="button" class="btn btn-primary" onclick={start} disabled={starting}>
       {starting ? 'Creating…' : 'Create & author →'}
     </button>
     {#if error}<span style="color:var(--err); font-size:13px">{error}</span>{/if}

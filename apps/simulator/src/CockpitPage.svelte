@@ -170,7 +170,6 @@
   eyebrow="Simulator · Public-API engagement"
   title="Cockpit"
   subtitle="How the simulator is driving the company — entirely through the public API, as the workforce."
-  motif="glass"
 />
 
 <!-- Clock — authoritative sim time / warp / paused from clock-api, which

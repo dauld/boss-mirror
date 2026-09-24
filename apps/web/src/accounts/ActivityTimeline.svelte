@@ -102,7 +102,7 @@
     {#if olderAvailable}
       <button
         type="button"
-        class="wb-btn"
+        class="btn"
         style="margin-top: 8px"
         onclick={() => (windowDays = windowDays * 2)}
       >

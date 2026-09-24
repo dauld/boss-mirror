@@ -118,10 +118,10 @@
     {#if err}<p style="color:var(--err); font-size:13px">{err}</p>{/if}
 
     <div style="display:flex; justify-content:flex-end; gap:8px">
-      <button type="button" class="wb-btn" onclick={onClose} disabled={saving}>Cancel</button>
+      <button type="button" class="btn" onclick={onClose} disabled={saving}>Cancel</button>
       <button
         type="button"
-        class="wb-btn wb-btn-primary"
+        class="btn btn-primary"
         onclick={save}
         disabled={saving}
       >

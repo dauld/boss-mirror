@@ -283,7 +283,6 @@
   eyebrow="Simulator"
   title="Engine controls"
   subtitle="Pause, resume, restart, and configure the simulator that drives the brewery tenant."
-  motif="tap"
 />
 
 {#if readOnly}

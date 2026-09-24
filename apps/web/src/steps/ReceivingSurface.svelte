@@ -232,7 +232,7 @@
   <div class="step-actions">
     {#if !terminal && isPending(step.status)}
       <button
-        class="step-btn step-btn-primary"
+        class="btn btn-primary"
         onclick={() => persist('active')}
         disabled={saving}
       >
@@ -241,7 +241,7 @@
     {/if}
     {#if !terminal && step.status === 'active'}
       <button
-        class="step-btn step-btn-primary"
+        class="btn btn-primary"
         onclick={() => persist('completed')}
         disabled={saving || items.length === 0}
       >

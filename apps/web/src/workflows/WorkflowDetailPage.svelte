@@ -233,7 +233,7 @@
     <div style="padding:0 24px 16px; display:flex; gap:12px; align-items:center">
       <button
         type="button"
-        class="wb-btn wb-btn-primary"
+        class="btn btn-primary"
         onclick={editNewVersion}
         disabled={action !== null}
         title="Author the next version in the graphical workspace (opens a fresh design Job; the active version + in-flight Jobs are untouched)"
@@ -242,7 +242,7 @@
       </button>
       <button
         type="button"
-        class="wb-btn"
+        class="btn"
         onclick={() => runAction('retire')}
         disabled={spec.status !== 'active' || action !== null}
         title="Flip the active row to retired — no new instances, in-flight Jobs unaffected"
@@ -251,7 +251,7 @@
       </button>
       <button
         type="button"
-        class="wb-btn"
+        class="btn"
         onclick={() => navigate(href(`/it/registry/new?fork=${encodeURIComponent(spec.kind)}`))}
         title="Create a new kind pre-populated from this one"
       >
@@ -351,7 +351,7 @@
       {#if compareSpec}
         <Section title={`Steps — v${compareSpec.version} vs v${spec.version}`} wide>
             <div style="padding:0 0 8px; display:flex; gap:8px; align-items:center">
-              <button type="button" class="wb-btn" onclick={() => (compareVersion = null)}>
+              <button type="button" class="btn" onclick={() => (compareVersion = null)}>
                 Close diff
               </button>
               <span style="display:inline-flex; gap:12px; color:var(--static)">
@@ -452,7 +452,7 @@
                     {:else if isCompared}
                       <button
                         type="button"
-                        class="wb-btn"
+                        class="btn"
                         style="font-size:12px; padding:2px 8px"
                         onclick={() => (compareVersion = null)}
                       >
@@ -461,7 +461,7 @@
                     {:else}
                       <button
                         type="button"
-                        class="wb-btn"
+                        class="btn"
                         style="font-size:12px; padding:2px 8px"
                         onclick={() => (compareVersion = v.version)}
                         title={`Compare v${v.version} with current v${spec.version}`}

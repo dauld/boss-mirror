@@ -8,8 +8,11 @@ import {
   failedStep,
   holderOf,
   inboundKinds,
+  loadEveryPage,
+  loadKind,
   parseJobsPage,
   readings,
+  takenIn,
   waiting,
   type InboundRow,
 } from './receiving';
@@ -160,6 +163,75 @@ describe('the page is parsed once', () => {
   });
   test('a malformed envelope is an empty page with total 0, not a throw', () => {
     expect(parseJobsPage(null)).toEqual({ rows: [], total: 0 });
+  });
+});
+
+// THE PARTITION (design 62de32ae decision 4): a packet stands in
+// receiving until its intake step completes, and is marshalling's after
+// — the rule `regions.rs::taken_in` draws the server's line with.
+describe('receiving holds a packet until its intake step completes', () => {
+  const parsed = (steps: ReadonlyArray<Record<string, unknown>>): InboundRow => {
+    const r = parseJobsPage({ data: [job({ steps })], total: 1 }).rows[0];
+    if (!r) throw new Error('fixture parsed to nothing');
+    return r;
+  };
+  const untriaged = parsed([
+    { kind: 'trigger', status: 'completed' },
+    { kind: 'task', status: 'ready' },
+  ]);
+  const triaged = parsed([
+    { kind: 'trigger', status: 'completed' },
+    { kind: 'task', status: 'completed' },
+    { kind: 'task', status: 'ready' },
+  ]);
+
+  test('a trigger takes nothing in; any other completed step does', () => {
+    expect(untriaged.takenIn).toBe(false);
+    expect(triaged.takenIn).toBe(true);
+    expect(takenIn([{ kind: 'task', status: 'skipped' }])).toBe(false);
+    expect(takenIn([])).toBe(false);
+  });
+
+  test('only what nothing has taken in is standing', () => {
+    const standing = waiting([{ ...untriaged, id: 'u' }, { ...triaged, id: 't' }], '2026-09-20');
+    expect(standing.map((r) => r.id)).toEqual(['u']);
+  });
+});
+
+// A LIMIT IS NOT A FILTER (design 62de32ae decision 4): the board read
+// one page of 500 and, on 2026-09-24, backlog-item had 822 in the window.
+describe('every page of a kind is read, to its total', () => {
+  const rows = (from: number, n: number): ReadonlyArray<InboundRow> =>
+    parseJobsPage({
+      data: Array.from({ length: n }, (_, i) => job({ id: `row-${from + i}` })),
+      total: n,
+    }).rows;
+  const TOTAL = 1201;
+
+  test('past the page, every row — and a row a shifting page repeats is kept once', async () => {
+    const asked: number[] = [];
+    const load: typeof loadKind = async (_kind, _days, limit, offset = 0) => {
+      asked.push(offset);
+      // The table moved under the read: the second page starts one row
+      // early, repeating the first page's last row.
+      const start = offset === 0 ? 0 : offset - 1;
+      return { kind: 'ready', data: { rows: rows(start, Math.min(limit, TOTAL - start)), total: TOTAL } };
+    };
+    const got = await loadEveryPage('backlog-item', 8, 500, load);
+    if (got.kind !== 'ready') throw new Error(`the read failed: ${JSON.stringify(got)}`);
+    expect(got.data.total).toBe(TOTAL);
+    expect(new Set(got.data.rows.map((r) => r.id)).size).toBe(got.data.rows.length);
+    expect(got.data.rows.length).toBe(TOTAL);
+    expect(asked.slice(0, 2)).toEqual([0, 500]);
+  });
+
+  test('a page that fails fails the read — half a kind is not a kind', async () => {
+    const load: typeof loadKind = async (_kind, _days, limit, offset = 0) =>
+      offset === 0
+        ? { kind: 'ready', data: { rows: rows(0, limit), total: TOTAL } }
+        : { kind: 'failed', error: 'HTTP 500' };
+    const got = await loadEveryPage('backlog-item', 8, 500, load);
+    expect(got).toEqual({ kind: 'failed', error: 'HTTP 500' });
   });
 });
 

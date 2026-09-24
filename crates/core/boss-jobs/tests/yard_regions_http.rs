@@ -97,6 +97,166 @@ fn dock_station_row() -> boss_jobs::StationSpec {
     s
 }
 
+/// A station every ready TASK lands on, whoever's packet it is — the
+/// shape of the live `q.platform-admin.task`, which is where receiving
+/// and marshalling counted the same packets (design 62de32ae decision 4).
+fn task_station_row() -> boss_jobs::StationSpec {
+    let mut s = boss_jobs::StationSpec::draft(
+        "q.platform-admin.task",
+        "Ready tasks",
+        boss_jobs::StationKind::Constraint,
+        boss_jobs::station_queue::StationPredicate {
+            status: Some(JobStatus::Open),
+            step: Some(boss_jobs::station_queue::StepMatch {
+                kind: Some("task".into()),
+                status_in: vec![StepStatus::Ready],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        t(NOW),
+    );
+    s.status = boss_jobs::registry::WorkflowStatus::Active;
+    s
+}
+
+/// The app with the platform protocols in its workflow registry — so the
+/// inbound kinds can be named — and the task station beside the dock.
+fn app_with_intake() -> (axum::Router, Arc<InMemoryJobs>) {
+    let jobs = Arc::new(InMemoryJobs::new());
+    let kinds = Arc::new(boss_jobs::InMemoryWorkflows::new());
+    for spec in boss_jobs::registry::seedable_platform_workflows() {
+        kinds.seed(spec).expect("seed platform kind");
+    }
+    let policy_client: Arc<dyn PolicyClient> = Arc::new(
+        FakePolicyClient::builder()
+            .allow("operator", Action::Read, Resource::job(), Scope::All)
+            .build(),
+    );
+    let bus = RecordingEventBus::new();
+    let bus_dyn: Arc<dyn EventBus> = bus.clone();
+    let stations = Arc::new(boss_jobs::InMemoryStations::new());
+    stations
+        .seed(dock_station_row())
+        .expect("seed the dock row");
+    stations
+        .seed(task_station_row())
+        .expect("seed the task station");
+    let state = JobsApiState {
+        stations: Some(stations),
+        kind_registry: Some(kinds as Arc<dyn boss_jobs::WorkflowRegistry>),
+        ..JobsApiState::minimal(
+            jobs.clone(),
+            bus,
+            DomainPublisher::new(bus_dyn, "jobs"),
+            policy_client,
+            Arc::new(boss_clock_client::FixedClockClient::new(
+                boss_clock_client::ClockNow {
+                    now: t(NOW),
+                    simulated: false,
+                    epoch_start: None,
+                    epoch_end: None,
+                    paused: false,
+                    restart_in_progress: false,
+                    warp_factor: None,
+                },
+            )),
+        )
+    };
+    (router(state), jobs)
+}
+
+/// An open backlog-item as the protocol admits one: `filed` (its
+/// trigger) completed, then `triage` — completed or still ready — and,
+/// once triaged, `build` ready.
+async fn backlog_item(jobs: &InMemoryJobs, n: u32, triaged: bool) -> JobId {
+    let id = Uuid::from_u128(0xB0B0_0000_0000_0000_0000_0000_0000_0000 + u128::from(n)).to_string();
+    let item = job(
+        "backlog-item",
+        &id,
+        &format!("item {n}"),
+        JobStatus::Open,
+        json!({}),
+    );
+    jobs.create_job_at(&item, t(NOW), &[]).await.unwrap();
+    let mut filed = step(&item.id, "filed", "filed", StepStatus::Completed, json!({}));
+    filed.kind = boss_jobs::regions::TRIGGER_STEP_KIND.into();
+    let triage_status = if triaged {
+        StepStatus::Completed
+    } else {
+        StepStatus::Ready
+    };
+    let mut steps = vec![
+        filed,
+        step(&item.id, "triage", "triage", triage_status, json!({})),
+    ];
+    if triaged {
+        steps.push(step(
+            &item.id,
+            "build",
+            "build",
+            StepStatus::Ready,
+            json!({}),
+        ));
+    }
+    for s in steps {
+        jobs.add_step_at(&s, t(NOW), &[]).await.unwrap();
+    }
+    item.id
+}
+
+/// THE PARTITION, END TO END (design 62de32ae decision 4): two
+/// backlog-items standing at the one task station — one waiting on its
+/// triage, one triaged and waiting on its build — are one packet in
+/// receiving and one in marshalling, and the two borders out of the pair
+/// wait on one each. Before, both regions counted both, and the world's
+/// "waiting at the borders" summed the overlap.
+#[tokio::test]
+async fn a_packet_is_in_receiving_or_marshalling_and_never_both() {
+    let (app, jobs) = app_with_intake();
+    backlog_item(&jobs, 1, false).await;
+    backlog_item(&jobs, 2, true).await;
+    let (status, v) = get(&app, "operator", "/api/yard/regions").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let receiving = region(&v, "receiving");
+    assert_eq!(receiving["count"], 1, "{receiving}");
+    let marshalling = region(&v, "marshalling");
+    assert_eq!(marshalling["count"], 1, "{marshalling}");
+
+    let (status, b) = get(&app, "operator", "/api/yard/borders").await;
+    assert_eq!(status, StatusCode::OK, "{b}");
+    let waiting = |from: &str, to: &str| {
+        b["borders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["from"] == from && x["to"] == to)
+            .map(|x| x["waiting"].clone())
+            .unwrap_or_else(|| panic!("no border {from} -> {to} in {b}"))
+    };
+    assert_eq!(waiting("receiving", "marshalling"), 1);
+    assert_eq!(waiting("marshalling", "shop-floor"), 1);
+}
+
+/// RECEIVING READS PAST ITS PAGE (design 62de32ae decision 4): the
+/// inbound read took ONE page of the handler's `MAX_LIMIT` (1000) and
+/// counted what came back, so past it the count was a floor that did not
+/// say it was one. One more untriaged item than a page holds is counted
+/// in full — and the open-packet page the steps ride is a page too, so
+/// the one past it is judged on steps read for it alone.
+#[tokio::test]
+async fn receiving_counts_every_inbound_packet_past_one_page() {
+    const PAST_ONE_PAGE: u32 = 1001;
+    let (app, jobs) = app_with_intake();
+    for n in 0..PAST_ONE_PAGE {
+        backlog_item(&jobs, n, false).await;
+    }
+    let (status, v) = get(&app, "operator", "/api/yard/regions").await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let receiving = region(&v, "receiving");
+    assert_eq!(receiving["count"], PAST_ONE_PAGE, "{receiving}");
+}
+
 fn app() -> (axum::Router, Arc<InMemoryJobs>) {
     let jobs = Arc::new(InMemoryJobs::new());
     let policy_client: Arc<dyn PolicyClient> = Arc::new(

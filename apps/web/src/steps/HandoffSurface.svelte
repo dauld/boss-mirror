@@ -183,14 +183,14 @@
   <div class="step-actions">
     {#if !terminal}
       <button
-        class="step-btn"
+        class="btn"
         onclick={() => persist(isPending(step.status) ? 'active' : undefined)}
         disabled={saving}
       >
         {saving ? 'Saving…' : 'Save'}
       </button>
       <button
-        class="step-btn step-btn-primary"
+        class="btn btn-primary"
         onclick={() => persist('completed')}
         disabled={saving || !bothConfirmed}
         title={!bothConfirmed

@@ -31,7 +31,14 @@
 // platform that lies fails world-interior.test.ts before it is a
 // picture. WorldMap.svelte owns the strokes.
 
-import { AGE_THRESHOLDS, CHANNELS, ageDays, type Channel, type InboundRow } from '../receiving/receiving';
+import {
+  AGE_THRESHOLDS,
+  CHANNELS,
+  ageDays,
+  standsHere,
+  type Channel,
+  type InboundRow,
+} from '../receiving/receiving';
 import type { Crew } from '../crew/crew';
 import type { Siding } from '../marshalling/marshalling';
 import { contentsBox, overflowNoteAt, type NoteAt } from './region-contents';
@@ -176,8 +183,8 @@ export function crewPlatforms(
 
 /** Receiving: a platform per channel, the channels holding flagged
  *  work first, then the deepest. `rows` is every inbound packet the
- *  page read — open ones stand, ones that closed inside the window are
- *  what left. */
+ *  page read — open ones nothing has taken in stand, ones that closed
+ *  inside the window are what left. */
 export function receivingPlatforms(
   rows: ReadonlyArray<InboundRow>,
   today: string,
@@ -186,8 +193,10 @@ export function receivingPlatforms(
   const window = new Set(days);
   const platforms = CHANNELS.map((channel: Channel): Platform => {
     const mine = rows.filter((r) => r.channel === channel);
+    // Standing = open AND not yet taken in: a triaged packet waiting on
+    // its build is marshalling's (design 62de32ae decision 4).
     const ages = mine
-      .filter((r) => r.status === 'open')
+      .filter(standsHere)
       .map((r) => ageDays(r.openedOn, today))
       .sort((a, b) => b - a);
     const stale = ages.filter((d) => d > AGE_THRESHOLDS.stale).length;

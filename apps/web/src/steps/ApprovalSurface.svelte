@@ -150,21 +150,21 @@
       </div>
       <div class="step-actions">
         <button
-          class="step-btn step-btn-approve"
+          class="btn btn-primary"
           onclick={() => decide('approved')}
           disabled={saving}
         >
           Approve
         </button>
         <button
-          class="step-btn step-btn-reject"
+          class="btn btn-danger-outline"
           onclick={() => decide('rejected')}
           disabled={saving}
         >
           Reject
         </button>
         <button
-          class="step-btn"
+          class="btn"
           onclick={() => decide('changes-requested')}
           disabled={saving}
         >

@@ -286,7 +286,6 @@
       eyebrow="Emergency session"
       title="Break-glass operator"
       subtitle="break-glass · hardware key · no employee record"
-      motif="glass"
     />
     <p class="empty">
       This session is a key someone is holding, not a person on the
@@ -308,7 +307,6 @@
       eyebrow={`Good ${timeOfDay()}`}
       title={user.name}
       subtitle={`${user.role} · ${tenureYears(user.hire_date).toFixed(1)} years · ${user.department}`}
-      motif="glass"
     />
 
     <!-- Worth showing when there is a choice to make — and ALWAYS

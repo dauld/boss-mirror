@@ -59,14 +59,14 @@
 //! set, in the same order (CLAUDE.md §9a — a fact that lives twice gets
 //! an equality test).
 
-use boss_core::job::{Job, JobStatus};
+use boss_core::job::Job;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::regions::{
     Instant, RegionInputs, RegionState, Trend, Windows, awaiting_proof, closed_at, count_split,
-    find_step, meta_instant, opened_at, parse_instant, plural, rate_trend,
-    released_awaiting_repair, shed_place, step_done_at,
+    find_step, marshalling_view, meta_instant, opened_at, parse_instant, plural, rate_trend,
+    receiving_standing, released_awaiting_repair, shed_place, step_done_at,
 };
 use crate::yard::{SILENT_AFTER_INTERVALS, TrainBlock};
 
@@ -447,12 +447,13 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                     "the workflow registry that names the inbound kinds could not be read",
                 );
             };
-            let stamps: Vec<Instant> = inbound.iter().filter_map(closed_at).collect();
+            let stamps: Vec<Instant> = inbound.iter().filter_map(|(j, _)| closed_at(j)).collect();
             let today = r.now.date_naive();
-            let mut open: Vec<&Job> = inbound
-                .iter()
-                .filter(|j| j.status == JobStatus::Open)
-                .collect();
+            // What waits here is RECEIVING's own count — the packets not
+            // yet taken in — and never a packet the next border also
+            // counts (design 62de32ae decision 4): the two used to be
+            // 325 and 321 of largely the same packets.
+            let mut open: Vec<&Job> = receiving_standing(r).unwrap_or_default();
             open.sort_by_key(|j| j.opened_on);
             let holds = open
                 .iter()
@@ -480,18 +481,24 @@ fn flow_of(spec: &BorderSpec, r: &RegionInputs<'_>, w: &Windows) -> Flow {
                 return Flow::unread("the agent-run packets could not be read");
             };
             let stamps: Vec<Instant> = runs.iter().filter_map(|(j, _)| opened_at(j)).collect();
-            let Some(stations) = r.stations else {
-                // The rate is still a measurement; the QUEUE is not, and
-                // an unread station registry is not an empty yard.
-                let last = stamps.iter().copied().max();
-                return Flow {
-                    rate: Flow::of(w, stamps, 0, Vec::new()).rate,
-                    last,
-                    waiting: None,
-                    holds: Vec::new(),
-                    unread: Some("the station registry could not be read".to_string()),
-                    oldest_waiting: None,
-                };
+            // MARSHALLING's own packets (design 62de32ae decision 4): a
+            // station also holds untriaged intake and packets that stand
+            // in a region of their own, and neither is waiting here.
+            let stations = match marshalling_view(r) {
+                Ok(view) => view,
+                Err(why) => {
+                    // The rate is still a measurement; the QUEUE is not,
+                    // and an unread station registry is not an empty yard.
+                    let last = stamps.iter().copied().max();
+                    return Flow {
+                        rate: Flow::of(w, stamps, 0, Vec::new()).rate,
+                        last,
+                        waiting: None,
+                        holds: Vec::new(),
+                        unread: Some(why.to_string()),
+                        oldest_waiting: None,
+                    };
+                }
             };
             let standing: std::collections::BTreeSet<&str> = stations
                 .iter()
@@ -1044,7 +1051,7 @@ mod tests {
     use super::*;
     use crate::regions::{DEFAULT_WINDOW_HOURS, RegionInputs, StationReading};
     use crate::yard::{BoardingReadings, Reading, YardInputs, YardStatus, build_status_for};
-    use boss_core::job::{JobId, Priority, Step, StepId, StepStatus, Subject};
+    use boss_core::job::{JobId, JobStatus, Priority, Step, StepId, StepStatus, Subject};
     use serde_json::json;
 
     const NOW: &str = "2026-09-19T12:00:00Z";
@@ -1127,7 +1134,7 @@ mod tests {
         cars: &'a [(Job, Vec<Step>)],
         closed_trains: &'a [(Job, Vec<Step>)],
         gate_runs: &'a [Job],
-        inbound: Option<&'a [Job]>,
+        inbound: Option<&'a [(Job, Vec<Step>)]>,
         stations: Option<&'a [StationReading]>,
     ) -> RegionInputs<'a> {
         RegionInputs {

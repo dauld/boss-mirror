@@ -198,14 +198,14 @@
   <div style="display:flex; gap:8px; margin-bottom:16px; align-items:center">
     <button
       type="button"
-      class="step-btn"
+      class="btn"
       onclick={() => (weekOffset = weekOffset - 1)}
     >
       ← Prev week
     </button>
     <button
       type="button"
-      class="step-btn"
+      class="btn"
       onclick={() => (weekOffset = 0)}
       style={`font-weight:${weekOffset === 0 ? 600 : 400}`}
     >
@@ -213,7 +213,7 @@
     </button>
     <button
       type="button"
-      class="step-btn"
+      class="btn"
       onclick={() => (weekOffset = weekOffset + 1)}
     >
       Next week →

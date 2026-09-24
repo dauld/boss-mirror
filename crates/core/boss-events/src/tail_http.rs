@@ -455,6 +455,26 @@ fn push_actor(actor: Option<&String>, sql: &mut String, binds: &mut Vec<Bind>) {
     }
 }
 
+/// The provenance clause — [`TailQuery::simulated`] — shared by tail,
+/// export and stream for the reason [`push_actor`] states. Until
+/// 2026-09-24 only the tail applied it: the stream declared no
+/// `simulated` and the export's WHERE never read the one it parsed, so
+/// live mode (the page's default) and Save .jsonl both served synthetic
+/// rows under a select reading "Real only" (backlog 34ea2ae0).
+///
+/// No bind: the two spellings are a closed set decided here, never
+/// caller text reaching SQL. An unrecognised value filters nothing,
+/// which keeps a typo in a URL from silently hiding the log.
+fn push_simulated(simulated: Option<&str>, sql: &mut String) {
+    match simulated {
+        Some("real") => {
+            sql.push_str(" AND COALESCE(payload->>'_simulated', 'false') <> 'true'");
+        }
+        Some("sim") => sql.push_str(" AND payload->>'_simulated' = 'true'"),
+        _ => {}
+    }
+}
+
 async fn tail(
     State(state): State<AuditTailState>,
     CurrentUser(user): CurrentUser,
@@ -496,16 +516,7 @@ async fn tail(
         sql.push_str(&format!(" AND timestamp < ${}", binds.len()));
     }
     push_actor(q.actor.as_ref(), &mut sql, &mut binds);
-    // No bind: the two spellings are a closed set decided here, never
-    // caller text reaching SQL. An unrecognised value filters nothing,
-    // which keeps a typo in a URL from silently hiding the log.
-    match q.simulated.as_deref() {
-        Some("real") => {
-            sql.push_str(" AND COALESCE(payload->>'_simulated', 'false') <> 'true'");
-        }
-        Some("sim") => sql.push_str(" AND payload->>'_simulated' = 'true'"),
-        _ => {}
-    }
+    push_simulated(q.simulated.as_deref(), &mut sql);
     binds.push(Bind::Int(limit));
     sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT ${}", binds.len()));
 
@@ -539,7 +550,8 @@ async fn tail(
 /// - Append-only-friendly — the same shape the audit_log table
 ///   has on the writer side.
 ///
-/// Filters mirror /api/events/tail (source, kind, since, until, actor).
+/// Filters mirror /api/events/tail (source, kind, since, until, actor,
+/// simulated).
 /// Cap is higher (50,000 rows) and the response is streamed so a
 /// long-range export doesn't pin server memory.
 ///
@@ -588,6 +600,7 @@ async fn export(
         sql.push_str(&format!(" AND timestamp < ${}", binds.len()));
     }
     push_actor(q.actor.as_ref(), &mut sql, &mut binds);
+    push_simulated(q.simulated.as_deref(), &mut sql);
     binds.push(Bind::Int(limit));
     sql.push_str(&format!(" ORDER BY timestamp ASC LIMIT ${}", binds.len()));
 
@@ -742,11 +755,15 @@ pub struct StreamQuery {
     pub kind: Option<String>,
     /// Exact match on `payload->>'_actor'` — [`TailQuery::actor`].
     pub actor: Option<String>,
+    /// Provenance lens — [`TailQuery::simulated`]. Absent until
+    /// 2026-09-24, so the page's default live mode painted synthetic
+    /// rows into a "Real only" view (backlog 34ea2ae0).
+    pub simulated: Option<String>,
 }
 
 /// SSE companion to `/api/events/tail`. Pushes new audit_log rows
 /// as they land, keyed off the table's monotonic id column. Filters
-/// (source, kind, actor) match the tail endpoint's shape.
+/// (source, kind, actor, simulated) match the tail endpoint's shape.
 ///
 /// Server-side polls the audit_log every 2s for `id > last_seen`,
 /// dedupes by id, pushes each new row as one SSE `data` frame. A read
@@ -779,6 +796,7 @@ async fn stream(
     let source_filter = q.source;
     let kind_filter = q.kind;
     let actor_filter = q.actor;
+    let simulated_filter = q.simulated;
 
     // A failed read of the log is ONE named frame, and then the stream
     // ends (backlog 260879f5, page audit 65a273d5). It used to be
@@ -838,6 +856,7 @@ async fn stream(
                 sql.push_str(&format!(" AND kind ILIKE ${}", binds.len()));
             }
             push_actor(actor_filter.as_ref(), &mut sql, &mut binds);
+            push_simulated(simulated_filter.as_deref(), &mut sql);
             sql.push_str(" ORDER BY id ASC LIMIT 500");
 
             #[derive(sqlx::FromRow)]

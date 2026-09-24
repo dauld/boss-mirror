@@ -198,7 +198,7 @@
   {#if !terminal}
     <div class="step-actions">
       <button
-        class="step-btn step-btn-primary"
+        class="btn btn-primary"
         onclick={postInvoiceAndComplete}
         disabled={!canPost}
         data-testid="billing-post-invoice"

@@ -118,7 +118,7 @@
         The <code class="mono">{kind}</code> surface failed to load
         ({loadState.reason}) — using the generic form below.
       </span>
-      <button class="step-btn" onclick={() => (retryNonce += 1)}>Retry</button>
+      <button class="btn" onclick={() => (retryNonce += 1)}>Retry</button>
     </div>
     <GenericSurface step={genericStep} {jobId} {onUpdate} />
   {/if}

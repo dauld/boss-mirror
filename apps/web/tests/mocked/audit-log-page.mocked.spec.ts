@@ -13,7 +13,6 @@
 // the assertion below states today's behaviour and names the backlog id,
 // so the car that closes the gap turns that assertion red and must
 // rewrite it — a gap cannot close without this file saying so:
-//   34ea2ae0  the live stream and the export ignore the provenance lens
 //   4630ebc0  a refused export replaces the app with the raw response
 //   c3e4edcc  no failure line carries the shared `.load-failed` marker
 //   91b41817  the page has two names; the row toggle is mouse-only
@@ -232,7 +231,7 @@ test.describe('/it/operate/audit — size and growth (GET /api/events/stats)', (
 });
 
 test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
-  test('the default read is Real only, limit 100; the rows paint Time / Source / Kind / Actor', async ({ page }) => {
+  test('the default read is All, limit 100; the rows paint Time / Source / Kind / Actor', async ({ page }) => {
     await installAuditReads(page);
     const seen = watch(page);
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
@@ -249,7 +248,10 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
     ]);
     await expect(stream(page).first().locator('td').first()).toHaveAttribute('title', '2026-09-23T21:44:03.250Z');
     const first = seen.tail[0] ?? '';
-    expect(param(first, 'simulated')).toBe('real');
+    // All since 34ea2ae0 (decided under page audit 65a273d5): this
+    // instance's log is real work, so "Real only" hid nearly nothing
+    // while naming a filter. "All" sends no provenance parameter.
+    expect(param(first, 'simulated')).toBeNull();
     expect(param(first, 'limit')).toBe('100');
     expect(param(first, 'source')).toBeNull();
     expect(param(first, 'kind')).toBeNull();
@@ -313,14 +315,24 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
 
     const prov = page.getByLabel('Provenance');
     await expect(prov.locator('option')).toHaveText(['Real only', 'Simulated only', 'All']);
-    await expect(prov).toHaveValue('real');
+    await expect(prov).toHaveValue('all');
+    // Backlog 34ea2ae0: the lens reaches the live stream as well as the
+    // snapshot. It used to reach only the snapshot, so a synthetic row
+    // streamed into a view the select called "Real only".
+    await prov.selectOption('real');
+    await expect.poll(() => param(last(seen.tail), 'simulated')).toBe('real');
+    await expect.poll(() => param(last(seen.stream), 'simulated')).toBe('real');
     await prov.selectOption('sim');
     await expect.poll(() => param(last(seen.tail), 'simulated')).toBe('sim');
+    await expect.poll(() => param(last(seen.stream), 'simulated')).toBe('sim');
     const before = seen.tail.length;
+    const streamsBefore = seen.stream.length;
     await prov.selectOption('all');
     await expect.poll(() => seen.tail.length).toBeGreaterThan(before);
-    // "All" sends no provenance parameter at all.
+    await expect.poll(() => seen.stream.length).toBeGreaterThan(streamsBefore);
+    // "All" sends no provenance parameter at all, to either read.
     expect(param(last(seen.tail), 'simulated')).toBeNull();
+    expect(param(last(seen.stream), 'simulated')).toBeNull();
 
     const lim = page.getByLabel('Limit');
     await expect(lim.locator('option')).toHaveText(['50', '100', '200', '500']);
@@ -373,7 +385,7 @@ test.describe('/it/operate/audit — the stream (GET /api/events/tail)', () => {
 });
 
 test.describe('/it/operate/audit — the live stream (EventSource /api/events/stream)', () => {
-  test('frames arrive at the top, deduped against the snapshot; the stream sends no provenance (34ea2ae0)', async ({ page }) => {
+  test('frames arrive at the top, deduped against the snapshot; under All the stream sends no provenance', async ({ page }) => {
     await installAuditReads(page);
     const seen = watch(page);
     // A long `retry` so the ended connection does not reconnect inside
@@ -382,7 +394,8 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
       // A duplicate of a snapshot row: must not paint twice.
       ROWS[0],
       { event_id: 'ev-4', timestamp: '2026-09-23T21:45:00.000Z', source: 'jobs', kind: 'jobs.job.opened', payload: { id: 'job-2', _actor: 'agent-claude', _simulated: false } },
-      // A SIMULATED row, arriving under the default "Real only" lens.
+      // A SIMULATED row, arriving under the default "All" lens, which
+      // keeps it.
       { event_id: 'ev-sim', timestamp: '2026-09-23T21:45:01.000Z', source: 'brewery', kind: 'brewery.batch.started', payload: { _actor: 'sim', _simulated: true } },
       'not json',
     ];
@@ -432,11 +445,11 @@ test.describe('/it/operate/audit — the live stream (EventSource /api/events/st
     const url = last(seen.stream);
     expect(param(url, 'source')).toBe('jobs');
     expect(param(url, 'kind')).toBe('j');
-    // Gap 34ea2ae0: the live stream carries source and kind only, so a
-    // simulated row lands in a view the Provenance select still calls
-    // "Real only".
+    // Under All the stream carries no provenance, so the simulated row
+    // belongs in the view; the lens-set legs are pinned in "each filter
+    // re-reads the tail with its own parameter" (34ea2ae0).
     expect(param(url, 'simulated')).toBeNull();
-    await expect(page.getByLabel('Provenance')).toHaveValue('real');
+    await expect(page.getByLabel('Provenance')).toHaveValue('all');
     await expect(page.getByLabel('Live (SSE)')).toBeChecked();
   });
 
@@ -606,7 +619,7 @@ test.describe('/it/operate/audit — Download ⤓ (GET /api/events/export)', () 
     expect(from).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect((Date.parse(to) - Date.parse(from)) / 86_400_000).toBe(7);
     await expect(panel.locator('.events-download-hint')).toHaveText(
-      'Exports up to 50,000 events matching the current source, kind and actor filters in the window above as JSON Lines (one event per line — parseable by jq, log forwarders, and most analytics tools). Narrow the window for large ranges.',
+      'Exports up to 50,000 events matching the current source, kind, actor and provenance filters in the window above as JSON Lines (one event per line — parseable by jq, log forwarders, and most analytics tools). Narrow the window for large ranges.',
     );
     await panel.getByRole('button', { name: 'Cancel' }).click();
     await expect(panel).toHaveCount(0);
@@ -630,6 +643,7 @@ test.describe('/it/operate/audit — Download ⤓ (GET /api/events/export)', () 
     await page.getByLabel('Source').fill('jobs');
     await page.getByLabel('Kind contains').fill('step');
     await page.getByLabel('Actor').fill('agent-claude');
+    await page.getByLabel('Provenance').selectOption('real');
     await page.getByRole('button', { name: 'Download ⤓' }).click();
     const panel = page.locator('.events-download-panel');
     await panel.getByLabel('From').fill('2026-09-01');
@@ -649,27 +663,58 @@ test.describe('/it/operate/audit — Download ⤓ (GET /api/events/export)', () 
     expect(param(u, 'since')).toBe('2026-09-01T00:00:00Z');
     // `until` is exclusive, so the To day is bumped by one.
     expect(param(u, 'until')).toBe('2026-09-04T00:00:00.000Z');
-    // The client sends the lens; the SERVER ignores it (34ea2ae0), and
-    // the hint above names only "source + kind" — pinned there.
+    // The lens rides the export, and the server applies it since
+    // 34ea2ae0 (tail_http.rs, export_honours_the_provenance_lens).
     expect(param(u, 'simulated')).toBe('real');
     await expect(panel).toHaveCount(0);
     await expect(page.locator('h1').first()).toContainText('Audit Log');
+    // The file is saved only once its body has been read to the end
+    // (4630ebc0), and the line says what was saved.
+    await expect(page.locator('.events-download-status')).toHaveText('Saved audit.jsonl: 1 event.');
   });
 
-  test('a REFUSED export replaces the app with the raw response (4630ebc0)', async ({ page }) => {
+  // Backlog 4630ebc0: Save .jsonl was a window.location navigation, so a
+  // refusal replaced the SPA with the raw body at the export URL, and a
+  // failure after the 200 was reported nowhere. The export is now read
+  // with fetch; the break-off-mid-stream leg is pinned in
+  // src/it/monitoring/auditExport.test.ts, because a mocked route can
+  // only fulfil a whole body.
+  test('a REFUSED export is named beside the panel, and the app stays (4630ebc0)', async ({ page }) => {
     await installAuditReads(page);
     await page.route(EXPORT, (r) => r.fulfill({ status: 403, contentType: 'text/plain', body: 'forbidden: operator tier required' }));
+    let downloads = 0;
+    page.on('download', () => {
+      downloads += 1;
+    });
+    await mountPage(page, PATH, { titleMatch: /Audit Log/ });
+    await page.getByRole('button', { name: 'Download ⤓' }).click();
+    const panel = page.locator('.events-download-panel');
+    await panel.getByRole('button', { name: 'Save .jsonl' }).click();
+    await expect(page.locator('.events-download-status')).toHaveText(
+      'The export was refused: HTTP 403: forbidden: operator tier required. Nothing was saved.',
+    );
+    await expect(page).toHaveURL(new RegExp(`${PATH}$`));
+    await expect(page.locator('h1').first()).toContainText('Audit Log');
+    // The panel keeps its window open for a retry.
+    await expect(panel).toBeVisible();
+    expect(downloads).toBe(0);
+  });
+
+  test('an export whose connection drops is named, and saves nothing (4630ebc0)', async ({ page }) => {
+    await installAuditReads(page);
+    await page.route(EXPORT, (r) => r.abort('connectionreset'));
+    let downloads = 0;
+    page.on('download', () => {
+      downloads += 1;
+    });
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     await page.getByRole('button', { name: 'Download ⤓' }).click();
     await page.locator('.events-download-panel').getByRole('button', { name: 'Save .jsonl' }).click();
-    // The refusal is not shown where the user was looking: the SPA is
-    // gone and the browser shows the body at the export URL.
-    await expect(page).toHaveURL(/\/api\/events\/export\?/);
-    await expect(page.locator('body')).toHaveText('forbidden: operator tier required');
-    await expect(page.locator('.app-shell')).toHaveCount(0);
-    await page.goBack();
+    const line = page.locator('.events-download-status');
+    await expect(line).toContainText('The export could not be read (');
+    await expect(line).toContainText('Nothing was saved.');
     await expect(page).toHaveURL(new RegExp(`${PATH}$`));
-    await expect(page.locator('h1').first()).toContainText('Audit Log');
+    expect(downloads).toBe(0);
   });
 });
 
@@ -679,7 +724,7 @@ test.describe('/it/operate/audit — writes', () => {
     const seen = watch(page);
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     await stream(page).first().click();
-    await page.getByLabel('Provenance').selectOption('all');
+    await page.getByLabel('Provenance').selectOption('sim');
     await page.getByRole('button', { name: 'Download ⤓' }).click();
     await page.locator('.events-download-panel').getByRole('button', { name: 'Cancel' }).click();
     await page.getByLabel('Live (SSE)').uncheck();

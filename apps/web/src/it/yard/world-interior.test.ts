@@ -44,6 +44,7 @@ const inbound = (over: Partial<InboundRow> & Pick<InboundRow, 'id' | 'openedOn'>
   channel: 'feedback',
   channelBasis: 'recorded',
   ready: [],
+  takenIn: false,
   ...over,
 });
 
@@ -137,6 +138,23 @@ describe('the receiving interior — one platform per channel', () => {
     expect(feedback.rate).toBe(1);
     expect(feedback.bound).toBeNull();
     expect(feedback.note).toContain('oldest 1 d');
+  });
+
+  // THE PARTITION (design 62de32ae decision 4): a packet an actor has
+  // taken in is marshalling's, however long it stays open — so the
+  // interior stands what the region's header counts.
+  it('stands nothing an actor has taken in, open or not', () => {
+    const p = receivingPlatforms(
+      [
+        inbound({ id: 'untriaged', openedOn: '2026-09-19', channel: 'session' }),
+        inbound({ id: 'triaged', openedOn: '2026-08-01', channel: 'session', takenIn: true }),
+      ],
+      today,
+      days,
+    );
+    const session = byName(p, 'session');
+    expect(session.standing).toBe(1);
+    expect(session.flag).toEqual({ from: 'head', n: 0 });
   });
 
   it('flags the packets past the stale band, from the head — the oldest stand at the front', () => {

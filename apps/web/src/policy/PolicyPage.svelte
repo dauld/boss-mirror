@@ -87,7 +87,7 @@
         {/each}
       </select>
     </label>
-    <button type="button" class="wb-btn" onclick={load} disabled={loading}>
+    <button type="button" class="btn" onclick={load} disabled={loading}>
       {loading ? 'Loading…' : 'Refresh'}
     </button>
   </div>
@@ -112,7 +112,7 @@
                   {#if rule}
                     <button
                       type="button"
-                      class="wb-btn"
+                      class="btn"
                       style="padding:2px 8px; font-size:12px"
                       onclick={() => (editing = rule)}
                     >

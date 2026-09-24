@@ -3,7 +3,8 @@
 //!
 //! Covers: authz (operator tier + ceo/cto role allow, plain user
 //! denies), source/kind/actor filtering, limit clamping, descending
-//! order, and the actor filter on the export and the live stream —
+//! order, the actor and provenance filters on the export and the live
+//! stream (the provenance half is backlog 34ea2ae0) —
 //! and, since 2026-09-24, the three reads the /it/operate/audit page
 //! makes that had no server test at all (backlog 0398c4d0, from page
 //! audit 65a273d5): the tail's `simulated` provenance lens, the JSONL
@@ -633,18 +634,16 @@ async fn export_streams_json_lines_oldest_first_as_a_named_attachment() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn export_ignores_the_provenance_lens_today() {
-    // PINNED AS IT IS, GAP INCLUDED — the convention the page's mocked
-    // spec keeps: the export reads TailQuery, which carries
-    // `simulated`, and never applies it, so "Real only" + Export
-    // downloads the synthetic rows too (gap 34ea2ae0). The car that
-    // closes that gap turns this red and must rewrite it to expect one
-    // line.
+async fn export_honours_the_provenance_lens() {
+    // Gap 34ea2ae0, closed: the export read TailQuery, which carried
+    // `simulated`, and never applied it, so "Real only" + Save .jsonl
+    // downloaded the synthetic rows too. It now applies the one
+    // provenance clause the tail applies, in the same WHERE.
     let db = TestDb::new().await;
     let writer = PgAuditWriter::new(db.pool.clone());
     let at = Utc.with_ymd_and_hms(2026, 9, 20, 12, 0, 0).unwrap();
-    seed_at(&writer, "jobs", "job.created", at, serde_json::json!({})).await;
-    seed_at(
+    let real = seed_at(&writer, "jobs", "job.created", at, serde_json::json!({})).await;
+    let sim = seed_at(
         &writer,
         "sim",
         "job.created",
@@ -653,15 +652,92 @@ async fn export_ignores_the_provenance_lens_today() {
     )
     .await;
     let app: Router = audit_tail_router(db.pool.clone());
-    let resp = app
-        .oneshot(get_req(
-            "/api/events/export?simulated=real",
-            &operator_user(),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_text(resp).await.lines().count(), 2);
+    let export = |uri: &'static str| {
+        let app = app.clone();
+        async move {
+            let resp = app.oneshot(get_req(uri, &operator_user())).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{uri}");
+            body_text(resp)
+                .await
+                .lines()
+                .map(|l| {
+                    let row: serde_json::Value = serde_json::from_str(l).unwrap();
+                    row["event_id"].as_str().unwrap().to_string()
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(
+        export("/api/events/export?simulated=real").await,
+        vec![real.to_string()]
+    );
+    assert_eq!(
+        export("/api/events/export?simulated=sim").await,
+        vec![sim.to_string()]
+    );
+    // No lens, and an unknown spelling, export both — the tail's rule.
+    assert_eq!(export("/api/events/export").await.len(), 2);
+    assert_eq!(export("/api/events/export?simulated=REAL").await.len(), 2);
+}
+
+// Gap 34ea2ae0, the live half: live mode is the page's default, and
+// the stream declared no `simulated`, so a synthetic row painted into a
+// view the Provenance select called "Real only". Each round writes the
+// row the lens must DROP first, so a stream that ignored the lens hands
+// that row back as its first frame — the shape of
+// stream_honours_the_actor_filter above. Both spellings, because a
+// clause that inverted the lens would pass one of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_honours_the_provenance_lens() {
+    let db = TestDb::new().await;
+    let writer = PgAuditWriter::new(db.pool.clone());
+    for (lens, keep_simulated) in [("real", false), ("sim", true)] {
+        let app: Router = audit_tail_router(db.pool.clone());
+        let uri = format!("/api/events/stream?simulated={lens}");
+        let resp = app.oneshot(get_req(&uri, &operator_user())).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let mut frames = resp.into_body().into_data_stream();
+        let mut pushed = None;
+        for _ in 0..5 {
+            let flag = |simulated: bool| serde_json::json!({"_simulated": simulated});
+            seed_at(
+                &writer,
+                "jobs",
+                "job.opened",
+                Utc::now(),
+                flag(!keep_simulated),
+            )
+            .await;
+            // The unflagged row: real by the COALESCE, sim by nothing.
+            if keep_simulated {
+                seed_at(
+                    &writer,
+                    "jobs",
+                    "job.opened",
+                    Utc::now(),
+                    serde_json::json!({}),
+                )
+                .await;
+            }
+            seed_at(
+                &writer,
+                "jobs",
+                "job.opened",
+                Utc::now(),
+                flag(keep_simulated),
+            )
+            .await;
+            pushed = next_data(&mut frames, std::time::Duration::from_secs(5)).await;
+            if pushed.is_some() {
+                break;
+            }
+        }
+        let frame = pushed.expect("a row the lens keeps, written after connect, is pushed");
+        assert_eq!(
+            frame["payload"]["_simulated"], keep_simulated,
+            "lens {lens}: the first frame is a row the lens keeps: {frame}"
+        );
+    }
 }
 
 /// The next SSE `data:` payload off a live stream, parsed, skipping

@@ -494,7 +494,6 @@
     eyebrow={eyebrow}
     title={titleFor}
     subtitle={`${total.toLocaleString()} ${status || 'any-status'}`}
-    motif="hops"
   />
 
   <!-- Filters: narrow the list down without leaving the page. The

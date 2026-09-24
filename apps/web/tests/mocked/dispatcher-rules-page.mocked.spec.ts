@@ -418,7 +418,7 @@ test.describe('/it/registry/rules — the controls', () => {
     const create = page.getByRole('link', { name: '+ New rule' });
     await expect(create).toHaveAttribute('href', NEW_RULE);
     // It is a link dressed as the page's primary button.
-    await expect(create).toHaveClass(/wb-btn-primary/);
+    await expect(create).toHaveClass(/(^|\s)btn-primary(\s|$)/);
     expect(parseRoute(NEW_RULE)).toEqual({ kind: 'dispatcherRuleEdit', ruleName: 'new' });
     // GAP 7 (backlog 3071e235), closed: the router places the guidance,
     // it lights the cascade's section, and the surface it opens is the

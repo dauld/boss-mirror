@@ -22,6 +22,7 @@
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
   import { formatDate } from '@boss/web-kit/ui/date';
   import { actorOf, knownActors as actorsIn } from './auditActor';
+  import { readExport } from './auditExport';
 
   type AuditEntry = {
     event_id: string;
@@ -119,12 +120,15 @@
   // `_actor`, applied by the server in tail, stream and export alike.
   let actorFilter = $state('');
   let limit = $state<(typeof LIMIT_CHOICES)[number]>(100);
-  // Provenance filter. Defaults to `real`: the audit log was 89%
-  // simulated when this landed (328,255 of 370,033 rows), so an
-  // unfiltered page is nine-tenths brewery traffic and the operator
-  // events it buries are the reason anyone opens this page. `all`
-  // stays one click away — the default is a lens, not a lie.
-  let provenance = $state<'real' | 'sim' | 'all'>('real');
+  // Provenance filter, applied by the server in tail, stream and export
+  // alike (the stream and the export ignored it until 2026-09-24,
+  // backlog 34ea2ae0). It defaulted to `real` when the log was 89%
+  // simulated (328,255 of 370,033 rows). It defaults to `all` since
+  // 34ea2ae0 landed, decided under page audit 65a273d5: the brewery sim
+  // is parked and simulated traffic belongs to the playground, so this
+  // instance's log is real work and `real` hid nearly nothing while
+  // naming a filter. `real` and `sim` stay one click away.
+  let provenance = $state<'real' | 'sim' | 'all'>('all');
   let autoRefresh = $state(true);
   let expanded = $state<string | null>(null);
   let lastFetched = $state<Date | null>(null);
@@ -134,13 +138,22 @@
   // wallclock default lands after every event and exports an empty file.
   // Populated when the panel opens (the sim clock is loaded by then); the
   // operator can override either date. The export inherits the page's
-  // source + kind filters; the browser saves via Content-Disposition.
+  // source, kind, actor and provenance filters; the browser saves via
+  // Content-Disposition.
   function isoDate(d: Date): string {
     return d.toISOString().slice(0, 10);
   }
   let downloadOpen = $state(false);
   let downloadFrom = $state<string>('');
   let downloadTo = $state<string>('');
+  // How the last Save .jsonl ended, said in one line under the panel
+  // (4630ebc0) — it used to end off the page or nowhere.
+  type ExportState =
+    | { kind: 'idle' }
+    | { kind: 'reading' }
+    | { kind: 'saved'; message: string }
+    | { kind: 'failed'; message: string };
+  let exportState = $state<ExportState>({ kind: 'idle' });
 
   function toggleDownload(): void {
     if (!downloadOpen) {
@@ -177,9 +190,33 @@
       params.set('until', t.toISOString());
     }
     // The export endpoint streams up to 50k rows; for large windows
-    // the operator narrows the range. Direct navigation triggers the
-    // browser download dialog via the response's Content-Disposition.
-    window.location.href = `/api/events/export?${params.toString()}`;
+    // the operator narrows the range. It is READ, not navigated to
+    // (4630ebc0): a navigation replaced the app with a refusal's raw
+    // body, and kept a short file when the stream broke off after its
+    // 200. auditExport.ts names every ending; only a whole body saves.
+    void saveExport(`/api/events/export?${params.toString()}`);
+  }
+
+  async function saveExport(url: string): Promise<void> {
+    exportState = { kind: 'reading' };
+    const out = await readExport(fetch, url);
+    if (out.kind === 'failed') {
+      // The panel stays open, holding the window, for a retry.
+      exportState = { kind: 'failed', message: out.message };
+      return;
+    }
+    const href = URL.createObjectURL(out.blob);
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = out.filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(href), 0);
+    exportState = {
+      kind: 'saved',
+      message: `Saved ${out.filename}: ${out.events.toLocaleString()} ${out.events === 1 ? 'event' : 'events'}.`,
+    };
     downloadOpen = false;
   }
 
@@ -266,6 +303,9 @@
     if (src) params.set('source', src);
     if (knd) params.set('kind', knd);
     if (act) params.set('actor', act);
+    // The lens the snapshot applies, or a synthetic row lands in a view
+    // the select calls "Real only" (34ea2ae0).
+    if (prov !== 'all') params.set('simulated', prov);
     let es: EventSource | null = null;
     let pollFallbackId: number | null = null;
     function fallBackToPoll(reason: string): void {
@@ -511,7 +551,12 @@
               <span>To</span>
               <input type="date" bind:value={downloadTo} min={downloadFrom} />
             </label>
-            <button type="button" class="events-download-go" onclick={startDownload}>
+            <button
+              type="button"
+              class="events-download-go"
+              onclick={startDownload}
+              disabled={exportState.kind === 'reading'}
+            >
               Save .jsonl
             </button>
             <button
@@ -523,12 +568,17 @@
             </button>
           </div>
           <p class="events-download-hint">
-            Exports up to 50,000 events matching the current source, kind and actor filters
+            Exports up to 50,000 events matching the current source, kind, actor and provenance filters
             in the window above as JSON Lines (one event per line — parseable by
             <code>jq</code>, log forwarders, and most analytics tools).
             Narrow the window for large ranges.
           </p>
         </div>
+      {/if}
+      {#if exportState.kind !== 'idle'}
+        <p class="events-download-status events-download-{exportState.kind}" role="status">
+          {exportState.kind === 'reading' ? 'Reading the export…' : exportState.message}
+        </p>
       {/if}
   </Section>
 
@@ -710,6 +760,15 @@
     background: var(--wash);
     padding: 1px 4px;
     border-radius: 2px;
+  }
+  .events-download-status {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--static);
+  }
+  .events-download-failed {
+    color: inherit;
+    font-weight: 500;
   }
   .events-table tbody tr.events-row {
     cursor: pointer;

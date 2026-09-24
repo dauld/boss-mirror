@@ -343,7 +343,7 @@
              takes — and, when it cannot be pressed, the field it is
              waiting on, in the row rather than a hover title. -->
         <button
-          class="step-btn step-btn-primary"
+          class="btn btn-primary"
           onclick={() => persist({ status: 'completed' })}
           disabled={saving || missingRequired.length > 0}
         >
@@ -430,7 +430,7 @@
   <div class="step-actions">
     {#if dirty && !terminal}
       <button
-        class="step-btn"
+        class="btn"
         onclick={() => persist({})}
         disabled={saving}
       >
@@ -439,7 +439,7 @@
     {/if}
     {#if !terminal && isPending(step.status)}
       <button
-        class="step-btn step-btn-primary"
+        class="btn btn-primary"
         onclick={() => persist({ status: 'active' })}
         disabled={saving}
       >
@@ -450,7 +450,7 @@
       <!-- A step with no contract completes here; one WITH a contract
            completes from the ask above, where the answer is. -->
       <button
-        class="step-btn step-btn-primary"
+        class="btn btn-primary"
         onclick={() => persist({ status: 'completed' })}
         disabled={saving}
       >

@@ -144,7 +144,7 @@
       <button
         type="button"
         onclick={() => (windowPreset = k)}
-        class="step-btn"
+        class="btn"
         style={`font-weight:${windowPreset === k ? 600 : 400}; background:${windowPreset === k ? 'var(--ink-raised)' : ''}`}
       >
         Next {WINDOW_DAYS[k]} days
