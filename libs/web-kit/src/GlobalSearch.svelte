@@ -230,6 +230,12 @@
     padding: 4px;
     text-align: left;
   }
+  /* On a phone the chrome bar scrolls sideways and so clips anything
+     hanging out of it (PerspectiveTabs, car G of design 62de32ae): the
+     results pin under the band, the screen's width less a margin. */
+  @media (max-width: 720px) {
+    .gs-panel { position: fixed; top: 50px; left: 8px; right: 8px; width: auto; }
+  }
   .gs-row {
     display: grid;
     grid-template-columns: 74px 1fr auto;
