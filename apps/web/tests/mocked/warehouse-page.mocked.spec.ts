@@ -779,11 +779,12 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
     await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
   });
 
-  // Gap 5 (8b1deea2), gap 6 (82674b2b), gap 7 (20410830): while the
-  // reads are in flight the header counts zeros, the filters count
-  // zeros, and the Inventory and Receiving tabs say their empty
-  // sentence — only the Overview has a loading line.
-  test('pending reads: "Loading warehouse status…" on the Overview, the empty sentences on the other two', async ({ page }) => {
+  // Gap 5 (8b1deea2), gap 6 (82674b2b), gap 7 (20410830), fixed: while
+  // the reads were in flight the header counted zeros, the filters
+  // counted zeros, and the Inventory and Receiving tabs said their empty
+  // sentence. Now every read starts as loading: each tab says what it
+  // waits for, the filters carry no number, and the header none either.
+  test('pending reads: every tab says what it is loading, and nothing counts a zero', async ({ page }) => {
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => { release = resolve; });
     await installWarehouse(page);
@@ -796,14 +797,15 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
     await mountPage(page, PATH);
 
     await expect(overviewLine(page)).toHaveText('Loading warehouse status…');
-    await expect(title(page)).toHaveText('0 tracked SKUs');
-    await expect(subtitle(page)).toHaveText('0 below reorder point');
+    await expect(title(page)).toHaveText('Loading warehouse…');
+    await expect(subtitle(page)).toHaveCount(0);
     await tab(page, 'Inventory').click();
-    await expect(listLine(page)).toHaveText('No items match that filter.');
-    await expect(filters(page)).toHaveText(['All (0)', 'Critical / Out (0)', 'Low (0)']);
+    await expect(listLine(page)).toHaveText('Loading inventory…');
+    await expect(filters(page)).toHaveText(['All', 'Critical / Out', 'Low']);
     await tab(page, 'Receiving').click();
-    await expect(listLine(page)).toHaveText('No POs match that filter.');
-    await expect(filters(page)).toHaveText(['Open (0)', 'All (0)']);
+    await expect(listLine(page)).toHaveText('Loading purchase orders…');
+    await expect(filters(page)).toHaveText(['Open', 'All']);
+    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
 
     release();
     await expect(title(page)).toHaveText('5 tracked SKUs');
@@ -812,7 +814,8 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
 
   // Gap 4 (fcd0e29e), fixed: each read keeps its own outcome, so the
   // items read failing leaves the Receiving tab its purchase orders.
-  // Gap 6 (82674b2b): the Inventory filters count zeros beside the alert.
+  // Gap 6 (82674b2b), fixed: the Inventory filters no longer count
+  // zeros beside the alert.
   test('a failed items read: the Inventory alert with the server\'s reason, and Receiving keeps its orders', async ({ page }) => {
     await installWarehouse(page);
     await page.route(ITEMS, (r) => json(r, { error: 'down' }, 503));
@@ -826,7 +829,7 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
     await expect(failed).toHaveText('Couldn\'t load inventory — HTTP 503: {"error":"down"}');
     await expect(failed).toHaveAttribute('role', 'alert');
     await expect(body(page).locator('table')).toHaveCount(0);
-    await expect(filters(page)).toHaveText(['All (0)', 'Critical / Out (0)', 'Low (0)']);
+    await expect(filters(page)).toHaveText(['All', 'Critical / Out', 'Low']);
 
     await tab(page, 'Receiving').click();
     await expect(failed).toHaveCount(0);
@@ -834,8 +837,8 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
     await expect(filters(page).first()).toHaveText('Open (3)');
   });
 
-  // Gap 4 (fcd0e29e) the other way round, and gap 6 (82674b2b) on the
-  // Receiving filters.
+  // Gap 4 (fcd0e29e) the other way round, and gap 6 (82674b2b), fixed,
+  // on the Receiving filters.
   test('a failed orders read: the Receiving alert with the server\'s reason, and Inventory keeps its items', async ({ page }) => {
     await installWarehouse(page);
     await page.route(ORDERS, (r) => json(r, { error: 'down' }, 500));
@@ -845,7 +848,7 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
     const failed = page.locator(FAILURE_MARKER);
     await expect(failed).toHaveText('Couldn\'t load purchase orders — HTTP 500: {"error":"down"}');
     await expect(failed).toHaveAttribute('role', 'alert');
-    await expect(filters(page)).toHaveText(['Open (0)', 'All (0)']);
+    await expect(filters(page)).toHaveText(['Open', 'All']);
     await expect(button(page, 'Create PO')).toBeVisible();
 
     await tab(page, 'Inventory').click();
@@ -874,16 +877,16 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
     });
   }
 
-  // Gap 5 (8b1deea2): items and status both down paints an empty
-  // warehouse in the header.
-  test('items and status both failed: the header reads "0 tracked SKUs"', async ({ page }) => {
+  // Gap 5 (8b1deea2), fixed: items and status both down painted an
+  // empty warehouse in the header; now it says the count is unavailable.
+  test('items and status both failed: the header says the count is unavailable, not zero', async ({ page }) => {
     await installWarehouse(page);
     await page.route(ITEMS, (r) => json(r, { error: 'down' }, 503));
     await page.route(STATUS, (r) => json(r, { error: 'down' }, 503));
     await mountPage(page, PATH);
     await expect(overviewLine(page)).toHaveText('Warehouse status unavailable — HTTP 503: {"error":"down"}');
-    await expect(title(page)).toHaveText('0 tracked SKUs');
-    await expect(subtitle(page)).toHaveText('0 below reorder point');
+    await expect(title(page)).toHaveText('Tracked SKUs unavailable');
+    await expect(subtitle(page)).toHaveText("Couldn't load warehouse status or inventory");
   });
 
   // Gap 4 (fcd0e29e), fixed: a network failure is one read's failure

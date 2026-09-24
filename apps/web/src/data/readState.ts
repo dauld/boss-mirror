@@ -30,9 +30,16 @@
 
 /// One read's outcome. A failure carries its reason, because the
 /// operator reading the page is the person who has to act on it.
+/// `loading` is a read that has not answered yet: a page that starts
+/// its reads as `okRead` claims an answer it does not have, and its
+/// empty state then speaks for the loading window (backlog 20410830,
+/// the /ux/warehouse audit).
 export type ReadState =
+  | { kind: 'loading' }
   | { kind: 'ok' }
   | { kind: 'failed'; error: string };
+
+export const loadingRead: ReadState = { kind: 'loading' };
 
 export const okRead: ReadState = { kind: 'ok' };
 
@@ -80,16 +87,19 @@ export type NamedRead = Readonly<{ source: string; state: ReadState }>;
 /// What a list surface renders.
 export type ListView =
   | { kind: 'failed'; source: string; error: string }
+  | { kind: 'loading'; source: string }
   | { kind: 'empty' }
   | { kind: 'rows' };
 
 /// The reads are checked BEFORE the row count, deliberately, and in the
 /// order the page declares them — its primary dataset first, so the
-/// banner names the read an operator should chase. Two separate rules:
+/// banner names the read an operator should chase. Three separate rules:
 /// zero rows because a read failed must not look like zero rows because
-/// there are none; and a failed read is still reported when rows
-/// happened to build from a partial join or a previous render, because
-/// reporting those numbers as complete is the quieter half of the bug.
+/// there are none; a failed read is still reported when rows happened
+/// to build from a partial join or a previous render, because reporting
+/// those numbers as complete is the quieter half of the bug; and zero
+/// rows because a read has not answered yet is neither — it is loading.
+/// A failure outranks a pending read: it is the one thing already known.
 export function listView(
   reads: ReadonlyArray<NamedRead>,
   rowCount: number,
@@ -102,14 +112,25 @@ export function listView(
       error: failure.state.error,
     };
   }
+  const pending = reads.find((r) => r.state.kind === 'loading');
+  if (pending) return { kind: 'loading', source: pending.source };
   return rowCount === 0 ? { kind: 'empty' } : { kind: 'rows' };
+}
+
+/// A filter label with its count — only when the read behind the count
+/// answered. "All (0)" beside a failure alert, or while the read is in
+/// flight, states a zero the data never said (backlog 82674b2b); with no
+/// answer the label carries no number at all.
+export function countLabel(label: string, read: ReadState, count: number): string {
+  return read.kind === 'ok' ? `${label} (${count})` : label;
 }
 
 /// What a blank cell means. With the failed arm discarded there is no
 /// answer to this: `isCapped(null)` is false, so the overflow banner
 /// cannot fire either, and the page has no surface at all that could
 /// report the read failed — an em-dash reads as "this row genuinely has
-/// none" whichever it was.
+/// none" whichever it was. A read that has not answered cannot say
+/// "absent" either.
 export function blankMeaning(read: ReadState): 'absent' | 'unknown' {
-  return read.kind === 'failed' ? 'unknown' : 'absent';
+  return read.kind === 'ok' ? 'absent' : 'unknown';
 }

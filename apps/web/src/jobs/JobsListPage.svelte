@@ -18,6 +18,7 @@
   import { appToday } from '@boss/web-kit/sim-clock';
   import { registeredAdHoc } from './adHoc';
   import { ACCOUNTS_LIST_URL } from '../accounts/api';
+  import { jobsFilterSearch } from './filterQuery';
 
   let userId = $derived(
     session.value.kind === 'ready' ? session.value.user.id : '',
@@ -35,6 +36,7 @@
     initialNewJobOpen = false,
     initialNewJobSubjectKind = '',
     initialNewJobSubjectId = '',
+    writesFiltersToUrl = false,
   } = $props<{
     initialKind?: string;
     initialKindPrefix?: string;
@@ -63,6 +65,11 @@
     initialNewJobOpen?: boolean;
     initialNewJobSubjectKind?: string;
     initialNewJobSubjectId?: string;
+    /// Set by the /jobs mount only: the route whose query parseRoute
+    /// reads the filters from, so the only one a written filter can
+    /// come back through. The Service queue and the Sales pipeline
+    /// mount this page on paths that parse no query.
+    writesFiltersToUrl?: boolean;
   }>();
 
   let kind = $state(initialKind);
@@ -75,6 +82,19 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let total = $state(0);
+
+  // The filters live in the URL, not only in page state: choosing All
+  // and reloading used to come back as Open, and a filtered view could
+  // not be shared (backlog f8027805). replaceState, not a navigation —
+  // a filter is not a place the back button should step through, and
+  // App re-parses the route on popstate only. The write is the inverse
+  // of parseRoute's read, so a mount rewrites nothing.
+  $effect(() => {
+    if (!writesFiltersToUrl) return;
+    const { pathname, search, hash } = window.location;
+    const next = jobsFilterSearch(search, { kind, status, subjectId: subjectIdFilter });
+    if (next !== search) window.history.replaceState(window.history.state, '', pathname + next + hash);
+  });
 
   // Auto-load kinds for the filter dropdown on mount; no user
   // interaction required.

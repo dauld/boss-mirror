@@ -64,8 +64,9 @@
 /// four readers depend on it agreeing: `boss gate` stamps it on a
 /// gate-run, `boss dispatch` writes it onto the step it claims
 /// (backlog dd6d44b7), the dispatcher rules read it back off the
-/// `step.done.<kind>` marker, and the step PUT carries it forward
-/// (backlog b91a2103) so a wholesale metadata write cannot erase it.
+/// `step.done.<kind>` marker, and the step PUT refuses a metadata body
+/// that omits it (e39a9d2a; it carried it forward by hand from
+/// b91a2103) so a wholesale metadata write cannot erase it.
 pub const EDGE_KEY: &str = "agent_run";
 
 /// Whether a claim hands a step to a DIFFERENT holder — the one case in

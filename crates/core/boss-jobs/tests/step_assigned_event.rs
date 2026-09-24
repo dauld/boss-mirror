@@ -248,11 +248,7 @@ async fn a_step_assigned_before_it_becomes_ready_carries_the_assignee_on_ready()
         req(
             "PUT",
             &format!("/api/jobs/{job_id}/steps/{scope_id}"),
-            serde_json::json!({
-                "status": "completed",
-                "metadata": {"summary": "s", "excludes": "e",
-                             "authority_role": "platform-admin"},
-            }),
+            scope_completion(&scope["metadata"]),
         ),
     )
     .await;
@@ -269,4 +265,15 @@ async fn a_step_assigned_before_it_becomes_ready_carries_the_assignee_on_ready()
         "the ready event must name the assignee so notify routes to THEM, \
          not the role's on-call member"
     );
+}
+
+/// The scope completion as a read-merge-write: the step's stored
+/// metadata with the evidence laid over it. The step PUT refuses a
+/// metadata body that omits a stored key (e39a9d2a), so a completer
+/// sends back everything it read.
+fn scope_completion(stored: &serde_json::Value) -> serde_json::Value {
+    let mut metadata = stored.clone();
+    metadata["summary"] = serde_json::json!("s");
+    metadata["excludes"] = serde_json::json!("e");
+    serde_json::json!({"status": "completed", "metadata": metadata})
 }

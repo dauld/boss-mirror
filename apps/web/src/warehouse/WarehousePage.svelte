@@ -23,10 +23,13 @@
     type StockStatus,
   } from '../parts/types';
   import type { WarehouseStatus } from './types';
+  import { warehouseHeader } from './header';
   import {
+    countLabel,
     failedRead,
     failedWithReason,
     listView,
+    loadingRead,
     okRead,
     type ReadState,
   } from '../data/readState';
@@ -46,11 +49,14 @@
   /// One outcome PER READ (packet 3fba9c35 made the failure visible;
   /// backlog fcd0e29e split it): a single shared `loadFailed` blanked
   /// the Receiving tab when only items failed, naming purchase orders,
-  /// and one network error rejected all three reads at once.
-  let itemsRead = $state<ReadState>(okRead);
-  let ordersRead = $state<ReadState>(okRead);
-  let statusRead = $state<ReadState>(okRead);
-  let statusLoading = $state(true);
+  /// and one network error rejected all three reads at once. Each starts
+  /// LOADING, not ok: starting as ok claimed an answer that had not
+  /// arrived, so the Inventory and Receiving tabs said "No items/POs
+  /// match that filter." and the header and filters counted zeros for
+  /// the whole loading window (backlog 20410830, 82674b2b, 8b1deea2).
+  let itemsRead = $state<ReadState>(loadingRead);
+  let ordersRead = $state<ReadState>(loadingRead);
+  let statusRead = $state<ReadState>(loadingRead);
   let tab = $state<Tab>('overview');
 
   /// One GET, settled on its own. A refusal keeps the server's status
@@ -82,7 +88,6 @@
     if (i.state.kind === 'ok') inventory = rowsOf<InventoryItem>(i.body);
     if (p.state.kind === 'ok') purchaseOrders = rowsOf<PurchaseOrder>(p.body);
     if (s.state.kind === 'ok') status = s.body as WarehouseStatus;
-    statusLoading = false;
   }
 
   $effect(() => {
@@ -97,30 +102,16 @@
     })),
   );
 
-  let headerTitle = $derived(
-    status
-      ? `${status.parts_stock.total_skus} tracked SKUs`
-      : `${inventory.length} tracked SKUs`,
+  let header = $derived(
+    warehouseHeader(
+      { read: statusRead, body: status },
+      {
+        read: itemsRead,
+        skus: inventory.length,
+        belowReorder: inventoryRows.filter((r) => r.available <= r.item.reorder_point).length,
+      },
+    ),
   );
-  // Tenant-aware subtitle: drop the refurb-WIP / ready-for-sale
-  // segments when they're zero. Brewery never has either; used-
-  // device-shop always has both — same code, no per-tenant gate.
-  let headerSubtitle = $derived.by(() => {
-    if (!status) {
-      return `${inventoryRows.filter((r) => r.available <= r.item.reorder_point).length} below reorder point`;
-    }
-    const parts = [
-      `${status.parts_stock.below_reorder_count} below reorder`,
-      `${status.inbound_pos.total_open} open POs`,
-    ];
-    if (status.refurb_wip.total_in_flight > 0) {
-      parts.push(`${status.refurb_wip.total_in_flight} refurb WIP`);
-    }
-    if (status.ready_for_sale_count > 0) {
-      parts.push(`${status.ready_for_sale_count} ready for sale`);
-    }
-    return parts.join(' · ');
-  });
 
   // Inventory filter
   type InvFilter = 'all' | 'critical' | 'low';
@@ -244,7 +235,7 @@
 </script>
 
 <div class="catalog theme-exec">
-  <PageHeader eyebrow="Warehouse" title={headerTitle} subtitle={headerSubtitle} />
+  <PageHeader eyebrow="Warehouse" title={header.title} subtitle={header.subtitle} />
 
   <nav class="tabs" role="tablist">
     {#each TABS as t (t.id)}
@@ -261,7 +252,7 @@
   </nav>
 
   {#if tab === 'overview'}
-    {#if statusLoading && !status}
+    {#if statusRead.kind === 'loading' && !status}
       <p class="empty" style="padding:16px">Loading warehouse status…</p>
     {:else if !status}
       <p class="empty" style="padding:16px">
@@ -401,13 +392,13 @@
       <aside class="catalog-filters">
         <FilterGroup label="Status">
             <FilterButton active={invFilter === 'all'} onclick={() => (invFilter = 'all')}>
-              All ({inventoryRows.length})
+              {countLabel('All', itemsRead, inventoryRows.length)}
             </FilterButton>
             <FilterButton active={invFilter === 'critical'} onclick={() => (invFilter = 'critical')}>
-              Critical / Out ({invCritical})
+              {countLabel('Critical / Out', itemsRead, invCritical)}
             </FilterButton>
             <FilterButton active={invFilter === 'low'} onclick={() => (invFilter = 'low')}>
-              Low ({invLow})
+              {countLabel('Low', itemsRead, invLow)}
             </FilterButton>
         </FilterGroup>
       </aside>
@@ -417,6 +408,8 @@
           <p class="empty load-failed" role="alert">
             Couldn't load {invView.source} — {invView.error}
           </p>
+        {:else if invView.kind === 'loading'}
+          <p class="empty">Loading {invView.source}…</p>
         {:else if invView.kind === 'empty'}
           <p class="empty">No items match that filter.</p>
         {:else}
@@ -463,10 +456,10 @@
       <aside class="catalog-filters">
         <FilterGroup label="PO status">
             <FilterButton active={poFilter === 'open'} onclick={() => (poFilter = 'open')}>
-              Open ({openPoCount})
+              {countLabel('Open', ordersRead, openPoCount)}
             </FilterButton>
             <FilterButton active={poFilter === 'all'} onclick={() => (poFilter = 'all')}>
-              All ({purchaseOrders.length})
+              {countLabel('All', ordersRead, purchaseOrders.length)}
             </FilterButton>
             {#each PO_STATUSES as s (s)}
               {@const c = poCounts.get(s) ?? 0}
@@ -554,6 +547,8 @@
           <p class="empty load-failed" role="alert">
             Couldn't load {poView.source} — {poView.error}
           </p>
+        {:else if poView.kind === 'loading'}
+          <p class="empty">Loading {poView.source}…</p>
         {:else if poView.kind === 'empty'}
           <p class="empty">No POs match that filter.</p>
         {:else}

@@ -235,11 +235,11 @@ fn after_hours(args: &[(String, Value)]) -> Result<f64, HandlerError> {
 /// IT IS AN EXPLICIT `null` THROUGH THE MERGE DOOR, and that is the
 /// whole of backlog ce3a4b16. Until 2026-09-22 this was one PUT whose
 /// `metadata` simply left the key out — which reads as a clear and is
-/// not one: since b91a2103 the step PUT CARRIES `agent_run` forward
-/// whenever a body omits it (`crates/core/boss-jobs/src/http/steps.rs`,
-/// pinned by `the_run_edge_survives_a_metadata_put.rs`), because
-/// omission is how every other completer says "leave the edge alone".
-/// So the release believed it cleared the edge and did not, and the
+/// not one: from b91a2103 the step PUT CARRIED `agent_run` forward
+/// whenever a body omitted it, and since e39a9d2a it refuses such a
+/// body outright (`crates/core/boss-jobs/src/http/steps.rs`, pinned by
+/// `a_step_put_that_drops_a_stored_key_is_refused.rs`). Under the
+/// carry, the release believed it cleared the edge and did not, and the
 /// reclaimed step went back to `ready` still naming the run that
 /// abandoned it. `PATCH .../steps/{id}/metadata` is the only door that
 /// DELETES a key, and only for a key given as `null`.
@@ -558,11 +558,11 @@ mod tests {
     /// - **PUT `/steps/{id}` is an OVERLAY**, not a replacement of the
     ///   row: a key absent from the body leaves the stored field alone
     ///   (`crates/core/boss-jobs/src/http/steps.rs`).
-    /// - **AND IT CARRIES `agent_run` FORWARD** whenever the body's
-    ///   `metadata` omits it (b91a2103, pinned by
-    ///   `crates/core/boss-jobs/tests/the_run_edge_survives_a_metadata_put.rs`).
-    ///   Omission is how a completer says "leave the edge alone", so a
-    ///   PUT can never DELETE it.
+    /// - **AND IT REFUSES A `metadata` BODY THAT DROPS A STORED KEY**
+    ///   (e39a9d2a, pinned by
+    ///   `crates/core/boss-jobs/tests/a_step_put_that_drops_a_stored_key_is_refused.rs`;
+    ///   until then it carried `agent_run` forward on omission,
+    ///   b91a2103), so a PUT can never DELETE the edge.
     /// - **PATCH `/steps/{id}/metadata` merges top-level keys, and a
     ///   `null` REMOVES one** — the only door that clears the edge.
     async fn mock_jobs(jobs: Vec<serde_json::Value>) -> (String, Writes) {
@@ -635,27 +635,33 @@ mod tests {
                                     if step["id"] != json!(step_id) {
                                         continue;
                                     }
+                                    // The server's own rule, called rather
+                                    // than retyped (CLAUDE.md §9a).
+                                    let drops = body.get("metadata").is_some_and(|sent| {
+                                        !boss_jobs::step_metadata_write::omitted_keys(
+                                            &step["metadata"],
+                                            sent,
+                                        )
+                                        .is_empty()
+                                    });
+                                    if drops {
+                                        return (
+                                            axum::http::StatusCode::CONFLICT,
+                                            boss_jobs::step_metadata_write::OMITTED_KEYS_HINT,
+                                        )
+                                            .into_response();
+                                    }
                                     for field in ["status", "assignee_id"] {
                                         if let Some(v) = body.get(field) {
                                             step[field] = v.clone();
                                         }
                                     }
-                                    let Some(sent) = body.get("metadata") else {
-                                        continue;
-                                    };
-                                    let carried = step
-                                        .pointer("/metadata/agent_run")
-                                        .filter(|_| sent.get("agent_run").is_none())
-                                        .cloned();
-                                    step["metadata"] = sent.clone();
-                                    if let Some(run) = carried
-                                        && let Some(obj) = step["metadata"].as_object_mut()
-                                    {
-                                        obj.insert("agent_run".into(), run);
+                                    if let Some(sent) = body.get("metadata") {
+                                        step["metadata"] = sent.clone();
                                     }
                                 }
                             }
-                            Json(json!({ "ok": true }))
+                            Json(json!({ "ok": true })).into_response()
                         }
                     },
                 ),
@@ -786,8 +792,9 @@ mod tests {
     /// THE DOOR IS THE FIX (backlog ce3a4b16). The release used to
     /// build one PUT whose `metadata` simply left `agent_run` out, and
     /// every assertion about that body passed — but omission is how a
-    /// caller says LEAVE IT ALONE, and since b91a2103 the server reads
-    /// it that way and carries the edge forward. So the reclaimed step
+    /// caller says LEAVE IT ALONE, and from b91a2103 the server read it
+    /// that way and carried the edge forward (since e39a9d2a it refuses
+    /// the body outright). So the reclaimed step
     /// went back to `ready` still naming the run that abandoned it, and
     /// `agent-run-delivers-when-its-step-is-done` would follow that
     /// edge onto a closed, dead run.

@@ -1,5 +1,7 @@
 // People domain — Boss employees. Port of apps/web/src/people/types.ts.
 
+import { failedRead, okRead, type ReadState } from '../data/readState';
+
 export type EmployeeId = string;
 
 /// Class registry code under
@@ -97,3 +99,26 @@ export type Employee = {
   status: EmploymentStatus | null;
   certifications: ReadonlyArray<Certification>;
 };
+
+/// Whether a 2xx body from `url` is an Employee the detail page can
+/// render. Only `id` and the two lists are checked: every other field is
+/// nullable (identity-first), but boss-people serializes `skills` and
+/// `certifications` on every row, so a row without one did not come from
+/// the service's contract — and the page iterates both. Backlog
+/// 548a1e8d: the page cast any 2xx body to Employee, the mocked floor's
+/// `[]` among them, and threw on `e.skills.length`. A failure names the
+/// field so the failure line says what the read lacked, rather than an
+/// optional chain painting "no skills" over a record that never said so.
+export function employeeRecordRead(url: string, body: unknown): ReadState {
+  if (
+    typeof body !== 'object' ||
+    body === null ||
+    Array.isArray(body) ||
+    typeof (body as { id?: unknown }).id !== 'string'
+  ) {
+    return failedRead(`${url}: the answer is not an employee record`);
+  }
+  const row = body as Record<string, unknown>;
+  const missing = (['skills', 'certifications'] as const).find((k) => !Array.isArray(row[k]));
+  return missing ? failedRead(`${url}: the record carries no ${missing} list`) : okRead;
+}

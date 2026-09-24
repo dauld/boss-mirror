@@ -63,6 +63,7 @@ pub mod station_queue;
 pub mod station_reach;
 pub mod station_seed;
 pub mod stations;
+pub mod step_metadata_write;
 pub mod stranded;
 pub mod trust;
 pub mod workflow_lint;

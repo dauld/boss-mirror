@@ -655,25 +655,22 @@ pub(crate) fn holdable(car: &Value) -> Result<&Value, String> {
 
 /// The merge-door body that puts the hold on — the marker in the one
 /// shape `stranded::hold_reason` reads (a non-blank string). One key,
-/// so every other key on the review step stays where it is by
-/// construction rather than by being read and sent back.
+/// so every other key on the review step is untouched by construction.
 pub(crate) fn hold_patch(reason: &str) -> Value {
     json!({ "hold": reason.trim() })
 }
 
-/// The merge-door body that takes the hold OFF — the key DELETED (the
-/// merge door deletes a key sent as an explicit null), not falsed.
-/// `hold_reason` reads `false`/`""` as released too, but a released car
-/// that still carries the key reads as "held then released" to every
-/// eye that is not that function.
+/// The merge-door body that takes the hold OFF — the key DELETED (an
+/// explicit null deletes at the merge door), not falsed. `hold_reason`
+/// reads `false`/`""` as released too, but a released car that still
+/// carries the key reads as "held then released" to every eye that is
+/// not that function.
 ///
-/// Why the merge door (e39a9d2a, 2026-09-23): until this, release PUT
-/// the review step's whole metadata back with `hold` left out — a clear
-/// by OMISSION, which worked only because the step PUT replaces
-/// metadata wholesale. The PUT still does; the merge door is simply the
-/// door a deliberate clear belongs at: it names the key that goes, and
-/// it cannot erase a key another writer set between our read and our
-/// write, which a whole-metadata PUT built from that read can.
+/// Through the merge door since e39a9d2a: release used to PUT the
+/// review step's metadata with `hold` left out, clearing by OMISSION —
+/// the one writer the step PUT's drop refusal was measured to break
+/// (refused_2026_09_23 on that packet). The PUT now refuses a metadata
+/// body that omits a stored key; clearing on purpose is a null here.
 pub(crate) fn release_patch_body() -> Value {
     json!({ "hold": Value::Null })
 }
@@ -791,9 +788,9 @@ impl Wire {
     }
 
     /// The step's MERGE door: keys land one at a time and an explicit
-    /// null DELETES one. The only door that can clear `agent_run`,
-    /// which the PUT below carries forward on omission (b91a2103), and
-    /// the door `boss hold` / `boss release` write through (e39a9d2a).
+    /// null DELETES one. The only door that can clear a key: the PUT
+    /// below refuses a metadata body that omits a stored key
+    /// (e39a9d2a), so clearing by omission is not a thing it does.
     async fn patch_step_metadata(&self, job_id: &str, step_id: &str, body: Value) -> Result<()> {
         self.call(
             reqwest::Method::PATCH,
@@ -977,9 +974,9 @@ pub(crate) async fn fold(
 }
 
 /// `Some(reason)` holds, `None` releases — one path, because both are
-/// the same one-key write to the review step's merge door (the key
-/// set, or nulled to delete it), and the read-back checks the key the
-/// same way the readers do (`stranded::hold_reason`).
+/// the same one-key write to the review step's merge door (the key set,
+/// or nulled to delete it), and the read-back checks the key the same
+/// way the readers do (`stranded::hold_reason`).
 pub(crate) async fn hold(wire: &Wire, car: &str, reason: Option<&str>) -> Result<()> {
     if let Some(r) = reason
         && r.trim().is_empty()
@@ -1054,9 +1051,11 @@ pub(crate) async fn hold(wire: &Wire, car: &str, reason: Option<&str>) -> Result
 // first, and the page march is about to ask for ~94 of them (47 routes
 // x `measure` + `file`). The three hazards that PUT carries are all in
 // `boss-jobs/src/http/steps.rs`: `metadata` is REPLACED wholesale by
-// the body's top-level keys (only `authority_role` and `human_only`
-// carry forward), so a naive completion deletes the step's `procedure`
-// and its `agent` block; an UNKNOWN field name is not refused but
+// the body's top-level keys, so a naive completion would delete the
+// step's `procedure` and its `agent` block — since e39a9d2a the PUT
+// refuses such a body (409, naming the dropped keys), which makes the
+// read-merge-write below the required form rather than a workaround;
+// an UNKNOWN field name is not refused but
 // stored beside the real ones, so a name typed from memory reads as
 // success and records nothing (retro 27fad542, class B); and a 204 is
 // a claim, not a fact.
@@ -1457,9 +1456,10 @@ pub(crate) fn releasable<'a>(packet: &'a Value, slug: &str) -> Result<&'a Value,
 /// The metadata merge body: the run edge CLEARED, and one evidence
 /// object saying who took the step back, from which run, and why.
 ///
-/// THE NULL IS THE WHOLE POINT. `update_step` carries `agent_run`
-/// forward when a PUT's metadata omits it (b91a2103), so the only door
-/// that can clear the edge is `PATCH .../steps/{id}/metadata`, where an
+/// THE NULL IS THE WHOLE POINT. `update_step` refuses a PUT whose
+/// metadata omits a stored key (e39a9d2a; it carried `agent_run`
+/// forward on omission before that, b91a2103), so the only door that
+/// can clear the edge is `PATCH .../steps/{id}/metadata`, where an
 /// explicit null deletes the key. Leaving a dead run named on a freed
 /// step is not cosmetic: `agent-run-delivers-when-its-step-is-done`
 /// follows that edge, so a step completed later would deliver onto a
@@ -2199,6 +2199,25 @@ mod tests {
                 else {
                     return ("404 Not Found", "step not found".into());
                 };
+                // THE SERVER REFUSES A METADATA BODY THAT DROPS A STORED
+                // KEY (e39a9d2a, pinned by
+                // `a_step_put_that_drops_a_stored_key_is_refused`).
+                // Modelled here so a verb that clears by omission
+                // through THIS door fails the test exactly as it fails
+                // live, instead of passing against a stub that is
+                // kinder than the API.
+                // Judged on an open step only, as the server does: a
+                // terminal one answers with the frozen-row rule below.
+                if let Some(sent_md) = sent.get("metadata")
+                    && !matches!(step["status"].as_str(), Some("completed" | "skipped"))
+                    && !boss_jobs::step_metadata_write::omitted_keys(&step["metadata"], sent_md)
+                        .is_empty()
+                {
+                    return (
+                        "409 Conflict",
+                        r#"{"error":"metadata body omits stored keys"}"#.into(),
+                    );
+                }
                 // The frozen-row rule (http/steps.rs): a terminal step's
                 // metadata is immutable, and saying so is the point.
                 if matches!(step["status"].as_str(), Some("completed" | "skipped"))
@@ -2206,26 +2225,10 @@ mod tests {
                 {
                     return ("409 Conflict", r#"{"error":"step is terminal"}"#.into());
                 }
-                // THE SERVER CARRIES THE RUN EDGE FORWARD when a PUT's
-                // metadata omits it (b91a2103, pinned by
-                // `the_run_edge_survives_a_metadata_put`). Modelled
-                // here so a release that tries to clear the edge
-                // through THIS door fails the test exactly as it fails
-                // live, instead of passing against a stub that is
-                // kinder than the API.
-                let carried = step["metadata"]
-                    .get(boss_jobs::agent_runs::EDGE_KEY)
-                    .cloned();
                 if let Some(obj) = sent.as_object() {
                     for (k, v) in obj {
                         step[k] = v.clone();
                     }
-                }
-                if let Some(run) = carried
-                    && let Some(md) = step["metadata"].as_object_mut()
-                {
-                    md.entry(boss_jobs::agent_runs::EDGE_KEY.to_string())
-                        .or_insert(run);
                 }
                 ("204 No Content", String::new())
             }
@@ -2481,11 +2484,10 @@ mod tests {
         );
         hold(&wire, "c6bd173e", None).await.expect("releases");
         {
-            // A release is a DELIBERATE clear, and the merge door is the
-            // door for one: an explicit null deletes the key and touches
-            // nothing else (e39a9d2a). Through the step PUT it was a
-            // clear by OMISSION — the whole metadata sent back without
-            // `hold` — resting on the PUT's wholesale replace.
+            // THE DEFECT (e39a9d2a): release cleared `hold` by OMISSION
+            // through the step PUT, which now refuses a metadata body
+            // that drops a stored key (the stub models the refusal). It
+            // is a null through the merge door instead.
             let puts = s.puts.lock().unwrap();
             assert_eq!(
                 puts[1].0,
@@ -2969,12 +2971,12 @@ mod tests {
     }
 
     /// THE CLEAR GOES THROUGH THE MERGE DOOR, AND IT HAS TO.
-    /// `update_step` CARRIES `agent_run` FORWARD on omission
-    /// (b91a2103, pinned by `the_run_edge_survives_a_metadata_put`),
-    /// so a PUT whose metadata simply lacks the key leaves the dead
-    /// run pinned to the step — a silent no-op. `PATCH
-    /// .../steps/{id}/metadata` deletes it on an explicit null, and is
-    /// the only door that can.
+    /// `update_step` REFUSES a PUT whose metadata lacks a stored key
+    /// (e39a9d2a, pinned by
+    /// `a_step_put_that_drops_a_stored_key_is_refused`; before that it
+    /// carried `agent_run` forward on omission, b91a2103, which left
+    /// the dead run pinned in silence). `PATCH .../steps/{id}/metadata`
+    /// deletes it on an explicit null, and is the only door that can.
     #[test]
     fn the_release_patch_clears_the_edge_with_an_explicit_null_and_records_who_took_it() {
         let body = release_patch(
@@ -2986,7 +2988,7 @@ mod tests {
         assert_eq!(
             body[boss_jobs::agent_runs::EDGE_KEY],
             Value::Null,
-            "an explicit null, not an omission — omission is carried forward: {body}"
+            "an explicit null, not an omission — omission is refused by the PUT: {body}"
         );
         assert_eq!(
             body[RELEASED_KEY]["why"],

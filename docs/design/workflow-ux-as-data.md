@@ -38,7 +38,9 @@ department actually works in.
   platform surface, then the generic fields/notes card, as fallback.
 - **What the host does NOT provide**: an API client. Every plugin
   fetches for itself — including the step PUT whose top-level
-  metadata replace wipes unmentioned keys. The merge-safe discipline
+  metadata replace would wipe unmentioned keys, and since e39a9d2a
+  refuses a body that omits one (409, naming the step merge door,
+  `PATCH .../steps/{step_id}/metadata`). The merge-safe discipline
   is documented in TriageBoard's `patchStep` because it once made
   cards vanish; today each plugin must rediscover it.
 - **Core generic surfaces** — TriageBoard (fork columns), TriageFlow

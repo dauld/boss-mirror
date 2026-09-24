@@ -15,7 +15,9 @@
 //            /api/jobs?department=support (support on only), and
 //            /api/commerce/invoices?limit=10000;
 //   writes — 0;
-//   controls — 1 search input; tier buttons: All + 3 tiers (4);
+//   controls — 1 search input; tier buttons: All + one per (account,
+//            tier) Class + No tier when an account has none (backlog
+//            d2c9e79f: the page hard-coded the seeded three);
 //            state buttons: All states + one per distinct state; one
 //            account link per row, and the row itself navigates to the
 //            same place (the link owns its own click, so that is ONE
@@ -64,8 +66,27 @@ const INVOICES = /\/api\/commerce\/invoices\?limit=10000$/;
 
 const account = (
   id: string, name: string | null, director: string | null, city: string | null,
-  state: string | null, tier: 'platinum' | 'gold' | 'silver' | null, customer_since: string | null,
+  state: string | null, tier: string | null, customer_since: string | null,
 ) => ({ id, name, director, city, state, tier, customer_since, territory_rep_id: null });
+
+/// The (account, tier) Classes as `GET /api/classes?subject_kind=account`
+/// serves them: the three 01-registries.sql seeds, plus a note-kind
+/// Class, which is an account Class too and is not a tier. A spec that
+/// needs a tenant's fourth tier passes it in `extra`.
+const tierClass = (code: string, display_name: string, sort_order: number) => ({
+  subject_kind: 'account', code, display_name, parent_code: null,
+  member_attribute: 'tier', metadata: {}, sort_order, retired_at: null,
+});
+const SEEDED_TIERS = [
+  tierClass('platinum', 'Platinum', 30), tierClass('gold', 'Gold', 31), tierClass('silver', 'Silver', 32),
+];
+async function installAccountClasses(page: Page, extra: ReadonlyArray<unknown> = []): Promise<void> {
+  await page.route(/\/api\/classes\?subject_kind=account$/, (r) => json(r, [
+    { subject_kind: 'account', code: 'call', display_name: 'Call', parent_code: null, member_attribute: 'note-kind', metadata: {}, sort_order: 1, retired_at: null },
+    ...SEEDED_TIERS,
+    ...extra,
+  ]));
+}
 
 /// The live directory, read 2026-09-22 by the audit's measure step: ONE
 /// account, the shared Anonymous Sponsor the sponsor-reconcile policy
@@ -121,8 +142,8 @@ const FLEET_HEADINGS = [
   'Account', 'Tier', 'Location', 'Primary contact', 'Equipment', 'Open SRs', 'Open AR', 'Customer since',
 ];
 const FLEET_ROWS: ReadonlyArray<ReadonlyArray<string>> = [
-  ['Anchor Pub', 'gold', 'Portland, OR', 'Ada Brewer', '2', '0', '—', '2024-03-01'],
-  ['Zed Taproom', 'platinum', 'Seattle, WA', 'Zoe Tap', '0', '1', '$1,250', '2023-01-15'],
+  ['Anchor Pub', 'Gold', 'Portland, OR', 'Ada Brewer', '2', '0', '—', '2024-03-01'],
+  ['Zed Taproom', 'Platinum', 'Seattle, WA', 'Zoe Tap', '0', '1', '$1,250', '2023-01-15'],
   ['Anonymous Sponsor', 'untiered', '—, —', '—', '0', '0', '—', '—'],
 ];
 const FLEET_NAMES = FLEET_ROWS.map((r) => r[0]!);
@@ -133,6 +154,7 @@ const FLEET_NAMES = FLEET_ROWS.map((r) => r[0]!);
 /// four reads answered with the fleet; a spec re-routes any one after.
 async function installFleet(page: Page): Promise<void> {
   await installSmokeMocks(page);
+  await installAccountClasses(page);
   await page.route(ACCOUNTS, (r) => json(r, paged(FLEET, 1000)));
   await page.route(ASSETS, (r) => json(r, paged(ASSETS_BODY, 1000)));
   await page.route(JOBS, (r) => json(r, paged(JOBS_BODY, 5000)));
@@ -153,6 +175,7 @@ async function installLive(page: Page): Promise<void> {
       display_name: 'Algedonic, LLC', tenant_id: 'algedonic', modules: m, labels: {},
     };
   }, MODULES_LIVE);
+  await installAccountClasses(page);
   await page.route(ACCOUNTS, (r) => json(r, paged([SPONSOR], 1000)));
   await page.route(ASSETS, (r) => json(r, paged([], 1000)));
   await page.route(INVOICES, (r) => json(r, paged([], 10_000)));
@@ -216,10 +239,10 @@ test.describe('/ux/accounts — the live instance (no modules, one account)', ()
     await expect(subtitle(page)).toHaveCount(0);
     await expect(body(page).locator('.filter-label')).toHaveText(['Search', 'Tier', 'State']);
     await expect(group(page, 1).getByRole('button')).toHaveText([
-      'All (1)', 'Platinum (0)', 'Gold (0)', 'Silver (0)',
+      'All (1)', 'Platinum (0)', 'Gold (0)', 'Silver (0)', 'No tier (1)',
     ]);
     await expect(group(page, 2).getByRole('button')).toHaveText(['All states']);
-    await expect(body(page).getByRole('button')).toHaveCount(5);
+    await expect(body(page).getByRole('button')).toHaveCount(6);
     await expect(body(page).locator('.filter-btn-active')).toHaveText(['All (1)', 'All states']);
     await expect(search(page)).toHaveValue('');
 
@@ -235,7 +258,9 @@ test.describe('/ux/accounts — the live instance (no modules, one account)', ()
     expect(seen.writes.map((r) => `${r.method()} ${r.url()}`)).toEqual([]);
   });
 
-  test('every tier button but All empties the list, because the sponsor is untiered', async ({ page }) => {
+  // Backlog d2c9e79f: the untiered sponsor was reachable only under All,
+  // because the page's three hand-written buttons had no No tier.
+  test('every tier Class button empties the list, and No tier shows the untiered sponsor', async ({ page }) => {
     await installLive(page);
     await mountPage(page, PATH);
     await expect(nameColumn(page)).toHaveText(['Anonymous Sponsor']);
@@ -245,6 +270,8 @@ test.describe('/ux/accounts — the live instance (no modules, one account)', ()
       await expect(body(page).locator('.filter-btn-active').first()).toHaveText(label);
       await expect(status(page), label).toHaveText('No accounts match those filters.');
     }
+    await button(page, 'No tier (1)').click();
+    await expect(nameColumn(page)).toHaveText(['Anonymous Sponsor']);
     await button(page, 'All (1)').click();
     await expect(nameColumn(page)).toHaveText(['Anonymous Sponsor']);
   });
@@ -268,7 +295,7 @@ test.describe('/ux/accounts — the fleet shape (support on): the list', () => {
     // total including the closed and the cancelled (3), not open ones.
     await expect(subtitle(page)).toHaveText('3 installed devices · 3 service jobs');
     await expect(group(page, 1).getByRole('button')).toHaveText([
-      'All (3)', 'Platinum (1)', 'Gold (1)', 'Silver (0)',
+      'All (3)', 'Platinum (1)', 'Gold (1)', 'Silver (0)', 'No tier (1)',
     ]);
     await expect(group(page, 2).getByRole('button')).toHaveText(['All states', 'OR (1)', 'WA (1)']);
 
@@ -346,6 +373,7 @@ test.describe('/ux/accounts — every filter button does what its label says', (
     for (const [label, names] of [
       ['Platinum (1)', ['Zed Taproom']],
       ['Gold (1)', ['Anchor Pub']],
+      ['No tier (1)', ['Anonymous Sponsor']],
       ['All (3)', FLEET_NAMES],
     ] as const) {
       await button(page, label).click();
@@ -509,6 +537,43 @@ test.describe('/ux/accounts — the account link, the row, and back', () => {
     await page.goBack();
     await expect.poll(() => new URL(page.url()).pathname).toBe(PATH);
     await expect(nameColumn(page)).toHaveText(FLEET_NAMES);
+  });
+});
+
+// ── A tier a tenant added ───────────────────────────────────────────
+
+// Backlog d2c9e79f: `accounts.tier` is plain TEXT (22-accounts.sql) and
+// a tier is an (account, tier) Class row, so a tenant adds one without
+// a deploy. The web typed it as platinum | gold | silver everywhere: the
+// account detail's schema refused the account ("Server returned an
+// unexpected payload shape"), and the list had no button for it.
+test.describe('/ux/accounts — a fourth tier, added as one Class row', () => {
+  const BRONZE = account('acct-bronze', 'Bronze Brewhouse', 'Bo Barley', 'Boise', 'ID', 'bronze', '2025-05-05');
+
+  async function installBronze(page: Page): Promise<void> {
+    await installFleet(page);
+    await installAccountClasses(page, [tierClass('bronze', 'Bronze Reserve', 33)]);
+    await page.route(ACCOUNTS, (r) => json(r, paged([...FLEET, BRONZE], 1000)));
+  }
+
+  test('the list gives it a counted button, in registry order, and labels its chip from the Class', async ({ page }) => {
+    await installBronze(page);
+    await mountPage(page, PATH);
+    await expect(group(page, 1).getByRole('button')).toHaveText([
+      'All (4)', 'Platinum (1)', 'Gold (1)', 'Silver (0)', 'Bronze Reserve (1)', 'No tier (1)',
+    ]);
+    await button(page, 'Bronze Reserve (1)').click();
+    await expect(nameColumn(page)).toHaveText(['Bronze Brewhouse']);
+    await expect(body(page).locator('tbody tr td').nth(1)).toHaveText('Bronze Reserve');
+  });
+
+  test('the account detail loads it and shows the Class label', async ({ page }) => {
+    await installBronze(page);
+    await installDetail(page, 'acct-bronze', BRONZE);
+    await mountPage(page, `${PATH}/acct-bronze`);
+    await expect(page.locator('h1.exec-title')).toHaveText('Bronze Brewhouse');
+    await expect(page.locator('dl.kv dt', { hasText: 'Tier' }).locator('xpath=following-sibling::dd[1]'))
+      .toHaveText('Bronze Reserve');
   });
 });
 

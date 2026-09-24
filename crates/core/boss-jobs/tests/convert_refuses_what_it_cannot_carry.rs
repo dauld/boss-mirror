@@ -198,11 +198,7 @@ async fn open_at_build(app: &axum::Router) -> String {
         req(
             "PUT",
             &format!("/api/jobs/{id}/steps/{scope_id}"),
-            serde_json::json!({
-                "status": "completed",
-                "metadata": {"summary": "s", "excludes": "e",
-                             "authority_role": "platform-admin"},
-            }),
+            scope_completion(&scope["metadata"]),
         ),
     )
     .await;
@@ -300,4 +296,15 @@ async fn a_move_that_changes_only_a_completed_step_converts() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["converted"], true, "{body}");
     assert_eq!(get_job(&app, &id).await["workflow_version"], to);
+}
+
+/// The scope completion as a read-merge-write: the step's stored
+/// metadata with the evidence laid over it. The step PUT refuses a
+/// metadata body that omits a stored key (e39a9d2a), so a completer
+/// sends back everything it read.
+fn scope_completion(stored: &serde_json::Value) -> serde_json::Value {
+    let mut metadata = stored.clone();
+    metadata["summary"] = serde_json::json!("s");
+    metadata["excludes"] = serde_json::json!("e");
+    serde_json::json!({"status": "completed", "metadata": metadata})
 }

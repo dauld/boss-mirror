@@ -400,6 +400,7 @@ async function clickLeg(
     writes = [];
     nativeDialog = null;
     const urlBefore = page.url();
+    const historyBefore = await page.evaluate(() => history.length).catch(() => 0);
     const target = page.locator('button, [role="button"]').nth(next.index);
     try {
       // A non-<button> control falls through to dispatchEvent below when
@@ -439,7 +440,16 @@ async function clickLeg(
     if (errors.length) findings.push({ route, control: next.label, what: `pageerror: ${errors.join(' | ')}` });
 
     const now = pathOf(page);
-    if (now !== route || page.url() !== new URL(route, page.url()).href) {
+    // A navigation leaves the route or pushes an entry. A control that
+    // only REPLACES its own route's query — a filter the page keeps in
+    // the URL so a reload and a shared link keep it (/ux/jobs, backlog
+    // f8027805) — changed state, not place: there is no entry for back
+    // to step through, so reading it as a navigation reported "back
+    // landed on /" for every filter. It is judged as a response below.
+    // An unreadable history length counts as pushed, the old reading.
+    const pushed =
+      navigated && (await page.evaluate(() => history.length).catch(() => historyBefore + 1)) > historyBefore;
+    if (now !== route || pushed) {
       // Navigated. It must be served, and back must return.
       const landed = `${now}${new URL(page.url()).search}`;
       if (process.env['CRAWL_VERBOSE']) console.log(`[click:${leg}] ${route} ${next.key} -> navigated ${landed}`);
@@ -465,7 +475,7 @@ async function clickLeg(
       ? await target.evaluate((el) => !(el.closest('form') as HTMLFormElement | null)?.checkValidity()).catch(() => false)
       : false;
     const after = await paint(page);
-    const responded = nativeDialog !== null || markersAfter > markersBefore || after !== before || invalidForm || requests.length > 0 || next.selected;
+    const responded = navigated || nativeDialog !== null || markersAfter > markersBefore || after !== before || invalidForm || requests.length > 0 || next.selected;
     if (process.env['CRAWL_VERBOSE']) console.log(`[click:${leg}] ${route} ${next.key} -> ${responded ? 'responded' : 'silent'} requests=${requests.length} markers ${markersBefore}->${markersAfter}`);
     if (leg === 'main' && !responded) {
       findings.push({ route, control: next.label, what: 'no observable response (no navigation, dialog, alert, request, or change in what is painted)' });

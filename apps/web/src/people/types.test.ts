@@ -8,7 +8,7 @@
 // not hold — or holds nothing yet, while it loads or after it fails.
 
 import { describe, expect, it } from 'bun:test';
-import { classLabel } from './types';
+import { classLabel, employeeRecordRead } from './types';
 
 /// Three live (employee, department) Classes, as the registry answered
 /// on 2026-09-24.
@@ -32,5 +32,59 @@ describe('classLabel', () => {
   it('renders a missing value as a dash, as humanizeClassCode does', () => {
     expect(classLabel(null, DEPARTMENT_CLASSES)).toBe('—');
     expect(classLabel(undefined, DEPARTMENT_CLASSES)).toBe('—');
+  });
+});
+
+// The employee page read `e.skills.length` off whatever 2xx body the
+// detail read returned (backlog 548a1e8d, 2026-09-23): under the mocked
+// floor that body is `[]`, so every field is undefined and the page threw
+// "Cannot read properties of undefined (reading 'length')" rather than
+// saying the read was malformed. boss-people serializes both lists on
+// every row (types.rs, no skip_serializing_if), so a row without one is
+// not an employee with no skills — it is a read that did not return an
+// employee, and the page must say which field it lacked.
+describe('employeeRecordRead', () => {
+  const READ = '/api/people/emp-001';
+  const ROW = {
+    id: 'emp-001', name: 'Demo CEO', email: null, role: null, department: null,
+    skill_level: null, skills: [], hire_date: null, location: null,
+    manager_id: null, employment_type: null, status: null, certifications: [],
+  };
+
+  it('accepts a row carrying its id and both lists, however sparse the rest', () => {
+    expect(employeeRecordRead(READ, ROW)).toEqual({ kind: 'ok' });
+    const { name: _name, email: _email, ...identityOnly } = ROW;
+    expect(employeeRecordRead(READ, identityOnly)).toEqual({ kind: 'ok' });
+  });
+
+  it('names the list a row omits, rather than letting it read as empty', () => {
+    const { skills: _s, ...noSkills } = ROW;
+    expect(employeeRecordRead(READ, noSkills)).toEqual({
+      kind: 'failed',
+      error: `${READ}: the record carries no skills list`,
+    });
+    const { certifications: _c, ...noCerts } = ROW;
+    expect(employeeRecordRead(READ, noCerts)).toEqual({
+      kind: 'failed',
+      error: `${READ}: the record carries no certifications list`,
+    });
+    expect(employeeRecordRead(READ, { ...ROW, skills: null })).toEqual({
+      kind: 'failed',
+      error: `${READ}: the record carries no skills list`,
+    });
+  });
+
+  it('refuses a body that is not a record at all, which the mocked floor answers', () => {
+    for (const body of [[], null, 'not found', 7]) {
+      expect(employeeRecordRead(READ, body)).toEqual({
+        kind: 'failed',
+        error: `${READ}: the answer is not an employee record`,
+      });
+    }
+    const { id: _id, ...noId } = ROW;
+    expect(employeeRecordRead(READ, noId)).toEqual({
+      kind: 'failed',
+      error: `${READ}: the answer is not an employee record`,
+    });
   });
 });

@@ -169,12 +169,15 @@ async fn scope_step(app: &axum::Router, job_id: &str) -> serde_json::Value {
         .clone()
 }
 
-fn completion_body() -> serde_json::Value {
-    serde_json::json!({
-        "status": "completed",
-        "metadata": {"summary": "s", "excludes": "e",
-                     "authority_role": "platform-admin"},
-    })
+/// A read-merge-write completion: the scope step's stored metadata with
+/// the evidence laid over it. The step PUT refuses a metadata body that
+/// omits a stored key (e39a9d2a), so the fixture reads before it writes,
+/// as every live completer must.
+async fn completion_body(app: &axum::Router, job_id: &str) -> serde_json::Value {
+    let mut metadata = scope_step(app, job_id).await["metadata"].clone();
+    metadata["summary"] = serde_json::json!("s");
+    metadata["excludes"] = serde_json::json!("e");
+    serde_json::json!({"status": "completed", "metadata": metadata})
 }
 
 /// A plain completion — no stamp in the body — reads back stamped with
@@ -189,7 +192,7 @@ async fn a_completion_is_stamped_with_the_signing_actor_and_the_instant() {
         req(
             "PUT",
             &format!("/api/jobs/{job_id}/steps/{scope_id}"),
-            completion_body(),
+            completion_body(&app, &job_id).await,
         ),
     )
     .await;
@@ -218,7 +221,7 @@ async fn a_client_supplied_stamp_is_overwritten_with_the_real_actor() {
     let app = app(true);
     let (job_id, scope_id) = open_packet(&app).await;
 
-    let mut body = completion_body();
+    let mut body = completion_body(&app, &job_id).await;
     body["completed_by"] = serde_json::json!("forged");
     body["completed_at"] = serde_json::json!("1999-01-01T00:00:00Z");
     let (status, resp) = send(
@@ -254,7 +257,7 @@ async fn a_stamp_survives_a_later_write_unchanged() {
         req(
             "PUT",
             &format!("/api/jobs/{job_id}/steps/{scope_id}"),
-            completion_body(),
+            completion_body(&app, &job_id).await,
         ),
     )
     .await;
@@ -263,7 +266,7 @@ async fn a_stamp_survives_a_later_write_unchanged() {
 
     // An idempotent redelivery of the same completion, now also
     // claiming a different actor.
-    let mut again = completion_body();
+    let mut again = completion_body(&app, &job_id).await;
     again["completed_by"] = serde_json::json!("someone-else");
     let (status, body) = send(
         &app,
@@ -297,7 +300,7 @@ async fn the_events_read_lists_the_step_done_event_with_its_actor() {
         req(
             "PUT",
             &format!("/api/jobs/{job_id}/steps/{scope_id}"),
-            completion_body(),
+            completion_body(&app, &job_id).await,
         ),
     )
     .await;
@@ -352,7 +355,7 @@ async fn the_events_read_is_scoped_to_one_packet() {
         req(
             "PUT",
             &format!("/api/jobs/{job_a}/steps/{scope_a}"),
-            completion_body(),
+            completion_body(&app, &job_a).await,
         ),
     )
     .await;

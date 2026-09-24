@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test';
 import {
   blankMeaning,
+  countLabel,
   failedRead,
   failedWithReason,
   listView,
+  loadingRead,
   okRead,
   readStateOf,
   readStateOfResponse,
@@ -130,6 +132,47 @@ describe('a list view refuses to let a failed read wear the empty state', () => 
   });
 });
 
+describe('a read still in flight has not said anything yet', () => {
+  // Backlog 20410830 (the /ux/warehouse audit, gap 7). The warehouse
+  // page started every read as `okRead`, so before an answer arrived the
+  // Inventory tab said "No items match that filter." — zero rows
+  // because nothing has answered wore the same words as zero rows
+  // because there are none.
+  const pending = (source: string) => ({ source, state: loadingRead });
+
+  test('an unanswered read is loading, not empty, and names what it waits for', () => {
+    const v = listView([pending('inventory')], 0);
+    expect(v).toEqual({ kind: 'loading', source: 'inventory' });
+    expect(v).not.toEqual({ kind: 'empty' });
+  });
+
+  test('a failure still wins over a read that has not answered', () => {
+    // The failure is the one thing already known to be wrong.
+    const v = listView([pending('jobs'), { source: 'assets', state: failedRead('HTTP 503') }], 0);
+    expect(v).toEqual({ kind: 'failed', source: 'assets', error: 'HTTP 503' });
+  });
+
+  test('a blank beside an unanswered read is unknown, not absent', () => {
+    expect(blankMeaning(loadingRead)).toBe('unknown');
+  });
+});
+
+describe('a count is shown only for a read that answered', () => {
+  // Backlog 82674b2b (gap 6): the warehouse filters read "All (0)",
+  // "Open (0)" while the reads were in flight AND beside a failure
+  // alert. A zero there is a claim about the data; with no answer the
+  // honest label carries no number at all.
+  test('an answered read carries its count', () => {
+    expect(countLabel('All', okRead, 5)).toBe('All (5)');
+    expect(countLabel('Low', okRead, 0)).toBe('Low (0)');
+  });
+
+  test('an unanswered or failed read carries no number', () => {
+    expect(countLabel('All', loadingRead, 0)).toBe('All');
+    expect(countLabel('Open', failedRead('HTTP 500'), 0)).toBe('Open');
+  });
+});
+
 describe('a blank cell says which kind of nothing it is', () => {
   // isCapped(null) is false, so with the failed arm discarded a page
   // has no surface at all that can report the read failed — the em-dash
@@ -143,7 +186,7 @@ describe('a blank cell says which kind of nothing it is', () => {
   });
 
   test('every state is one of the two — no third reading', () => {
-    const states: ReadState[] = [okRead, failedRead('x')];
-    expect(states.map(blankMeaning)).toEqual(['absent', 'unknown']);
+    const states: ReadState[] = [okRead, failedRead('x'), loadingRead];
+    expect(states.map(blankMeaning)).toEqual(['absent', 'unknown', 'unknown']);
   });
 });

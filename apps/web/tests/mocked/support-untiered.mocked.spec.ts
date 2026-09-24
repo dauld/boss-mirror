@@ -45,6 +45,9 @@ async function installReads(page: Page): Promise<void> {
 
 /// [account, tier] per visible row, top to bottom. textContent, not
 /// innerText: the chip capitalises by CSS, and the word is what we pin.
+/// A tier's word is its (account, tier) Class label since d2c9e79f —
+/// humanised from the code here, as the shell mocks carry no tier
+/// Classes. The sort is still by code.
 async function accountTierRows(page: Page): Promise<string[][]> {
   return page.locator('table.data-table tbody tr').evaluateAll((rows) =>
     rows.map((row) => [0, 1].map((i) => (row.children[i]?.textContent ?? '').trim())));
@@ -57,8 +60,8 @@ test('an account with no tier reads "untiered", not an empty cell', async ({ pag
 
   const rows = await accountTierRows(page);
   expect(rows).toContainEqual(['Newly Opened Bar', 'untiered']);
-  expect(rows).toContainEqual(['Gilded Taproom', 'gold']);
-  expect(rows).toContainEqual(['acct-bare', 'platinum']);
+  expect(rows).toContainEqual(['Gilded Taproom', 'Gold']);
+  expect(rows).toContainEqual(['acct-bare', 'Platinum']);
   for (const [, tier] of rows) expect(tier).not.toBe('');
 });
 
@@ -70,9 +73,9 @@ test('the Tier sort places untiered accounts first ascending and last descending
   const tierHeader = page.getByRole('columnheader', { name: /Tier/ });
   await tierHeader.click();
   await expect(tierHeader).toContainText('↑');
-  expect((await accountTierRows(page)).map(([, t]) => t)).toEqual(['untiered', 'gold', 'platinum', 'silver']);
+  expect((await accountTierRows(page)).map(([, t]) => t)).toEqual(['untiered', 'Gold', 'Platinum', 'Silver']);
 
   await tierHeader.click();
   await expect(tierHeader).toContainText('↓');
-  expect((await accountTierRows(page)).map(([, t]) => t)).toEqual(['silver', 'platinum', 'gold', 'untiered']);
+  expect((await accountTierRows(page)).map(([, t]) => t)).toEqual(['Silver', 'Platinum', 'Gold', 'untiered']);
 });

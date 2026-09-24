@@ -312,7 +312,7 @@ The **StepType registry** (`boss-jobs/src/step_registry.rs`) is the alphabet of 
 
 Two rules shape the contract:
 - **Required-at-done, not required-at-create.** A `scheduling` step can exist with no `scheduled_at`; that field is required only when the step flips to `status=completed`. Metadata validators run on completion, not on create.
-- **PATCH semantics on PUT.** `PUT /api/jobs/{id}/steps/{step_id}` fetches the current step, overlays the body, then saves. Callers can send `{"status":"completed"}` and keep every other field intact. Clients providing new `metadata` must merge with the existing keys — top-level fields are replaced wholesale, so partial metadata wipes unmentioned keys.
+- **PATCH semantics on PUT.** `PUT /api/jobs/{id}/steps/{step_id}` fetches the current step, overlays the body, then saves. Callers can send `{"status":"completed"}` and keep every other field intact. Top-level fields are replaced wholesale, so a `metadata` body that omits a key the step already holds is REFUSED 409, naming the keys (e39a9d2a) — it used to wipe them in silence. Write a key or two through the step merge door, `PATCH /api/jobs/{id}/steps/{step_id}/metadata` (a key sent as `null` is deleted), then PUT the status alone; or read the step and send every stored key back.
 
 ### Events
 Every state change emits an immutable fact through NATS (`boss-nats`) and lands in `audit_log` (`boss-events`). **The log is the system of record.** Projections rebuild from it; rebuilders reproduce truth from it; the five-property correctness protocol (provenance, conservation, closure, idempotence, determinism) guarantees the system contributes zero error of its own. Every state-changing operation publishes an event; nothing else.

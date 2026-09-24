@@ -8,6 +8,7 @@
 
   import { onMount } from 'svelte';
   import { parseRoute, type Route } from './router';
+  import { JOBS_DEFAULT_STATUS } from './jobs/filterQuery';
   import { goToLogin } from '@boss/web-kit/session/deadSession';
   import { loadSession } from '@boss/web-kit/session/session.svelte';
   import { loadManifest, manifest, reflectTenantOnDocument } from '@boss/web-kit/session/manifest.svelte';
@@ -276,12 +277,13 @@
       <JobsListPage
         initialKind={route.workflow ?? ''}
         initialKindPrefix={route.workflowPrefix ?? ''}
-        initialStatus={route.jobStatus ?? 'open'}
+        initialStatus={route.jobStatus ?? JOBS_DEFAULT_STATUS}
         initialOwnerId={route.jobOwnerId ?? ''}
         initialSubjectId={route.jobSubjectId ?? ''}
         initialNewJobOpen={route.newJobOpen ?? false}
         initialNewJobSubjectKind={route.newJobSubjectKind ?? ''}
         initialNewJobSubjectId={route.newJobSubjectId ?? ''}
+        writesFiltersToUrl
       />
     {:else if route.kind === 'jobDetail'}
       <JobDetailPage jobId={route.jobId} />

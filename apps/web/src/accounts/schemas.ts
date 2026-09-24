@@ -5,10 +5,13 @@
 
 import { z } from '../data/parseResponse';
 
-/// Account tier. DB CHECK constraint pins this to platinum/gold/silver
-/// today; matching the TS type's closed enum so a tenant inserting an
-/// out-of-set tier surfaces the bug instead of silently mis-rendering
-/// the TierChip. Widen later if the DB constraint widens.
+/// `tier` is a code, not an enum (backlog d2c9e79f). This schema pinned
+/// it to platinum/gold/silver on the word of a DB CHECK that
+/// 22-accounts.sql does not have: the column is plain TEXT and a tier is
+/// an (account, tier) Class row, validated by the HTTP handler. So an
+/// account on a tenant-added tier failed THIS parse and its detail page
+/// said "unexpected payload shape". The registry decides which codes
+/// exist; TierChip labels them from it.
 export const AccountSchema = z.object({
   id: z.string(),
   // Identity-first: only `id` is guaranteed; descriptive fields are
@@ -17,7 +20,7 @@ export const AccountSchema = z.object({
   director: z.string().nullable(),
   city: z.string().nullable(),
   state: z.string().nullable(),
-  tier: z.enum(['platinum', 'gold', 'silver']).nullable(),
+  tier: z.string().nullable(),
   customer_since: z.string().nullable(),
   territory_rep_id: z.string().nullable(),
 });

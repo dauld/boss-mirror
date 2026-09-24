@@ -229,9 +229,11 @@ Two rules across every StepType — they're worth committing to memory:
    `PUT /api/jobs/{id}/steps/{step_id}` fetches the current
    step, overlays the body, then saves. Callers can send
    `{"status":"completed"}` and keep every other field intact.
-   Clients providing new `metadata` must merge with the existing
-   keys themselves — top-level fields are replaced wholesale, so
-   partial metadata wipes unmentioned keys.
+   Top-level fields are replaced wholesale, so a `metadata` body
+   that omits a stored key is refused 409, naming the keys
+   (e39a9d2a). Send the keys you change through the step merge
+   door, `PATCH /api/jobs/{id}/steps/{step_id}/metadata` (a key
+   sent as `null` is deleted), then PUT the status alone.
 
 Both contracts are enforced server-side; UI plugins can rely on
 them.

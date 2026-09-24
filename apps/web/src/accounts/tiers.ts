@@ -3,7 +3,8 @@
 // 08b0c4f8 GAP 11, 2026-09-23). WatchlistPage hard-coded Platinum /
 // Gold / Silver — a copy of registry data (CLAUDE.md §9, §9a) — so a
 // tier a tenant adds by inserting one Class row never became a filter,
-// and an untiered account was reachable only under All.
+// and an untiered account was reachable only under All. AccountsList
+// had the same trio and reads its buttons from here too (d2c9e79f).
 
 import { humanizeClassCode } from '../people/types';
 

@@ -26,8 +26,8 @@
   import { fetchAccountsPage } from './api';
   import { moduleEnabled } from '@boss/web-kit/session/manifest.svelte';
   import { okRead, readStateOf, type ReadState } from '../data/readState';
-
-  type Tier = Account['tier'] | 'all';
+  import { loadClasses, classesFor } from '@boss/web-kit/session/classes.svelte';
+  import { tierAdmits, tierBuckets, type TierFilter } from './tiers';
 
   let accounts = $state<Account[]>([]);
   let accountsPage = $state<Paged<Account> | null>(null);
@@ -36,7 +36,7 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
 
-  let tier = $state<Tier>('all');
+  let tier = $state<TierFilter>({ kind: 'all' });
   let stateFilter = $state<string>('all');
   let query = $state('');
 
@@ -150,7 +150,7 @@
 
   let visible = $derived(
     rows.filter((r) => {
-      if (tier !== 'all' && r.account.tier !== tier) return false;
+      if (!tierAdmits(tier, r.account.tier)) return false;
       if (stateFilter !== 'all' && r.account.state !== stateFilter) return false;
       if (query) {
         const q = query.toLowerCase();
@@ -198,13 +198,21 @@
     ].flatMap((f) => (f.read.kind === 'failed' ? [{ ...f, error: f.read.error }] : [])),
   );
 
-  const TIERS: ReadonlyArray<'platinum' | 'gold' | 'silver'> = [
-    'platinum', 'gold', 'silver',
-  ];
-
-  function cap(s: string): string {
-    return s ? s[0]!.toUpperCase() + s.slice(1) : s;
-  }
+  // The Tier buttons come from the (account, tier) Classes, plus No
+  // tier when an account has none — the watchlist's tiers.ts, reused
+  // (backlog d2c9e79f, after 1be37454 fixed the same trio there). A
+  // hand-written Platinum / Gold / Silver hid any tier a tenant added
+  // by one Class row, and left the untiered sponsor reachable only
+  // under All. Counted over every row, as the other filters are.
+  $effect(() => {
+    void loadClasses('account');
+  });
+  let tierButtons = $derived(
+    tierBuckets(
+      rows.map((r) => r.account.tier),
+      classesFor('account', 'tier'),
+    ),
+  );
 </script>
 
 <div class="catalog theme-exec">
@@ -247,12 +255,15 @@
       </FilterGroup>
 
       <FilterGroup label="Tier">
-          <FilterButton active={tier === 'all'} onclick={() => (tier = 'all')}>
+          <FilterButton active={tier.kind === 'all'} onclick={() => (tier = { kind: 'all' })}>
             All ({rows.length})
           </FilterButton>
-          {#each TIERS as t (t)}
-            <FilterButton active={tier === t} onclick={() => (tier = t)}>
-                {cap(t)} ({rows.filter((r) => r.account.tier === t).length})
+          {#each tierButtons as b (b.code ?? '')}
+            <FilterButton
+              active={tier.kind === 'code' && tier.code === b.code}
+              onclick={() => (tier = { kind: 'code', code: b.code })}
+            >
+                {b.label} ({b.count})
             </FilterButton>
           {/each}
       </FilterGroup>

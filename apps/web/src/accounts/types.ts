@@ -11,7 +11,10 @@ export type Account = {
   director: string | null;
   city: string | null;
   state: string | null;
-  tier: 'platinum' | 'gold' | 'silver' | null;
+  // An (account, tier) Class code — a tenant adds a tier as one Class
+  // row, so no closed union can name them (backlog d2c9e79f). `null`
+  // is untiered, until classified.
+  tier: string | null;
   customer_since: string | null;
   territory_rep_id: string | null;
 };

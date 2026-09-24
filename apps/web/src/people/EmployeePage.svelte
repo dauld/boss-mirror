@@ -11,7 +11,7 @@
   import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import FileAttachments from '../content/FileAttachments.svelte';
   import CalendarFeedSection from './CalendarFeedSection.svelte';
-  import { classLabel, employmentTone, type Employee } from './types';
+  import { classLabel, employeeRecordRead, employmentTone, type Employee } from './types';
   import { directReports, tenureYears } from './utils';
   import { href } from '../router';
   import { classesFor } from '@boss/web-kit/session/classes.svelte';
@@ -34,18 +34,25 @@
 
   $effect(() => {
     const id = empId;
+    const url = `/api/people/${encodeURIComponent(id)}`;
     let cancelled = false;
     loading = true;
     (async () => {
       try {
         const [eResp, rosterResp] = await Promise.all([
-          fetch(`/api/people/${encodeURIComponent(id)}`),
+          fetch(url),
           fetch('/api/people'),
         ]);
         if (!cancelled) {
           if (eResp.ok) {
-            employee = (await eResp.json()) as Employee;
-            loadFailed = null;
+            // A 2xx is not yet an employee. Cast straight to Employee, a
+            // body missing a list made the template throw "reading
+            // 'length'" and paint nothing (backlog 548a1e8d); it is a
+            // failed read, said on the failure line, naming the field.
+            const body: unknown = await eResp.json();
+            const read = employeeRecordRead(url, body);
+            employee = read.kind === 'ok' ? (body as Employee) : null;
+            loadFailed = read.kind === 'failed' ? read.error : null;
           } else if (eResp.status === 404) {
             employee = null;
             loadFailed = null;

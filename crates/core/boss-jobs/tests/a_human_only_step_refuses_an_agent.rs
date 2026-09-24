@@ -201,6 +201,17 @@ async fn step_by_slug(jobs: &InMemoryJobs, job: &Job, slug: &str) -> Step {
         .unwrap_or_else(|| panic!("no step {slug}"))
 }
 
+/// The step's stored metadata with `keys` laid over it — the
+/// read-merge-write body the step PUT requires, since it refuses a
+/// metadata body that omits a stored key (e39a9d2a).
+fn over(step: &Step, keys: serde_json::Value) -> serde_json::Value {
+    let mut md = step.metadata.clone();
+    if let (Some(m), Some(k)) = (md.as_object_mut(), keys.as_object()) {
+        m.extend(k.clone());
+    }
+    md
+}
+
 async fn put_step(
     app: &Router,
     step: &Step,
@@ -322,26 +333,34 @@ async fn a_step_that_is_not_human_only_is_untouched() {
 }
 
 /// The declaration is protocol data on the step and a body cannot
-/// strip it: a metadata PUT that omits `human_only` leaves the step
-/// human-only, so the next assignment is still refused.
+/// strip it by omission: a metadata PUT that omits `human_only` is
+/// refused (the drop refusal, e39a9d2a — it used to be carried forward
+/// by hand), the step stays human-only, and the next assignment is
+/// still refused.
 #[tokio::test]
 async fn human_only_cannot_be_stripped_by_a_metadata_put() {
     let (app, jobs) = app();
     let job = file(&app, &jobs, "rotation", serde_json::json!({})).await;
     let kill = step_by_slug(&jobs, &job, "kill").await;
 
-    let (status, _, text) = put_step(
+    let (status, body, text) = put_step(
         &app,
         &kill,
         &user(AGENT, "platform-admin"),
         serde_json::json!({ "metadata": { "note": "stripped" } }),
     )
     .await;
-    assert!(status.is_success(), "{status} {text}");
+    assert_eq!(status, StatusCode::CONFLICT, "{text}");
+    assert!(
+        body["missing_keys"]
+            .as_array()
+            .is_some_and(|k| k.iter().any(|k| k == boss_jobs::human_only::KEY)),
+        "the refusal names the dropped declaration: {text}"
+    );
     let stored = jobs.get_step(&kill.id).await.unwrap().unwrap();
     assert!(
         boss_jobs::human_only::declared(&stored.metadata),
-        "human_only is carried forward like authority_role: {}",
+        "human_only survives an omitting PUT: {}",
         stored.metadata
     );
 
@@ -411,7 +430,7 @@ async fn an_answer_question_completion_records_whether_the_proposal_was_accepted
         &user(DAVID, "platform-admin"),
         serde_json::json!({
             "status": "completed",
-            "metadata": { "verdict": "approved", "answer": proposed },
+            "metadata": over(&decide, serde_json::json!({ "verdict": "approved", "answer": proposed })),
         }),
     )
     .await;
@@ -439,11 +458,11 @@ async fn an_answer_question_completion_records_whether_the_proposal_was_accepted
         &user(DAVID, "platform-admin"),
         serde_json::json!({
             "status": "completed",
-            "metadata": {
+            "metadata": over(&decide, serde_json::json!({
                 "verdict": "approved",
                 "answer": "Stamp completed_by only; drop the rest.",
                 "accepted_as_proposed": true,
-            },
+            })),
         }),
     )
     .await;

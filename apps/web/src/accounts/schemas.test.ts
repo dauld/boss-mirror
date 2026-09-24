@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { RiskScoreListSchema } from './schemas';
+import { AccountSchema, RiskScoreListSchema } from './schemas';
 
 // The crash this schema exists to stop: WatchlistPage cast the payload
 // and read `.length` off the result, so a response without `accounts`
@@ -56,5 +56,31 @@ describe('RiskScoreListSchema', () => {
 
   test('an empty account list is valid — zero at-risk accounts is a real answer', () => {
     expect(RiskScoreListSchema.safeParse({ accounts: [] }).success).toBe(true);
+  });
+});
+
+// Backlog d2c9e79f: the schema pinned `tier` to platinum/gold/silver,
+// citing a DB CHECK that 22-accounts.sql does not have — `tier` is
+// plain TEXT, and a tier is an (account, tier) Class row a tenant adds
+// without a deploy. The account detail validates with this schema, so
+// an account on a tenant-added tier refused to load.
+describe('AccountSchema tier', () => {
+  const account = (tier: unknown) => ({
+    id: 'acct-1', name: 'One', director: null, city: null, state: null,
+    tier, customer_since: null, territory_rep_id: null,
+  });
+
+  test('accepts a tier the seeded trio does not name — the registry decides, not the schema', () => {
+    expect(AccountSchema.safeParse(account('bronze')).success).toBe(true);
+  });
+
+  test('accepts an untiered account and the seeded tiers', () => {
+    for (const t of [null, 'platinum', 'gold', 'silver']) {
+      expect(AccountSchema.safeParse(account(t)).success).toBe(true);
+    }
+  });
+
+  test('still refuses a tier that is not a string', () => {
+    expect(AccountSchema.safeParse(account(3)).success).toBe(false);
   });
 });
