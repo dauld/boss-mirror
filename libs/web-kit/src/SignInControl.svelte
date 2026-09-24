@@ -60,9 +60,11 @@
   /* Ghost button, §04: square corners, hairline border, mono caps.
      Hover inverts rather than tinting — the spec's one hover rule for
      buttons, and it keeps SIGNAL free for state that means something. */
+  /* On the enamel band (backlog 7eb59678 car 2): the band's white for
+     the word and frame, and hover fills the frame white under ink. */
   .signin-btn {
     background: transparent;
-    border: 1px solid var(--hairline);
+    border: 1px solid var(--band-rule);
     border-radius: var(--radius);
     padding: 5px 12px;
     font-family: var(--font-mono);
@@ -70,7 +72,7 @@
     font-weight: 500;
     text-transform: uppercase;
     letter-spacing: var(--ls-nav);
-    color: var(--fog);
+    color: var(--on-band);
     text-decoration: none;
     cursor: pointer;
     line-height: 1.4;
@@ -78,17 +80,21 @@
     transition: background 0.1s, color 0.1s, border-color 0.1s;
   }
   .signin-btn:hover {
-    background: var(--fog);
-    color: var(--void);
-    border-color: var(--fog);
+    background: var(--on-band);
+    color: var(--band);
+    border-color: var(--on-band);
   }
-  /* The refusal beside the button: the bar's mono voice, in the
-     error tone, so a sign-out that did not land looks like one. */
+  /* The refusal beside the button: the bar's mono voice on the troubled
+     plate, so a sign-out that did not land looks like one. The error
+     red as bare text measures 3.15:1 on the band, under the floor. */
   .signin-refusal {
     margin-left: 8px;
+    padding: 1px 6px;
+    border-radius: var(--radius-field);
     font-family: var(--font-mono);
     font-size: 11px;
-    color: var(--err);
+    background: var(--troubled);
+    color: var(--on-troubled);
     white-space: nowrap;
   }
 </style>

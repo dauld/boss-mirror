@@ -147,7 +147,7 @@
         <ol class="pm-steps">
           {#each job.steps as s (s.id)}
             <li class="pm-step">
-              <span class="pm-step-status pm-step-{s.status}">{s.status}</span>
+              <span class="pm-step-status step-status step-status-{s.status}">{s.status}</span>
               <span class="pm-step-title">{s.title}</span>
               {#if s.assignee_id}<span class="pm-step-who">{formatActor(s.assignee_id)}</span>{/if}
             </li>
@@ -261,7 +261,7 @@
     margin: 0;
     padding: 0;
     display: grid;
-    gap: 4px;
+    gap: 6px;
   }
   .pm-step {
     display: flex;
@@ -269,20 +269,14 @@
     gap: 8px;
     font-size: 0.85rem;
   }
+  /* The status is the step's plate (.step-status-<s> in apps/web's
+     styles.css, "States are plates" — backlog 7eb59678 car 2); this rule
+     only sets the column, so the plates stand in one aligned row of signs
+     down the list. It used to paint ready and active the same green. */
   .pm-step-status {
     flex: none;
-    width: 72px;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--fog);
-  }
-  .pm-step-ready,
-  .pm-step-active {
-    color: var(--ok);
-  }
-  .pm-step-completed {
-    color: var(--fog);
+    min-width: 88px;
+    text-align: center;
   }
   .pm-step-title {
     color: var(--fog);
