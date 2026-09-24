@@ -21,13 +21,21 @@ impl PgMessages {
 
 #[async_trait]
 impl MessageRepository for PgMessages {
-    async fn inbox(&self, recipient_id: &str) -> Result<Vec<Message>, MessageError> {
-        let rows: Vec<MessageRow> =
-            sqlx::query_as("SELECT * FROM messages WHERE recipient_id = $1 ORDER BY sent_at DESC")
-                .bind(recipient_id)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| MessageError::Storage(e.to_string()))?;
+    async fn inbox(
+        &self,
+        recipient_id: &str,
+        include_archived: bool,
+    ) -> Result<Vec<Message>, MessageError> {
+        let rows: Vec<MessageRow> = sqlx::query_as(
+            "SELECT * FROM messages \
+             WHERE recipient_id = $1 AND ($2 OR kind <> 'archived') \
+             ORDER BY sent_at DESC",
+        )
+        .bind(recipient_id)
+        .bind(include_archived)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| MessageError::Storage(e.to_string()))?;
 
         Ok(rows.into_iter().map(|r| r.into_message()).collect())
     }
@@ -39,11 +47,12 @@ impl MessageRepository for PgMessages {
     ) -> Result<u32, MessageError> {
         // One statement with a NULL-tolerant clause rather than two
         // query strings: `$2 IS NULL OR kind = $2` keeps the filtered
-        // and unfiltered counts provably the same query.
+        // and unfiltered counts provably the same query. Unfiltered
+        // leaves out `archived`, the rows the inbox read leaves out.
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM messages \
              WHERE recipient_id = $1 AND read_at IS NULL \
-               AND ($2::text IS NULL OR kind = $2)",
+               AND (($2::text IS NULL AND kind <> 'archived') OR kind = $2)",
         )
         .bind(recipient_id)
         .bind(kind)

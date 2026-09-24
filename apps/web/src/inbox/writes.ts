@@ -31,3 +31,32 @@ export async function postWrite(url: string, init: RequestInit = {}): Promise<Wr
     return { kind: 'refused', reason: e instanceof Error ? e.message : String(e) };
   }
 }
+
+/// A bulk write's answer, per message: which ids landed, and why each
+/// of the others was refused.
+export type BulkOutcome = Readonly<{
+  done: readonly string[];
+  refused: Readonly<Record<string, string>>;
+}>;
+
+/// One `postWrite` per id (backlog 5963a322, page audit GAP 8: the
+/// inbox's bulk Mark all read and Archive selected). There is no bulk
+/// endpoint and this does not want one: each POST is the server's
+/// per-row write, recording one event per message, exactly as the row's
+/// own button would. Sequential, so a few hundred rows reach the server
+/// one transaction at a time rather than as a burst; a refusal is kept
+/// against its id and the rest still go.
+export async function postEach(
+  ids: readonly string[],
+  urlFor: (id: string) => string,
+): Promise<BulkOutcome> {
+  let out: BulkOutcome = { done: [], refused: {} };
+  for (const id of ids) {
+    const r = await postWrite(urlFor(id));
+    out =
+      r.kind === 'done'
+        ? { ...out, done: [...out.done, id] }
+        : { ...out, refused: { ...out.refused, [id]: r.reason } };
+  }
+  return out;
+}

@@ -124,6 +124,29 @@ async fn rebuild_reproduces_projection_after_drop() {
     let read: Vec<_> = before.iter().filter(|r| r.read_at.is_some()).collect();
     assert_eq!(read.len(), 2, "two messages marked read");
 
+    // The archived row has left emp-b's inbox read, and is still there
+    // for a reader that asks for it (backlog 8578b91e / 5963a322).
+    async fn inbox_ids(router: &Router, uri: &str) -> Vec<String> {
+        let resp = TestRequest::get(uri).send(router).await;
+        resp.assert_status(StatusCode::OK);
+        let rows: Vec<serde_json::Value> = resp.assert_json();
+        let mut ids: Vec<String> = rows
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+    let mut kept = vec![m1.clone(), m3.clone()];
+    kept.sort_unstable();
+    assert_eq!(inbox_ids(&router, "/api/messages/inbox/emp-b").await, kept);
+    let mut all = vec![m1.clone(), m2.clone(), m3.clone()];
+    all.sort_unstable();
+    assert_eq!(
+        inbox_ids(&router, "/api/messages/inbox/emp-b?include_archived=true").await,
+        all
+    );
+
     // 3. Verify audit_log has the full event sequence — 4 sent + 2
     //    read + 1 archived + 1 deleted = 8 events.
     let event_count: (i64,) =

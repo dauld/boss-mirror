@@ -29,8 +29,18 @@
   import { session } from '@boss/web-kit/session/session.svelte';
 
   import { FINANCE_TABS, financeSearch, type FinanceTab, type FinanceView } from './financeQuery';
+  import { departmentLabel } from '@boss/web-kit/nav';
+  import { departments } from '@boss/web-kit/session/departments.svelte';
+  import DepartmentThirds from '../departments/DepartmentThirds.svelte';
 
-  let { view }: { view: FinanceView } = $props();
+  // `department` is the catalog entry's, handed in by App.svelte the
+  // way /ux/parts gets the warehouse's (044dffa1). Every read below is
+  // a ledger or commerce read; none is a jobs read, so until this prop
+  // a receive-a-payout packet waiting at its post step for 2.6 days was
+  // on no finance surface (backlog 4d4dc204, page audit 3f964c57 gap
+  // 2). Empty draws no panel.
+  let { view, department = '' }: { view: FinanceView; department?: string } = $props();
+  const departmentName = $derived(departmentLabel(department, departments()));
 
   // The tab, and the entry or fact a link opened, live in the URL, not
   // only in page state: a posted journal entry landed on Overview, and
@@ -189,5 +199,14 @@
       <TaxLiabilityTab />
     {/if}
   </div>
+
+  {#if department}
+    <!-- Outside the tab panel, so the department's packets stand under
+         every tab and a tab click never remounts (and re-reads) them. -->
+    <section class="department-jobs">
+      <h2>{departmentName} jobs</h2>
+      <DepartmentThirds code={department} />
+    </section>
+  {/if}
 </div>
 

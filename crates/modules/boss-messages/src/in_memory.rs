@@ -35,11 +35,16 @@ impl InMemoryMessages {
 
 #[async_trait]
 impl MessageRepository for InMemoryMessages {
-    async fn inbox(&self, recipient_id: &str) -> Result<Vec<Message>, MessageError> {
+    async fn inbox(
+        &self,
+        recipient_id: &str,
+        include_archived: bool,
+    ) -> Result<Vec<Message>, MessageError> {
         let guard = self.messages.read().await;
         let mut msgs: Vec<Message> = guard
             .iter()
             .filter(|m| m.recipient_id == recipient_id)
+            .filter(|m| include_archived || m.kind.0 != MessageKind::ARCHIVED)
             .cloned()
             .collect();
         msgs.sort_by_key(|m| std::cmp::Reverse(m.sent_at));
@@ -55,7 +60,10 @@ impl MessageRepository for InMemoryMessages {
         let count = guard
             .iter()
             .filter(|m| m.recipient_id == recipient_id && m.read_at.is_none())
-            .filter(|m| kind.is_none_or(|k| m.kind.0 == k))
+            .filter(|m| match kind {
+                Some(k) => m.kind.0 == k,
+                None => m.kind.0 != MessageKind::ARCHIVED,
+            })
             .count();
         Ok(count as u32)
     }
@@ -279,7 +287,7 @@ mod tests {
     #[tokio::test]
     async fn inbox_returns_messages_for_recipient() {
         let repo = test_repo();
-        let inbox = repo.inbox("emp-001").await.unwrap();
+        let inbox = repo.inbox("emp-001", false).await.unwrap();
         assert_eq!(inbox.len(), 3);
         assert!(inbox.iter().all(|m| m.recipient_id == "emp-001"));
     }
@@ -287,7 +295,7 @@ mod tests {
     #[tokio::test]
     async fn inbox_sorted_by_sent_at_desc() {
         let repo = test_repo();
-        let inbox = repo.inbox("emp-001").await.unwrap();
+        let inbox = repo.inbox("emp-001", false).await.unwrap();
         for pair in inbox.windows(2) {
             assert!(pair[0].sent_at >= pair[1].sent_at);
         }
@@ -296,7 +304,7 @@ mod tests {
     #[tokio::test]
     async fn inbox_empty_for_unknown_recipient() {
         let repo = test_repo();
-        let inbox = repo.inbox("emp-999").await.unwrap();
+        let inbox = repo.inbox("emp-999", false).await.unwrap();
         assert!(inbox.is_empty());
     }
 

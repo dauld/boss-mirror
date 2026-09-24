@@ -26,6 +26,7 @@
     THIRD_LABEL,
     loadDepartment,
     thirds,
+    waitingAt,
     type JobsPage,
     type Third,
   } from './department';
@@ -95,7 +96,9 @@
 
 {#snippet table(list: ReadonlyArray<Job>)}
   <!-- The jobs list's own table, column for column, so a department
-       reads its packets the way All jobs shows them. -->
+       reads its packets the way All jobs shows them — plus "Waiting
+       at", the step a live packet stands at, because "open" alone let
+       a payout sit at its post step for 2.6 days unsaid (4d4dc204). -->
   <table class="data-table data-table-striped">
     <thead>
       <tr>
@@ -104,6 +107,7 @@
         <th>Title</th>
         <th>Subject</th>
         <th>Status</th>
+        <th>Waiting at</th>
         <th>Priority</th>
         <th>Opened</th>
         <th>Closed</th>
@@ -121,6 +125,7 @@
             <Link to={href(subjectPath(j.subject))}>{subjectLabel(j.subject)}</Link>
           </td>
           <td>{j.status}</td>
+          <td class="waiting-at">{waitingAt(j)}</td>
           <td>{j.priority}</td>
           <td>{j.opened_on}</td>
           <td>{j.closed_on ?? ''}</td>

@@ -141,18 +141,30 @@ export const NextActionListSchema = z.array(NextActionSchema);
 /// parseResponse.ts was written about (feedback 2fe1c8c1). The page's
 /// own old comment had predicted it.
 ///
-/// `factors` is permissive on purpose: the page reads a handful of keys
-/// off it and tolerates absent ones, so pinning every field here would
-/// turn a harmless backend addition into a hard parse failure. The
-/// shape that MATTERS is `accounts` being an array of objects each
-/// carrying an id and a numeric score — that is what the table indexes,
-/// sorts and counts.
+/// `factors` is REQUIRED, with the four keys the page reads. It was
+/// `optional()` and a bag of unknowns, on the claim that the page
+/// tolerates absent keys — it does not: WatchlistPage sorts and renders
+/// `s.factors.*` unguarded, so a row without factors parsed clean and
+/// then threw a TypeError in render, past the try that sets the error
+/// state (backlog 4b981df2; page audit 08b0c4f8 GAP 10, 2026-09-23).
+/// The server always sends all four (boss-accounts `RiskFactors`; a
+/// prediction without factors is a 500 there), so a row missing one is
+/// a wrong shape and the page says so. Keys the page does not read are
+/// still stripped, not refused — a backend adding a signal must not
+/// become a hard parse failure.
+export const RiskFactorsSchema = z.object({
+  days_since_last_invoice: z.number().nullable(),
+  open_ticket_count: z.number(),
+  has_active_contract: z.boolean(),
+  days_since_last_note: z.number().nullable(),
+});
+
 export const RiskScoreSchema = z.object({
   account_id: z.string(),
   account_name: z.string(),
   score: z.number(),
   top_factor: z.string(),
-  factors: z.record(z.string(), z.unknown()).optional(),
+  factors: RiskFactorsSchema,
 });
 
 export const RiskScoreListSchema = z.object({

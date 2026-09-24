@@ -93,8 +93,11 @@
         // a confident, wrong answer, which is worse than saying so.
         const parsed = RiskScoreListSchema.safeParse(await rResp.json());
         if (!parsed.success) throw new Error('unexpected risk-score payload');
-        if (!cancelled)
-          loadState = { kind: 'ready', scores: parsed.data.accounts as RiskScore[] };
+        // NO CAST. `as RiskScore[]` let an optional `factors` in the
+        // schema meet an unguarded `s.factors.*` below and compile
+        // (backlog 4b981df2); without it, the schema must produce the
+        // RiskScore this page reads, or svelte-check refuses.
+        if (!cancelled) loadState = { kind: 'ready', scores: parsed.data.accounts };
         // A failed directory read does not fail the page — the scores
         // are its own read and they answered — but it is SAID, and the
         // filters that need it stand down (below). A capped one is said

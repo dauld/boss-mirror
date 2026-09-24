@@ -261,34 +261,6 @@
     {:else}
       {@const s = status}
       <div class="tab-content" style="padding:16px 0; display:flex; flex-direction:column; gap:16px">
-        {#if s.refurb_wip.total_in_flight > 0 || s.ready_for_sale_count > 0}
-          <!-- Tenant-aware refurb pipeline. Brewery never has
-               either bucket populated → section hides. Used-device-
-               shop always does → section shows. No tenant flag, no
-               per-tenant code path. -->
-          <section class="tab-section">
-            <h3 style="margin-top:0">
-              Refurb pipeline · {s.refurb_wip.total_in_flight.toLocaleString()} in flight ·
-              <span style="color:var(--ok)">{s.ready_for_sale_count.toLocaleString()}</span>
-              ready for sale
-            </h3>
-            <div style="display:flex; gap:8px; flex-wrap:wrap">
-              {#each s.refurb_wip.by_stage as row (row.stage)}
-                <div
-                  style="flex:1 1 0; min-width:120px; padding:10px 12px; border:1px solid var(--hairline); border-radius:8px; background:var(--ink-raised)"
-                >
-                  <div style="font-size:11px; color:var(--static); text-transform:uppercase; letter-spacing:0.4px">
-                    {row.stage}
-                  </div>
-                  <div style="font-size:24px; font-weight:600; margin-top:2px">
-                    {row.count.toLocaleString()}
-                  </div>
-                </div>
-              {/each}
-            </div>
-          </section>
-        {/if}
-
         <div style="display:flex; flex-wrap:wrap; gap:16px">
           <Section title="Parts stock">
               {@const ps = s.parts_stock}

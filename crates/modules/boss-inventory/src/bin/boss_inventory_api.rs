@@ -5,11 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use boss_assets_client::ReqwestAssetsClient;
 use boss_classes_client::{ClassesClient, ReqwestClassesClient};
 use boss_inventory::http::{InventoryApiState, WarehouseClients, router};
 use boss_inventory::inventory_config::InventoryApiConfig;
-use boss_jobs_client::ReqwestJobsClient;
 use boss_shipping_client::ReqwestShippingClient;
 use clap::Parser;
 use tokio::net::TcpListener;
@@ -72,15 +70,11 @@ async fn main() -> Result<()> {
     };
 
     let clients = WarehouseClients {
-        jobs: Arc::new(ReqwestJobsClient::new(cfg.jobs_api_url.clone())),
-        assets: Arc::new(ReqwestAssetsClient::new(cfg.assets_api_url.clone())),
         shipping: Arc::new(ReqwestShippingClient::new(cfg.shipping_api_url.clone())),
     };
     info!(
-        jobs = %cfg.jobs_api_url,
-        assets = %cfg.assets_api_url,
         shipping = %cfg.shipping_api_url,
-        "warehouse-status cross-service clients configured"
+        "warehouse-status cross-service client configured"
     );
 
     // Class registry validation for DiscrepancyKind. Mandatory and

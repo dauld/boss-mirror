@@ -15,7 +15,7 @@
 // Two renders, because the live instance and the page disagree:
 //   State A — the warehouse module off (the live instance): ModuleDisabled,
 //             one button, no reads.
-//   State B — the module on (the used-device-shop tenant.toml):
+//   State B — the module on (the Ales tenant.toml, warehouse = true):
 //             WarehousePage — 3 tabs; Overview 0 buttons + 1 link kind
 //             (below-reorder SKU); Inventory 3 filter buttons + 7
 //             clickable sort headers + 1 link kind (SKU); Receiving 2
@@ -86,8 +86,7 @@ const ORDERS_BODY = [
 const lowRow = (part_sku: string, bin: string, on_hand: number, allocated: number, reorder_point: number) => ({
   part_sku, bin, on_hand, allocated, available: on_hand - allocated, reorder_point,
 });
-/// The used-device-shop shape: refurb WIP and ready-for-sale populated,
-/// so the pipeline section and every subtitle segment render. The
+/// Three SKUs below reorder, so every Overview section renders. The
 /// below-reorder list is shorter than its count, as the server caps it.
 const STATUS_BODY = {
   parts_stock: {
@@ -100,17 +99,12 @@ const STATUS_BODY = {
     late_count: 1, arriving_this_week_count: 2, recent: [],
   },
   outbound_shipments: { label_created: 4, picked_up: 2, in_transit: 6, exception: 1, delivered_7d: 9, recent: [] },
-  refurb_wip: { total_in_flight: 7, by_stage: [{ stage: 'intake', count: 3 }, { stage: 'diagnostics', count: 4 }] },
-  ready_for_sale_count: 2,
   as_of: '2026-09-23T22:00:00Z',
 };
-/// The brewery shape: no refurb, nothing ready for sale, nothing below
-/// reorder — the pipeline section hides and the subtitle drops two segments.
-const STATUS_BREWERY = {
+/// Nothing below reorder — the below-reorder table gives way to a sentence.
+const STATUS_STOCKED = {
   ...STATUS_BODY,
   parts_stock: { ...STATUS_BODY.parts_stock, below_reorder_count: 0, below_reorder_items: [] },
-  refurb_wip: { total_in_flight: 0, by_stage: [] },
-  ready_for_sale_count: 0,
 };
 
 /// The Inventory tab's landing order: Status ascending, by severity
@@ -268,7 +262,7 @@ test.describe('/ux/warehouse — State B, the module on: header, tabs and the Ov
     expect([...seen.reads].sort()).toEqual([...READ_PATHS].sort());
 
     await expect(body(page).locator('.exec-eyebrow')).toHaveText('Warehouse');
-    await expect(subtitle(page)).toHaveText('3 below reorder · 3 open POs · 7 refurb WIP · 2 ready for sale');
+    await expect(subtitle(page)).toHaveText('3 below reorder · 3 open POs');
 
     // Three tabs, Overview selected; they are role=tab, so the Overview
     // carries no button at all.
@@ -278,13 +272,9 @@ test.describe('/ux/warehouse — State B, the module on: header, tabs and the Ov
     await expect(body(page).getByRole('button')).toHaveCount(0);
 
     await expect(body(page).locator('section.tab-section h3')).toHaveText([
-      'Refurb pipeline · 7 in flight · 2 ready for sale',
       'Parts stock', 'Inbound POs', 'Outbound shipments',
       'Below reorder · showing 2 of 3',
     ]);
-    const pipeline = body(page).locator('section.tab-section').first();
-    await expect(pipeline.locator('div > div > div:first-child')).toHaveText(['intake', 'diagnostics']);
-    await expect(pipeline.locator('div > div > div:last-child')).toHaveText(['3', '4']);
 
     const kv = (section: string) =>
       body(page).locator('section.tab-section', { has: page.locator('h3', { hasText: section }) }).locator('dl.kv');
@@ -304,9 +294,9 @@ test.describe('/ux/warehouse — State B, the module on: header, tabs and the Ov
     expect(seen.writes.map((r) => `${r.method()} ${r.url()}`)).toEqual([]);
   });
 
-  test('the brewery shape hides the refurb pipeline, drops two subtitle segments, and says nothing is below reorder', async ({ page }) => {
+  test('nothing below reorder: the subtitle counts zero and the Overview says so instead of a table', async ({ page }) => {
     await installWarehouse(page);
-    await page.route(STATUS, (r) => json(r, STATUS_BREWERY));
+    await page.route(STATUS, (r) => json(r, STATUS_STOCKED));
     await mountWarehouse(page);
     await expect(subtitle(page)).toHaveText('0 below reorder · 3 open POs');
     await expect(body(page).locator('section.tab-section h3')).toHaveText([
@@ -760,8 +750,8 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
     await page.route(ORDERS, (r) => json(r, []));
     await page.route(STATUS, (r) =>
       json(r, {
-        ...STATUS_BREWERY,
-        parts_stock: { ...STATUS_BREWERY.parts_stock, total_skus: 0, total_on_hand: 0, total_allocated: 0, total_available: 0 },
+        ...STATUS_STOCKED,
+        parts_stock: { ...STATUS_STOCKED.parts_stock, total_skus: 0, total_on_hand: 0, total_allocated: 0, total_available: 0 },
         inbound_pos: { ...STATUS_BODY.inbound_pos, total_open: 0 },
       }),
     );
@@ -823,7 +813,7 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
     await page.route(ITEMS, (r) => json(r, { error: 'down' }, 503));
     await mountWarehouse(page);
     // The status read answered, so the header and the Overview stand.
-    await expect(subtitle(page)).toHaveText('3 below reorder · 3 open POs · 7 refurb WIP · 2 ready for sale');
+    await expect(subtitle(page)).toHaveText('3 below reorder · 3 open POs');
     await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
 
     await tab(page, 'Inventory').click();
@@ -897,7 +887,7 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
     await installWarehouse(page);
     await page.route(ITEMS, (r) => r.abort('failed'));
     await mountWarehouse(page);
-    await expect(subtitle(page)).toHaveText('3 below reorder · 3 open POs · 7 refurb WIP · 2 ready for sale');
+    await expect(subtitle(page)).toHaveText('3 below reorder · 3 open POs');
     await tab(page, 'Inventory').click();
     await expect(page.locator(FAILURE_MARKER)).toHaveText("Couldn't load inventory — Failed to fetch");
     await tab(page, 'Receiving').click();

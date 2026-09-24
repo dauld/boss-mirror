@@ -320,6 +320,100 @@ async fn get_inbox_for_unknown_employee_returns_empty_list() {
     assert!(msgs.is_empty());
 }
 
+/// Backlog 8578b91e (page audit 5477d9eb, GAP 2): the inbox read was
+/// `SELECT *` by recipient, so an archived row came back to a page
+/// whose MessageKind knows only `direct` and `signal` — counted in
+/// All, drawn with the direct glyph, counted Unread when the expire
+/// rule had archived an unread signal, and offered Mark read. Archived
+/// is the inbox's exit (backlog 5963a322 puts the Archive control on
+/// the page), so the read leaves it out unless it is asked for.
+fn archived_and_kept(recipient: &str) -> Vec<Message> {
+    let mut kept = message_fixture("msg-kept");
+    kept.recipient_id = recipient.to_string();
+    let mut archived = message_fixture("msg-archived");
+    archived.recipient_id = recipient.to_string();
+    archived.kind = MessageKind::ARCHIVED.into();
+    vec![kept, archived]
+}
+
+#[tokio::test]
+async fn get_inbox_leaves_out_archived_rows() {
+    let app = MessageTestApp::with_messages(archived_and_kept("emp-42"));
+
+    let resp = TestRequest::get("/api/messages/inbox/emp-42")
+        .send(&app.router)
+        .await;
+    resp.assert_status(StatusCode::OK);
+
+    let msgs: Vec<Message> = resp.assert_json();
+    let ids: Vec<&str> = msgs.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, vec!["msg-kept"]);
+}
+
+#[tokio::test]
+async fn get_inbox_with_include_archived_returns_them_too() {
+    let app = MessageTestApp::with_messages(archived_and_kept("emp-42"));
+
+    let resp = TestRequest::get("/api/messages/inbox/emp-42?include_archived=true")
+        .send(&app.router)
+        .await;
+    resp.assert_status(StatusCode::OK);
+
+    let msgs: Vec<Message> = resp.assert_json();
+    let mut ids: Vec<&str> = msgs.iter().map(|m| m.id.as_str()).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec!["msg-archived", "msg-kept"]);
+}
+
+/// The page's Archive control is this round trip: the write records
+/// its event, and the next inbox read no longer carries the row.
+#[tokio::test]
+async fn an_archived_message_leaves_the_inbox_read_and_records_its_event() {
+    let mut m = message_fixture("msg-done");
+    m.recipient_id = "emp-42".to_string();
+    let app = MessageTestApp::with_messages(vec![m]);
+
+    TestRequest::post("/api/messages/msg-done/archive")
+        .send(&app.router)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    app.assert_recorded("messages.message.archived");
+
+    let resp = TestRequest::get("/api/messages/inbox/emp-42")
+        .send(&app.router)
+        .await;
+    resp.assert_status(StatusCode::OK);
+    let msgs: Vec<Message> = resp.assert_json();
+    assert!(msgs.is_empty(), "archived row still in the inbox: {msgs:?}");
+}
+
+/// The unread count is a question about the same inbox, so an unread
+/// row the expire rule archived (it leaves `read_at` NULL) is not
+/// counted in it either. `?kind=archived` still asks for them by name.
+#[tokio::test]
+async fn get_unread_leaves_out_archived_rows_unless_asked_by_kind() {
+    let app = MessageTestApp::with_messages(archived_and_kept("emp-42"));
+
+    let count = |uri: &'static str, router: axum::Router| async move {
+        let resp = TestRequest::get(uri).send(&router).await;
+        resp.assert_status(StatusCode::OK);
+        let v: serde_json::Value = resp.assert_json();
+        v["count"].as_u64().unwrap()
+    };
+    assert_eq!(
+        count("/api/messages/unread/emp-42", app.router.clone()).await,
+        1
+    );
+    assert_eq!(
+        count(
+            "/api/messages/unread/emp-42?kind=archived",
+            app.router.clone()
+        )
+        .await,
+        1
+    );
+}
+
 // Silence unused warnings for MessageKind when only used in fixture.
 #[allow(dead_code)]
 fn _kind_marker() -> MessageKind {

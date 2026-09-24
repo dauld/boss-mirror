@@ -7,17 +7,20 @@ import { AccountSchema, RiskScoreListSchema } from './schemas';
 // "Cannot read properties of undefined (reading 'length')"
 // under the route-smoke suite's adversarial mock (feedback 2fe1c8c1).
 
-const ok = {
-  accounts: [
-    {
-      account_id: 'acct-1',
-      account_name: 'Algedonic Ales',
-      score: 72,
-      top_factor: 'days_since_last_invoice',
-      factors: { days_since_last_invoice: 40, open_ticket_count: 2 },
-    },
-  ],
+const factors = {
+  days_since_last_invoice: 40,
+  open_ticket_count: 2,
+  has_active_contract: true,
+  days_since_last_note: null,
 };
+const row = {
+  account_id: 'acct-1',
+  account_name: 'Algedonic Ales',
+  score: 72,
+  top_factor: 'days_since_last_invoice',
+  factors,
+};
+const ok = { accounts: [row] };
 
 describe('RiskScoreListSchema', () => {
   test('accepts a well-formed payload', () => {
@@ -38,19 +41,43 @@ describe('RiskScoreListSchema', () => {
   /** A score the table sorts on must be a NUMBER; a string sorts wrong
    *  and silently, which is worse than refusing. */
   test('refuses a non-numeric score', () => {
-    const bad = { accounts: [{ ...ok.accounts[0], score: 'high' }] };
+    const bad = { accounts: [{ ...row, score: 'high' }] };
     expect(RiskScoreListSchema.safeParse(bad).success).toBe(false);
   });
 
-  /** `factors` is deliberately permissive: the page reads a few keys and
-   *  tolerates absent ones, so a backend adding a field must not become
-   *  a hard parse failure. */
-  test('tolerates an absent or extended factors bag', () => {
-    const noFactors = { accounts: [{ ...ok.accounts[0], factors: undefined }] };
-    expect(RiskScoreListSchema.safeParse(noFactors).success).toBe(true);
-    const extra = {
-      accounts: [{ ...ok.accounts[0], factors: { brand_new_signal: 1 } }],
-    };
+  /** Backlog 4b981df2 (page audit 08b0c4f8 GAP 10): this test ACCEPTED
+   *  a row without `factors`, while WatchlistPage dereferences
+   *  `s.factors.*` in its sort and its table with no guard — so such a
+   *  row parsed clean and then threw a TypeError in render, past the
+   *  try that sets the error state. The server always sends all four
+   *  keys (boss-accounts `RiskFactors`, and a prediction without
+   *  factors is a 500 there), so a row missing one is a wrong shape and
+   *  is REFUSED here, where the page turns a refusal into its error
+   *  state. */
+  test('REFUSES a row without factors — the page reads them unguarded', () => {
+    const noFactors = Object.fromEntries(Object.entries(row).filter(([k]) => k !== 'factors'));
+    expect(RiskScoreListSchema.safeParse({ accounts: [noFactors] }).success).toBe(false);
+    const nullFactors = { accounts: [{ ...row, factors: null }] };
+    expect(RiskScoreListSchema.safeParse(nullFactors).success).toBe(false);
+  });
+
+  test('refuses a factors bag missing a key the page reads', () => {
+    for (const key of Object.keys(factors)) {
+      const missing = Object.fromEntries(Object.entries(factors).filter(([k]) => k !== key));
+      const bad = { accounts: [{ ...row, factors: missing }] };
+      expect(RiskScoreListSchema.safeParse(bad).success).toBe(false);
+    }
+  });
+
+  test('refuses a ticket count that is not a number — it sorts the table', () => {
+    const bad = { accounts: [{ ...row, factors: { ...factors, open_ticket_count: '2' } }] };
+    expect(RiskScoreListSchema.safeParse(bad).success).toBe(false);
+  });
+
+  /** A backend ADDING a signal must not become a hard parse failure:
+   *  only the keys the page reads are required. */
+  test('tolerates an extended factors bag', () => {
+    const extra = { accounts: [{ ...row, factors: { ...factors, brand_new_signal: 1 } }] };
     expect(RiskScoreListSchema.safeParse(extra).success).toBe(true);
   });
 

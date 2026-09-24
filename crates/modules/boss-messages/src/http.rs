@@ -136,13 +136,17 @@ async fn inbox<R: MessageRepository + 'static>(
     State(state): State<Arc<MessageApiState<R>>>,
     CurrentUser(user): CurrentUser,
     Path(employee_id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     // Security gate: a real session may only read its own inbox;
     // operators or trusted internal callers may read any.
     if !is_trusted(&user) && user.id != employee_id {
         return StatusCode::FORBIDDEN.into_response();
     }
-    match state.messages.inbox(&employee_id).await {
+    // Archived rows have left the inbox (backlog 8578b91e); a reader
+    // that needs them anyway says `?include_archived=true`.
+    let include_archived = params.get("include_archived").is_some_and(|v| v == "true");
+    match state.messages.inbox(&employee_id, include_archived).await {
         Ok(msgs) => Json(msgs).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

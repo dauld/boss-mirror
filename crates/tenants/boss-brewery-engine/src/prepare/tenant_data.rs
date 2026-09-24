@@ -1111,8 +1111,13 @@ fn ensure_messages(
     headers: &reqwest::header::HeaderMap,
 ) -> Result<()> {
     // Idempotence by sender+subject — refuse to double-post the
-    // same scripted thread on reruns.
-    let inbox_url = format!("{base}/api/messages/inbox/{}", OPERATORS[0]);
+    // same scripted thread on reruns. Archived threads included: the
+    // inbox read leaves them out by default (backlog 8578b91e), and a
+    // thread the operator archived was still posted.
+    let inbox_url = format!(
+        "{base}/api/messages/inbox/{}?include_archived=true",
+        OPERATORS[0]
+    );
     let existing_subjects: std::collections::HashSet<String> =
         match client.get(&inbox_url).headers(headers.clone()).send() {
             Ok(r) if r.status().is_success() => {

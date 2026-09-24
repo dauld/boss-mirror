@@ -19,16 +19,10 @@ export function warehouseHeader(
 ): WarehouseHeader {
   if (status.body) {
     const s = status.body;
-    // Tenant-aware subtitle: drop the refurb-WIP / ready-for-sale
-    // segments when they're zero. Brewery never has either; used-
-    // device-shop always has both — same code, no per-tenant gate.
-    const parts = [
-      `${s.parts_stock.below_reorder_count} below reorder`,
-      `${s.inbound_pos.total_open} open POs`,
-    ];
-    if (s.refurb_wip.total_in_flight > 0) parts.push(`${s.refurb_wip.total_in_flight} refurb WIP`);
-    if (s.ready_for_sale_count > 0) parts.push(`${s.ready_for_sale_count} ready for sale`);
-    return { title: `${s.parts_stock.total_skus} tracked SKUs`, subtitle: parts.join(' · ') };
+    return {
+      title: `${s.parts_stock.total_skus} tracked SKUs`,
+      subtitle: `${s.parts_stock.below_reorder_count} below reorder · ${s.inbound_pos.total_open} open POs`,
+    };
   }
   if (items.read.kind === 'ok') {
     return { title: `${items.skus} tracked SKUs`, subtitle: `${items.belowReorder} below reorder point` };

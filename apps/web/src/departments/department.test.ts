@@ -10,6 +10,7 @@ import {
   parseJobsPage,
   thirdOf,
   thirds,
+  waitingAt,
 } from './department';
 
 function step(status: StepStatus): Step {
@@ -99,6 +100,48 @@ describe('thirds — the three lists, in reading order', () => {
   it('an empty page is three empty thirds, not a crash', () => {
     const t = thirds([]);
     expect(t).toEqual({ in: [], working: [], out: [] });
+  });
+});
+
+// Backlog 4d4dc204 (page audit 3f964c57, 2026-09-23): a receive-a-payout
+// packet stood at its `post` step for 2.6 days and no surface a finance
+// operator opens said so. The thirds say a packet is live; this says
+// WHERE it stands — the step or steps that can be taken now.
+describe('waitingAt — the step a live packet stands at', () => {
+  const at = (
+    status: Job['status'],
+    steps: ReadonlyArray<Readonly<{ title: string; status: StepStatus; sort_order: number }>>,
+  ): Job => ({
+    ...job('p', status, []),
+    steps: steps.map((s) => ({ ...step(s.status), id: s.title, title: s.title, sort_order: s.sort_order })),
+  });
+
+  it('names the ready or active step, not the done or the not-yet', () => {
+    const j = at('open', [
+      { title: 'Record the payout', status: 'completed', sort_order: 0 },
+      { title: 'Post the payout', status: 'ready', sort_order: 1 },
+      { title: 'Reconcile', status: 'pending', sort_order: 2 },
+    ]);
+    expect(waitingAt(j)).toBe('Post the payout');
+  });
+
+  it('names every step open in parallel, in the workflow order', () => {
+    const j = at('open', [
+      { title: 'Second', status: 'active', sort_order: 2 },
+      { title: 'First', status: 'ready', sort_order: 1 },
+      { title: 'Done', status: 'skipped', sort_order: 0 },
+    ]);
+    expect(waitingAt(j)).toBe('First · Second');
+  });
+
+  it('a terminal packet waits on nothing, whatever a stray step says', () => {
+    expect(waitingAt(at('closed', [{ title: 'Post', status: 'ready', sort_order: 0 }]))).toBe('');
+    expect(waitingAt(at('cancelled', [{ title: 'Post', status: 'active', sort_order: 0 }]))).toBe('');
+  });
+
+  it('a live packet with no open step says nothing rather than guessing', () => {
+    expect(waitingAt(at('open', [{ title: 'Later', status: 'pending', sort_order: 0 }]))).toBe('');
+    expect(waitingAt({ status: 'open' })).toBe('');
   });
 });
 

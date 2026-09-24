@@ -12,7 +12,6 @@ pub mod postgres;
 pub mod procurement;
 #[cfg(feature = "postgres")]
 pub mod rebuild;
-pub mod refurb_wip;
 pub mod types;
 pub mod warehouse_status;
 

@@ -65,6 +65,22 @@ export function thirdOf(job: Pick<Job, 'status' | 'steps'>): Third {
   return moved ? 'working' : 'in';
 }
 
+/** Where a live packet stands: the titles of the steps that can be
+ *  taken now (ready or active), in the workflow's order. A terminal
+ *  packet waits on nothing, and a live one with no open step answers
+ *  '' rather than naming a step it is not at. Backlog 4d4dc204: a
+ *  payout sat at `post` for 2.6 days and the finance page could not
+ *  say so — a third says a packet is live; this says where. */
+export function waitingAt(job: Pick<Job, 'status' | 'steps'>): string {
+  if (job.status === 'closed' || job.status === 'cancelled') return '';
+  return (job.steps ?? [])
+    .filter((s) => s.status === 'ready' || s.status === 'active')
+    .slice()
+    .sort((a, b) => a.sort_order - b.sort_order)
+    .map((s) => s.title || s.kind)
+    .join(' · ');
+}
+
 export type Thirds = Readonly<{
   in: ReadonlyArray<Job>;
   working: ReadonlyArray<Job>;

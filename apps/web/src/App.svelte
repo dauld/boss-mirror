@@ -349,7 +349,7 @@
            mounts what the link names; the page's own tab clicks
            replaceState and never re-parse the route (2ab44d55). -->
       {#key route}
-        <FinancePage view={route.view} />
+        <FinancePage view={route.view} department={ROUTE_CATALOG.finance.department ?? ''} />
       {/key}
     {:else if route.kind === 'newInvoice'}
       <NewInvoicePage />

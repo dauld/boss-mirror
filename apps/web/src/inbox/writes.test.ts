@@ -7,7 +7,7 @@
 // that stores its answer has a sentence to render for every failure.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { postWrite } from './writes';
+import { postEach, postWrite } from './writes';
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -66,5 +66,45 @@ describe('postWrite', () => {
       body: '{"a":1}',
     });
     expect(seen.map((i) => [i?.method, i?.body])).toEqual([['POST', '{"a":1}']]);
+  });
+});
+
+// The bulk controls (backlog 5963a322, GAP 8): Mark all read and
+// Archive selected are one POST per message — the server records one
+// event per row — and every refusal is kept against its own row, so a
+// bulk write that half-lands says which half.
+describe('postEach', () => {
+  test('one POST per id, in order, each to its own url', async () => {
+    const seen: Array<[string, string | undefined]> = [];
+    stubFetch(async (url, init) => {
+      seen.push([url, init?.method]);
+      return new Response(null, { status: 204 });
+    });
+    const out = await postEach(['a', 'b'], (id) => `/api/messages/${id}/archive`);
+    expect(seen).toEqual([
+      ['/api/messages/a/archive', 'POST'],
+      ['/api/messages/b/archive', 'POST'],
+    ]);
+    expect(out).toEqual({ done: ['a', 'b'], refused: {} });
+  });
+
+  test('a refusal is kept against its id and does not stop the rest', async () => {
+    stubFetch(async (url) =>
+      url.includes('/b/')
+        ? new Response('not your message', { status: 403 })
+        : new Response(null, { status: 204 }),
+    );
+    const out = await postEach(['a', 'b', 'c'], (id) => `/api/messages/${id}/read`);
+    expect(out).toEqual({
+      done: ['a', 'c'],
+      refused: { b: 'HTTP 403: not your message' },
+    });
+  });
+
+  test('nothing asked is nothing done', async () => {
+    stubFetch(async () => {
+      throw new Error('no write should go out');
+    });
+    expect(await postEach([], (id) => id)).toEqual({ done: [], refused: {} });
   });
 });

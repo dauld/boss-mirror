@@ -404,9 +404,6 @@ mod tests {
         ) -> Result<u64, boss_assets_client::AssetsClientError> {
             Ok(0)
         }
-        async fn ready_for_sale_count(&self) -> Result<u64, boss_assets_client::AssetsClientError> {
-            Ok(0)
-        }
     }
 
     fn test_app() -> Router {

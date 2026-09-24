@@ -698,4 +698,13 @@ describe('a surface that lists a department names the department', () => {
     expect(ROUTE_CATALOG.parts.app).toBe('warehouse');
     expect(ROUTE_CATALOG.parts.department).toBe('warehouse');
   });
+
+  // Backlog 4d4dc204 (2026-09-23, page audit 3f964c57 gap 2): /ux/finance
+  // made no jobs read and linked nowhere that did, so a receive-a-payout
+  // packet waiting at its post step for 2.6 days was on no finance
+  // surface. Same key, same reason as the warehouse's above.
+  it('the finance surface lists the finance department it sits under', () => {
+    expect(ROUTE_CATALOG.finance.app).toBe('finance');
+    expect(ROUTE_CATALOG.finance.department).toBe('finance');
+  });
 });

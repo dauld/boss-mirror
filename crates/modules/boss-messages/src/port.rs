@@ -21,13 +21,28 @@ pub enum MessageError {
 /// AHEAD of the recording, so a collapsed replay records nothing.
 #[async_trait]
 pub trait MessageRepository: Send + Sync {
-    async fn inbox(&self, recipient_id: &str) -> Result<Vec<Message>, MessageError>;
+    /// A recipient's messages, newest first. Archived rows are left out
+    /// unless `include_archived`: archiving is how a message leaves the
+    /// inbox, and a read that still returned them handed the page a
+    /// third kind it could not place — counted in All and Unread, drawn
+    /// as a direct, offered Mark read (backlog 8578b91e, page audit
+    /// 5477d9eb GAP 2). The archived rows are not deleted, so a reader
+    /// that needs every row it ever sent (a tenant seed's idempotence
+    /// check) asks for them.
+    async fn inbox(
+        &self,
+        recipient_id: &str,
+        include_archived: bool,
+    ) -> Result<Vec<Message>, MessageError>;
     /// Unread messages for a recipient, optionally narrowed to one
     /// `kind`. The narrowing is what makes the count usable as a
     /// badge: an inbox holding 1,980 unread `signal` rows against 3
     /// unread `direct` ones renders the noise as a number unless the
     /// caller can ask the question the reader actually has, which is
-    /// "is anything addressed to me?". `None` counts every kind.
+    /// "is anything addressed to me?". `None` counts every kind but
+    /// `archived` — the same inbox `inbox` returns, since the expire
+    /// rule archives a signal without reading it; `Some("archived")`
+    /// still counts those by name.
     async fn unread_count(
         &self,
         recipient_id: &str,

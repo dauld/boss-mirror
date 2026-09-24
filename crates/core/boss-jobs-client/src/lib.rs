@@ -1,13 +1,13 @@
 //! HTTP client port for reaching the `boss-jobs` service.
 //!
 //! Defines tenant-neutral, question-shaped methods other services
-//! need to ask Jobs: "what's the phase distribution right now?" and
-//! "what Jobs match these filters?". Tenant-shape projections
-//! (refurb-pipeline WIP, field-service history per device) build on
-//! top of these in modules-tier crates — keeping this trait
-//! generic over Workflow / StepType vocabulary.
-
-use std::collections::BTreeMap;
+//! need to ask Jobs — today one: "what Jobs match these filters?".
+//! A consumer projects the rows into its own shape in its own crate,
+//! keeping this trait generic over Workflow / StepType vocabulary.
+//!
+//! The phase-distribution question it also asked had one consumer, a
+//! warehouse stage count filled only by a retired example tenant's
+//! Workflows, and left with it (backlog a8991c86).
 
 use async_trait::async_trait;
 use boss_core::http_client::{self, HttpClientError, ServiceLabel};
@@ -27,23 +27,6 @@ impl ServiceLabel for Jobs {
 /// compiling.
 pub type JobsClientError = HttpClientError<Jobs>;
 
-/// Generic phase-distribution response keyed by Workflow. The
-/// `tiers` map carries per-step-tier counts (and the synthetic
-/// `-1` bucket for "every step terminal but Job still open").
-///
-/// Tenant-shape projections (e.g. mapping refurb-used tiers to
-/// warehouse stages) live in the consuming module crate.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PhaseDistribution {
-    pub by_kind: BTreeMap<String, PhaseKindCounts>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PhaseKindCounts {
-    /// Per-tier counts. Tier `-1` is "all steps terminal, Job still open".
-    pub tiers: BTreeMap<String, i64>,
-}
-
 /// One row from `/api/jobs`. Generic across Workflows — callers
 /// filter by `kind` and project to their own row shape.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -59,13 +42,6 @@ pub struct JobSummary {
 
 #[async_trait]
 pub trait JobsClient: Send + Sync {
-    /// Per-kind, per-tier distribution of Jobs in the system.
-    /// `status` filters to e.g. `Some("open")` for in-flight only.
-    async fn phase_distribution(
-        &self,
-        status: Option<&str>,
-    ) -> Result<PhaseDistribution, JobsClientError>;
-
     /// List Jobs matching the given filters. `kind` selects a
     /// Workflow; `subject_id` filters by the Job subject id;
     /// `limit` caps the response.
@@ -79,8 +55,7 @@ pub trait JobsClient: Send + Sync {
 
 /// Production `JobsClient` that calls the jobs HTTP API over reqwest.
 /// 5-second timeout matches the `AssetsClient` convention — an
-/// unresponsive jobs service shouldn't wedge the warehouse dashboard
-/// indefinitely.
+/// unresponsive jobs service shouldn't wedge its caller indefinitely.
 pub struct ReqwestJobsClient {
     base_url: String,
     http: reqwest::Client,
@@ -95,18 +70,6 @@ impl ReqwestJobsClient {
 
 #[async_trait]
 impl JobsClient for ReqwestJobsClient {
-    async fn phase_distribution(
-        &self,
-        status: Option<&str>,
-    ) -> Result<PhaseDistribution, JobsClientError> {
-        let url = match status {
-            Some(s) => format!("{}/api/jobs/phase-distribution?status={s}", self.base_url),
-            None => format!("{}/api/jobs/phase-distribution", self.base_url),
-        };
-        let body: serde_json::Value = http_client::get_json(&self.http, &url).await?;
-        parse_phase_distribution(&body)
-    }
-
     async fn list_jobs(
         &self,
         kind: Option<&str>,
@@ -171,56 +134,10 @@ pub fn project_job_summaries(rows: &[serde_json::Value]) -> Vec<JobSummary> {
         .collect()
 }
 
-/// Pure parser: raw HTTP body → PhaseDistribution. Extracted so
-/// tests can pin the parse without a reqwest stack.
-pub fn parse_phase_distribution(
-    body: &serde_json::Value,
-) -> Result<PhaseDistribution, JobsClientError> {
-    let by_kind_obj = body
-        .get("by_kind")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| JobsClientError::MalformedBody(format!("missing by_kind in {body}")))?;
-
-    let mut by_kind = BTreeMap::new();
-    for (kind, v) in by_kind_obj {
-        let mut tiers = BTreeMap::new();
-        if let Some(t) = v.get("tiers").and_then(|t| t.as_object()) {
-            for (tier_str, count_v) in t {
-                let count = count_v.as_i64().unwrap_or(0);
-                tiers.insert(tier_str.clone(), count);
-            }
-        }
-        by_kind.insert(kind.clone(), PhaseKindCounts { tiers });
-    }
-    Ok(PhaseDistribution { by_kind })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn parses_phase_distribution_from_wire_shape() {
-        let body = json!({
-            "by_kind": {
-                "refurb-used": { "tiers": { "0": 3, "1": 5, "-1": 4 } },
-                "sale":        { "tiers": { "0": 50 } }
-            }
-        });
-        let dist = parse_phase_distribution(&body).unwrap();
-        assert_eq!(dist.by_kind.len(), 2);
-        let refurb = &dist.by_kind["refurb-used"];
-        assert_eq!(refurb.tiers["0"], 3);
-        assert_eq!(refurb.tiers["-1"], 4);
-    }
-
-    #[test]
-    fn phase_distribution_with_missing_by_kind_errors() {
-        let body = json!({ "wrong_key": {} });
-        let result = parse_phase_distribution(&body);
-        assert!(matches!(result, Err(JobsClientError::MalformedBody(_))));
-    }
 
     #[test]
     fn project_job_summaries_reads_dates_and_fields() {
