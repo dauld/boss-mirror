@@ -708,6 +708,20 @@ spec:
             # entrypoint can chmod it 0700 despite the pod's fsGroup
             # setgid bit, which Postgres refuses to start without.
             capabilities: {drop: ["NET_RAW"]}
+          # NO DURABILITY, FOR THE GATE'S REASON (backlog c71cf9d0,
+          # 2026-09-24). PGDATA is the emptyDir below, so a synced file
+          # protects data nobody will read after a restart — and with
+          # fsync on, every DROP DATABASE waits on a forced checkpoint
+          # that must flush the files of every WAL_LOG-copied test
+          # database. Measured on this sidecar that day: one builder
+          # running boss-jobs' 45 *_pg binaries left 50 DROP DATABASE
+          # backends waiting on checkpoints that spent 93s and 69s in
+          # DataFileSync; five builders held it at max_connections
+          # (100, 98 of them drops) and 124 of 225 binary runs failed
+          # with "too many clients" / "pool timed out". The gate
+          # sidecar has run with these flags since afaa90a3. Pinned
+          # beside it by gate_runner_manifests.
+          args: ["-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
           env:
             - {name: POSTGRES_USER, value: boss}
             - {name: POSTGRES_PASSWORD, value: boss}
