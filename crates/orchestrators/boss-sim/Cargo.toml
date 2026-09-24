@@ -1,6 +1,6 @@
 [package]
 name = "boss-sim"
-description = "Shape-driven simulation engine — Periodic + Counterparty + Batch primitives, side-effect dispatch, output adapters. Tenants compose these via per-tenant engine crates (boss-brewery-engine, boss-used-device-shop-engine)."
+description = "Shape-driven simulation engine — Periodic + Counterparty + Batch primitives, side-effect dispatch, output adapters. Tenants compose these via per-tenant engine crates (today boss-brewery-engine)."
 version.workspace = true
 edition.workspace = true
 

@@ -167,9 +167,8 @@ today:
   `boss-cli`, `boss-sim`,
   `boss-ml-api` (wires the Tier-1 ML framework + Tier-2 plugins),
   `boss-simulator` (the standalone `/simulator` UX service).
-- **Tenants** (`crates/tenants/`, 2 crates).
-  `boss-brewery-engine` (Algedonic Ales) and
-  `boss-used-device-shop-engine`. Outside the tier system;
+- **Tenants** (`crates/tenants/`, 1 crate).
+  `boss-brewery-engine` (Algedonic Ales). Outside the tier system;
   tenant-shaped.
 
 A Tier-1 LIBRARY crate must NOT depend on a Tier-2 crate
