@@ -1575,6 +1575,13 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // edited one — would rewrite an append-only record. The stored list
     // wins (design 4105b020); its one writer is the corrections door.
     crate::corrections::carry_forward(&mut job.metadata, &existing.metadata);
+    // And the record of every move between protocol versions (design
+    // 7cf202a9 Q3), whose one writer is the re-pin door.
+    crate::corrections::carry_forward_key(
+        &mut job.metadata,
+        &existing.metadata,
+        crate::repin::REPINS_KEY,
+    );
 
     // Pick the right policy action: transitioning to Closed is a Close
     // action (more restricted than Update); everything else is Update.
@@ -1745,6 +1752,11 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
     if patch.contains_key(crate::corrections::CORRECTIONS_KEY) {
         return (StatusCode::CONFLICT, crate::corrections::PATCH_REFUSAL).into_response();
     }
+    // So is the record of every move between protocol versions
+    // (design 7cf202a9 Q3): its one writer is the re-pin door.
+    if patch.contains_key(crate::repin::REPINS_KEY) {
+        return (StatusCode::CONFLICT, crate::repin::PATCH_REFUSAL).into_response();
+    }
 
     let existing = match state.jobs.get_job(&job_id).await {
         Ok(Some(existing)) => existing,
@@ -1815,8 +1827,191 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// `POST /api/jobs/{id}/convert` — pull a packet forward to a newer
-/// protocol version, if where it stands allows it.
+/// A move of one packet between two versions of its protocol, judged:
+/// where it stands, whether the move is safe, and what it would write.
+/// Shared by the dry run and the write so the preview an operator reads
+/// is the move the door makes.
+struct JudgedMove {
+    existing: Job,
+    from: i32,
+    to: i32,
+    verdict: crate::protocol_conversion::Convertibility,
+    plan: Result<crate::repin::RepinPlan, crate::repin::Unplannable>,
+}
+
+/// Why a judged move stops before it is a plan: an answer the caller
+/// gets as it is (a refusal, a missing packet, "already there").
+enum NoMove {
+    Answer(Response),
+}
+
+async fn judge_move<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    user: &boss_policy_client::User,
+    id: &str,
+    to_version: Option<i32>,
+    action: Action,
+) -> Result<JudgedMove, NoMove> {
+    let answer = |r: Response| NoMove::Answer(r);
+    let job_id = resolve_path_job_id(state, id).await.map_err(answer)?;
+    let existing = match state.jobs.get_job(&job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => {
+            return Err(answer(
+                (StatusCode::NOT_FOUND, "job not found").into_response(),
+            ));
+        }
+        Err(e) => {
+            return Err(answer(
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+            ));
+        }
+    };
+    let scope = match state.policy.check(user, action, Resource::job()).await {
+        Ok(Decision::Allow { scope }) => scope,
+        Ok(Decision::Deny { reason }) => {
+            return Err(answer((StatusCode::FORBIDDEN, reason).into_response()));
+        }
+        Err(e) => {
+            return Err(answer(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("policy check failed: {e}"),
+                )
+                    .into_response(),
+            ));
+        }
+    };
+    if !scope_matches(user, &scope, &existing) {
+        return Err(answer(
+            (StatusCode::FORBIDDEN, "job is outside your scope").into_response(),
+        ));
+    }
+
+    let Some(ref reg) = state.kind_registry else {
+        return Err(answer(
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no workflow registry: conversion cannot be judged without both specs",
+            )
+                .into_response(),
+        ));
+    };
+    let from = reg
+        .get_version(&existing.kind, existing.workflow_version)
+        .await
+        .map_err(|e| {
+            answer(
+                (
+                    StatusCode::CONFLICT,
+                    format!(
+                        "cannot read the version this packet is pinned to ({} v{}): {e}",
+                        existing.kind, existing.workflow_version
+                    ),
+                )
+                    .into_response(),
+            )
+        })?;
+    let to = match to_version {
+        Some(v) => reg.get_version(&existing.kind, v).await,
+        None => reg.get_active(&existing.kind).await,
+    }
+    .map_err(|e| {
+        answer((StatusCode::CONFLICT, format!("no such target version: {e}")).into_response())
+    })?;
+    if to.version == existing.workflow_version {
+        return Err(answer(
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "converted": false,
+                    "convertible": false,
+                    "reason": "already pinned to that version",
+                    "workflow_version": existing.workflow_version,
+                })),
+            )
+                .into_response(),
+        ));
+    }
+
+    // Where the packet actually stands: the slugs it has completed.
+    let steps =
+        state.jobs.list_steps(&job_id).await.map_err(|e| {
+            answer((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())
+        })?;
+    let done: std::collections::BTreeSet<String> = steps
+        .iter()
+        .filter(|s| s.status == boss_core::job::StepStatus::Completed)
+        .filter_map(|s| s.spec_slug.clone())
+        .collect();
+    let verdict = crate::protocol_conversion::convertibility_for_packet(&from, &to, &done);
+    let plan = crate::repin::plan(&from, &to, &existing, &steps);
+    Ok(JudgedMove {
+        existing,
+        from: from.version,
+        to: to.version,
+        verdict,
+        plan,
+    })
+}
+
+/// The obstacles a judged move answers with: the safety verdict's, and
+/// the one reason a packet cannot be planned at all.
+fn move_obstacles(judged: &JudgedMove) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = judged
+        .verdict
+        .obstacles()
+        .iter()
+        .map(|o| serde_json::json!({ "step": o.step, "reason": o.reason }))
+        .collect();
+    if let Err(why) = &judged.plan {
+        out.push(serde_json::json!({ "step": null, "reason": why.0 }));
+    }
+    out
+}
+
+#[derive(Deserialize)]
+pub(super) struct ConvertQuery {
+    to_version: Option<i32>,
+}
+
+/// `GET /api/jobs/{id}/convert[?to_version=N]` — the dry run (design
+/// 7cf202a9 Q1): the verdict and exactly what the move would write,
+/// with nothing written. A READ, on the job-read permission, because a
+/// cohort move is previewed by running this across the cohort before
+/// anyone moves a packet (Q5). `boss job convert --dry-run` is its twin.
+pub(super) async fn preview_convert_job<R: JobsRepository + 'static, B: EventBus + 'static>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    Path(id): Path<String>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<ConvertQuery>,
+) -> Response {
+    let judged = match judge_move(&state, &user, &id, q.to_version, Action::Read).await {
+        Ok(j) => j,
+        Err(NoMove::Answer(r)) => return r,
+    };
+    let obstacles = move_obstacles(&judged);
+    let (reprojected, inserted) = judged
+        .plan
+        .as_ref()
+        .map(crate::repin::listed)
+        .unwrap_or_default();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "convertible": obstacles.is_empty(),
+            "from": judged.from,
+            "to": judged.to,
+            "obstacles": obstacles,
+            "reprojected": reprojected,
+            "inserted": inserted,
+        })),
+    )
+        .into_response()
+}
+
+/// `POST /api/jobs/{id}/convert` — move a packet to another version of
+/// its protocol, and make the move true of it and on the record.
 ///
 /// THE DOOR IS NARROW ON PURPOSE. `workflow_version` is excluded from
 /// `update_job`'s SET list, so no ordinary PUT can re-pin a packet by
@@ -1826,148 +2021,95 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
 /// the step it concerns and an operator's next question is always
 /// "which step, and what changed".
 ///
-/// A SAFE MOVE IS NOT YET ENOUGH (backlog 1e973965, 2026-09-23). This
-/// door moves one column, so a step row keeps what the admission version
-/// wrote on it and a step the target inserts is never created — it once
-/// answered `converted: true` for a page-audit whose pending steps still
-/// read v1. So it asks
-/// [`crate::protocol_conversion::convertibility_for_repin`], which adds
-/// to the safety verdict every change this door cannot carry, until a
-/// re-pin re-projects pending steps (design 7cf202a9 Q2, 4347a1af).
+/// WHAT IT WRITES (design 7cf202a9, David 2026-09-23, all five
+/// questions accepted as proposed; backlog 4347a1af). Until this car
+/// the door moved one column, so a moved packet's steps still read the
+/// admission version's text (1e973965). Now, in one transaction
+/// ([`crate::repin`]): every step not yet finished is re-projected from
+/// the target, every step the target inserts is materialised, completed
+/// steps keep the text they ran under (Q2); a `jobs.job.repinned` event
+/// and an entry in the packet's reserved `repins` list say from, to,
+/// who, and each step moved (Q3).
+///
+/// WHO. Moving a live packet changes what the registry guarantees about
+/// it, so it is the registry owner's act: the caller must hold
+/// `publish` on `workflow` — the permission that makes a protocol
+/// version live, `platform-admin`'s in the core defaults — as well as
+/// the ordinary write on this job (Q4). It was any job writer. Never
+/// automatic: nothing calls this on publish (Q5).
 pub(super) async fn convert_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     Path(id): Path<String>,
     CurrentUser(user): CurrentUser,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-    let job_id = match resolve_path_job_id(&state, &id).await {
-        Ok(job_id) => job_id,
-        Err(refusal) => return refusal,
-    };
-    let existing = match state.jobs.get_job(&job_id).await {
-        Ok(Some(j)) => j,
-        Ok(None) => return (StatusCode::NOT_FOUND, "job not found").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-
-    // Same gate as any other job write.
-    let decision = match state
-        .policy
-        .check(&user, Action::Update, Resource::job())
-        .await
-    {
-        Ok(d) => d,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
-        }
-    };
-    let scope = match decision {
-        Decision::Deny { reason } => return (StatusCode::FORBIDDEN, reason).into_response(),
-        Decision::Allow { scope } => scope,
-    };
-    if !scope_matches(&user, &scope, &existing) {
-        return (StatusCode::FORBIDDEN, "job is outside your scope").into_response();
+    let want = body
+        .get("to_version")
+        .and_then(serde_json::Value::as_i64)
+        .map(|v| v as i32);
+    if let Err(refusal) = super::kinds::policy_check(&state, &user, Action::Publish).await {
+        return refusal;
     }
-
-    let Some(ref reg) = state.kind_registry else {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no workflow registry: conversion cannot be judged without both specs",
-        )
-            .into_response();
+    let judged = match judge_move(&state, &user, &id, want, Action::Update).await {
+        Ok(j) => j,
+        Err(NoMove::Answer(r)) => return r,
     };
-    let from = match reg
-        .get_version(&existing.kind, existing.workflow_version)
-        .await
-    {
-        Ok(s) => s,
-        Err(e) => {
+    let obstacles = move_obstacles(&judged);
+    let plan = match (&judged.plan, obstacles.is_empty()) {
+        (Ok(plan), true) => plan,
+        _ => {
             return (
                 StatusCode::CONFLICT,
-                format!(
-                    "cannot read the version this packet is pinned to ({} v{}): {e}",
-                    existing.kind, existing.workflow_version
-                ),
+                Json(serde_json::json!({
+                    "converted": false,
+                    "from": judged.from,
+                    "to": judged.to,
+                    "obstacles": obstacles,
+                })),
             )
                 .into_response();
         }
     };
-    let want = body.get("to_version").and_then(serde_json::Value::as_i64);
-    let to = match want {
-        Some(v) => reg.get_version(&existing.kind, v as i32).await,
-        None => reg.get_active(&existing.kind).await,
-    };
-    let to = match to {
-        Ok(s) => s,
-        Err(e) => {
-            return (StatusCode::CONFLICT, format!("no such target version: {e}")).into_response();
-        }
-    };
-    if to.version == existing.workflow_version {
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "converted": false,
-                "reason": "already pinned to that version",
-                "workflow_version": existing.workflow_version,
-            })),
-        )
-            .into_response();
-    }
-
-    // Where the packet actually stands: the slugs it has completed.
-    let steps = match state.jobs.list_steps(&job_id).await {
-        Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let done: std::collections::BTreeSet<String> = steps
-        .iter()
-        .filter(|s| s.status == boss_core::job::StepStatus::Completed)
-        .filter_map(|s| s.spec_slug.clone())
-        .collect();
-
-    let verdict = crate::protocol_conversion::convertibility_for_repin(&from, &to, &done);
-    if !verdict.is_automatic() {
-        return (
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "converted": false,
-                "from": from.version,
-                "to": to.version,
-                "obstacles": verdict.obstacles().iter().map(|o| serde_json::json!({
-                    "step": o.step, "reason": o.reason,
-                })).collect::<Vec<_>>(),
-            })),
-        )
-            .into_response();
-    }
 
     let actor = user
         .ambient_actor()
         .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
     let stamp = state
         .publisher
-        .stamp_with_actor(actor)
+        .stamp_with_actor(actor.clone())
         .await
-        .with_partition(existing.partition);
+        .with_partition(judged.existing.partition);
+    let record = crate::repin::record(
+        plan,
+        judged.from,
+        judged.to,
+        &actor.to_string(),
+        stamp.timestamp,
+    );
     match state
         .jobs
-        .repin_workflow_version_at(&job_id, to.version, &stamp)
+        .repin_workflow_version_at(&judged.existing.id, judged.to, plan, &record, &stamp)
         .await
     {
-        Ok(job) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "converted": true,
-                "from": from.version,
-                "to": job.workflow_version,
-            })),
-        )
-            .into_response(),
+        Ok(job) => {
+            // An inserted step is born pending; the readiness pass the
+            // rest of the packet already had decides whether it is
+            // workable now, against the version it was moved to.
+            if job.status == JobStatus::Open {
+                super::steps::reevaluate_and_persist(&state, &job, &actor).await;
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "converted": true,
+                    "from": judged.from,
+                    "to": job.workflow_version,
+                    "reprojected": record["reprojected"],
+                    "inserted": record["inserted"],
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

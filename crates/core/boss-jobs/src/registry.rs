@@ -1721,10 +1721,9 @@ pub fn reevaluate(
 /// If the step has an `authority_role`, surface it in metadata so the
 /// sign-off gate in `boss-jobs::http::update_step` can enforce it.
 ///
-/// Crate-visible because the re-pin door compares what this writes for
-/// two versions of one step (`protocol_conversion::convertibility_for_repin`,
-/// 1e973965): a key that differs is one a pending step's row would keep
-/// stale.
+/// A re-pin compares what this writes for two versions of one step
+/// (through [`materialize_steps_at`], in `repin::plan`): a key that
+/// differs is one it moves on a step not yet finished (1e973965).
 pub(crate) fn merge_metadata(defaults: &serde_json::Value, step: &StepSpec) -> serde_json::Value {
     let mut merged = match defaults {
         serde_json::Value::Object(_) => defaults.clone(),

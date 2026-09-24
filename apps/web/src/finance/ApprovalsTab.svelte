@@ -5,6 +5,7 @@
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
   import { formatMoney } from '@boss/web-kit/ui/money';
+  import { failedWithReason } from '../data/readState';
 
   type PurchaseOrderLine = {
     part_sku: string;
@@ -27,7 +28,16 @@
   /// (packet 3fba9c35, the false-empty sweep).
   let loadFailed = $state<string | null>(null);
   let loading = $state(true);
-  let actionStatus = $state<Record<string, string>>({});
+  /// One Approve's outcome per PO. `refused` carries the status and the
+  /// server's reason and IS RENDERED beside the row: until backlog
+  /// 1acaa10e the template drew only 'Approved' or the button, so a 403,
+  /// 409 or 500 was stored here and looked like a click that did nothing
+  /// (page audit 3f964c57 gap 11).
+  type Approval =
+    | { kind: 'approving' }
+    | { kind: 'approved' }
+    | { kind: 'refused'; error: string };
+  let actionStatus = $state<Record<string, Approval>>({});
 
   $effect(() => {
     let cancelled = false;
@@ -55,7 +65,7 @@
   });
 
   async function approvePo(poId: string): Promise<void> {
-    actionStatus = { ...actionStatus, [poId]: 'approving...' };
+    actionStatus = { ...actionStatus, [poId]: { kind: 'approving' } };
     try {
       const r = await fetch(
         `/api/inventory/orders/${encodeURIComponent(poId)}/status`,
@@ -66,17 +76,24 @@
         },
       );
       if (r.ok) {
-        actionStatus = { ...actionStatus, [poId]: 'approved' };
+        actionStatus = { ...actionStatus, [poId]: { kind: 'approved' } };
         orders = orders.map((po) =>
           po.id === poId ? { ...po, status: 'submitted' } : po,
         );
       } else {
-        actionStatus = { ...actionStatus, [poId]: `error: ${r.status}` };
+        const refusal = failedWithReason(r.status, await r.text());
+        actionStatus = {
+          ...actionStatus,
+          [poId]: {
+            kind: 'refused',
+            error: refusal.kind === 'failed' ? refusal.error : `HTTP ${r.status}`,
+          },
+        };
       }
     } catch (e) {
       actionStatus = {
         ...actionStatus,
-        [poId]: `error: ${e instanceof Error ? e.message : 'unknown'}`,
+        [poId]: { kind: 'refused', error: e instanceof Error ? e.message : String(e) },
       };
     }
   }
@@ -126,16 +143,21 @@
                   </td>
                   <td>{po.placed_on}</td>
                   <td>
-                    {#if status === 'approved'}
+                    {#if status?.kind === 'approved'}
                       <span style="color:var(--ok); font-size:12px">Approved</span>
                     {:else}
                       <button
                         class="hr-done-btn"
                         onclick={() => approvePo(po.id)}
-                        disabled={status === 'approving...'}
+                        disabled={status?.kind === 'approving'}
                       >
-                        {status === 'approving...' ? 'Approving...' : 'Approve'}
+                        {status?.kind === 'approving' ? 'Approving...' : 'Approve'}
                       </button>
+                      {#if status?.kind === 'refused'}
+                        <p class="load-failed" role="alert" style="margin:4px 0 0; font-size:12px">
+                          Not approved — {status.error}
+                        </p>
+                      {/if}
                     {/if}
                   </td>
                 </tr>

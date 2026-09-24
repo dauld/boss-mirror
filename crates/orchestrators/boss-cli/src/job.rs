@@ -855,8 +855,208 @@ pub async fn patch(job_ref: &str, path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// `--to 3` or `--to v3` — the version the way `boss job get` prints it
+/// (`kind v3`) or bare.
+pub(crate) fn parse_version(s: &str) -> Result<i32> {
+    s.trim()
+        .trim_start_matches(['v', 'V'])
+        .parse::<i32>()
+        .with_context(|| format!("--to {s:?} is not a protocol version (e.g. 3 or v3)"))
+}
+
+/// A judged move as an operator reads it: from, to, the verdict, each
+/// obstacle by step, then what the move writes — each step re-projected
+/// with what changed on it and what it kept, and each step inserted.
+/// Pure, over the body `GET /api/jobs/{id}/convert` answers (the POST's
+/// answer carries the same two lists).
+pub(crate) fn render_move(body: &Value) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let n = |k: &str| body.get(k).and_then(Value::as_i64).unwrap_or_default();
+    let list = |k: &str| {
+        body.get(k)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let words = |v: &Value| {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+    };
+    let _ = writeln!(out, "v{} -> v{}", n("from"), n("to"));
+    for o in list("obstacles") {
+        let step = o
+            .get("step")
+            .and_then(Value::as_str)
+            .unwrap_or("(protocol)");
+        let why = o.get("reason").and_then(Value::as_str).unwrap_or("?");
+        let _ = writeln!(out, "  refused  {step}: {why}");
+    }
+    for r in list("reprojected") {
+        let step = r.get("step").and_then(Value::as_str).unwrap_or("?");
+        let _ = write!(out, "  re-project  {step}: {}", words(&r["changed"]));
+        if r.get("kept").is_some() {
+            let _ = write!(out, "  (kept as written: {})", words(&r["kept"]));
+        }
+        out.push('\n');
+    }
+    for i in list("inserted") {
+        let step = i.get("step").and_then(Value::as_str).unwrap_or("?");
+        let _ = writeln!(out, "  insert  {step}");
+    }
+    out
+}
+
+/// `boss job convert <packet> [--to vN] [--dry-run]` — move a packet to
+/// another version of its protocol, or preview the move (design
+/// 7cf202a9 Q1; the CLI twin of `/api/jobs/{id}/convert`).
+///
+/// The dry run is a READ (`GET`), so it can be run across a cohort
+/// before anyone moves a packet (Q5) and needs no actor. The move is a
+/// write, and the API refuses it to anyone who may not publish a
+/// protocol version (Q4). Either way the verb asks the preview first
+/// and prints it, so a refusal names each obstacle by step instead of
+/// arriving as a 409 inside an error line.
+///
+/// CONFIRMATION OVER STATUS CODES: after a move, the packet is read back
+/// and the verb FAILS unless it is pinned to the target and its
+/// `repins` record grew by one.
+pub async fn convert(job_ref: &str, to: Option<&str>, dry_run: bool) -> Result<()> {
+    let to = to.map(parse_version).transpose()?;
+    let http = reqwest::Client::new();
+    let id = fetch_and_resolve(&http, job_ref).await?;
+    let query = to.map(|v| format!("?to_version={v}")).unwrap_or_default();
+    let preview = crate::gate::api(
+        &http,
+        reqwest::Method::GET,
+        &format!("/api/jobs/{id}/convert{query}"),
+        None,
+    )
+    .await?
+    .context("the conversion preview returned no body")?;
+    if preview.get("reason").is_some() {
+        println!(
+            "boss job convert: {id} — {} (v{})",
+            preview["reason"].as_str().unwrap_or("nothing to do"),
+            preview["workflow_version"]
+        );
+        return Ok(());
+    }
+    print!("{}", render_move(&preview));
+    let convertible = preview.get("convertible").and_then(Value::as_bool) == Some(true);
+    if dry_run {
+        println!(
+            "boss job convert: {id} — dry run, nothing written ({})",
+            if convertible {
+                "convertible"
+            } else {
+                "refused"
+            }
+        );
+        return Ok(());
+    }
+    if !convertible {
+        bail!(
+            "{id} cannot be moved to v{} — the obstacles above name each step",
+            preview["to"]
+        );
+    }
+
+    let before = crate::gate::api(
+        &http,
+        reqwest::Method::GET,
+        &format!("/api/jobs/{id}"),
+        None,
+    )
+    .await?
+    .context("could not read the packet before moving it")?;
+    let body = match to {
+        Some(v) => json!({ "to_version": v }),
+        None => json!({}),
+    };
+    crate::gate::api(
+        &http,
+        reqwest::Method::POST,
+        &format!("/api/jobs/{id}/convert"),
+        Some(body),
+    )
+    .await?;
+
+    // The status code said yes; the packet is the authority.
+    let after = crate::gate::api(
+        &http,
+        reqwest::Method::GET,
+        &format!("/api/jobs/{id}"),
+        None,
+    )
+    .await?
+    .context("could not read the moved packet back")?;
+    let repins = |job: &Value| {
+        job.pointer("/metadata/repins")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    };
+    if after["workflow_version"] != preview["to"] || repins(&after) != repins(&before) + 1 {
+        bail!(
+            "the API answered the move but the packet does not show it: pinned v{}, {} repins \
+             record(s) (was {})",
+            after["workflow_version"],
+            repins(&after),
+            repins(&before)
+        );
+    }
+    println!(
+        "boss job convert: {id} moved to v{} — confirmed by reading it back",
+        after["workflow_version"]
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_version_reads_bare_or_as_printed() {
+        assert_eq!(super::parse_version("3").unwrap(), 3);
+        assert_eq!(super::parse_version("v8").unwrap(), 8);
+        assert!(super::parse_version("latest").is_err());
+    }
+
+    /// The preview names every step the move touches, and what it kept.
+    #[test]
+    fn a_rendered_move_names_each_step_and_what_it_kept() {
+        let out = super::render_move(&serde_json::json!({
+            "from": 1, "to": 3, "convertible": true, "obstacles": [],
+            "reprojected": [
+                {"step": "measure", "changed": ["`procedure`"]},
+                {"step": "file", "changed": [], "kept": ["`procedure`"]},
+            ],
+            "inserted": [{"step": "draft-design"}],
+        }));
+        assert!(out.starts_with("v1 -> v3\n"), "{out}");
+        assert!(out.contains("re-project  measure: `procedure`"), "{out}");
+        assert!(out.contains("(kept as written: `procedure`)"), "{out}");
+        assert!(out.contains("insert  draft-design"), "{out}");
+    }
+
+    /// A refusal names each obstacle by step.
+    #[test]
+    fn a_rendered_refusal_names_the_step() {
+        let out = super::render_move(&serde_json::json!({
+            "from": 2, "to": 7, "convertible": false,
+            "obstacles": [{"step": "measure", "reason": "required field `x` added"}],
+        }));
+        assert!(
+            out.contains("refused  measure: required field `x` added"),
+            "{out}"
+        );
+    }
+
     /// A closed page with no `total` is refused, never read as zero
     /// closed jobs (backlog 10776b6c). Counted as 0, it set the read
     /// depth to 0, the loop never ran, and the verb said "no job

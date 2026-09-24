@@ -24,6 +24,7 @@ import {
   appsFor,
   departmentJobsPath,
   departmentsWithoutSurfaces,
+  inPerspective,
   type NavItem,
 } from './nav-catalog';
 import { parseRoute } from '../router';
@@ -316,8 +317,8 @@ describe('nav catalog — app assignment', () => {
 
   // A row a fixed-perspective group lists must be one that perspective
   // can render. AppShell's visible() runs inPerspective on every row,
-  // which drops any catalog row whose app (looked up by permKey, as the
-  // shell does) is not the app being rendered — so a row listed under
+  // which drops any catalog row whose app is not the app being
+  // rendered — so a row listed under
   // the wrong app is dead text: no role ever sees it, and nothing says
   // so. Home's Mine group carried `exec` (app executive) that way until
   // backlog e8fe5e5a (2026-09-24), one group down from the Work group's
@@ -325,7 +326,15 @@ describe('nav catalog — app assignment', () => {
   // the Executive app's row, and every department tab is offered to
   // every role (appsFor takes the departments alone), so removing the
   // dead row takes no route away from anyone.
-  it('every row the Home and IT sidebars list is one that app renders', () => {
+  //
+  // The department groups ride the same check (backlog 72a88031,
+  // 2026-09-24): Production's Products row carries permKey `parts`, the
+  // gate it shares with Warehouse's Ingredients & parts, and the rule
+  // then looked its app up THROUGH that permKey — warehouse — so
+  // Production dropped the row for every role. The rule is now the
+  // shell's own function, imported here rather than restated, so the
+  // pin judges the rows the way the sidebar does.
+  it('every row the Home, IT and department sidebars list is one that app renders', () => {
     const shell = readFileSync(new URL('./AppShell.svelte', import.meta.url), 'utf8');
     const between = (from: string, to: string): string => {
       const start = shell.indexOf(from);
@@ -343,19 +352,28 @@ describe('nav catalog — app assignment', () => {
       ['home', rowsOf(between('const HOME_GROUPS', 'let MAIN'))],
       ['it', rowsOf(between('const IT_GROUPS', '// Home —'))],
     ];
-    for (const [, rows] of groups) expect(rows.length).toBeGreaterThan(0);
-    // The shell's own rule, restated: a permKey-less row is always in
-    // perspective; otherwise it renders under the app of the catalog
-    // entry its permKey names.
+    // Every department group: APP_SURFACES, one `app: ['row', ...]`
+    // line per department — the list the shell maps into that app's
+    // sidebar.
+    const surfaces = between('const APP_SURFACES', '};');
+    const departmentGroups = [...surfaces.matchAll(/^\s*([\w-]+|'[^']+'):\s*\[([^\]]*)\]/gm)].map(
+      (m) =>
+        [
+          m[1]!.replace(/'/g, '') as AppId,
+          [...m[2]!.matchAll(/'([^']+)'/g)].map((r) => r[1]!),
+        ] as const,
+    );
+    expect(departmentGroups.length, 'APP_SURFACES lists no department').toBeGreaterThan(0);
+    const allGroups = [...groups, ...departmentGroups];
+    for (const [, rows] of allGroups) expect(rows.length).toBeGreaterThan(0);
     const catalog = ROUTE_CATALOG as Readonly<Record<string, NavItem | undefined>>;
-    const renderedUnder = (key: string): AppId | 'anywhere' => {
-      const permKey = catalog[key]?.permKey;
-      return permKey === undefined ? 'anywhere' : (catalog[permKey]?.app ?? 'home');
-    };
-    const dead = groups.flatMap(([app, rows]) =>
+    const dead = allGroups.flatMap(([app, rows]) =>
       rows
-        .filter((k) => renderedUnder(k) !== 'anywhere' && renderedUnder(k) !== app)
-        .map((k) => `${k} (listed under ${app}, renders under ${renderedUnder(k)})`),
+        .filter((k) => {
+          const item = catalog[k];
+          return item === undefined || !inPerspective(item, app);
+        })
+        .map((k) => `${k} (listed under ${app}, app ${catalog[k]?.app ?? 'none'})`),
     );
     expect(dead, `sidebar rows no role can ever see: ${dead.join(', ')}`).toEqual([]);
   });

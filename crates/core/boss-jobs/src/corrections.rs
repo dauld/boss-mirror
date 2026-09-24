@@ -315,16 +315,24 @@ pub fn for_step(job_metadata: &Value, step_id: &str) -> Vec<Value> {
 /// forward when the job holds one, removed from the body when it does
 /// not.
 pub fn carry_forward(body_metadata: &mut Value, stored_metadata: &Value) {
-    let stored = stored_metadata.get(CORRECTIONS_KEY).cloned();
+    carry_forward_key(body_metadata, stored_metadata, CORRECTIONS_KEY);
+}
+
+/// [`carry_forward`] for any reserved, append-only job-metadata key —
+/// the re-pin record `repins` (design 7cf202a9 Q3) is the second.
+pub fn carry_forward_key(body_metadata: &mut Value, stored_metadata: &Value, key: &str) {
+    let stored = stored_metadata.get(key).cloned();
     match (body_metadata.as_object_mut(), stored) {
         (Some(md), Some(list)) => {
-            md.insert(CORRECTIONS_KEY.into(), list);
+            md.insert(key.into(), list);
         }
         (Some(md), None) => {
-            md.remove(CORRECTIONS_KEY);
+            md.remove(key);
         }
         (None, Some(list)) => {
-            *body_metadata = json!({ CORRECTIONS_KEY: list });
+            let mut md = Map::new();
+            md.insert(key.into(), list);
+            *body_metadata = Value::Object(md);
         }
         (None, None) => {}
     }

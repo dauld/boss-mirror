@@ -230,3 +230,42 @@ test('a healthy read renders the task', async ({ page }) => {
   // this row could not exist and the tasks table was unreachable.
   await expect(page.getByText('0/1 tasks (0%)')).toBeVisible();
 });
+
+// ---- people roster ----------------------------------------------------
+//
+// Backlog 25ad5042 (page audit 0c0265a3, gap 4). /ux/people has one read,
+// /api/people, and this file mocked it as success only, while the outage
+// crawl kept it up as a shell read. So no spec failed the read, and the
+// page's "Couldn't load the roster" line could have regressed to "No
+// employees match those filters." with every suite green. The same pair
+// as above: broken and genuinely empty must not look alike.
+
+async function peopleMocks(page: Page, people: (r: Route) => Promise<void>) {
+  await page.addInitScript(() => {
+    setInterval(() => document.querySelector('bun-hmr')?.remove(), 200);
+  });
+  await page.route('**/api/**', (r) => json(r, []));
+  await page.route(/\/api\/tenant\/manifest$/, (r) =>
+    json(r, { display_name: 'Algedonic Ales', modules: {}, labels: {} }));
+  await page.route(/\/api\/session$/, (r) =>
+    json(r, { username: 'david', employee_id: EMP.id, role: 'platform-admin' }));
+  await page.route(/\/api\/people$/, people);
+}
+
+test('a failed roster read says so — never "No employees match those filters."', async ({ page }) => {
+  await peopleMocks(page, (r) => json(r, 'people store down', 500));
+
+  await page.goto('/ux/people');
+  await expect(page.locator('.load-failed')).toBeVisible();
+  await expect(page.locator('.load-failed')).toContainText("Couldn't load the roster");
+  await expect(page.locator('.load-failed')).toContainText('HTTP 500');
+  await expect(page.getByText('No employees match those filters.')).toHaveCount(0);
+});
+
+test('a genuinely empty roster still reads as empty, not as a failure', async ({ page }) => {
+  await peopleMocks(page, (r) => json(r, []));
+
+  await page.goto('/ux/people');
+  await expect(page.getByText('No employees match those filters.')).toBeVisible();
+  await expect(page.locator('.load-failed')).toHaveCount(0);
+});

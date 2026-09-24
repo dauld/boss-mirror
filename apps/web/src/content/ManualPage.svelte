@@ -4,8 +4,11 @@
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { formatDate } from '@boss/web-kit/ui/date';
   import RichBody from './RichBody.svelte';
+  import { tokenize } from './richBody';
   import type { ManualSection } from './types';
   import { href, navigate } from '../router';
+  import { loadOwnerNames, personIdsOf } from '../data/ownerNames';
+  import { okRead, type ReadState } from '../data/readState';
 
   type Props = { slug: string | null };
   let { slug }: Props = $props();
@@ -26,7 +29,8 @@
   let active = $state<ManualSection | null>(null);
   let activeLoading = $state(false);
   let activeNotFound = $state(false);
-  let empNames = $state<Map<string, string>>(new Map());
+  let empNames = $state<ReadonlyMap<string, string>>(new Map());
+  let namesRead = $state<ReadState>(okRead);
 
   const COLLAPSED_KEY = 'boss.manual.collapsed';
 
@@ -62,16 +66,36 @@
         if (!cancelled) sectionsFailed = e instanceof Error ? e.message : String(e);
       }
       if (!cancelled) sectionsLoading = false;
-      try {
-        const r = await fetch('/api/people');
-        if (r.ok) {
-          const body = (await r.json()) as Array<{ id: string; name: string }>;
-          const m = new Map<string, string>();
-          for (const e of body) m.set(e.id, e.name);
-          if (!cancelled) empNames = m;
-        }
-      } catch {
-        // ignore
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  // Names only the employees the open section's body names, one row
+  // each, and says so when a name cannot load. Until backlog 1e73bd93
+  // (5013bef4's gap 3) every mount read the WHOLE roster — although 0
+  // of the 17 live bodies carried a shortcode — and a refusal or a
+  // network error was dropped, so a shortcode silently read as its id.
+  // Keyed on the id list as a string so a re-render of the same body
+  // does not re-ask the same question.
+  let bodyPeopleKey = $derived(
+    active
+      ? personIdsOf(
+          tokenize(active.body).flatMap((t) =>
+            t.kind === 'link' && t.entityKind === 'employee' ? [t.id] : [],
+          ),
+        ).join('\n')
+      : '',
+  );
+  $effect(() => {
+    const ids = bodyPeopleKey ? bodyPeopleKey.split('\n') : [];
+    let cancelled = false;
+    (async () => {
+      const out = await loadOwnerNames(ids);
+      if (!cancelled) {
+        empNames = out.names;
+        namesRead = out.read;
       }
     })();
     return () => {
@@ -211,6 +235,11 @@
               {formatDate(active.updated_at)}
             </div>
           </header>
+          {#if namesRead.kind === 'failed'}
+            <p class="load-failed" role="alert" style="font-size:12px">
+              Couldn't load employee names — {namesRead.error}. Employees show as ids.
+            </p>
+          {/if}
           <div class="manual-article-body">
             <RichBody body={active.body} employeeNames={empNames} />
           </div>

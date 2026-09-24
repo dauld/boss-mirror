@@ -5,6 +5,8 @@
   import { formatDate } from '@boss/web-kit/ui/date';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import { appNow } from '@boss/web-kit/sim-clock';
+  import { loadOwnerNames, personIdsOf } from '../data/ownerNames';
+  import { okRead, type ReadState } from '../data/readState';
 
   type AvailabilityKind =
     | 'available' | 'pto' | 'sick' | 'holiday' | 'training' | 'blocked';
@@ -102,7 +104,8 @@
   /// (packet 3fba9c35, the false-empty sweep).
   let loadFailed = $state<string | null>(null);
   let loading = $state(true);
-  let empNames = $state<Map<string, string>>(new Map());
+  let empNames = $state<ReadonlyMap<string, string>>(new Map());
+  let namesRead = $state<ReadState>(okRead);
 
   let weekStart = $derived(addDays(startOfWeek(appNow()), weekOffset * 7));
   let weekEnd = $derived(addDays(weekStart, 7));
@@ -149,19 +152,20 @@
     };
   });
 
+  // Names only the techs on the grid, one row each, and says so when a
+  // name cannot load. Until backlog 1e73bd93 this read the WHOLE roster
+  // and dropped a refusal or a network error, so the techs silently
+  // became ids (see ../data/ownerNames.ts). Keyed on the id list as a
+  // string so paging to a week with the same techs does not re-ask.
+  let techKey = $derived(personIdsOf((data?.rows ?? []).map((r) => r.employee_id)).join('\n'));
   $effect(() => {
+    const ids = techKey ? techKey.split('\n') : [];
     let cancelled = false;
     (async () => {
-      try {
-        const r = await fetch('/api/people');
-        if (r.ok) {
-          const body = (await r.json()) as Array<{ id: string; name: string }>;
-          const m = new Map<string, string>();
-          for (const e of body) m.set(e.id, e.name);
-          if (!cancelled) empNames = m;
-        }
-      } catch {
-        // ignore
+      const out = await loadOwnerNames(ids);
+      if (!cancelled) {
+        empNames = out.names;
+        namesRead = out.read;
       }
     })();
     return () => {
@@ -228,6 +232,11 @@
   {:else if !data || data.rows.length === 0}
     <p class="empty">No techs have availability or assignments this week.</p>
   {:else}
+    {#if namesRead.kind === 'failed'}
+      <p class="load-failed" role="alert" style="font-size:12px; margin-bottom:12px">
+        Couldn't load tech names — {namesRead.error}. Techs show as ids.
+      </p>
+    {/if}
     <div style="overflow-x:auto">
       <table class="data-table" style="min-width:900px; border-collapse:collapse">
         <thead>

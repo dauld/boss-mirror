@@ -474,10 +474,18 @@ narrows to `platform-admin`**, the role that owns the Workflow registry,
 from any job writer; (5) **never automatic, never on publish** — a
 cohort move (the 47 page-audits on v1) is the per-packet door run in a
 loop by an operator after a dry run, each packet its own event,
-revisited once moves have been counted. Not yet built: on main the
-route still admits any job writer, refuses no changed procedure and
-emits a plain `job.updated`, so the guarantee above is decided and the
-door does not yet hold it.
+revisited once moves have been counted. Built in two cars: the first
+refused every move the one-column door could not carry (1e973965); the
+second (backlog `4347a1af`) is the door as decided — `boss job convert`
+and its `GET` dry run, the plan in `boss_jobs::repin` written in one
+transaction, the `jobs.job.repinned` marker beside the row state, and
+`repins` reserved against the metadata PATCH and carried through the
+job PUT the way `corrections` is. Q4's "platform-admin" is held as
+policy data rather than a role name: the caller needs `publish` on
+`workflow` — the permission that makes a protocol version live, which
+the core defaults give platform-admin alone — as well as the job write.
+A projected key the executor has since written is not overwritten; the
+record lists it as `kept`.
 
 The brewery's `wholesale-keg-order` is the worked example of
 agent-gated fulfillment: an `availability-gate` reads finished-goods

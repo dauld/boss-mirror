@@ -129,7 +129,8 @@ company change how it works without rebuilding what it works *on*:
   endpoints: steps, the predicates that order them, the evidence each
   requires, the terminals, the obligations. That is why protocols are
   **registry data** — versioned, append-only, in-flight packets pinned to
-  the version they were admitted under. "The **current** operating model"
+  the version they were admitted under unless an actor explicitly moves
+  one, and then the move is on the record. "The **current** operating model"
   is load-bearing: a protocol that cannot be replaced without a deploy
   has leaked into the substrate, and that leak is the defect to hunt.
 - **The actors run it.** Humans and registered agents are the CPUs —
@@ -303,7 +304,7 @@ The **Workflow registry** (`boss-jobs`, backed by the `workflows` table) is appe
 - `steps` — a flat set of Steps; the DAG is implicit in each step's `ready_when` predicate (an edge A → B exists iff B's `ready_when` references A), not an author-drawn graph
 - `metadata_schema` + `entitlements` — typed fields and policy hooks on the Job itself
 
-**Adding a new workflow means adding a Workflow row**, not touching core code. New versions supersede old ones; in-flight Jobs stay pinned to the version they were opened under. Authoring lives at `/system/workflows`.
+**Adding a new workflow means adding a Workflow row**, not touching core code. New versions supersede old ones; in-flight Jobs stay pinned to the version they were opened under — never moved on publish. Moving one is an explicit, recorded act: `boss job convert <packet> [--to vN] [--dry-run]` (`POST /api/jobs/{id}/convert`, `publish` authority on `workflow`) refuses a move that would demand evidence retroactively or strand a step, re-projects the target's text onto steps not yet completed, creates the steps it inserts, leaves completed steps with what they ran under, and records a `jobs.job.repinned` event plus a `repins` entry on the packet (design 7cf202a9). Authoring lives at `/system/workflows`.
 
 ### Steps
 A **Step** is the typed unit of work inside a Job. Each step has a `kind` (from the StepType registry), `status` (pending → ready → active → completed (+ skipped)), optional assignee, `blocked_by` (a predicate-derived denormalized edge list for DAG rendering — recovered from the step's `ready_when` references, not an author-specified gate), optional sign-off, and free-form `metadata`.

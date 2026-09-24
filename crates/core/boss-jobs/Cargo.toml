@@ -117,6 +117,10 @@ name = "job_metadata_patch_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "repin_writes_the_move_whole_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "step_fields_survive_an_update"
 required-features = ["postgres"]
 

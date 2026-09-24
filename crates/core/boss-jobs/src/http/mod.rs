@@ -282,7 +282,12 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         // Top-level metadata merge — the atomic alternative to the
         // GET → spread → full PUT read-modify-write. `null` removes.
         .route("/api/jobs/{id}/metadata", patch(patch_job_metadata::<R, B>))
-        .route("/api/jobs/{id}/convert", post(convert_job::<R, B>))
+        // Move a packet to another version of its protocol (POST), or
+        // preview the move without writing (GET) — design 7cf202a9.
+        .route(
+            "/api/jobs/{id}/convert",
+            get(preview_convert_job::<R, B>).post(convert_job::<R, B>),
+        )
         .route("/api/estate/nodes", get(list_estate_nodes::<R, B>))
         // The instance's hosting edit level, off the tenant manifest
         // (a479faf7): the word the dispatch door and the gate's

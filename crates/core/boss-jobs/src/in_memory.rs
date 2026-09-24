@@ -601,23 +601,74 @@ impl JobsRepository for InMemoryJobs {
         &self,
         id: &JobId,
         to_version: i32,
+        plan: &crate::repin::RepinPlan,
+        record: &serde_json::Value,
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<Job, JobsError> {
-        // One column, under the lock, and the event carries the row as
-        // it stands afterwards — same shape as the metadata merge above.
-        let repinned = {
+        // The whole move under one lock — the Pg adapter's transaction,
+        // as Rust — and every event built from the rows as they stand
+        // afterwards.
+        let (repinned, rewritten, inserted) = {
             let mut state = self.inner.lock().expect("poisoned");
             let Some(job) = state.jobs.get_mut(&job_key(id)) else {
                 return Err(JobsError::NotFound(*id));
             };
             job.workflow_version = to_version;
-            job.clone()
+            job.metadata = crate::repin::appended(&job.metadata, record);
+            let repinned = job.clone();
+            let mut rewritten = Vec::new();
+            for r in &plan.reprojected {
+                let key = step_key(&r.step.id);
+                let Some(stored) = state.steps.get(&key) else {
+                    return Err(JobsError::StepNotFound(r.step.id));
+                };
+                // A row that finished since the plan was read keeps what
+                // it ran under; only its place in the list moves.
+                let next = if matches!(stored.status, StepStatus::Completed | StepStatus::Skipped) {
+                    Step {
+                        sort_order: r.step.sort_order,
+                        ..stored.clone()
+                    }
+                } else {
+                    Step {
+                        status: stored.status,
+                        sign_offs: stored.sign_offs.clone(),
+                        ..r.step.clone()
+                    }
+                };
+                state.step_touched_at.insert(key.clone(), stamp.timestamp);
+                state.steps.insert(key, next.clone());
+                rewritten.push(next);
+            }
+            let inserted: Vec<Step> = plan
+                .inserted
+                .iter()
+                .filter(|s| insert_step_locked(&mut state, s, stamp.timestamp))
+                .cloned()
+                .collect();
+            (repinned, rewritten, inserted)
         };
-        let event = stamp.event(
+        let mut events = vec![stamp.event(
             crate::events::JOB_UPDATED,
             serde_json::to_value(&repinned).unwrap_or_default(),
-        );
-        self.record_all(&[event]);
+        )];
+        events.extend(rewritten.iter().map(|s| {
+            stamp.event(
+                crate::events::STEP_UPDATED,
+                crate::events::step_state_payload(s),
+            )
+        }));
+        events.extend(inserted.iter().map(|s| {
+            stamp.event(
+                crate::events::STEP_CREATED,
+                crate::events::step_state_payload(s),
+            )
+        }));
+        events.push(stamp.event(
+            crate::events::JOB_REPINNED,
+            crate::repin::repinned_payload(&id.to_string(), record),
+        ));
+        self.record_all(&events);
         Ok(repinned)
     }
 

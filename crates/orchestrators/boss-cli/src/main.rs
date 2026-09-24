@@ -1405,6 +1405,23 @@ enum JobAction {
         /// JSON object file: key -> value, null to remove.
         patch: std::path::PathBuf,
     },
+    /// Move a packet to another version of its protocol (design
+    /// 7cf202a9): steps not yet completed re-read the target's text,
+    /// steps it inserts are created, completed steps keep what they ran
+    /// under, and the move is recorded on the packet (`repins`) and in
+    /// the log (`jobs.job.repinned`). Prints the plan first; refused
+    /// unless you may publish a protocol version. Never automatic.
+    Convert {
+        /// Full uuid, 8+ characters of the id, or the car's branch.
+        job: String,
+        /// Target version, `3` or `v3` (default: the active version).
+        #[arg(long, value_name = "VERSION")]
+        to: Option<String>,
+        /// Print the verdict and the plan; write nothing. A read, so it
+        /// can be run across a cohort before anyone moves a packet.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1653,6 +1670,9 @@ async fn main() -> Result<()> {
                 job::file(&kind, &title, priority, metadata, subject_id, channel).await
             }
             JobAction::Patch { job, patch } => job::patch(&job, &patch).await,
+            JobAction::Convert { job, to, dry_run } => {
+                job::convert(&job, to.as_deref(), dry_run).await
+            }
         },
         Commands::Orient { all } => orient::run(all).await,
         Commands::Brief { packet, profile } => brief::run(packet, profile).await,

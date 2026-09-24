@@ -902,17 +902,29 @@ pub trait JobsRepository: Send + Sync {
     /// immutability is what makes "in-flight packets stay on the
     /// version they were admitted under" true rather than aspirational.
     ///
-    /// So conversion gets its own door, and the door is narrow: it
-    /// changes exactly one column, and the caller is expected to have
-    /// asked [`crate::protocol_conversion::convertibility_for_repin`]
-    /// first — which refuses, besides an unsafe move, any change this
-    /// one column cannot carry onto the step rows (1e973965). Widening `update_job` instead would have let any PUT
-    /// re-pin a packet by accident, which is the failure this shape
-    /// exists to prevent (bfc74b3a).
+    /// So conversion gets its own door. The caller is expected to have
+    /// asked [`crate::protocol_conversion::convertibility_for_packet`]
+    /// first, and hands over what the move writes
+    /// ([`crate::repin::plan`]). Widening `update_job` instead would have
+    /// let any PUT re-pin a packet by accident, which is the failure
+    /// this shape exists to prevent (bfc74b3a).
+    ///
+    /// ONE TRANSACTION, because a move is true of the packet only whole
+    /// (design 7cf202a9 Q2/Q3; backlog 1e973965 measured the door that
+    /// moved the column alone): the pinned version, `record` appended
+    /// to the reserved `repins` list, each re-projected step row, each
+    /// inserted one — recorded as JOB_UPDATED, a STEP_UPDATED per
+    /// rewritten row and a STEP_CREATED per inserted one (the state the
+    /// rebuild replays), and the `jobs.job.repinned` marker carrying
+    /// `record`. A re-projected row that finished between the caller's
+    /// read and this write keeps everything but its `sort_order`: a
+    /// completed step keeps the text it ran under, whoever raced.
     async fn repin_workflow_version_at(
         &self,
         id: &JobId,
         to_version: i32,
+        plan: &crate::repin::RepinPlan,
+        record: &serde_json::Value,
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<Job, JobsError>;
 

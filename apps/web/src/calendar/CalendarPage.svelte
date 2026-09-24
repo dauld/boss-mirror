@@ -5,7 +5,7 @@
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
   import { okRead, type ReadState } from '../data/readState';
-  import { loadOwnerNames, ownerIdsOf } from './ownerNames';
+  import { loadOwnerNames, ownerIdsOf } from '../data/ownerNames';
 
   type LaunchCalendarRow = {
     job_id: string;
@@ -96,7 +96,7 @@
   // Names only the owners shown, one row each, and says so when a name
   // cannot load. Until backlog 0268a829 this read the whole roster, and
   // a refusal or a network error was dropped, so the owners silently
-  // became ids (see ./ownerNames.ts).
+  // became ids (see ../data/ownerNames.ts).
   let ownerIds = $derived(ownerIdsOf(data));
   $effect(() => {
     const ids = ownerIds;

@@ -15,7 +15,10 @@
 //   links    2 kinds  — tree section link; entity link in a section body
 //   buttons  1 kind   — tree toggle (Expand / Collapse; a no-op on a leaf)
 //   forms    0
-//   reads    3        — the tree, /api/people, the active section
+//   reads    3        — the tree, the active section, and one
+//                        /api/people/{id} per employee shortcode in
+//                        that section's body (the whole roster until
+//                        backlog 1e73bd93, which closed gap 3)
 //   writes   0
 //
 // THIS STEP PINS WHAT THE PAGE DOES TODAY; it does not fix the gaps.
@@ -37,7 +40,14 @@ const json = (r: Route, body: unknown, status = 200): Promise<void> =>
 /// The page's three reads, as ManualPage.svelte spells them.
 const TREE = /\/api\/content\/manual$/;
 const SECTION = /\/api\/content\/manual\/(.+)$/;
-const PEOPLE = /\/api\/people$/;
+const PERSON = /\/api\/people\/([^/]+)$/;
+
+/// The one employee the fixture bodies name, as its own row answers.
+/// The smoke ROSTER (the app shell's session read) names emp-001 "Demo
+/// CEO", so a page that went back to reading the whole roster to name
+/// a shortcode shows the wrong name and fails the shortcode test rather
+/// than passing it by accident (backlog 1e73bd93).
+const EMP_001 = { id: 'emp-001', name: 'Rhea Okafor' };
 
 /// localStorage key the tree's collapse set lives under.
 const COLLAPSED_KEY = 'boss.manual.collapsed';
@@ -95,6 +105,10 @@ async function installManualReads(page: Page): Promise<void> {
     const slug = SECTION.exec(new URL(r.request().url()).pathname)?.[1] ?? '';
     const hit = SECTIONS.find((s) => s.slug === slug);
     return hit ? json(r, hit) : json(r, { error: 'not found' }, 404);
+  });
+  await page.route(PERSON, (r) => {
+    const id = PERSON.exec(new URL(r.request().url()).pathname)?.[1] ?? '';
+    return id === EMP_001.id ? json(r, EMP_001) : json(r, 'not found', 404);
   });
 }
 
@@ -332,7 +346,7 @@ test.describe('/manual — the section body', () => {
 
     const link = page.locator('.manual-article-body a');
     await expect(link).toHaveCount(1);
-    await expect(link).toHaveText('Demo CEO');
+    await expect(link).toHaveText(EMP_001.name);
     await expect(link).toHaveAttribute('href', '/ux/people/emp-001');
     expect(route('/ux/people/emp-001')).toEqual({ kind: 'employee', empId: 'emp-001' });
 
@@ -412,16 +426,45 @@ test.describe('/manual — empty and failed reads are never the same paint', () 
     await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
   });
 
-  // CURRENT, gap 3 (5013bef4): the roster read that labels employee
-  // shortcodes fails silently; the shortcode falls back to its raw id.
-  test('CURRENT, gap 3: a failed roster read leaves the raw employee id and says nothing', async ({ page }) => {
+  // Gap 3 (5013bef4), FIXED by backlog 1e73bd93: this test was
+  // "CURRENT, gap 3: a failed roster read leaves the raw employee id and
+  // says nothing". The shortcode still falls back to its id — an id is
+  // the honest label when the name is unknown — but the page now says
+  // the name read failed, and which read it was.
+  test('a failed name read keeps the raw employee id and says so, naming the read', async ({ page }) => {
     await installManualReads(page);
-    await page.route(PEOPLE, (r) => json(r, { error: 'people down' }, 503));
+    await page.route(PERSON, (r) => json(r, { error: 'people down' }, 503));
     await mountPage(page, '/ux/manual/welcome', { titleMatch: /Company manual/ });
 
     await expect(page.locator('article.manual-article h2')).toHaveText('Welcome');
     await expect(page.locator('.manual-article-body a')).toHaveText('emp-001');
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+    const failed = page.locator(`article.manual-article ${FAILURE_MARKER}`);
+    await expect(failed).toHaveAttribute('role', 'alert');
+    await expect(failed).toHaveText(
+      "Couldn't load employee names — /api/people/emp-001: HTTP 503. Employees show as ids.",
+    );
+  });
+
+  // 5013bef4's other half: 0 of the 17 live bodies carry a shortcode,
+  // and the page read the whole roster on every mount anyway. The
+  // roster half is pinned by the shortcode test above (the roster
+  // fixture names emp-001 "Roster Copy"); the app shell's session still
+  // reads the roster once, which is not this page's read, so this
+  // counts the per-person reads only.
+  test('a body with no shortcode reads no one, and a body with one reads only that person', async ({ page }) => {
+    const personReads: string[] = [];
+    page.on('request', (req) => {
+      const path = new URL(req.url()).pathname;
+      if (PERSON.test(path)) personReads.push(path);
+    });
+    await installManualReads(page);
+    await mountPage(page, '/ux/manual/policies/security', { titleMatch: /Company manual/ });
+    await expect(page.locator('article.manual-article h2')).toHaveText('Security');
+    expect(personReads).toEqual([]);
+
+    await page.getByRole('link', { name: 'Welcome', exact: true }).click();
+    await expect(page.locator('.manual-article-body a')).toHaveText(EMP_001.name);
+    expect([...new Set(personReads)]).toEqual(['/api/people/emp-001']);
   });
 });
 

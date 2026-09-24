@@ -71,7 +71,11 @@ pub struct Obstacle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bites {
     /// Retroactive evidence. A completed step would be claiming work
-    /// that was never done; a step still ahead simply collects it.
+    /// that was never done; a step still ahead simply collects it —
+    /// true BECAUSE the re-pin re-projects that step's row
+    /// ([`crate::repin`]): completion validates the ROW's `fields`, not
+    /// the spec's, so a required field the row never received would
+    /// never be asked for (backlog 1e973965, until 4347a1af carried it).
     IfDone,
     /// Only affects work the packet has not reached yet.
     IfNotDone,
@@ -192,6 +196,14 @@ fn required_fields(s: &StepSpec) -> BTreeSet<&str> {
 /// `done` holds the slugs of steps this packet has already completed.
 /// Structural obstacles and workflow-level ones bite regardless — this
 /// filters, it never overrides.
+///
+/// It judges the MOVE, and the verdict leans on what the move writes:
+/// "a step still ahead simply collects it" and "an inserted step ahead
+/// of the packet will simply be walked" are true only because the
+/// re-pin door re-projects every unfinished step's row and materialises
+/// every inserted one ([`crate::repin::plan`], design 7cf202a9 Q2). A
+/// door that moved only the pinned version would make both false —
+/// which the first door did, measured on page-audit c0d2caf0 (1e973965).
 pub fn convertibility_for_packet(
     from: &WorkflowSpec,
     to: &WorkflowSpec,
@@ -231,137 +243,6 @@ pub fn convertibility_for_packet(
     } else {
         Convertibility::NeedsReview(biting)
     }
-}
-
-/// Can the `/convert` door, AS IT IS BUILT TODAY, re-pin this packet
-/// and have the result be true of it?
-///
-/// [`convertibility_for_packet`] answers whether the MOVE is safe. This
-/// answers whether the DOOR can carry it, which is a narrower question
-/// with a measured answer (backlog 1e973965, 2026-09-23): the door
-/// changes `jobs.workflow_version` and nothing else. Every step row
-/// keeps what materialisation copied onto it from the ADMISSION version
-/// — its procedure and other `metadata_defaults`, its kind, its fields
-/// (which completion validates against, not the spec), its sign-offs —
-/// and a step the target inserts gets no row at all. On page-audit
-/// c0d2caf0 (v1, active v3, differing only in two pending procedures)
-/// the door would have answered `converted: true` and changed nothing
-/// an executor reads: the record saying v3 while the steps say v1.
-///
-/// So, until the re-pin re-projects pending steps and materialises
-/// inserted ones (design 7cf202a9 Q2, the next car of backlog
-/// 4347a1af), a move is refused when it would change what a step NOT
-/// YET COMPLETED carries, or insert a step anywhere. A completed step
-/// is left out on purpose: it ran under the text it holds, and keeping
-/// that text is what the decision asks of it. The refusal names each
-/// property, so "which step, and what changed" is answered in one read.
-/// This only ever ADDS obstacles to the safety verdict — it never
-/// waves through what that one refers.
-pub fn convertibility_for_repin(
-    from: &WorkflowSpec,
-    to: &WorkflowSpec,
-    done: &BTreeSet<String>,
-) -> Convertibility {
-    let mut obstacles = convertibility_for_packet(from, to, done)
-        .obstacles()
-        .to_vec();
-    let uncarried: Vec<Obstacle> = changes_the_repin_cannot_carry(from, to, done)
-        .into_iter()
-        // An insertion the packet is already past is the safety
-        // verdict's own obstacle; one step, one account of it.
-        .filter(|c| {
-            !obstacles
-                .iter()
-                .any(|o| o.step == c.step && o.bites == Bites::IfPacketPast)
-        })
-        .collect();
-    obstacles.extend(uncarried);
-    if obstacles.is_empty() {
-        Convertibility::Automatic
-    } else {
-        Convertibility::NeedsReview(obstacles)
-    }
-}
-
-/// What a re-pin that moves only the pinned version would leave untrue
-/// on this packet: every inserted step, and every property a
-/// not-yet-completed step's row copies from its spec that differs
-/// between the two versions. Across two different protocols this says
-/// nothing — [`convertibility`] already refuses that as a re-admission.
-fn changes_the_repin_cannot_carry(
-    from: &WorkflowSpec,
-    to: &WorkflowSpec,
-    done: &BTreeSet<String>,
-) -> Vec<Obstacle> {
-    if from.kind != to.kind {
-        return Vec::new();
-    }
-    let from_steps: BTreeMap<&str, &StepSpec> =
-        from.steps.iter().map(|s| (s.title.as_str(), s)).collect();
-    to.steps
-        .iter()
-        .filter_map(|t| match from_steps.get(t.title.as_str()) {
-            None => Some(Obstacle::step(
-                &t.title,
-                "step inserted by the target version — the re-pin door \
-                 creates no row for it today, so the packet would reach a \
-                 step it does not have (1e973965); refused until a re-pin \
-                 materialises inserted steps (4347a1af)",
-            )),
-            Some(_) if done.contains(&t.title) => None,
-            Some(f) => {
-                let changed = row_differences(f, t);
-                (!changed.is_empty()).then(|| {
-                    Obstacle::step(
-                        &t.title,
-                        format!(
-                            "{} would change on a step not yet completed — the \
-                             re-pin door moves only the pinned version, so this \
-                             step's row would keep what the admission version \
-                             wrote (1e973965); refused until a re-pin re-projects \
-                             pending steps (4347a1af)",
-                            changed.join(", ")
-                        ),
-                    )
-                })
-            }
-        })
-        .collect()
-}
-
-/// The properties a materialised step row copies from its spec
-/// (`registry::materialize_steps_at`) that differ between two versions
-/// of one step, each named the way an operator would look for it:
-/// a projected metadata key in backticks (`procedure` is the measured
-/// one), the other row columns by name. `ready_when` and `terminal` are
-/// absent because the engine reads them from the pinned spec, not the
-/// row — a re-pin does carry them, and the safety verdict judges them.
-fn row_differences(f: &StepSpec, t: &StepSpec) -> Vec<String> {
-    let (fm, tm) = (
-        crate::registry::merge_metadata(&f.metadata_defaults, f),
-        crate::registry::merge_metadata(&t.metadata_defaults, t),
-    );
-    let empty = serde_json::Map::new();
-    let (fm, tm) = (
-        fm.as_object().unwrap_or(&empty),
-        tm.as_object().unwrap_or(&empty),
-    );
-    let keys: BTreeSet<&String> = fm.keys().chain(tm.keys()).collect();
-    let metadata = keys
-        .into_iter()
-        .filter(|k| fm.get(*k) != tm.get(*k))
-        .map(|k| format!("`{k}`"));
-    let columns = [
-        (f.kind != t.kind, "kind"),
-        (f.title_template != t.title_template, "title"),
-        (f.fields != t.fields, "fields"),
-        (f.sign_offs_required != t.sign_offs_required, "sign-offs"),
-        (f.assurance_required != t.assurance_required, "assurance"),
-    ]
-    .into_iter()
-    .filter(|(differs, _)| *differs)
-    .map(|(_, name)| name.to_string());
-    metadata.chain(columns).collect()
 }
 
 pub fn convertibility(from: &WorkflowSpec, to: &WorkflowSpec) -> Convertibility {
@@ -1010,142 +891,6 @@ mod tests {
         assert!(
             !convertibility_for_packet(&before, &after, &done(&["scope", "build"])).is_automatic(),
             "build is done — claiming it collected a field it never did is the lie"
-        );
-    }
-
-    // -----------------------------------------------------------------
-    // The re-pin door as built: it moves one column (1e973965).
-    // -----------------------------------------------------------------
-
-    fn with_procedure(title: &str, procedure: &str) -> StepSpec {
-        let mut s = step(title);
-        s.metadata_defaults = serde_json::json!({ "procedure": procedure });
-        s
-    }
-
-    /// THE MEASURED CASE (backlog 1e973965, page-audit c0d2caf0). Its
-    /// v1 -> v3 differs ONLY in two pending steps' procedure text, so
-    /// the per-packet verdict is Automatic — and the door, which moves
-    /// only `jobs.workflow_version`, answered converted while the step
-    /// rows kept the v1 text the executor reads. The pair is safe; the
-    /// door cannot carry it, and must say so rather than answer.
-    #[test]
-    fn a_repin_refuses_a_procedure_change_on_a_step_not_yet_completed() {
-        let before = wf(vec![
-            with_procedure("scope", "Scope it."),
-            with_procedure("build", "Build it."),
-        ]);
-        let after = wf(vec![
-            with_procedure("scope", "Scope it."),
-            with_procedure("build", "Build it, test first."),
-        ]);
-        let at = done(&["scope"]);
-        assert!(
-            convertibility_for_packet(&before, &after, &at).is_automatic(),
-            "precondition: the safety verdict calls this move harmless"
-        );
-
-        let v = convertibility_for_repin(&before, &after, &at);
-        assert!(
-            !v.is_automatic(),
-            "the step row keeps the text it was materialised with"
-        );
-        let o = &v.obstacles()[0];
-        assert_eq!(o.step.as_deref(), Some("build"));
-        assert!(
-            o.reason.contains("`procedure`"),
-            "the refusal must name WHAT would change: {:?}",
-            o.reason
-        );
-    }
-
-    /// ...and the same edit on a step the packet has already completed
-    /// converts: that step ran under the text it holds, which is what
-    /// a completed step must keep. This is the one safe case.
-    #[test]
-    fn a_procedure_change_on_a_completed_step_still_converts() {
-        let before = wf(vec![
-            with_procedure("scope", "Scope it."),
-            with_procedure("build", "Build it."),
-        ]);
-        let after = wf(vec![
-            with_procedure("scope", "Scope it, in writing."),
-            with_procedure("build", "Build it."),
-        ]);
-        assert_eq!(
-            convertibility_for_repin(&before, &after, &done(&["scope"])),
-            Convertibility::Automatic
-        );
-    }
-
-    /// An inserted step AHEAD of the packet is harmless to the safety
-    /// verdict (it will simply be walked) — but the door creates no row
-    /// for it, so the packet would reach a step it does not have.
-    /// backlog-item v1 -> v7 inserts `draft-design` exactly this way.
-    #[test]
-    fn a_repin_refuses_a_step_the_target_inserts_ahead_of_the_packet() {
-        let before = wf(vec![step("scope"), step("build"), step("merged")]);
-        let after = wf(vec![
-            step("scope"),
-            step("build"),
-            step("merged"),
-            step("settled"),
-        ]);
-        let at = done(&["scope"]);
-        assert!(convertibility_for_packet(&before, &after, &at).is_automatic());
-
-        let v = convertibility_for_repin(&before, &after, &at);
-        assert_eq!(v.obstacles().len(), 1, "{:?}", v.obstacles());
-        let o = &v.obstacles()[0];
-        assert_eq!(o.step.as_deref(), Some("settled"));
-        assert!(o.reason.contains("inserted"), "{:?}", o.reason);
-    }
-
-    /// An insertion the packet is already PAST is the safety verdict's
-    /// own obstacle; the door's refusal must not report it a second
-    /// time under another reason.
-    #[test]
-    fn an_inserted_step_the_packet_is_past_is_reported_once() {
-        let before = wf(vec![step("scope"), step("build")]);
-        let after = wf(vec![step("scope"), step("inspection"), step("build")]);
-        let v = convertibility_for_repin(&before, &after, &done(&["scope", "build"]));
-        let named: Vec<_> = v
-            .obstacles()
-            .iter()
-            .filter(|o| o.step.as_deref() == Some("inspection"))
-            .collect();
-        assert_eq!(named.len(), 1, "{:?}", v.obstacles());
-    }
-
-    /// Procedure is the measured case, not the only copy. A step row
-    /// carries everything materialisation wrote onto it — its kind, its
-    /// fields, its sign-offs, its projected placement keys — and
-    /// completion validates against the ROW (`step.fields` in
-    /// http/steps.rs). A newly required field on a pending step reads
-    /// "simply collected" to the safety verdict; on a re-pinned row it
-    /// would never be asked for; a WIDENED authority is the loosening
-    /// the safety verdict exists for, and the row would still carry the
-    /// old role every assignment query reads. Each is named.
-    #[test]
-    fn every_property_a_pending_step_row_copies_is_refused_when_it_changes() {
-        let mut narrow = step("build");
-        narrow.authority_role = Some("cto".to_string());
-        let before = wf(vec![step("scope"), narrow]);
-        let mut build = step("build");
-        build.fields = vec![field("test", true)];
-        let after = wf(vec![step("scope"), build]);
-        let at = done(&["scope"]);
-        assert!(
-            convertibility_for_packet(&before, &after, &at).is_automatic(),
-            "precondition: both are safe for a packet that has not reached build"
-        );
-
-        let v = convertibility_for_repin(&before, &after, &at);
-        let reasons: Vec<&str> = v.obstacles().iter().map(|o| o.reason.as_str()).collect();
-        assert!(reasons.iter().any(|r| r.contains("fields")), "{reasons:?}");
-        assert!(
-            reasons.iter().any(|r| r.contains("`authority_role`")),
-            "{reasons:?}"
         );
     }
 

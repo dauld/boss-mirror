@@ -128,7 +128,10 @@ pub async fn rebuild_jobs_and_steps(pool: &PgPool) -> Result<RebuildReport, Rebu
                 "jobs.job.status_changed"
                 | "jobs.job.closed"
                 | "jobs.step.completed"
-                | "jobs.step.signed_off" => Ok(Applied::Skipped),
+                | "jobs.step.signed_off"
+                // A re-pin's rows ride its sibling JOB_UPDATED /
+                // STEP_UPDATED / STEP_CREATED (design 7cf202a9).
+                | "jobs.job.repinned" => Ok(Applied::Skipped),
                 other => {
                     warn!(event_id = ev.audit_id, kind = %other, "unknown jobs.* event kind; skipping");
                     Ok(Applied::Skipped)

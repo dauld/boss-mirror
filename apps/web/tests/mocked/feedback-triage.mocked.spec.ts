@@ -407,4 +407,47 @@ test.describe('feedback triage board', () => {
     expect(body).not.toHaveProperty('status');
     expect(sent.metadata['disposition']).toBeUndefined();
   });
+
+  // Backlog 1e73bd93. The board read the WHOLE roster to name the few
+  // owners on its cards and swallowed a failure ("the roster is
+  // decoration"), so an outage of the people service read as a board of
+  // raw ids with nothing saying why. It now reads one row per person
+  // shown, through the shared reader (src/data/ownerNames.ts), and says
+  // when a name did not load. The roster fixture names the owner
+  // differently, so a board that went back to the roster fails the
+  // first leg rather than passing it by accident.
+  test.describe('naming the owners on the cards', () => {
+    const OWNER = /\/api\/people\/emp-bootstrap-admin$/;
+
+    test.beforeEach(async ({ page }) => {
+      await page.route(/\/api\/people$/, (r) =>
+        r.fulfill({ json: [{ id: 'emp-bootstrap-admin', name: 'Roster Copy' }] }),
+      );
+    });
+
+    test('answered, each owner is named from its own row and nothing says a read failed', async ({ page }) => {
+      await page.route(OWNER, (r) => r.fulfill({ json: { id: 'emp-bootstrap-admin', name: 'David Hauld' } }));
+      await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+
+      const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
+      await expect(card.locator('.tb-by')).toHaveText('David Hauld');
+      await expect(page.locator('.load-failed')).toHaveCount(0);
+    });
+
+    test('refused, the cards keep the id and the board says the names did not load', async ({ page }) => {
+      await page.route(OWNER, (r) => r.fulfill({ status: 503, json: { error: 'people down' } }));
+      await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+
+      const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
+      await expect(card.locator('.tb-by')).toHaveText('emp-bootstrap-admin');
+      const failed = page.locator('.load-failed[role=alert]');
+      await expect(failed).toHaveText(
+        "Couldn't load owner names — /api/people/emp-bootstrap-admin: HTTP 503. Owners show as ids.",
+      );
+      // The names are decoration: the board still renders every card.
+      await expect(page.locator('section[aria-label="Waiting on triage"]')).toContainText(
+        'Typo on the vendors page',
+      );
+    });
+  });
 });

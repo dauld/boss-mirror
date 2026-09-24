@@ -35,6 +35,8 @@
   // board and the terminal queue reader. See jobs/fork.ts.
   import { type Fork, forkStep as forkStepOf, gatedStep, readFork } from './fork';
   import { formatActor } from '../data/actor';
+  import { loadOwnerNames, personIdsOf } from '../data/ownerNames';
+  import { okRead, type ReadState } from '../data/readState';
 
   type Props = Readonly<{
     /// Which queue this board shows. One Workflow today because that is
@@ -120,10 +122,12 @@
   // Employee id -> name, so a card says "David Hauld" rather than
   // `emp-bootstrap-admin` (feedback 19896c17). formatActor already
   // knows how to spell every actor kind — machines, agents, humans —
-  // and falls back to the raw id when the roster has not arrived or
-  // does not contain the id, so a slow or failed fetch degrades to
-  // exactly the old behaviour rather than to a blank.
-  let empNames = $state<Map<string, string>>(new Map());
+  // and falls back to the raw id when a name has not arrived, so a slow
+  // or failed read degrades to the ids rather than to a blank — and,
+  // since backlog 1e73bd93, `namesRead` says so rather than leaving an
+  // outage looking like a board of people with ids for names.
+  let empNames = $state<ReadonlyMap<string, string>>(new Map());
+  let namesRead = $state<ReadState>(okRead);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let busy = $state<Record<string, boolean>>({});
@@ -434,25 +438,38 @@
     if (j) void route(j, col);
   }
 
-  // The roster is decoration, not data the board depends on: it is
-  // fetched alongside `load` rather than inside it, and a failure is
-  // swallowed. formatActor falls back to the raw id, so the worst
-  // case is the ids we were already showing — a board that refuses to
-  // render because /api/people is down would be a strictly worse
-  // trade than a card that says `emp-bootstrap-admin`.
-  async function loadRoster() {
-    try {
-      const r = await fetch('/api/people');
-      if (!r.ok) return;
-      const roster = (await r.json()) as ReadonlyArray<{ id: string; name?: string }>;
-      empNames = new Map(roster.map((e) => [e.id, e.name ?? '']));
-    } catch {
-      /* names stay ids */
-    }
-  }
+  // Names are decoration, not data the board depends on: they are read
+  // beside `load` rather than inside it, and a board that refused to
+  // render because the people service is down would be a strictly
+  // worse trade than a card that says `emp-bootstrap-admin`. But a
+  // failure is SAID (one line above the board), not swallowed.
+  //
+  // Only the people shown are read — card owners, and the step
+  // assignees the packet modal names — one row each through the shared
+  // reader, where this read the WHOLE roster until backlog 1e73bd93.
+  // Keyed on the id list as a string, because `jobs` is replaced on
+  // every poll and the same people should not be re-asked each time.
+  let namesKey = $derived(
+    personIdsOf(
+      jobs.flatMap((j) => [j.owner_id, ...(j.steps ?? []).map((s) => s.assignee_id)]),
+    ).join('\n'),
+  );
+  $effect(() => {
+    const ids = namesKey ? namesKey.split('\n') : [];
+    let cancelled = false;
+    (async () => {
+      const out = await loadOwnerNames(ids);
+      if (!cancelled) {
+        empNames = out.names;
+        namesRead = out.read;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  });
 
   onMount(load);
-  onMount(loadRoster);
 </script>
 
 <PageHeader {title} {subtitle} />
@@ -465,6 +482,11 @@
   <p class="tb-msg">{emptyMessage}</p>
   {@render archiveNote()}
 {:else}
+  {#if namesRead.kind === 'failed'}
+    <p class="tb-msg tb-err load-failed" role="alert">
+      Couldn't load owner names — {namesRead.error}. Owners show as ids.
+    </p>
+  {/if}
   <div class="tb-board">
     {#each columns as col (col.id)}
       {@const cards = byColumn[col.id] ?? []}

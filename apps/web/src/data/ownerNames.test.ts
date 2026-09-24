@@ -1,12 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import { loadOwnerNames, ownerIdsOf } from './ownerNames';
+import { loadOwnerNames, ownerIdsOf, personIdsOf } from './ownerNames';
 
 // Backlog 0268a829 (page audit 0ceeffa6, /ux/calendar GAP 8). The
 // calendar named its owners by fetching the WHOLE roster, and a refusal
 // or a network error was dropped (`if (r.ok)` with no else, and
 // `catch { // ignore }`), so the owners silently became raw ids. These
 // pin the two halves of the fix: read only the owners shown, and say so
-// when a name could not be read.
+// when a name could not be read. Lifted from calendar/ into data/ by
+// backlog 1e73bd93, when the other pages that name a few people moved
+// onto it.
 
 type Answer = { status: number; body?: unknown } | Error;
 
@@ -37,6 +39,40 @@ describe('which owners the calendar asks about', () => {
       { owner_id: 'emp-b' },
     ];
     expect(ownerIdsOf(rows)).toEqual(['emp-a', 'emp-b']);
+  });
+
+  // Backlog 1e73bd93. A job may be owned by an agent, and the triage
+  // board and the KB timeline name ACTORS, which are machines as often
+  // as people. A machine has no people row, so asking about one is a
+  // guaranteed 404 that would paint a false "couldn't load names" line;
+  // formatActor already labels machines without a lookup.
+  test('a machine owner is never asked about — it has no people row', () => {
+    const rows = [
+      { owner_id: 'agent-claude' },
+      { owner_id: 'emp-a' },
+      { owner_id: 'automation:train-conductor' },
+    ];
+    expect(ownerIdsOf(rows)).toEqual(['emp-a']);
+  });
+});
+
+describe('which people a page asks about', () => {
+  test('any ids at all: distinct, sorted, blanks and machines dropped', () => {
+    expect(
+      personIdsOf([
+        'emp-b',
+        null,
+        undefined,
+        '',
+        'emp-a',
+        'emp-b',
+        'agent-claude',
+        'claude@algedonic.dev',
+        'claude:opus-5[1m]',
+        'automation:rule:bill-approve',
+        'system',
+      ]),
+    ).toEqual(['emp-a', 'emp-b']);
   });
 });
 

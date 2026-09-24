@@ -70,7 +70,6 @@ const SILENT: ReadonlyMap<string, string> = new Map([
   ['/ux/jobs', 'jobs list: /api/jobs + /api/workflows'],
   ['/ux/accounts', 'accounts: /api/people/accounts, /api/assets, /api/commerce/invoices'],
   ['/ux/vendors', 'vendors: /api/inventory/vendors, /orders, /vendor-invoices'],
-  ['/ux/people', 'people: roster reads /api/people, which HEALTHY keeps up — needs a per-read outage'],
   ['/ux/assets', 'assets: /api/assets + /api/assets/summary'],
   ['/ux/calendar/me', 'my calendar: identity-keyed reads never fire under the empty mocked session'],
   ['/ux/service', 'service: /api/jobs + /api/workflows'],
@@ -94,13 +93,32 @@ const SILENT: ReadonlyMap<string, string> = new Map([
   ['/hr', 'HR (bare alias): same as /ux/hr'],
 ]);
 
+/// PER-READ OUTAGES: a shell read that is also a route's OWN data, broken
+/// on that route alone (backlog 25ad5042). HEALTHY keeps /api/people up
+/// on every route, so /ux/people, whose one read IS /api/people, was
+/// crawled with its roster loaded and sat on SILENT, and nothing failed
+/// the read and asserted the page's roster-failure line. A regression
+/// to "No employees match those filters." would have passed every spec.
+/// Breaking it on the one route that owns it keeps the other 50 crawled
+/// with the shell they need. The session read beside it tolerates the
+/// failure (loadSession falls through on an empty roster), and the
+/// crawl's mocked session is unauthenticated anyway, so the shell still
+/// paints.
+const ALSO_BROKEN: ReadonlyMap<string, ReadonlyArray<RegExp>> = new Map([
+  ['/ux/people', [/\/api\/people$/]],
+]);
+
 /// Force the outage. Runs AFTER installSmokeMocks, so it takes
-/// precedence, and falls back to the healthy fixtures for HEALTHY.
-async function installOutage(page: Page): Promise<void> {
+/// precedence, and falls back to the healthy fixtures for HEALTHY —
+/// except the reads ALSO_BROKEN names for the route being crawled, which
+/// `current` answers at the moment each request is made.
+async function installOutage(page: Page, current: () => string): Promise<void> {
   await installSmokeMocks(page);
   await page.route('**/api/**', async (route) => {
     const url = route.request().url();
-    if (HEALTHY.some((re) => re.test(url))) return route.fallback();
+    const broken = ALSO_BROKEN.get(current()) ?? [];
+    const healthy = HEALTHY.some((re) => re.test(url)) && !broken.some((re) => re.test(url));
+    if (healthy) return route.fallback();
     return route.fulfill({
       status: 500,
       contentType: 'application/json',
@@ -172,10 +190,12 @@ async function settle(page: Page, reads: Reads): Promise<void> {
 /// route-smoke: the browser keeps the on-the-fly bundle warm, and a full
 /// goto wipes the previous route's JS state, so there is no effect bleed.
 async function crawl(page: Page, routes: ReadonlyArray<string>): Promise<Seen[]> {
-  await installOutage(page);
+  let current = '';
+  await installOutage(page, () => current);
   const reads = watchReads(page);
   const seen: Seen[] = [];
   for (const route of routes) {
+    current = route;
     let shell = false;
     for (let attempt = 1; attempt <= 2 && !shell; attempt++) {
       try {
@@ -235,6 +255,17 @@ test.describe('the outage crawl — a surface cannot render a falsehood', () => 
       ghosts,
       'an excuse for a route no crawl visits reads as "known debt" while ' +
         'covering nothing — drop it, or fix the path',
+    ).toEqual([]);
+  });
+
+  test('every per-read outage breaks a crawled, asserted route', async () => {
+    const crawled = new Set(ROUTES);
+    const idle = [...ALSO_BROKEN.keys()].filter((r) => !crawled.has(r) || SILENT.has(r)).sort();
+    expect(
+      idle,
+      'a per-read outage on a route no crawl visits, or on a SILENT one the ' +
+        'first test never asserts, breaks a read and checks nothing — drop ' +
+        'it, fix the path, or take the route off SILENT',
     ).toEqual([]);
   });
 });

@@ -970,6 +970,8 @@ impl JobsRepository for PgJobs {
         &self,
         id: &JobId,
         to_version: i32,
+        plan: &crate::repin::RepinPlan,
+        record: &serde_json::Value,
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<Job, JobsError> {
         let mut tx = self
@@ -978,10 +980,22 @@ impl JobsRepository for PgJobs {
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
         // The one column update_job deliberately cannot reach, in its
-        // own statement, so re-pinning is always an explicit act.
+        // own statement, so re-pinning is always an explicit act — and
+        // the record of the move appended in the same statement, with
+        // the fold `repin::appended` states in Rust (a non-object
+        // metadata or a non-list under the key reads as empty).
         let row = sqlx::query_as::<_, JobRow>(
             r#"
-            UPDATE jobs SET workflow_version = $2, updated_at = $3
+            UPDATE jobs SET
+                workflow_version = $2,
+                metadata = (CASE WHEN jsonb_typeof(metadata) = 'object'
+                                 THEN metadata ELSE '{}'::jsonb END)
+                           || jsonb_build_object(
+                                'repins',
+                                (CASE WHEN jsonb_typeof(metadata -> 'repins') = 'array'
+                                      THEN metadata -> 'repins' ELSE '[]'::jsonb END)
+                                || jsonb_build_array($4::jsonb)),
+                updated_at = $3
             WHERE id = $1
             RETURNING id, kind, workflow_version, subject_kind, subject_id, title, owner_id,
                       status, priority, opened_on, opened_at, due_on, closed_on, metadata, tags, partition
@@ -990,6 +1004,7 @@ impl JobsRepository for PgJobs {
         .bind(*id.inner().as_uuid())
         .bind(to_version)
         .bind(stamp.timestamp)
+        .bind(record.clone())
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
@@ -997,13 +1012,89 @@ impl JobsRepository for PgJobs {
             return Err(JobsError::NotFound(*id));
         };
         let job = row_to_job(row);
-        let event = stamp.event(
+        let mut events = vec![stamp.event(
             crate::events::JOB_UPDATED,
             serde_json::to_value(&job).unwrap_or_default(),
-        );
-        boss_events::outbox::record_event_in_tx(&mut tx, &event)
+        )];
+
+        // Each re-projected row. The same freeze `update_step_at`
+        // states: a row that is completed or skipped by the time this
+        // runs keeps every column the spec projects — it ran under that
+        // text — and only its place in the list moves. RETURNING is the
+        // row as this statement left it, which is what its state event
+        // must carry.
+        for r in &plan.reprojected {
+            let s = &r.step;
+            let row = sqlx::query_as::<_, StepRow>(
+                r#"
+                UPDATE steps SET
+                    sort_order = $2,
+                    kind = CASE WHEN status IN ('completed', 'skipped') THEN kind ELSE $3 END,
+                    title = CASE WHEN status IN ('completed', 'skipped') THEN title ELSE $4 END,
+                    assignee_id = CASE WHEN status IN ('completed', 'skipped')
+                                       THEN assignee_id ELSE $5 END,
+                    blocked_by = CASE WHEN status IN ('completed', 'skipped')
+                                      THEN blocked_by ELSE $6 END,
+                    metadata = CASE WHEN status IN ('completed', 'skipped')
+                                    THEN metadata ELSE $7 END,
+                    fields = CASE WHEN status IN ('completed', 'skipped') THEN fields ELSE $8 END,
+                    sign_offs_required = CASE WHEN status IN ('completed', 'skipped')
+                                              THEN sign_offs_required ELSE $9 END,
+                    assurance_required = CASE WHEN status IN ('completed', 'skipped')
+                                              THEN assurance_required ELSE $10 END,
+                    updated_at = $11
+                WHERE id = $1
+                RETURNING id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
+                          blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
+                          completed_on, metadata, notes, step_plugin_version, embedded_job,
+                          completed_by, completed_at
+                "#,
+            )
+            .bind(*s.id.inner().as_uuid())
+            .bind(s.sort_order)
+            .bind(&s.kind)
+            .bind(&s.title)
+            .bind(&s.assignee_id)
+            .bind(blocked_by_uuids(&s.blocked_by))
+            .bind(&s.metadata)
+            .bind(serde_json::to_value(&s.fields).unwrap_or_default())
+            .bind(serde_json::to_value(&s.sign_offs_required).unwrap_or_default())
+            .bind(
+                s.assurance_required
+                    .and_then(|a| serde_json::to_value(a).ok())
+                    .and_then(|v| v.as_str().map(str::to_string)),
+            )
+            .bind(stamp.timestamp)
+            .fetch_optional(&mut *tx)
             .await
-            .map_err(JobsError::Storage)?;
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+            let Some(row) = row else {
+                return Err(JobsError::StepNotFound(s.id));
+            };
+            let written = row_to_step(row)?;
+            events.push(stamp.event(
+                crate::events::STEP_UPDATED,
+                crate::events::step_state_payload(&written),
+            ));
+        }
+
+        for s in &plan.inserted {
+            if insert_step_in_tx(&mut tx, s, stamp.timestamp).await? > 0 {
+                events.push(stamp.event(
+                    crate::events::STEP_CREATED,
+                    crate::events::step_state_payload(s),
+                ));
+            }
+        }
+        events.push(stamp.event(
+            crate::events::JOB_REPINNED,
+            crate::repin::repinned_payload(&id.to_string(), record),
+        ));
+        for event in &events {
+            boss_events::outbox::record_event_in_tx(&mut tx, event)
+                .await
+                .map_err(JobsError::Storage)?;
+        }
         tx.commit()
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;

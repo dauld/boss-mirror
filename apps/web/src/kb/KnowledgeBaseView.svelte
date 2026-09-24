@@ -21,7 +21,8 @@
   import { entityHref } from '@boss/web-kit/ui/entity-href';
   import { formatActor } from '../data/actor';
   import { relatedJobsUrl } from './relatedJobs';
-  import type { Employee } from '../people/types';
+  import { loadOwnerNames, personIdsOf } from '../data/ownerNames';
+  import { okRead, type ReadState } from '../data/readState';
 
   type EntityKind = 'account' | 'asset';
 
@@ -73,7 +74,8 @@
   let factsFailed = $state<string | null>(null);
   let jobsFailed = $state<string | null>(null);
   let docsFailed = $state<string | null>(null);
-  let empNames = $state<Map<string, string>>(new Map());
+  let empNames = $state<ReadonlyMap<string, string>>(new Map());
+  let namesRead = $state<ReadState>(okRead);
   let workflowLabels = $state<Map<string, string>>(new Map());
 
   // --- Facts fetch ---------------------------------------------------------
@@ -177,18 +179,20 @@
   });
 
   // --- Employee-name lookup (for timeline actor labels) -------------------
+  // Only the people acting on the facts shown (the first 50), one row
+  // each, and a failure is said above the timeline. Until backlog
+  // 1e73bd93 this read the WHOLE roster and dropped a refusal or a
+  // network error, so the actors silently became ids. Machine actors
+  // are never asked about (see ../data/ownerNames.ts).
+  let actorKey = $derived(personIdsOf(facts.slice(0, 50).map((f) => f.actor_id)).join('\n'));
   $effect(() => {
+    const ids = actorKey ? actorKey.split('\n') : [];
     let cancelled = false;
     (async () => {
-      try {
-        const r = await fetch('/api/people');
-        if (!r.ok || cancelled) return;
-        const roster = (await r.json()) as Employee[];
-        if (!cancelled) {
-          empNames = new Map(roster.map((e) => [e.id, e.name ?? ""]));
-        }
-      } catch {
-        /* ignore */
+      const out = await loadOwnerNames(ids);
+      if (!cancelled) {
+        empNames = out.names;
+        namesRead = out.read;
       }
     })();
     return () => {
@@ -285,6 +289,11 @@
       {:else if facts.length === 0}
         <div class="kb-empty">No recorded activity yet.</div>
       {:else}
+        {#if namesRead.kind === 'failed'}
+          <div class="kb-empty load-failed" role="alert">
+            Couldn't load the names on the timeline — {namesRead.error}. People show as ids.
+          </div>
+        {/if}
         <div class="kb-timeline">
           {#each facts.slice(0, 50) as fact, i (fact.id ?? `${factKindOf(fact)}-${i}`)}
             {@const kind = factKindOf(fact)}

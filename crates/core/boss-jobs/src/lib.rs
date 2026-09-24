@@ -54,6 +54,7 @@ pub mod rebuild;
 pub mod refusals;
 pub mod regions;
 pub mod registry;
+pub mod repin;
 pub mod scheduling;
 pub mod station_flow;
 pub mod station_lint;

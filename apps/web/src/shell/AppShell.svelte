@@ -16,6 +16,7 @@
   import {
     ROUTE_CATALOG,
     departmentJobsPath,
+    inPerspective,
     type AppId,
     type NavItem,
     type NavGroup,
@@ -236,25 +237,17 @@
           ],
   );
 
-  // A surface is in-perspective when its catalog `app` matches the
-  // app this shell is rendering. One comparison against one field —
-  // where this used to be a MODEL_ROUTES set here that had to agree
-  // with a MODEL_KINDS set in App.svelte, keyed off a different
-  // vocabulary (RouteName vs Route['kind']).
-  function inPerspective(i: NavItem): boolean {
-    // A permKey-less NavItem (e.g. a plain sub-page link like Audit
-    // Log / Atlas) carries no app of its own — it belongs to whatever
-    // group it's placed in, so it's always in-perspective.
-    if (i.permKey === undefined) return true;
-    return (ROUTE_CATALOG[i.permKey]?.app ?? 'home') === activeApp;
-  }
-
+  // A surface is in-perspective when its own catalog `app` matches the
+  // app this shell is rendering — inPerspective in ./nav-catalog, where
+  // the test pinning every sidebar list imports it (72a88031). One
+  // comparison against one field, where this used to be a MODEL_ROUTES
+  // set here that had to agree with a MODEL_KINDS set in App.svelte.
   function visible(items: ReadonlyArray<NavItem>): ReadonlyArray<NavItem> {
     if (!role) return [];
     return items.filter((i) => {
       const policyOk = i.permKey === undefined || canSeeRoute(role, i.permKey, roleRow);
       const moduleOk = i.module === undefined || moduleEnabled(i.module);
-      return policyOk && moduleOk && inPerspective(i);
+      return policyOk && moduleOk && inPerspective(i, activeApp);
     });
   }
 

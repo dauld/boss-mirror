@@ -16,17 +16,37 @@
 // server change. The outcome is the shared ReadState (../data/readState),
 // the idiom the exec page adopted for the same launch owners (223ebcd6),
 // so the failure line reads the same wherever it appears.
+//
+// LIFTED INTO data/ (backlog 1e73bd93, 2026-09-24). Measured on
+// origin/main that day, the calendar was one of twenty web files that
+// fetched the whole `/api/people` roster; about half of them only named
+// the few people on screen, and most dropped a failed read. The ones
+// that move here are those — a page that names a handful of people.
+// A page that OFFERS the roster (an owner or recipient picker) or
+// summarises it (HR, QA, the people list) genuinely needs every row and
+// keeps its own read; this module is not for them.
 
-import { failedRead, okRead, readStateOfResponse, type ReadState } from '../data/readState';
+import { isHumanActor } from './actor';
+import { failedRead, okRead, readStateOfResponse, type ReadState } from './readState';
 
-/// The distinct owner ids of the rows shown, sorted so two reads of
-/// the same rows ask the same questions. A row with no owner asks none.
+/// The distinct PEOPLE among the ids a page shows, sorted so two reads
+/// of the same rows ask the same questions. Blanks ask nothing, and so
+/// do machine actors — an agent, a named automation, a session login —
+/// because none of them has a people row: asking would be a guaranteed
+/// 404 dressed as a failed name, and `formatActor` labels them without
+/// a lookup. `isHumanActor` is the one client-side definition of that
+/// line, so this asks it rather than re-deriving it.
+export function personIdsOf(ids: Iterable<string | null | undefined>): string[] {
+  const out = new Set<string>();
+  for (const id of ids) if (id && isHumanActor(id)) out.add(id);
+  return [...out].sort();
+}
+
+/// The people owning the rows shown. A row with no owner asks nothing.
 export function ownerIdsOf(
   rows: ReadonlyArray<{ readonly owner_id: string | null }>,
 ): string[] {
-  const ids = new Set<string>();
-  for (const r of rows) if (r.owner_id) ids.add(r.owner_id);
-  return [...ids].sort();
+  return personIdsOf(rows.map((r) => r.owner_id));
 }
 
 type Fetch = (url: string) => Promise<Pick<Response, 'ok' | 'status' | 'json'>>;

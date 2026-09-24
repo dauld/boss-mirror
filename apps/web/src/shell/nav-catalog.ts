@@ -288,6 +288,21 @@ export function appForSection(section: string): AppId {
   return entry?.app ?? 'home';
 }
 
+/// Whether a sidebar row renders in the app being shown: judged by the
+/// row's OWN `app`, and a row with none (an inline link like My Day or
+/// a department's Jobs row) belongs to the group it sits in.
+///
+/// It judged by the app of the catalog entry the row's PERMKEY names
+/// until backlog 72a88031 (2026-09-24). That is the same answer for
+/// every row but one: Production's Products gates on `parts`, whose
+/// entry is Warehouse's, so Production dropped Products for every
+/// role. The permKey decides policy (canSeeRoute); the app decides
+/// placement. Here, not in AppShell, so the test that pins every
+/// sidebar list imports the rule instead of restating it.
+export function inPerspective(item: NavItem, app: AppId): boolean {
+  return item.app === undefined || item.app === app;
+}
+
 /// Subject kinds each app is "about".
 ///
 /// Feeds `app_kinds` on `/api/search`, which floats these to the top of
