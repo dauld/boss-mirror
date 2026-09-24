@@ -788,6 +788,41 @@ pub trait JobsRepository: Send + Sync {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<Job, JobsError>;
 
+    /// Close the Job, writing ONLY the fields a close owns: `status`
+    /// becomes `closed`, `closed_on` is set, and `owned`'s top-level
+    /// keys (`closed_at`, and `outcome` when the close names one) merge
+    /// into `metadata` against the row as it stands. Every other key
+    /// and every other envelope field is left exactly as the row holds
+    /// it at write time.
+    ///
+    /// It is also a compare-and-set on the status: only an OPEN row
+    /// closes. A row already Closed (another closer won), Cancelled or
+    /// Draft is left untouched and the answer is `Ok(None)` — nothing
+    /// written, nothing recorded. `Some` carries the post-close row.
+    ///
+    /// WHY (backlog 29a7ea09): the two closers of a step write — the
+    /// declared-terminal close and the all-steps-terminal catch-all —
+    /// were each GET → mutate → whole-row `update_job_at`. Measured on
+    /// car 6b23d135 at 2026-09-24T22:18:10Z: the terminal close wrote
+    /// `outcome=disproved`, then the catch-all, holding a copy read
+    /// before that write committed, wrote its whole row back and the
+    /// outcome was gone. Any key another writer merged between a
+    /// closer's read and its write was lost the same way, silently — a
+    /// conservation break in the system of record.
+    ///
+    /// Records, in the same transaction, JOB_UPDATED built from the
+    /// POST-close row (full row state, what the rebuild consumes, as
+    /// `merge_job_metadata_at`'s is) and then whatever `markers` builds
+    /// from that same row (the status-changed and closed markers).
+    async fn close_job_at(
+        &self,
+        id: &JobId,
+        closed_on: chrono::NaiveDate,
+        owned: &serde_json::Map<String, serde_json::Value>,
+        stamp: &boss_core::publisher::EventStamp,
+        markers: &(dyn for<'j> Fn(&'j Job) -> Vec<boss_core::event::Event> + Send + Sync),
+    ) -> Result<Option<Job>, JobsError>;
+
     /// Append one entry to the Job's reserved `corrections` list
     /// (`crate::corrections`, design 4105b020), atomically against the
     /// row as it stands, and return the post-append Job with the index

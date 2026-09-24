@@ -44,6 +44,9 @@ struct State {
     /// Packets whose steps read fails, set by
     /// [`InMemoryJobs::fail_steps_read`].
     unreadable_steps: BTreeSet<String>,
+    /// Packets whose close write fails, set by
+    /// [`InMemoryJobs::fail_job_close`].
+    unclosable_jobs: BTreeSet<String>,
 }
 
 impl InMemoryJobs {
@@ -67,6 +70,17 @@ impl InMemoryJobs {
     pub fn fail_steps_read(&self, job_id: &JobId) {
         if let Ok(mut state) = self.inner.lock() {
             state.unreadable_steps.insert(job_key(job_id));
+        }
+    }
+
+    /// Make every later `close_job_at` of this packet fail with a
+    /// storage error, so a closer's handling of a close it could not
+    /// write is testable: until backlog 29a7ea09 the catch-all close
+    /// discarded that error with `let _ =` and answered 204, leaving a
+    /// packet whose every step was terminal open with nobody told.
+    pub fn fail_job_close(&self, job_id: &JobId) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.unclosable_jobs.insert(job_key(job_id));
         }
     }
 
@@ -364,6 +378,48 @@ impl JobsRepository for InMemoryJobs {
         );
         self.record_all(&[event]);
         Ok(merged)
+    }
+
+    async fn close_job_at(
+        &self,
+        id: &JobId,
+        closed_on: chrono::NaiveDate,
+        owned: &serde_json::Map<String, serde_json::Value>,
+        stamp: &boss_core::publisher::EventStamp,
+        markers: &(dyn for<'j> Fn(&'j Job) -> Vec<boss_core::event::Event> + Send + Sync),
+    ) -> Result<Option<Job>, JobsError> {
+        // Mirror the Pg adapter's one UPDATE: under the lock, only an
+        // open row closes, and only the close's own fields move.
+        let closed = {
+            let mut state = self.inner.lock().expect("poisoned");
+            if state.unclosable_jobs.contains(&job_key(id)) {
+                return Err(JobsError::Storage(format!(
+                    "close of job {id} failed (injected by fail_job_close)"
+                )));
+            }
+            let Some(job) = state.jobs.get_mut(&job_key(id)) else {
+                return Err(JobsError::NotFound(*id));
+            };
+            if job.status != JobStatus::Open {
+                return Ok(None);
+            }
+            let mut md = match &job.metadata {
+                serde_json::Value::Object(m) => m.clone(),
+                _ => serde_json::Map::new(),
+            };
+            md.extend(owned.iter().map(|(k, v)| (k.clone(), v.clone())));
+            job.metadata = serde_json::Value::Object(md);
+            job.status = JobStatus::Closed;
+            job.closed_on = Some(closed_on);
+            job.clone()
+        };
+        let mut events = vec![stamp.event(
+            crate::events::JOB_UPDATED,
+            serde_json::to_value(&closed).unwrap_or_default(),
+        )];
+        events.extend(markers(&closed));
+        self.record_all(&events);
+        Ok(Some(closed))
     }
 
     async fn append_step_correction_at(
@@ -1303,6 +1359,122 @@ mod tests {
         repo.update_job(&job).await.unwrap();
         let got = repo.get_job(&job.id).await.unwrap().unwrap();
         assert_eq!(got.status, JobStatus::Open);
+    }
+
+    /// Backlog 29a7ea09, the shape measured on car 6b23d135: two closers
+    /// both read the packet open, a third writer merges a key, the
+    /// terminal close lands, and the catch-all close — whose copy of
+    /// the row predates both — lands after it. The close writes only
+    /// what it owns, so the merged key survives the first close, and
+    /// the second close finds the row no longer open and writes
+    /// nothing, so the outcome survives the second.
+    #[tokio::test]
+    async fn a_close_keeps_a_key_merged_after_the_closers_read_the_row() {
+        let repo = InMemoryJobs::new();
+        let mut job = make_job_with("ship-a-change", serde_json::json!({ "branch": "fix/x" }));
+        job.status = JobStatus::Open;
+        repo.create_job(&job).await.unwrap();
+
+        let stamp = boss_core::publisher::EventStamp::new(
+            "jobs",
+            boss_core::actor::ActorId::Automation("test".into()),
+        );
+        let obj = |v: serde_json::Value| match v {
+            serde_json::Value::Object(m) => m,
+            _ => unreachable!("test patches are objects"),
+        };
+        // Between the closers' reads and their writes.
+        repo.merge_job_metadata_at(
+            &job.id,
+            &obj(serde_json::json!({ "merged_sha": "abc123" })),
+            &stamp,
+        )
+        .await
+        .unwrap();
+
+        let marker = |j: &Job| {
+            vec![stamp.event(
+                crate::events::JOB_CLOSED,
+                serde_json::json!({ "id": j.id.to_string(), "outcome": j.metadata.get("outcome") }),
+            )]
+        };
+        let first_day = NaiveDate::from_ymd_opt(2026, 9, 24).unwrap();
+        let closed = repo
+            .close_job_at(
+                &job.id,
+                first_day,
+                &obj(serde_json::json!({
+                    "outcome": "disproved",
+                    "closed_at": "2026-09-24T22:18:10.556307Z",
+                })),
+                &stamp,
+                &marker,
+            )
+            .await
+            .unwrap()
+            .expect("an open packet closes");
+        assert_eq!(closed.status, JobStatus::Closed);
+        assert_eq!(closed.closed_on, Some(first_day));
+        assert_eq!(closed.metadata["outcome"], "disproved");
+        assert_eq!(
+            closed.metadata["merged_sha"], "abc123",
+            "a key merged after the closer read the row must survive the close: {:#}",
+            closed.metadata
+        );
+        assert_eq!(closed.metadata["branch"], "fix/x");
+
+        let events_before = repo.recorded_events().len();
+        let second = repo
+            .close_job_at(
+                &job.id,
+                NaiveDate::from_ymd_opt(2026, 9, 25).unwrap(),
+                &obj(serde_json::json!({ "closed_at": "2026-09-24T22:18:10.586476Z" })),
+                &stamp,
+                &marker,
+            )
+            .await
+            .unwrap();
+        assert!(second.is_none(), "a closed packet does not close twice");
+        assert_eq!(
+            repo.recorded_events().len(),
+            events_before,
+            "the losing close records nothing"
+        );
+
+        let stored = repo.get_job(&job.id).await.unwrap().unwrap();
+        assert_eq!(stored.closed_on, Some(first_day));
+        assert_eq!(stored.metadata["outcome"], "disproved");
+        assert_eq!(stored.metadata["merged_sha"], "abc123");
+        assert_eq!(stored.metadata["closed_at"], "2026-09-24T22:18:10.556307Z");
+
+        // The state event is the post-close row, the marker is built
+        // from it, in that order.
+        let recorded = repo.recorded_events();
+        let tail: Vec<&str> = recorded[recorded.len() - 2..]
+            .iter()
+            .map(|e| e.kind.as_str())
+            .collect();
+        assert_eq!(
+            tail,
+            [crate::events::JOB_UPDATED, crate::events::JOB_CLOSED]
+        );
+        let updated = &recorded[recorded.len() - 2].payload;
+        assert_eq!(updated["status"], "closed");
+        assert_eq!(updated["metadata"]["merged_sha"], "abc123");
+        assert_eq!(recorded[recorded.len() - 1].payload["outcome"], "disproved");
+
+        let missing = make_job("ship-a-change");
+        let err = repo
+            .close_job_at(
+                &missing.id,
+                first_day,
+                &obj(serde_json::json!({})),
+                &stamp,
+                &marker,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, JobsError::NotFound(_)), "got: {err}");
     }
 
     #[tokio::test]

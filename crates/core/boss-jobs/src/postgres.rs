@@ -706,6 +706,82 @@ impl JobsRepository for PgJobs {
         Ok(job)
     }
 
+    async fn close_job_at(
+        &self,
+        id: &JobId,
+        closed_on: chrono::NaiveDate,
+        owned: &serde_json::Map<String, serde_json::Value>,
+        stamp: &boss_core::publisher::EventStamp,
+        markers: &(dyn for<'j> Fn(&'j Job) -> Vec<boss_core::event::Event> + Send + Sync),
+    ) -> Result<Option<Job>, JobsError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        // ONE statement is both halves of the contract. The merge is
+        // `merge_job_metadata_at`'s — against the row as it stands, so
+        // a key another writer merged after this closer read the row
+        // survives (29a7ea09). The `status = 'open'` guard is the
+        // compare-and-set: a closer whose copy predates another close
+        // matches no row, so it cannot write a closed row back over it.
+        let row = sqlx::query_as::<_, JobRow>(
+            r#"
+            UPDATE jobs SET
+                status = 'closed',
+                closed_on = $2,
+                metadata = (CASE WHEN jsonb_typeof(metadata) = 'object'
+                                 THEN metadata ELSE '{}'::jsonb END) || $3::jsonb,
+                updated_at = $4
+            WHERE id = $1 AND status = 'open'
+            RETURNING id, kind, workflow_version, subject_kind, subject_id, title, owner_id,
+                      status, priority, opened_on, opened_at, due_on, closed_on, metadata, tags, partition
+            "#,
+        )
+        .bind(*id.inner().as_uuid())
+        .bind(closed_on)
+        .bind(serde_json::Value::Object(owned.clone()))
+        .bind(stamp.timestamp)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        let Some(row) = row else {
+            // No open row: either there is no such packet, or it is
+            // already closed / cancelled / draft and this close lost.
+            let exists =
+                sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM jobs WHERE id = $1)")
+                    .bind(*id.inner().as_uuid())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|e| JobsError::Storage(e.to_string()))?;
+            return if exists {
+                Ok(None)
+            } else {
+                Err(JobsError::NotFound(*id))
+            };
+        };
+        let job = row_to_job(row);
+        // OUTBOX (phase 2): the state event is the POST-close row — the
+        // rebuild replays it as full row state, so one built from the
+        // caller's copy would replay the very loss this write refuses —
+        // then the caller's markers, built from that same row, all in
+        // the write's transaction.
+        let mut events = vec![stamp.event(
+            crate::events::JOB_UPDATED,
+            serde_json::to_value(&job).unwrap_or_default(),
+        )];
+        events.extend(markers(&job));
+        for event in &events {
+            boss_events::outbox::record_event_in_tx(&mut tx, event)
+                .await
+                .map_err(JobsError::Storage)?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(Some(job))
+    }
+
     async fn append_step_correction_at(
         &self,
         id: &JobId,
