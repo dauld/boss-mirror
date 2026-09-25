@@ -477,7 +477,25 @@ fi
 # could no longer create the file it writes command output into, so
 # `df` and `rm` stopped working too and the failure had disabled its
 # own diagnosis.
-gate_min_free_gb="${BOSS_GATE_MIN_FREE_GB:-12}"
+#
+# THE NUMBER LIVES IN infra/build-floor.env, with the dev pod reclaim's
+# trigger defined above it (backlog 99ce8744). Until 2026-09-24 it was a
+# literal here and the reclaim's /work floor a separate literal of 6, so
+# the automatic pass never fired before this refused, and two builders
+# in one hour lowered BOSS_GATE_MIN_FREE_GB by hand. The env knob stays
+# for the tests that drive the refusal; the default is the file's, and
+# a file that does not define it is refused rather than guessed at.
+gate_floor_from="BOSS_GATE_MIN_FREE_GB"
+if [ -z "${BOSS_GATE_MIN_FREE_GB:-}" ]; then
+    gate_floor_from="GATE_MIN_FREE_GB in infra/build-floor.env"
+fi
+gate_min_free_gb="${BOSS_GATE_MIN_FREE_GB:-$(awk -F= '$1 == "GATE_MIN_FREE_GB" {v = $2} END {print v}' infra/build-floor.env 2>/dev/null)}"
+case "${gate_min_free_gb:-empty}" in
+    empty|*[!0-9]*)
+        echo "gate: the disk floor is not a whole number (got '${gate_min_free_gb}' from ${gate_floor_from}) — refusing rather than guessing one." >&2
+        exit 2
+        ;;
+esac
 
 # The free-space reader, overridable ONLY so the poll itself can be
 # tested — a fake that shrinks across calls is a faithful model of the

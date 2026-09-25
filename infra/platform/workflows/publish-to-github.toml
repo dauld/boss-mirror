@@ -69,6 +69,26 @@
 #      older packet as `pr_superseded` + `pr_state` — so David only
 #      ever sees one PR to merge.
 #
+# v9 (backlog c6cb678b, 2026-09-24). The reading judged the SCAN alone,
+# so a slower check's verdict was never read: PR #243's Gate concluded
+# failure at 04:18Z, `read-checks` had recorded it in_progress minutes
+# before, `judge-checks` judged CodeQL's three rules, and the packet
+# closed `pr-opened` at 04:41Z. No `ready_when` changes — the row's
+# words do:
+#
+#   9. (The verb and a rule, not this row.) read-publish-checks now
+#      completes `read-checks` only once EVERY check on the head has
+#      completed — re-read hourly by `reread-publish-checks-hourly`,
+#      `unfinished` past a four-hour ceiling — and its `conclusion` is
+#      the verdict over all of them: the scan's own when it did not
+#      pass, else `failure` when any other check failed, named in
+#      `failing`. So a Gate red over a clean scan makes judge-checks
+#      ready, which the `!= "success"` guard already routes.
+#  10. judge-checks' procedure judges each FAILING CHECK beside each
+#      scan rule — one disposition per check, by its name — because a
+#      disposition list that covers only the scan's rules would close a
+#      red Gate as `noise` by omission.
+#
 # Cadence: the daily `publish-to-github-daily` rule (129/149) spawns one
 # packet per day, guarded to one open packet per mirror; most days land
 # on `nothing-to-publish`, which is the measurement that the mirror is
@@ -179,10 +199,12 @@ required = true
 
 # The reading (5). A machine step like open-pr: nobody nominated, the
 # `ops_verb` marker routes it, the forge verb completes it. Required at
-# done: the scan's conclusion as GitHub spells it (`success`, `failure`,
-# … or `absent` when no scan check ran), the annotation count read, and
-# the count of distinct rules — the three numbers the judge step's
-# readiness and the answer line both carry.
+# done: the verdict over every check on the head (9) — the scan's
+# conclusion as GitHub spells it when the scan did not pass (`failure`,
+# … or `absent` when no scan check ran), else `failure` when another
+# check failed, `unfinished` past the ceiling, `success` otherwise —
+# the annotation count read, and the count of distinct rules: the three
+# numbers the judge step's readiness and the answer line both carry.
 [[workflow.step]]
 title = "read-checks"
 kind = "task"
@@ -216,7 +238,7 @@ ready_when = "steps.read-checks.done AND steps.read-checks.metadata.conclusion !
 title_template = "Judge the code-scanning alerts: a disposition per rule"
 audience = { role = "platform-admin" }
 agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
-metadata_defaults = { human_only = false, procedure = "The reading is ON THIS PACKET: `metadata.code_scanning` — every check on the PR head with its conclusion, and under `alerts` the scan's annotations counted by rule (`by_rule`, largest first, each with its file count), by file and by level, with `declared` (what the check-run says it holds) beside `read` (what the API exposed). Judge each RULE in `by_rule`, not each alert: record `dispositions` as one entry per rule — `{rule, disposition, reason}` — where disposition is `noise` (a heuristic that named a non-secret: an account_id / employee_id / uid in a log line, a #[cfg(test)] constant, an in-cluster http URL) with the reason that makes it noise, or `real` with the backlog-item you FILED for it (its id in the reason). Read the code behind a rule before calling it noise — `by_file` names the files, and the check-run's url the lines. Then `verdict`: `noise` when every rule is noise, `real` when any is, `clean` only when there were no alerts at all. The merge on GitHub is David's and follows this verdict; a rule left unjudged is a red badge he merges over by hand, which is the defect this step exists to end (backlog 321f1409: #238 merged over 64 unread alerts, #239 stalled on 109)." }
+metadata_defaults = { human_only = false, procedure = "The reading is ON THIS PACKET: `metadata.code_scanning` — every check on the PR head with its conclusion, and under `alerts` the scan's annotations counted by rule (`by_rule`, largest first, each with its file count), by file and by level, with `declared` (what the check-run says it holds) beside `read` (what the API exposed). Judge each RULE in `by_rule`, not each alert: record `dispositions` as one entry per rule — `{rule, disposition, reason}` — where disposition is `noise` (a heuristic that named a non-secret: an account_id / employee_id / uid in a log line, a #[cfg(test)] constant, an in-cluster http URL) with the reason that makes it noise, or `real` with the backlog-item you FILED for it (its id in the reason). Read the code behind a rule before calling it noise — `by_file` names the files, and the check-run's url the lines. EVERY FAILING CHECK IS JUDGED TOO, not only the scan's rules (backlog c6cb678b: #243 closed pr-opened with its Gate red, judged on CodeQL alone). `metadata.code_scanning.failing` names each check on the head that completed without passing — the mirror's own `Gate (infra/gate.sh, full)` among them — and `still_running` names any the reading saw unfinished (the step's `conclusion` reads `unfinished` when a check outlasted the ceiling). For each one that is not the scan itself, add one `dispositions` entry with `rule` = the check's name: `real` with the backlog-item you FILED for it (open the check's `url`, name the failing test or phase in the reason), or `noise` only with the evidence that the failure is not the tree's (a runner fault, a GitHub outage — never 'it passed on our gate'). An unfinished check is judged the same way, from what its url shows. Then `verdict`: `noise` when every rule and check is noise, `real` when any is, `clean` only when there were no alerts and nothing failed. The merge on GitHub is David's and follows this verdict; a rule or check left unjudged is a red badge he merges over by hand, which is the defect this step exists to end (backlog 321f1409: #238 merged over 64 unread alerts, #239 stalled on 109)." }
 [[workflow.step.fields]]
 name = "dispositions"
 field_type = "array"

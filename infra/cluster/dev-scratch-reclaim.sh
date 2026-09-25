@@ -110,13 +110,17 @@
 #   BOSS_LIVE_TARGET_MIN     minutes since a sibling target was touched
 #                            before the floor pass may take it (default 30)
 #   BOSS_STALE_TARGET_H      hours before a sibling target dir is dead (default 12)
-#   BOSS_WORK_FLOOR_GB       free GB to keep on /work        (default 6)
+#   (the /work floor is not a tunable: it is the gate's floor plus a
+#    margin, from infra/build-floor.env — BOSS_WORK_FLOOR_GB is retired
+#    and ignored; see WORK_FLOOR_GB below)
 #   BOSS_WORKTREE_MAX_AGE_H  only prune worktrees older than; also the
 #                            git quiet before an UNPUSHED worktree (no
 #                            origin/ ref, not on origin/main) counts as
 #                            abandoned                      (default 48)
 #   BOSS_WORKTREE_GRACE_H    hours of git quiet before a LANDED
-#                            worktree is removable          (default 12)
+#                            worktree is removable; under the /work
+#                            floor it yields to BOSS_LIVE_TARGET_MIN
+#                                                           (default 12)
 #   BOSS_WORKTREE_IDLE_H     hours of git quiet before a main/detached
 #                            worktree is removable          (default 168)
 #   BOSS_FF_LAUNCH_WINDOW_SECS  how recently a gate-run must have opened
@@ -158,7 +162,38 @@ LIVE_TARGET_MIN="${BOSS_LIVE_TARGET_MIN:-30}"
 # (boss brief says so), and a landed branch's target outlives it by
 # days; 12h is longer than any build and shorter than the next morning.
 STALE_TARGET_H="${BOSS_STALE_TARGET_H:-12}"
-WORK_FLOOR_GB="${BOSS_WORK_FLOOR_GB:-6}"
+# THE /work FLOOR IS DERIVED, NOT CONFIGURED (backlog 99ce8744): the
+# gate's own floor plus a margin, both read from infra/build-floor.env,
+# the one definition infra/gate.sh reads too. Measured 2026-09-24
+# ~23:00Z: /work at 12 GB free of 40, the gate refusing below 12 and
+# this pass acting only below 6 (`BOSS_WORK_FLOOR_GB`, default 6 and 6
+# again in the sidecar's env) — so the automatic pass never fired before
+# a builder's pre-flight was refused, and two builders lowered the
+# gate's floor by hand in one hour. Adding the margin to the gate's
+# number is what makes "the reclaim acts first" true by construction.
+#
+# BOSS_WORK_FLOOR_GB IS RETIRED AND IGNORED. The live sidecar still sets
+# it to 6 (boss-dev.yaml), and a manifest edit rolls the pod and ends
+# the operator's session (memory: boss-dev-manifest-cars-restart-the-
+# session), so it is this script, which the sidecar runs from the
+# checkout every hour, that stops reading it. The file is found beside
+# this script's own checkout, so the sidecar reads the floor of the tree
+# it is running.
+BUILD_FLOOR_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/build-floor.env"
+build_floor() {
+    awk -F= -v k="$1" '$1 == k {v = $2} END {print v}' "$BUILD_FLOOR_FILE" 2>/dev/null
+}
+GATE_MIN_FREE_GB="$(build_floor GATE_MIN_FREE_GB)"
+WORK_RECLAIM_MARGIN_GB="$(build_floor WORK_RECLAIM_MARGIN_GB)"
+for name in GATE_MIN_FREE_GB WORK_RECLAIM_MARGIN_GB; do
+    case "${!name:-empty}" in
+        empty|*[!0-9]*)
+            echo "dev-scratch-reclaim: $BUILD_FLOOR_FILE must define $name as a whole number, got '${!name}'" >&2
+            exit 64
+            ;;
+    esac
+done
+WORK_FLOOR_GB=$((GATE_MIN_FREE_GB + WORK_RECLAIM_MARGIN_GB))
 WORKTREE_MAX_AGE_H="${BOSS_WORKTREE_MAX_AGE_H:-48}"
 # Hours of git QUIET (no commit, HEAD write or reflog entry) before a
 # worktree whose branch has LANDED — head on origin/main, no origin/
@@ -767,6 +802,23 @@ reclaim_gone_worktrees() {
     local self now judge_locks=1
     self="$(pwd -P 2>/dev/null || echo /nonexistent)"
     now=$(date +%s)
+
+    # THE GRACE YIELDS TO THE FLOOR (backlog 99ce8744), as it already
+    # does for targets: above the floor a stale target waits
+    # STALE_TARGET_H, below it only LIVE_TARGET_MIN. A landed worktree's
+    # 12h grace exists for a tree someone may still be standing in, and
+    # the same live window answers that for a tree as for a target —
+    # while /work under its floor is what refuses the next builder's
+    # pre-flight. One reading, up front: the pass removes every landed
+    # tree past the live window rather than stopping at the floor,
+    # because each would go at the 12h mark anyway and holds no work
+    # (clean, on origin/main).
+    local under_floor=0 wkb
+    wkb=$(free_kb "$WORK_MOUNT")
+    if [ -n "$wkb" ] && [ $((wkb / 1024 / 1024)) -lt "$WORK_FLOOR_GB" ]; then
+        under_floor=1
+        log "worktree pass: $WORK_MOUNT $((wkb / 1024 / 1024))GB free < ${WORK_FLOOR_GB}GB floor — a landed worktree waits only the ${LIVE_TARGET_MIN}-minute live window, not the ${WORKTREE_GRACE_H}h grace"
+    fi
     if ! proc_view_is_pods; then
         judge_locks=0
         log "worktree pass: locks not judged — $PROC_ROOT/1 is not the pod's pause, so this process table cannot say a harness pid is gone; every locked tree is kept"
@@ -775,7 +827,7 @@ reclaim_gone_worktrees() {
     # `path<TAB>branch<TAB>locked<TAB>reason` per worktree, `detached`
     # standing in for a HEAD with no branch; the first block is the main
     # worktree.
-    local first=1 path branch locked reason stale window why last idle_h dirty kb head held
+    local first=1 path branch locked reason stale window_s why last idle_s idle_h dirty kb head held
     while IFS=$'\t' read -r path branch locked reason; do
         [ -z "$path" ] && continue
         if [ "$first" = 1 ]; then first=0; continue; fi
@@ -795,7 +847,7 @@ reclaim_gone_worktrees() {
 
         case "$branch" in
             detached|main)
-                window=$WORKTREE_IDLE_H; why="on $branch"
+                window_s=$((WORKTREE_IDLE_H * 3600)); why="on $branch"
                 ;;
             *)
                 if git -C "$REPO_DIR" rev-parse --verify -q "refs/remotes/origin/$branch" >/dev/null 2>&1; then
@@ -803,16 +855,20 @@ reclaim_gone_worktrees() {
                     continue
                 fi
                 if git -C "$REPO_DIR" merge-base --is-ancestor "refs/heads/$branch" "$main_sha" 2>/dev/null; then
-                    window=$WORKTREE_GRACE_H; why="branch $branch has no origin/ ref and its head is on origin/main (landed)"
+                    window_s=$((WORKTREE_GRACE_H * 3600)); why="branch $branch has no origin/ ref and its head is on origin/main (landed)"
+                    if [ "$under_floor" = 1 ]; then
+                        window_s=$((LIVE_TARGET_MIN * 60)); why="$why, under the /work floor"
+                    fi
                 else
-                    window=$WORKTREE_MAX_AGE_H; why="branch $branch has no origin/ ref and is not on origin/main (unpushed)"
+                    window_s=$((WORKTREE_MAX_AGE_H * 3600)); why="branch $branch has no origin/ ref and is not on origin/main (unpushed)"
                 fi
                 ;;
         esac
 
         last=$(worktree_last_activity "$path")
-        idle_h=$(( (now - last) / 3600 ))
-        if [ "$idle_h" -lt "$window" ]; then
+        idle_s=$((now - last))
+        idle_h=$((idle_s / 3600))
+        if [ "$idle_s" -lt "$window_s" ]; then
             WT_KEPT_RECENT=$((WT_KEPT_RECENT + 1))
             continue
         fi
@@ -892,14 +948,14 @@ reclaim_work() {
     fi
     gb=$((kb / 1024 / 1024))
     if [ "$gb" -ge "$WORK_FLOOR_GB" ]; then
-        log "$WORK_MOUNT ${gb}GB free >= ${WORK_FLOOR_GB}GB floor — no worktree reclaim"
+        log "$WORK_MOUNT ${gb}GB free >= ${WORK_FLOOR_GB}GB floor (the gate's ${GATE_MIN_FREE_GB} + ${WORK_RECLAIM_MARGIN_GB} margin, infra/build-floor.env) — no worktree reclaim"
         return 0
     fi
     if [ ! -d "$REPO_DIR/.git" ] && [ ! -f "$REPO_DIR/.git" ]; then
         log "$REPO_DIR is not a git checkout — cannot prune worktrees"
         return 0
     fi
-    log "$WORK_MOUNT ${gb}GB free < ${WORK_FLOOR_GB}GB floor — pruning stale git worktrees"
+    log "$WORK_MOUNT ${gb}GB free < ${WORK_FLOOR_GB}GB floor (the gate's ${GATE_MIN_FREE_GB} + ${WORK_RECLAIM_MARGIN_GB} margin, infra/build-floor.env) — pruning stale git worktrees"
 
     # Metadata first: drop admin entries for worktree dirs that are
     # already gone. Cheap and always safe.

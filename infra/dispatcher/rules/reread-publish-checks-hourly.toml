@@ -1,0 +1,64 @@
+# Read the mirror PR's checks AGAIN, every hour, until every one has
+# completed (backlog c6cb678b, 2026-09-24).
+#
+# THE DEFECT. `read-publish-checks-on-read-checks-ready` files the read
+# once, the moment open-pr completes; the verb waits for the
+# code-scanning checks (~13 minutes) and stops, because since d167e7d7
+# it must not hold the forge's serial ops-runner for the mirror's full
+# Gate, whose own `timeout-minutes` is 180. Until this rule the verb
+# then COMPLETED the step with the Gate recorded in_progress, and
+# nothing ever read the Gate again: PR #243's Gate concluded failure at
+# 04:18Z, the publish packet closed `pr-opened` at 04:41Z over a clean
+# judgement of CodeQL's three rules, and the publish region turned red
+# 25 hours later on the PR's age, naming no check at all.
+#
+# Now a check still running is `not yet` (exit 75): the partial reading
+# is on the packet and `read-checks` stays open. THIS RULE IS WHAT
+# READS IT AGAIN. It files the same verb every hour; the verb finds the
+# publish packet whose `read-checks` is still open and reads the head's
+# checks once more — complete, it completes the step with the verdict
+# over every check; still running, not yet again; past the verb's
+# ceiling (four hours after the PR opened), it completes the step as
+# `unfinished`, naming what never ended, so the judge step reads it.
+#
+# NO GUARD, and that is decided, not forgotten. The verb is the
+# idempotence: with no publish packet waiting it answers `nothing to
+# do` and writes nothing — `refresh-publish-drift-daily` is the worked
+# example, and `cadence_roster::unreadable_guard_repair` names it as
+# the shape for a conditional spawner. A guard asking "is a read-checks
+# step open" is a question the silence roster cannot read, so this rule
+# would declare a cadence it does not keep. The cost is stated: one
+# ops-request an hour, most of them answering `nothing to do`, and the
+# silence sweep watches the hour as a declared cadence.
+#
+# HOURLY, because that is the grain of the thing it waits on: a check
+# that outlasts the scan is the mirror's Gate, minutes to three hours;
+# a finer grain re-reads a Gate that has not moved, a coarser one lets
+# a finished red wait longer than the Gate took to run.
+#
+# The request carries NO `for_publish`: a clock firing has no packet
+# in its payload to name. So the answer rule's failure mode cannot
+# annotate the step from one of these; a failing re-read is on its own
+# ops-request, and the verb's ceiling is what keeps the step from
+# waiting unread past four hours.
+[[rule]]
+name = "reread-publish-checks-hourly"
+version = 1
+why = """
+A TIMER, the standing exemption: "an hour passed" is no packet's event,
+and the packet this re-reads is by definition sitting still — a publish
+whose PR's slowest check is still running on GitHub emits nothing while
+it waits, and GitHub has no path into the LAN to say it finished.
+Measured 2026-09-24 (backlog c6cb678b): PR #243's Gate concluded
+failure at 04:18Z, after the one read the step-ready rule files had
+already completed read-checks with the Gate in_progress, and the
+packet closed clean at 04:41Z. It adds no routing: it files the same
+ops-request the step-ready rule files, and what happens next is the
+publish protocol's own row (read-checks -> judge-checks -> pr-opened).
+No authority widened: the verb holds no credential and writes only the
+waiting publish packet's reading and step.
+"""
+schedule = { cadence = "hourly", anchor_date = "2026-09-24" }
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"ops-request\"", subject_kind = "\"custom\"", subject = "\"github-mirror-checks\"", title = "\"re-read the mirror PR's checks from the forge — until every one has completed\"", "metadata.host" = "\"forge\"", "metadata.verb" = "\"read-publish-checks\"", "metadata.area" = "\"platform\"" }

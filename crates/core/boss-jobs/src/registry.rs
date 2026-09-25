@@ -316,6 +316,34 @@ impl WorkflowSpec {
             created_at: Utc::now(),
         }
     }
+
+    /// The outcome a live step at `sort_order` closes its Job with, if
+    /// it is a declared terminal. A live Step pairs back to its StepSpec
+    /// by index (== `sort_order`, the materializer's contract).
+    pub fn terminal_outcome_at(&self, sort_order: i32) -> Option<&str> {
+        let i = usize::try_from(sort_order).ok()?;
+        self.steps
+            .get(i)?
+            .terminal
+            .as_ref()
+            .map(|t| t.outcome.as_str())
+    }
+
+    /// The outcome a Job whose steps have these `(sort_order,
+    /// completed)` pairs has CLOSED with: the first completed step that
+    /// is a declared terminal. Every writer of a close derives the
+    /// outcome here — the terminal close, the catch-all close that can
+    /// race it, and the repair of a close that lost it (228c9a7d) — so
+    /// they cannot name two.
+    pub fn completed_terminal_outcome(
+        &self,
+        steps: impl IntoIterator<Item = (i32, bool)>,
+    ) -> Option<&str> {
+        steps
+            .into_iter()
+            .filter(|&(_, completed)| completed)
+            .find_map(|(sort_order, _)| self.terminal_outcome_at(sort_order))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3261,6 +3289,43 @@ pub use pg::PgWorkflows;
 
 #[cfg(test)]
 mod tests {
+
+    /// 228c9a7d: the outcome a close names is the first COMPLETED
+    /// declared terminal, paired by sort_order — a skipped terminal, a
+    /// completed non-terminal, and an index past the spec name nothing.
+    #[test]
+    fn a_closed_jobs_outcome_is_its_completed_terminals() {
+        let step = |title: &str, outcome: Option<&str>| super::StepSpec {
+            title: title.into(),
+            terminal: outcome.map(|o| super::Terminal { outcome: o.into() }),
+            ..Default::default()
+        };
+        let spec = super::WorkflowSpec::platform_seed(
+            "ship-a-change",
+            "Ship a change",
+            "engineering",
+            vec!["custom".into()],
+            vec![
+                step("review", None),
+                step("merged", Some("merged")),
+                step("disproved", Some("disproved")),
+            ],
+        );
+        assert_eq!(spec.terminal_outcome_at(2), Some("disproved"));
+        assert_eq!(spec.terminal_outcome_at(0), None);
+        assert_eq!(spec.terminal_outcome_at(-1), None);
+        assert_eq!(spec.terminal_outcome_at(3), None);
+        // 6b23d135's shape: review completed, merged skipped, disproved
+        // completed.
+        assert_eq!(
+            spec.completed_terminal_outcome([(0, true), (1, false), (2, true)]),
+            Some("disproved")
+        );
+        assert_eq!(
+            spec.completed_terminal_outcome([(0, true), (1, false), (2, false)]),
+            None
+        );
+    }
 
     /// The platform bundle says exactly what the code used to say.
     ///

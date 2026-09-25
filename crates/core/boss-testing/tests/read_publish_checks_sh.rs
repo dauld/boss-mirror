@@ -30,7 +30,14 @@
 //!     still in flight — a partial reading, never a clean one;
 //!   * only the code-scanning checks are waited for (backlog d167e7d7):
 //!     a non-scanning check still running — the mirror's full gate —
-//!     is recorded as running and does not hold the reading;
+//!     does not hold the forge's runner, but it is NOT YET (backlog
+//!     c6cb678b): the partial reading goes on the packet, the step
+//!     stays open, exit 75 — and past the ceiling the step completes
+//!     `unfinished`, naming it;
+//!   * the step's `conclusion` is the verdict over EVERY check: a
+//!     failing gate over a clean scan reads `failure` and is named in
+//!     `failing`, so the judge step reads it (PR #243 closed clean with
+//!     its Gate red);
 //!   * a publish packet whose `open-pr` step recorded no head sha is a
 //!     refusal naming the step, not a read of nothing;
 //!   * `--check` asks only for the tools and the addresses, no network.
@@ -46,6 +53,12 @@ const STEP: &str = "00000000-0000-0000-0000-0000000000cc";
 /// PR #239's head, as `open-pr` recorded it (`snapshot_commit`).
 const HEAD: &str = "12d4a68279752c2c451b147ec8e21c248c8681a3";
 const PR_URL: &str = "https://github.com/algedonic-dev/boss/pull/239";
+/// When #239 opened — the server's stamp on the `open-pr` step, and the
+/// zero the ceiling on a still-running check counts from.
+const PR_OPENED_AT: &str = "2026-09-19T08:22:25Z";
+/// A ceiling no case reaches (#239 opened in 2026-09), for the cases
+/// that measure "not yet" rather than the ceiling.
+const NO_CEILING: (&str, &str) = ("BOSS_CHECKS_CEILING_SECONDS", "9999999999");
 /// The CodeQL check-run's id in the fixture — the annotations URL
 /// GitHub hands back is keyed on it.
 const CODEQL_RUN: &str = "105867839495";
@@ -117,7 +130,8 @@ impl Run {
                 "metadata": {"target": "origin/main"},
                 "steps": [
                     {"id": "00000000-0000-0000-0000-0000000000bb", "spec_slug": "open-pr",
-                     "status": "completed", "metadata": open_pr_metadata},
+                     "status": "completed", "completed_at": PR_OPENED_AT,
+                     "metadata": open_pr_metadata},
                     {"id": STEP, "spec_slug": "read-checks", "status": "ready",
                      "metadata": {"ops_verb": "read-publish-checks"}}
                 ]
@@ -377,6 +391,14 @@ fn a_completed_prs_checks_and_alerts_are_read_onto_the_packet_and_the_step_compl
         put["metadata"]["ops_verb"], "read-publish-checks",
         "the step's existing metadata is merged, not replaced"
     );
+    // What failed, by name, on the step and on the reading (c6cb678b).
+    assert_eq!(put["metadata"]["failing"], "CodeQL: failure");
+    assert_eq!(put["metadata"]["still_running"], "");
+    assert_eq!(reading["conclusion"], "failure");
+    assert_eq!(
+        reading["failing"],
+        serde_json::json!([{"name": "CodeQL", "conclusion": "failure"}])
+    );
 
     // The answer line is LAST and the rule reads it.
     let last = text.lines().last().unwrap_or("");
@@ -505,23 +527,26 @@ fn pr239_with_the_gate_running() -> serde_json::Value {
     checks
 }
 
-/// The reading waits for the code-scanning checks ONLY — the check named
-/// by `BOSS_CODE_SCANNING_CHECK` and its `Analyze (…)` jobs — because
-/// that is all `judge-checks` reads (backlog d167e7d7). A cold full gate
-/// on a GitHub runner outlasts the 1500 s deadline, and waiting on it
-/// held the forge's serial ops-runner the whole time and then failed the
-/// read with `complete: false`. Every other check is recorded as it
-/// stood when read: still running, named as running, never a conclusion.
+/// The WAIT covers the code-scanning checks only — the check named by
+/// `BOSS_CODE_SCANNING_CHECK` and its `Analyze (…)` jobs (backlog
+/// d167e7d7): a cold full gate on a GitHub runner outlasts the 1500 s
+/// deadline, and waiting on it held the forge's serial ops-runner the
+/// whole time. But a check still running is NOT a reading (backlog
+/// c6cb678b): on PR #243 the step completed with the Gate in_progress,
+/// the Gate concluded failure minutes later, and nothing in BOSS read
+/// it. So the verb answers "not yet" at once — the partial reading on
+/// the packet, the step left open, exit 75 — and the hourly re-read
+/// reads it again.
 #[test]
-fn a_non_scanning_check_still_running_does_not_hold_the_reading() {
+fn a_non_scanning_check_still_running_is_not_yet_and_does_not_hold_the_runner() {
     let run = Run::new("gate-running", open_pr_done());
     let checks = run.root.join("check-runs-gate-running.json");
     write_file(&checks, &pr239_with_the_gate_running().to_string());
     run.route(&format!("/commits/{HEAD}/check-runs"), &checks);
     run.route_pr239_complete();
 
-    let (code, text) = run.go(&[], &[]);
-    assert_eq!(code, 0, "{text}");
+    let (code, text) = run.go(&[], &[NO_CEILING]);
+    assert_eq!(code, 75, "a check still running is not yet:\n{text}");
     assert_eq!(
         run.log()
             .matches(&format!("/commits/{HEAD}/check-runs"))
@@ -531,8 +556,11 @@ fn a_non_scanning_check_still_running_does_not_hold_the_reading() {
         run.log()
     );
     let reading = run.reading();
-    assert_eq!(reading["complete"], true);
-    assert_eq!(reading["alerts"]["read"], 100);
+    assert_eq!(reading["complete"], false, "a partial reading says so");
+    assert_eq!(
+        reading["alerts"]["read"], 100,
+        "the scan's counts are on it"
+    );
     let gate = reading["checks"]
         .as_array()
         .unwrap()
@@ -550,12 +578,132 @@ fn a_non_scanning_check_still_running_does_not_hold_the_reading() {
         serde_json::json!([MIRROR_GATE]),
         "the reading names what was still running when it was read"
     );
-    assert_eq!(run.step_put()["status"], "completed");
+    assert!(
+        !run.writes().contains("PUT "),
+        "a check still running completes nothing:\n{}",
+        run.writes()
+    );
     let last = text.lines().last().unwrap_or("");
     assert!(
-        rule_pattern().captures(last).is_some(),
-        "the answer line is still last: {last}"
+        last.starts_with("read-publish-checks: not yet: ") && last.contains(MIRROR_GATE),
+        "the not-yet line names what is still running: {last}"
     );
+    assert!(
+        rule_pattern().captures(last).is_none(),
+        "a not-yet line is never read as an answer: {last}"
+    );
+}
+
+/// #239's completed check-runs with the scan PASSING and the mirror gate
+/// completed with `conclusion` — PR #243's shape once its Gate ended.
+fn pr239_with_a_clean_scan_and_the_gate(conclusion: &str) -> serde_json::Value {
+    let mut checks = pr239_with_the_gate_running();
+    for c in checks["check_runs"].as_array_mut().unwrap() {
+        if c["name"] == "CodeQL" {
+            c["conclusion"] = serde_json::json!("success");
+        }
+        if c["name"] == MIRROR_GATE {
+            c["status"] = serde_json::json!("completed");
+            c["conclusion"] = serde_json::json!(conclusion);
+        }
+    }
+    checks
+}
+
+/// A GATE RED IS A RED READING (backlog c6cb678b). With the scan clean
+/// and every check done, a failing mirror gate makes the step's
+/// `conclusion` `failure` — so `judge-checks` becomes ready and the
+/// packet cannot close `pr-opened` over it — and names the gate in
+/// `failing`. The scan's own conclusion stays the scan's.
+#[test]
+fn a_failing_gate_is_the_readings_verdict_when_the_scan_passed_and_is_named() {
+    let run = Run::new("gate-failed", open_pr_done());
+    let checks = run.root.join("check-runs-gate-failed.json");
+    write_file(
+        &checks,
+        &pr239_with_a_clean_scan_and_the_gate("failure").to_string(),
+    );
+    run.route(&format!("/commits/{HEAD}/check-runs"), &checks);
+    run.route_pr239_complete();
+
+    let (code, text) = run.go(&[], &[]);
+    assert_eq!(code, 0, "{text}");
+    let reading = run.reading();
+    assert_eq!(reading["complete"], true);
+    assert_eq!(reading["alerts"]["conclusion"], "success", "the scan's own");
+    assert_eq!(
+        reading["conclusion"], "failure",
+        "the verdict over every check"
+    );
+    assert_eq!(
+        reading["failing"],
+        serde_json::json!([{"name": MIRROR_GATE, "conclusion": "failure"}])
+    );
+    let put = run.step_put();
+    assert_eq!(put["metadata"]["conclusion"], "failure");
+    assert_eq!(
+        put["metadata"]["failing"],
+        format!("{MIRROR_GATE}: failure")
+    );
+    assert!(
+        text.contains(&format!(
+            "read-publish-checks: failing: {MIRROR_GATE}: failure"
+        )),
+        "the run names what failed:\n{text}"
+    );
+    let last = text.lines().last().unwrap_or("");
+    let caps = rule_pattern()
+        .captures(last)
+        .unwrap_or_else(|| panic!("the answer line is last and read: {last}"));
+    assert_eq!(&caps["conclusion"], "failure");
+}
+
+/// And a PASSING gate over a clean scan is a clean reading: the verdict
+/// is not "every check is a failure", it is the checks' own.
+#[test]
+fn a_passing_gate_over_a_clean_scan_reads_success() {
+    let run = Run::new("gate-passed", open_pr_done());
+    let checks = run.root.join("check-runs-gate-passed.json");
+    write_file(
+        &checks,
+        &pr239_with_a_clean_scan_and_the_gate("success").to_string(),
+    );
+    run.route(&format!("/commits/{HEAD}/check-runs"), &checks);
+    run.route_pr239_complete();
+
+    let (code, text) = run.go(&[], &[]);
+    assert_eq!(code, 0, "{text}");
+    assert_eq!(run.reading()["conclusion"], "success");
+    assert_eq!(run.step_put()["metadata"]["conclusion"], "success");
+    assert_eq!(run.step_put()["metadata"]["failing"], "");
+}
+
+/// THE CEILING. A check still running past `BOSS_CHECKS_CEILING_SECONDS`
+/// after the PR opened (open-pr's `completed_at`) completes the step as
+/// `unfinished`, naming it — the judge step reads that, and the packet
+/// neither waits forever nor closes clean over a check nobody saw end.
+#[test]
+fn a_check_still_running_past_the_ceiling_completes_the_step_unfinished() {
+    let run = Run::new("gate-past-ceiling", open_pr_done());
+    let checks = run.root.join("check-runs-gate-running.json");
+    write_file(&checks, &pr239_with_the_gate_running().to_string());
+    run.route(&format!("/commits/{HEAD}/check-runs"), &checks);
+    run.route_pr239_complete();
+
+    let (code, text) = run.go(&[], &[("BOSS_CHECKS_CEILING_SECONDS", "3600")]);
+    assert_eq!(code, 0, "{text}");
+    let reading = run.reading();
+    assert_eq!(reading["complete"], false);
+    assert_eq!(reading["conclusion"], "unfinished");
+    let put = run.step_put();
+    assert_eq!(put["status"], "completed");
+    assert_eq!(put["metadata"]["conclusion"], "unfinished");
+    assert_eq!(put["metadata"]["still_running"], MIRROR_GATE);
+    let last = text.lines().last().unwrap_or("");
+    let caps = rule_pattern()
+        .captures(last)
+        .unwrap_or_else(|| panic!("the answer line is last and read: {last}"));
+    assert_eq!(&caps["conclusion"], "unfinished");
 }
 
 /// The gate can register before CodeQL does. A head whose only check-run
@@ -582,8 +730,11 @@ fn a_running_gate_before_the_scan_registers_is_not_yet() {
     run.route(&format!("/commits/{HEAD}/check-runs"), &then);
     run.route_pr239_complete();
 
-    let (code, text) = run.go(&[], &[]);
-    assert_eq!(code, 0, "{text}");
+    let (code, text) = run.go(&[], &[NO_CEILING]);
+    assert_eq!(
+        code, 75,
+        "the gate is still running once the scan is read:\n{text}"
+    );
     assert_eq!(
         run.log()
             .matches(&format!("/commits/{HEAD}/check-runs"))

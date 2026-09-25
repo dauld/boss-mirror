@@ -1511,6 +1511,18 @@ enum JobAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Write the `outcome` a CLOSED packet lost, re-derived from its
+    /// completed declared terminal under the version it is pinned to —
+    /// never typed, and never over a recorded one (228c9a7d: a racing
+    /// catch-all close erased car 6b23d135's `disproved`). Confirmed by
+    /// reading it back.
+    Outcome {
+        /// Full uuid, 8+ characters of the id, or the car's branch.
+        job: String,
+        /// Print what it would write; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1778,6 +1790,7 @@ async fn main() -> Result<()> {
             JobAction::Convert { job, to, dry_run } => {
                 job::convert(&job, to.as_deref(), dry_run).await
             }
+            JobAction::Outcome { job, dry_run } => job::outcome(&job, dry_run).await,
         },
         Commands::Orient { all } => orient::run(all).await,
         Commands::Brief { packet, profile } => brief::run(packet, profile).await,

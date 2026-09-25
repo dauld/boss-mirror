@@ -1018,8 +1018,196 @@ pub async fn convert(job_ref: &str, to: Option<&str>, dry_run: bool) -> Result<(
     Ok(())
 }
 
+/// PURE: the `outcome` a CLOSED packet's metadata owes — derived from
+/// its completed declared terminal under the version it is pinned to,
+/// by the one rule every close uses
+/// ([`boss_jobs::WorkflowSpec::completed_terminal_outcome`]) — or
+/// `None` when it already records it, or the refusal. Never invented:
+/// a packet that closed with no completed terminal has no outcome to
+/// derive, and a recorded outcome that disagrees is not overwritten.
+pub(crate) fn owed_outcome(
+    job: &Value,
+    spec: &boss_jobs::WorkflowSpec,
+) -> std::result::Result<Option<String>, String> {
+    let id = job.get("id").and_then(Value::as_str).unwrap_or("?");
+    let id = &id[..8.min(id.len())];
+    let status = job.get("status").and_then(Value::as_str).unwrap_or("?");
+    if status != "closed" {
+        return Err(format!(
+            "packet {id} is {status} — an outcome is written by the close, and this repairs \
+             only a close that lost it"
+        ));
+    }
+    let steps = job
+        .get("steps")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let derived = spec
+        .completed_terminal_outcome(steps.iter().map(|s| {
+            (
+                s.get("sort_order")
+                    .and_then(Value::as_i64)
+                    .and_then(|n| i32::try_from(n).ok())
+                    .unwrap_or(-1),
+                s.get("status").and_then(Value::as_str) == Some("completed"),
+            )
+        }))
+        .ok_or_else(|| {
+            format!(
+                "packet {id} closed with no completed declared terminal under {} v{} — there \
+                 is no outcome to derive, and none is invented",
+                spec.kind, spec.version
+            )
+        })?;
+    match job.pointer("/metadata/outcome").and_then(Value::as_str) {
+        Some(recorded) if recorded == derived => Ok(None),
+        Some(recorded) => Err(format!(
+            "packet {id} records outcome {recorded:?} but its completed terminal declares \
+             {derived:?} — a recorded outcome is not overwritten; read the packet"
+        )),
+        None => Ok(Some(derived.to_string())),
+    }
+}
+
+/// `boss job outcome <packet> [--dry-run]` — write the `outcome` a
+/// closed packet lost, re-derived from its completed terminal step
+/// (228c9a7d). Car 6b23d135 closed through `disproved` and a racing
+/// catch-all close erased the outcome its terminal close had stamped;
+/// the server no longer writes that close without it, and this is the
+/// door for a packet closed before it did — not a hand PATCH of a value
+/// someone read off the steps. Confirmed by reading the packet back.
+pub async fn outcome(job_ref: &str, dry_run: bool) -> Result<()> {
+    let http = reqwest::Client::new();
+    let id = fetch_and_resolve(&http, job_ref).await?;
+    let job = crate::gate::api(
+        &http,
+        reqwest::Method::GET,
+        &format!("/api/jobs/{id}"),
+        None,
+    )
+    .await?
+    .context("could not read the packet")?;
+    let kind = job
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("packet {id} has no kind"))?;
+    let version = job
+        .get("workflow_version")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("packet {id} is pinned to no version"))?;
+    let spec: boss_jobs::WorkflowSpec = serde_json::from_value(
+        crate::gate::api(
+            &http,
+            reqwest::Method::GET,
+            &format!("/api/workflows/{kind}/versions/{version}"),
+            None,
+        )
+        .await?
+        .with_context(|| format!("{kind} v{version} is not in the registry"))?,
+    )
+    .with_context(|| format!("{kind} v{version} did not read as a protocol version"))?;
+    let owed = owed_outcome(&job, &spec).map_err(|e| anyhow!("boss job outcome: REFUSED — {e}"))?;
+    let Some(owed) = owed else {
+        println!("boss job outcome: {id} already records its terminal's outcome — nothing to do");
+        return Ok(());
+    };
+    if dry_run {
+        println!(
+            "boss job outcome: {id} — dry run, would write outcome {owed:?} (its completed \
+             terminal under {kind} v{version})"
+        );
+        return Ok(());
+    }
+    let sent = json!({ "outcome": owed });
+    crate::gate::api(
+        &http,
+        reqwest::Method::PATCH,
+        &format!("/api/jobs/{id}/metadata"),
+        Some(sent.clone()),
+    )
+    .await?;
+    let after = crate::gate::api(
+        &http,
+        reqwest::Method::GET,
+        &format!("/api/jobs/{id}"),
+        None,
+    )
+    .await?
+    .context("could not read the packet back")?;
+    let (report, took) = confirm_patch(
+        &after.get("metadata").cloned().unwrap_or_else(|| json!({})),
+        &sent,
+    );
+    print!("{report}");
+    if !took {
+        bail!("the API answered but packet {id} does not hold the outcome that was sent");
+    }
+    println!(
+        "boss job outcome: {id} records outcome {owed:?}, derived from its completed terminal \
+         — confirmed by reading it back"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    /// 228c9a7d: the outcome a closed packet owes is its completed
+    /// terminal's — 6b23d135's shape — and nothing else is written: an
+    /// open packet, a close with no completed terminal, and a recorded
+    /// outcome that disagrees are each refused by name; one that agrees
+    /// is nothing to do.
+    #[test]
+    fn a_lost_outcome_is_re_derived_from_the_completed_terminal() {
+        use serde_json::json;
+        let spec: boss_jobs::WorkflowSpec = serde_json::from_value(json!({
+            "kind": "ship-a-change", "version": 3, "status": "active",
+            "label": "Ship a change", "category": "engineering",
+            "subject_kinds": ["custom"], "owning_team": "platform",
+            "created_at": "2026-09-24T00:00:00Z",
+            "steps": [
+                {"title": "review", "kind": "task", "ready_when": "true"},
+                {"title": "merged", "kind": "outcome", "ready_when": "true",
+                 "terminal": {"outcome": "merged"}},
+                {"title": "disproved", "kind": "outcome", "ready_when": "true",
+                 "terminal": {"outcome": "disproved"}},
+            ],
+        }))
+        .unwrap();
+        let car = json!({
+            "id": "6b23d135-1bde-47cc-9bd5-5612c741b9f2", "status": "closed",
+            "metadata": {"merged": "true", "disproved": "true"},
+            "steps": [
+                {"sort_order": 0, "status": "completed"},
+                {"sort_order": 1, "status": "skipped"},
+                {"sort_order": 2, "status": "completed"},
+            ],
+        });
+        assert_eq!(
+            super::owed_outcome(&car, &spec),
+            Ok(Some("disproved".to_string()))
+        );
+
+        let mut repaired = car.clone();
+        repaired["metadata"]["outcome"] = json!("disproved");
+        assert_eq!(super::owed_outcome(&repaired, &spec), Ok(None));
+
+        let mut other = car.clone();
+        other["metadata"]["outcome"] = json!("merged");
+        let e = super::owed_outcome(&other, &spec).unwrap_err();
+        assert!(e.contains("not overwritten"), "{e}");
+
+        let mut open = car.clone();
+        open["status"] = json!("open");
+        let e = super::owed_outcome(&open, &spec).unwrap_err();
+        assert!(e.contains("6b23d135 is open"), "{e}");
+
+        let mut catch_all = car.clone();
+        catch_all["steps"][2]["status"] = json!("skipped");
+        let e = super::owed_outcome(&catch_all, &spec).unwrap_err();
+        assert!(e.contains("none is invented"), "{e}");
+    }
+
     #[test]
     fn a_version_reads_bare_or_as_printed() {
         assert_eq!(super::parse_version("3").unwrap(), 3);

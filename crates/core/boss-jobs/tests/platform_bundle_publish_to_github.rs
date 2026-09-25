@@ -267,3 +267,37 @@ fn publish_to_github_v8_hands_measure_and_review_to_an_agent_and_keeps_approve_d
     );
     assert_eq!(approve.authority_role.as_deref(), Some("platform-admin"));
 }
+
+/// v9 (backlog c6cb678b, 2026-09-24). PR #243 closed `pr-opened` with
+/// its Gate red: the reading had recorded the Gate in_progress and the
+/// judge judged CodeQL's rules alone. The verb now completes
+/// `read-checks` only on every check and reads `failure` for a failing
+/// Gate over a clean scan — which the `!= "success"` guard already
+/// routes to the judge. What this row must add is that the judge JUDGES
+/// it: a disposition list covering only the scan's rules would close a
+/// red Gate as noise by omission. So the procedure names the reading's
+/// `failing` list and asks one disposition per failing check.
+#[test]
+fn publish_to_github_v9_judges_every_failing_check_not_only_the_scan() {
+    let wf = bundled("publish-to-github");
+    let judge = wf
+        .steps
+        .iter()
+        .find(|s| s.title == "judge-checks")
+        .expect("publish-to-github has a judge-checks step");
+    let procedure = judge.metadata_defaults["procedure"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        procedure.contains("code_scanning.failing"),
+        "the judge reads the failing checks off the reading: {procedure}"
+    );
+    assert!(
+        procedure.contains("EVERY FAILING CHECK IS JUDGED"),
+        "the judge disposes of each failing check, not only the scan's rules: {procedure}"
+    );
+    assert!(
+        procedure.contains("unfinished"),
+        "a check that outlasted the ceiling is judged too: {procedure}"
+    );
+}

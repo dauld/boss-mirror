@@ -171,6 +171,7 @@ fn run(scratch: &Path, extra: &[(&str, &str)]) -> Output {
 fn run_with(scratch: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
     let bin = stub_curl(scratch);
     stub_git(scratch);
+    stub_df(&bin);
     let installer = stub_installer(scratch);
     let mut cmd = Command::new("bash");
     cmd.arg(repo_root().join("infra/cluster/dev-scratch-reclaim.sh"))
@@ -1675,18 +1676,24 @@ fn du_kb(path: &Path) -> u64 {
 /// A `df` that reports the scratch fixture as a filesystem of
 /// `STUB_DF_SIZE_GB` whose free space is `STUB_DF_CAP_KB` minus what
 /// the fixture holds now, with each fixture MiB read as one GB — so a
-/// reclaim of a 3 MiB target shows as 3 GB freed. Any other path is
-/// roomy, so the /work floor never fires.
+/// reclaim of a 3 MiB target shows as 3 GB freed. `STUB_DF_WORK_GB`
+/// sets the /work fixture's free space in whole GB. Any other path is
+/// roomy, so neither floor fires unless a test asks — `run_with`
+/// installs this for every test, because the /work floor now sits at
+/// the gate's floor plus a margin (infra/build-floor.env), and the
+/// real volume a test host's fixtures land on may well be under it.
 fn stub_df(bin: &Path) {
     boss_testing::write_exec(
         &bin.join("df"),
         concat!(
             "#!/usr/bin/env bash\n",
             "m=\"${@: -1}\"\n",
-            "if [ \"$m\" = \"$STUB_DF_SCRATCH\" ]; then\n",
+            "if [ \"$m\" = \"${STUB_DF_SCRATCH:-}\" ]; then\n",
             "    used=$(du -sk \"$m\" | cut -f1)\n",
             "    free=$(( (STUB_DF_CAP_KB - used) * 1024 ))\n",
             "    size=$(( STUB_DF_SIZE_GB * 1024 * 1024 ))\n",
+            "elif [ -n \"${STUB_DF_WORK_GB:-}\" ] && [ \"$m\" = \"$WORK_MOUNT\" ]; then\n",
+            "    free=$(( STUB_DF_WORK_GB * 1024 * 1024 )); size=$(( 40 * 1024 * 1024 ))\n",
             "else\n",
             "    free=$(( 1 << 40 )); size=$(( 1 << 41 ))\n",
             "fi\n",
@@ -1889,4 +1896,118 @@ fn above_the_floor_the_scratch_floor_mode_is_silent_and_takes_nothing() {
         "a pass that took nothing files nothing\n{text}"
     );
     assert!(install_log(&root).is_empty(), "{text}");
+}
+
+// ---------------------------------------------------------------------
+// THE /work FLOOR IS THE GATE'S FLOOR PLUS A MARGIN (backlog 99ce8744).
+// ---------------------------------------------------------------------
+// Measured 2026-09-24 ~23:00Z: /work at 12 GB free of 40. The gate
+// refused below 12 and this pass acted only below 6, so it never fired
+// before a builder's pre-flight was refused, and two builders lowered
+// the gate's floor by hand. Both now read infra/build-floor.env, and
+// the floor here is DERIVED — the gate's plus a margin — so the
+// automatic pass acts first. The gate's half of the pin is in
+// the_build_floor_lives_once.rs.
+
+/// The value of `name` in `infra/build-floor.env`, read the way the
+/// scripts read it: the last `NAME=<number>` line.
+fn build_floor(name: &str) -> u64 {
+    let text = std::fs::read_to_string(repo_root().join("infra/build-floor.env"))
+        .expect("infra/build-floor.env is the one definition of the build floor");
+    text.lines()
+        .rev()
+        .find_map(|l| l.strip_prefix(&format!("{name}=")))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| panic!("infra/build-floor.env defines {name} as a whole number"))
+}
+
+fn work_floor() -> u64 {
+    build_floor("GATE_MIN_FREE_GB") + build_floor("WORK_RECLAIM_MARGIN_GB")
+}
+
+#[test]
+fn the_work_floor_is_the_gates_floor_plus_the_margin_and_the_retired_knob_moves_nothing() {
+    let floor = work_floor();
+    for (free, below) in [(floor - 1, true), (floor, false)] {
+        let root = boss_testing::scratch_dir("boss-dsr-work-floor");
+        let _guard = Scratch(root.clone());
+        let _yard = Yard::new(&root);
+        let out = run(
+            &root,
+            &[
+                ("STUB_DF_WORK_GB", &free.to_string()),
+                // The live sidecar still sets this (boss-dev.yaml) and a
+                // manifest edit rolls the pod, so the script must be the
+                // one that stops reading it — else the 6 it names keeps
+                // the reclaim below the gate for as long as the pod runs.
+                ("BOSS_WORK_FLOOR_GB", "6"),
+            ],
+        );
+        let text = say(&out);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if below {
+            assert!(
+                stdout.contains(&format!("{free}GB free < {floor}GB floor")),
+                "one GB under the gate's floor plus the margin, the /work pass fires\n{text}"
+            );
+        } else {
+            assert!(
+                stdout.contains(&format!("{free}GB free >= {floor}GB floor")),
+                "at the derived floor the /work pass is met\n{text}"
+            );
+        }
+    }
+}
+
+/// Under the /work floor a LANDED worktree waits only the live window
+/// the floor's target pass keeps (BOSS_LIVE_TARGET_MIN), not the 12h
+/// grace — "the grace yields to the floor, as it already does for
+/// targets". A freshly cut tree (its head still on origin/main, so it
+/// reads as landed) is inside the live window and is kept.
+#[test]
+fn under_the_work_floor_a_landed_worktree_waits_only_the_live_window() {
+    let floor = work_floor();
+    for under in [true, false] {
+        let root = boss_testing::scratch_dir("boss-dsr-work-floor-grace");
+        let _guard = Scratch(root.clone());
+        let yard = Yard::new(&root);
+        let landed = yard.worktree("agent-landed-2h", Some("feat/landed"), 2);
+        yard.land("feat/landed");
+        let fresh = root.join("work").join("wt").join("agent-fresh");
+        git(
+            &yard.repo,
+            0,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat/fresh",
+                fresh.to_str().expect("utf8"),
+                "main",
+            ],
+        );
+        let free = if under { floor - 1 } else { floor + 10 };
+        let out = run(&root, &[("STUB_DF_WORK_GB", &free.to_string())]);
+        let text = say(&out);
+        if under {
+            assert!(
+                !landed.exists(),
+                "under the /work floor a landed tree idle 2h goes — the 12h grace yields\n{text}"
+            );
+            assert!(
+                String::from_utf8_lossy(&out.stdout).contains("under the /work floor"),
+                "the removal says it was the floor that shortened the wait\n{text}"
+            );
+        } else {
+            assert!(
+                landed.exists(),
+                "above the floor a landed tree keeps its 12h grace\n{text}"
+            );
+        }
+        assert!(
+            fresh.exists(),
+            "a tree cut minutes ago is inside the live window, floor or not\n{text}"
+        );
+    }
 }

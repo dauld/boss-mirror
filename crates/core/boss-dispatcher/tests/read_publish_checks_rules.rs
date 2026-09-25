@@ -14,13 +14,15 @@
 //! packet closed, PR #238 was merged over 64 unread alerts and #239
 //! stalled on 109, and nothing in the record said so.
 
-use boss_dispatcher::rules::expr::{NoHelpers, Value};
+use boss_core::calendar::Cadence;
+use boss_dispatcher::rules::expr::{Expr, NoHelpers, Value};
 use boss_dispatcher::rules::registry::{MatchedInvocation, Registry, match_event};
 
 mod common;
 
 const FILING: &str = "read-publish-checks-on-read-checks-ready";
 const ANSWER: &str = "complete-publish-read-checks-on-read-publish-checks-answered";
+const REREAD: &str = "reread-publish-checks-hourly";
 
 fn rule(name: &str) -> Registry {
     common::authored_rule(name)
@@ -164,6 +166,53 @@ fn an_answered_read_request_hands_the_handler_the_edge_the_fields_and_the_failur
         arg(inv, "on_failure"),
         Value::String("annotate-and-alert".into()),
         "a deadline passed or an unreadable GitHub must annotate the step and file the alert"
+    );
+}
+
+/// THE RE-READ (backlog c6cb678b). A check slower than the scan — the
+/// mirror's full Gate, up to 180 minutes — is `not yet` on the one read
+/// the step-ready rule files, so the step stays open; this is what reads
+/// it again. Hourly, unguarded (the verb is the idempotence), filing the
+/// SAME verb for the same host as the step-ready rule.
+#[test]
+fn the_hourly_rule_re_files_the_same_forge_read_unguarded() {
+    let reg = rule(REREAD);
+    let r = reg
+        .rules()
+        .iter()
+        .find(|r| r.name == REREAD)
+        .expect("the re-read rule is declared");
+    let schedule = r.schedule().expect("a timer, not an event rule");
+    assert_eq!(
+        schedule.cadence,
+        Cadence::Hourly,
+        "the grain of the Gate it waits on"
+    );
+    assert!(
+        r.when.is_none(),
+        "no guard: a guard the silence roster cannot read declares a cadence it does not keep"
+    );
+    let step = r.do_steps.first().expect("one handler");
+    assert_eq!(step.handler, "jobs.spawn");
+    let lit = |k: &str| {
+        step.args
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, e)| e.clone())
+            .unwrap_or_else(|| panic!("arg {k} missing"))
+    };
+    assert_eq!(
+        lit("kind"),
+        Expr::Literal(Value::String("ops-request".into()))
+    );
+    assert_eq!(
+        lit("metadata.verb"),
+        Expr::Literal(Value::String("read-publish-checks".into())),
+        "the same verb the step-ready rule files"
+    );
+    assert_eq!(
+        lit("metadata.host"),
+        Expr::Literal(Value::String("forge".into()))
     );
 }
 

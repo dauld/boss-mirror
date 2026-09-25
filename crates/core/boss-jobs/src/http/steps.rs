@@ -1596,12 +1596,8 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             old.status != StepStatus::Completed && step.status == StepStatus::Completed;
         if just_completed
             && let Ok(spec) = reg.get_version(&job.kind, job.workflow_version).await
-            && let Some(outcome) = spec
-                .steps
-                .get(old.sort_order as usize)
-                .and_then(|spec_step| spec_step.terminal.as_ref())
-                .map(|t| t.outcome.clone())
-            && let Err(e) = close_job_on_terminal(&state, &job_id, &outcome, &actor, now).await
+            && let Some(outcome) = spec.terminal_outcome_at(old.sort_order)
+            && let Err(e) = close_job_on_terminal(&state, &job_id, outcome, &actor, now).await
         {
             return close_not_written(&job_id, &e);
         }
@@ -1635,6 +1631,27 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                 let job_now = boss_clock_client::now_from(&state.clock).await;
                 job.closed_on = step.completed_on.or(Some(job_now.date_naive()));
                 stamp_close_instant(&mut job, &job_now);
+                // A catch-all close that FOLLOWS a completed declared
+                // terminal names that terminal's outcome. Two completers
+                // of one marker (a verb's PUT and the dispatcher's
+                // `complete-marker-on-step-ready`) race here: the second
+                // reads the terminal completed and the rest skipped while
+                // the first's close is not yet written, closes the Job
+                // itself, and its whole-row write landed last — so car
+                // 6b23d135 closed through `disproved` with no outcome
+                // (228c9a7d). Deriving it here makes both writers say
+                // the same thing, whichever lands last.
+                if let Some(reg) = &state.kind_registry
+                    && let Ok(spec) = reg.get_version(&job.kind, job.workflow_version).await
+                    && let Some(outcome) = spec.completed_terminal_outcome(
+                        steps
+                            .iter()
+                            .map(|s| (s.sort_order, s.status == StepStatus::Completed)),
+                    )
+                    && let serde_json::Value::Object(map) = &mut job.metadata
+                {
+                    map.insert("outcome".to_string(), outcome.into());
+                }
             }
             // OUTBOX (phase 2): the state event (full row state for
             // the rebuild) + status markers record in the SAME

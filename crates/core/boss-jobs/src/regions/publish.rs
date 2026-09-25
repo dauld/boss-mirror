@@ -47,6 +47,11 @@ pub struct PublishPr {
     /// region says the reading, never a symptom (design cb38d806 §4).
     pub alerts: String,
     pub rules: String,
+    /// The checks the reading saw complete without passing, as the
+    /// step recorded them (`<name>: <conclusion>`, `; `-joined) — the
+    /// mirror's Gate among them since backlog c6cb678b. EMPTY when
+    /// none failed, or on a reading older than that field.
+    pub failing: String,
     /// `judge-checks` completed: a disposition per rule is on the
     /// packet. A SKIPPED judge is not a judgement — the workflow skips
     /// it only when the scan concluded `success`, which the conclusion
@@ -84,9 +89,18 @@ impl PublishPr {
     /// reports a symptom sends a human to re-derive what the system
     /// already recorded (CLAUDE.md §Diagnosis), so the sentence names
     /// the conclusion and both counts the step wrote down.
+    ///
+    /// A FAILING CHECK IS NAMED (backlog c6cb678b): PR #243's Gate
+    /// failed, and the only sentence the region ever carried about it
+    /// was the PR's age. A verdict must name what failed.
     pub fn reading(&self) -> String {
+        let failing = if self.failing.is_empty() {
+            String::new()
+        } else {
+            format!(" — failing: {}", self.failing)
+        };
         format!(
-            "the scan read {} — {} alert(s) over {} rule(s), no disposition recorded",
+            "the checks read {} — {} alert(s) over {} rule(s){failing}, no disposition recorded",
             self.conclusion, self.alerts, self.rules
         )
     }
@@ -143,6 +157,7 @@ pub fn publish_prs(packets: &[(Job, Vec<Step>)]) -> Vec<PublishPr> {
                 conclusion: read("conclusion"),
                 alerts: read("alerts"),
                 rules: read("rules"),
+                failing: read("failing"),
                 judged: judge.is_some_and(|s| s.status == StepStatus::Completed),
             })
         })
@@ -279,14 +294,24 @@ pub(super) fn publish(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         );
         // Openness is said only where GitHub was READ saying it
         // (backlog a5d4322c); an unread PR is named as unread.
+        // And what failed on it, when a check did (backlog c6cb678b):
+        // #243's only sentence was its age, with its Gate red.
+        let failing = if p.failing.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; its checks read {} — failing: {}",
+                p.conclusion, p.failing
+            )
+        };
         let why = if p.state_read_at.is_empty() {
             format!(
-                "{} was opened {age} ago and its state was never read from GitHub — past the {STALLED_PUBLISH_HOURS}h a publish may stand, so it is stalled or unobserved",
+                "{} was opened {age} ago and its state was never read from GitHub — past the {STALLED_PUBLISH_HOURS}h a publish may stand, so it is stalled or unobserved{failing}",
                 p.url
             )
         } else {
             format!(
-                "{} has been open {age} (GitHub read it open at {}) — past the {STALLED_PUBLISH_HOURS}h a publish may stand, and every day it does the next diff is larger",
+                "{} has been open {age} (GitHub read it open at {}) — past the {STALLED_PUBLISH_HOURS}h a publish may stand, and every day it does the next diff is larger{failing}",
                 p.url, p.state_read_at
             )
         };
@@ -480,6 +505,63 @@ mod tests {
         assert_eq!(
             by_name(&out, "publish").kpi[0].text,
             "1 mirror pull request awaiting merge"
+        );
+    }
+
+    /// A FAILING CHECK IS NAMED (backlog c6cb678b). PR #243's Gate
+    /// failed over a clean scan, and the region's only sentence about it
+    /// — 25 hours later — was the PR's age. The reading now records
+    /// `failing` on read-checks, and both troubled sentences carry it:
+    /// the unjudged red, and the stalled PR after it was judged.
+    #[test]
+    fn a_failing_gate_is_named_in_the_publish_regions_why() {
+        const GATE: &str = "Gate (infra/gate.sh, full): failure";
+        let with_failing = |(j, mut steps): (Job, Vec<Step>)| {
+            for s in &mut steps {
+                if s.spec_slug.as_deref() == Some("read-checks") {
+                    s.metadata["failing"] = json!(GATE);
+                }
+            }
+            (j, steps)
+        };
+        let status = empty_status();
+
+        // Unjudged, inside its day: the red reading leads, naming it.
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let packets = vec![with_failing(publish_packet(
+            "https://mirror/pull/243",
+            "snap-243",
+            "mirror-a",
+            "2026-09-19T11:00:00Z",
+            Some(("failure", "3", "3")),
+            false,
+        ))];
+        let out = regions(&with_publish(base, Some(&packets)));
+        let p = by_name(&out, "publish");
+        assert_eq!(p.state, RegionState::Troubled, "{}", p.why);
+        assert!(
+            p.why.contains(GATE),
+            "the unjudged red names the failing check: {}",
+            p.why
+        );
+
+        // Judged, and standing past its day: the age sentence names it too.
+        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let packets = vec![with_failing(publish_packet(
+            "https://mirror/pull/243",
+            "snap-243",
+            "mirror-a",
+            "2026-09-18T06:00:00Z",
+            Some(("failure", "3", "3")),
+            true,
+        ))];
+        let out = regions(&with_publish(base, Some(&packets)));
+        let p = by_name(&out, "publish");
+        assert_eq!(p.state, RegionState::Troubled, "{}", p.why);
+        assert!(
+            p.why.contains(GATE) && p.why.contains("hours"),
+            "the stalled sentence names what failed beside the age: {}",
+            p.why
         );
     }
 

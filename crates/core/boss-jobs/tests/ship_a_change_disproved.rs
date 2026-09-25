@@ -60,6 +60,12 @@ fn admin_header() -> String {
 }
 
 fn app() -> axum::Router {
+    app_with_jobs().0
+}
+
+/// The router, and the repository behind it — for the one test that
+/// has to stand the car in a state only a race produces.
+fn app_with_jobs() -> (axum::Router, Arc<InMemoryJobs>) {
     let kinds = Arc::new(InMemoryWorkflows::new());
     // The real platform bundle: a fixture copy would pass while the
     // shipped ship-a-change had no such terminal.
@@ -67,6 +73,7 @@ fn app() -> axum::Router {
         kinds.seed(spec).expect("seed platform kind");
     }
     let jobs = Arc::new(InMemoryJobs::new());
+    let repo = jobs.clone();
     let policy: Arc<dyn PolicyClient> = Arc::new(
         FakePolicyClient::builder()
             .allow(
@@ -103,7 +110,7 @@ fn app() -> axum::Router {
             Arc::new(boss_clock_client::WallClockClient),
         )
     };
-    router(state)
+    (router(state), repo)
 }
 
 async fn send(
@@ -313,6 +320,77 @@ async fn a_disproved_car_closes_through_its_own_terminal_with_the_failing_probe(
     for not_taken in ["proven", "merged", "abandoned", "settled", "landed-twin"] {
         assert_eq!(slug(&closed, not_taken)["status"], "skipped", "{not_taken}");
     }
+}
+
+/// 228c9a7d: TWO COMPLETERS, ONE OUTCOME. The marker readies
+/// `disproved`, and two actors complete it: the verb's own PUT, and the
+/// dispatcher's `complete-marker-on-step-ready` rule, which completes
+/// every ready marker. Car 6b23d135's log (2026-09-24T22:18:10Z) holds
+/// both: the verb's terminal close stamped `outcome = disproved`
+/// (.556307), then the dispatcher's re-send — reading the step already
+/// completed and every other step already skipped, but the Job still
+/// open — closed it AGAIN through the catch-all (.586476), and that
+/// whole-row write carried no outcome. The car read closed with none.
+///
+/// This stands the car in exactly the state the second PUT saw — the
+/// terminal completed and the rest skipped by the first close, the Job
+/// not yet closed — and sends the dispatcher's PUT. Since b416ad40 an
+/// unchanged re-send of a terminal step writes NOTHING, so it can no
+/// longer race the first closer: the Job stays open with no outcome
+/// written by the re-send, and the close is left to the terminal
+/// closer, which names the outcome (and, since 29a7ea09, merges only
+/// the fields a close owns).
+#[tokio::test]
+async fn a_resend_that_races_the_terminal_close_leaves_the_close_to_it() {
+    use boss_core::job::{JobId, StepStatus};
+    use boss_jobs::JobsRepository;
+
+    let (app, jobs) = app_with_jobs();
+    let id = car_at_the_shed(&app, "fix/dev-pod-not-first-evicted", true).await;
+    let car = get_job(&app, &id).await;
+    let w = disprove_writes(&car, &measured_false()).expect("disprovable");
+    for (path, body) in [
+        (w.outcome.merge_path(&id), w.outcome.metadata.clone()),
+        (format!("/api/jobs/{id}/metadata"), w.marker.clone()),
+    ] {
+        let (status, said) = send(&app, "PATCH", &path, Some(body)).await;
+        assert!(status.is_success(), "{path}: {status} {said}");
+    }
+
+    // The first completer's step writes landed; its Job close has not.
+    let job_id = JobId::from_uuid(uuid::Uuid::parse_str(&id).unwrap());
+    let now = chrono::Utc::now();
+    for mut s in jobs.list_steps(&job_id).await.unwrap() {
+        s.status = match (s.id.to_string() == w.outcome.step_id, s.status) {
+            (true, _) => StepStatus::Completed,
+            (false, StepStatus::Pending | StepStatus::Ready | StepStatus::Active) => {
+                StepStatus::Skipped
+            }
+            (false, kept) => kept,
+        };
+        jobs.update_step_at(&s, now, &[]).await.unwrap();
+    }
+    assert_eq!(get_job(&app, &id).await["status"], "open");
+
+    // The second completer: the dispatcher's PUT of the same status.
+    let (status, body) = send(
+        &app,
+        "PUT",
+        &w.outcome.status_path(&id),
+        Some(w.outcome.status_body.clone()),
+    )
+    .await;
+    assert!(status.is_success(), "the re-send: {status} {body}");
+
+    let after = get_job(&app, &id).await;
+    assert_eq!(
+        after["status"], "open",
+        "an unchanged re-send must not close the packet itself: {after:#}"
+    );
+    assert!(
+        after["metadata"].get("outcome").is_none_or(|o| o.is_null()),
+        "the re-send wrote no outcome of its own: {after:#}"
+    );
 }
 
 /// The terminal cannot be reached without the evidence: its three

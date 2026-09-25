@@ -143,9 +143,13 @@ No ssh from the pod. Three doors, all read-only:
   `dauld-github-token`, and refuses loudly without it; `--check`
   validates its inputs with no network), `read-publish-checks` (the
   second machine step of publish-to-github v7: waits for the mirror
-  PR's code-scanning check-runs (CodeQL and its Analyze jobs — every
-  other check, the mirror's own gate among them, is recorded as it
-  stands when read, backlog d167e7d7) over the PUBLIC API — no token —
+  PR's code-scanning check-runs (CodeQL and its Analyze jobs, backlog
+  d167e7d7) and then completes the step only once EVERY check has
+  completed — a check still running, the mirror's own gate among them,
+  is `not yet` (exit 75, the runner not held), re-read hourly by
+  `reread-publish-checks-hourly`, `unfinished` four hours after the PR
+  opened, and a failing one makes the reading red and is named, backlog
+  c6cb678b) over the PUBLIC API — no token —
   reads the CodeQL
   annotations and writes the reading onto the publish packet as
   `code_scanning`, so the `judge-checks` step and David's merge follow a

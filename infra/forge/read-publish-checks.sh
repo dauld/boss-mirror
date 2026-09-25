@@ -39,14 +39,29 @@
 #      FAILED line is what the packet sees, never the runner's kill.
 #      ONLY those, since backlog d167e7d7 (2026-09-23): the mirror now
 #      runs the full infra/gate.sh on every PR (car 5ede7044), cold on a
-#      4-vCPU GitHub runner, which outlasts $DEADLINE — so waiting for
-#      EVERY check-run held the forge's serial ops-runner for 25 minutes
-#      and then failed the read with complete=false, though
-#      `judge-checks` reads nothing but the scan. Every other check-run
-#      is recorded as it stood when read — one still running is named
-#      in `still_running` with status in_progress and no conclusion,
-#      never a verdict. A head with nothing running at all is read as
-#      before, including one that carries no $SCAN_CHECK run;
+#      4-vCPU GitHub runner with a 180-minute timeout, which outlasts
+#      $DEADLINE — so waiting for EVERY check-run held the forge's
+#      serial ops-runner for 25 minutes and then failed the read with
+#      complete=false;
+#   2b. BUT THE STEP COMPLETES ONLY ON EVERY CHECK (backlog c6cb678b,
+#      2026-09-24). d167e7d7 reasoned that `judge-checks` reads nothing
+#      but the scan, and so completed the step with the gate still
+#      running — which made a slow check's verdict one nobody read. PR
+#      #243: the mirror's Gate concluded failure at 04:18Z, the reading
+#      had recorded it in_progress minutes earlier, `judge-checks`
+#      judged CodeQL's three rules, and the packet closed `pr-opened`
+#      at 04:41Z; the publish region turned red 25 hours later on the
+#      PR's AGE. So a check still running once the scan is read is
+#      NOT YET: the partial reading goes on the packet, the step stays
+#      open, and this verb exits 75 at once — the runner is not held
+#      for the gate. The hourly rule `reread-publish-checks-hourly`
+#      files this verb again until every check has completed, and the
+#      step's `conclusion` is then the verdict over ALL of them: the
+#      scan's own when it did not pass, else `failure` when any other
+#      check failed, named in `failing`. A check still running
+#      $CEILING seconds after the PR opened completes the step as
+#      `unfinished` with what was still running named, so the judge
+#      step reads it rather than the packet waiting forever;
 #   3. reads the code-scanning check's annotations (every page the API
 #      exposes; GitHub caps a check-run's exposed annotations, and the
 #      reading records the declared count beside the read count);
@@ -68,6 +83,15 @@
 # later has no rule that can alert on its failure. A publish happens
 # at most once a day and its checks take ~15 minutes; revisit if the
 # runner's queue shows the delay.
+#
+# The re-reads (2b) take that declined cadence back, for the checks
+# slower than the scan, and at the one frequency that is honest for
+# them: hourly, unconditional, with the idempotence here — a firing
+# with no packet waiting answers `nothing to do`, as mirror-drift does
+# on a quiet day. Its cost is stated: one ops-request an hour, almost
+# all of them that answer. Holding this runner for a gate whose own
+# timeout is three hours was the alternative, and d167e7d7 measured
+# why not.
 #
 # Idempotent: re-running for the same packet re-reads and re-PATCHes
 # the same keys; a step already completed is nothing to do.
@@ -113,6 +137,12 @@ DEADLINE="${BOSS_CHECKS_DEADLINE_SECONDS:-1500}"
 # so a three-second deadline sometimes allowed one poll and sometimes
 # hundreds. A count is the same number on an idle pod and a loaded one.
 MAX_POLLS="${BOSS_CHECKS_MAX_POLLS:-0}"
+# THE CEILING on a check still running after the scan is read, counted
+# from the instant `open-pr` completed (backlog c6cb678b). Four hours:
+# the mirror gate's own `timeout-minutes: 180` in .github/workflows/
+# ci.yml, plus one hourly re-read to see it end. Past it the step
+# completes `unfinished`, naming what never finished.
+CEILING="${BOSS_CHECKS_CEILING_SECONDS:-14400}"
 # GitHub pages a check-run's annotations 100 at a time; ten pages is
 # well past what it exposes for one run.
 MAX_PAGES=10
@@ -138,8 +168,8 @@ check_inputs() {
         */*) ;;
         *) echo "$me: BOSS_MIRROR_SLUG '$MIRROR_SLUG' is not owner/repo" >&2; rc=1 ;;
     esac
-    case "$POLL$DEADLINE" in
-        *[!0-9]*) echo "$me: BOSS_CHECKS_POLL_SECONDS ($POLL) and BOSS_CHECKS_DEADLINE_SECONDS ($DEADLINE) must be whole seconds" >&2; rc=1 ;;
+    case "${POLL:-empty}${DEADLINE:-empty}${CEILING:-empty}" in
+        *[!0-9]*) echo "$me: BOSS_CHECKS_POLL_SECONDS ($POLL), BOSS_CHECKS_DEADLINE_SECONDS ($DEADLINE) and BOSS_CHECKS_CEILING_SECONDS ($CEILING) must be whole seconds" >&2; rc=1 ;;
     esac
     case "${MAX_POLLS:-empty}" in
         empty|*[!0-9]*) echo "$me: BOSS_CHECKS_MAX_POLLS ($MAX_POLLS) must be a whole number of polls (0 is no bound)" >&2; rc=1 ;;
@@ -151,7 +181,8 @@ if [ "${1:-}" = "--check" ]; then
     echo "$me --check"
     echo "  mirror     : $MIRROR_SLUG via $GITHUB_API (public, unauthenticated)"
     echo "  scan check : $SCAN_CHECK, with its jobs named '$SCAN_JOBS…'"
-    echo "  wait       : every ${POLL}s up to ${DEADLINE}s for those check-runs to complete; every other one is recorded as it stands"
+    echo "  wait       : every ${POLL}s up to ${DEADLINE}s for those check-runs to complete; any other still running is not yet (exit 75), re-read hourly"
+    echo "  ceiling    : ${CEILING}s after the PR opened, a check still running completes the step as unfinished"
     echo "  jobs api   : ${BOSS_JOBS_URL:-<unset — the ops-runner pins it on its Exec line>}"
     if check_inputs; then
         echo "$me: --check ok"
@@ -201,6 +232,8 @@ step_id=$(printf '%s' "$target" | jq -r '.read.id')
 open_status=$(printf '%s' "$target" | jq -r '.open.status // "absent"')
 head=$(printf '%s' "$target" | jq -r '.open.metadata.snapshot_commit // ""')
 pr_url=$(printf '%s' "$target" | jq -r '.open.metadata.pr_url // ""')
+# When the PR opened: the server's stamp on open-pr, the ceiling's zero.
+pr_opened_at=$(printf '%s' "$target" | jq -r '.open.completed_at // ""')
 [ "$open_status" = "completed" ] \
     || refuse "packet ${job_id:0:8}: read-checks is ready but its open-pr step is '$open_status' — the PR is not on the record yet"
 case "$head" in
@@ -274,7 +307,7 @@ done
 if [ -z "$running" ]; then
     say "$total check-runs on ${head:0:12}, all completed"
 else
-    say "$total check-runs on ${head:0:12}, the code-scanning checks completed; recorded as still running: $running"
+    say "$total check-runs on ${head:0:12}, the code-scanning checks completed; still running: $running"
 fi
 
 # 3. The scanning check's annotations, every page.
@@ -304,13 +337,27 @@ jq -n -c --slurpfile checks "$checks" --slurpfile ann "$ann" \
     ($checks[0].check_runs) as $runs
     | ($ann[0]) as $a
     | ([$runs[] | select(.name == $scan)] | .[0]) as $s
+    # A check that ran and did not pass. `neutral` and `skipped` are
+    # GitHub saying the check had nothing to object to.
+    | [$runs[] | select(.status == "completed"
+                        and ((.conclusion // "none") | IN("success", "neutral", "skipped") | not))
+               | {name, conclusion: (.conclusion // "none")}] as $failing
+    | ([$runs[] | select(.status != "completed") | .name]) as $running
     | {code_scanning: {
-        read_at: $at, head: $head, pr_url: $pr, complete: true,
+        read_at: $at, head: $head, pr_url: $pr, complete: ($running | length == 0),
+        # THE VERDICT OVER EVERY CHECK (backlog c6cb678b): the scan when
+        # it did not pass, else `failure` when any other check failed —
+        # a Gate red on the PR is a red reading, never a clean one.
+        conclusion: (if $s == null then "absent"
+                     elif ($s.conclusion // "none") != "success" then ($s.conclusion // "none")
+                     elif ([$failing[] | select(.name != $scan)] | length) > 0 then "failure"
+                     else "success" end),
+        failing: $failing,
         checks: [$runs[] | {name, status, conclusion, title: .output.title,
                             annotations: .output.annotations_count, url: .html_url, app: .app.slug}],
-        # As read, not waited for: a check here is still running and has
-        # no conclusion on this record (backlog d167e7d7).
-        still_running: [$runs[] | select(.status != "completed") | .name],
+        # A check here is still running and has no conclusion on this
+        # record; the step does not complete on it (backlog c6cb678b).
+        still_running: $running,
         alerts: (if $s == null then {check: $scan, conclusion: "absent", read: 0, by_rule: [], by_file: [], by_level: {}}
                  else {
                     check: $scan, conclusion: ($s.conclusion // "none"), title: $s.output.title,
@@ -327,10 +374,38 @@ jq -n -c --slurpfile checks "$checks" --slurpfile ann "$ann" \
                     by_file: ($a | group_by(.path) | map({path: .[0].path, count: length})
                               | sort_by(-.count, .path))
                  } end)}}' > "$workdir/reading"
-conclusion=$(jq -r '.code_scanning.alerts.conclusion' "$workdir/reading")
 alerts=$(jq -r '.code_scanning.alerts.read' "$workdir/reading")
 rules=$(jq -r '.code_scanning.alerts.by_rule | length' "$workdir/reading")
 files=$(jq -r '.code_scanning.alerts.by_file | length' "$workdir/reading")
+
+# A CHECK STILL RUNNING is not yet — or, past the ceiling, unfinished.
+if [ -n "$running" ]; then
+    opened_s=""
+    [ -n "$pr_opened_at" ] && opened_s=$(date -u -d "$pr_opened_at" +%s 2>/dev/null || true)
+    case "${opened_s:-empty}" in
+        empty|*[!0-9]*) past=0; age="unknown (open-pr carries no readable completed_at '${pr_opened_at}')" ;;
+        *) age=$(( $(date -u +%s) - opened_s ))
+           if [ "$age" -ge "$CEILING" ]; then past=1; else past=0; fi
+           age="${age}s" ;;
+    esac
+    if [ "$past" -eq 0 ]; then
+        # The partial reading goes on the packet — the scan's counts are
+        # final, and what is still running is named — and nothing else.
+        curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
+            ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
+            --data-binary @"$workdir/reading" "$BASE/api/jobs/$job_id/metadata" > /dev/null 2>"$workdir/err" \
+            || fail "writing the partial reading onto ${job_id:0:8} (PATCH /api/jobs/$job_id/metadata) — $(head -c 300 "$workdir/err" | tr '\n' ' ')"
+        echo "$me: not yet: $running still running on ${head:0:12}, ${age} after the PR opened (ceiling ${CEILING}s) — the partial reading is on ${job_id:0:8} (code_scanning.complete=false), read-checks stays open, and reread-publish-checks-hourly reads it again"
+        exit 75
+    fi
+    jq -c --arg r "$running" --arg age "$age" \
+        '.code_scanning.conclusion = "unfinished"
+         | .code_scanning.note = "\($r) still running \($age) after the PR opened — past the ceiling, read as unfinished"' \
+        "$workdir/reading" > "$workdir/reading.new" && mv "$workdir/reading.new" "$workdir/reading"
+    say "$running still running ${age} after the PR opened — past the ${CEILING}s ceiling; the step completes unfinished so the judge reads it"
+fi
+conclusion=$(jq -r '.code_scanning.conclusion' "$workdir/reading")
+failing=$(jq -r '[.code_scanning.failing[] | "\(.name): \(.conclusion)"] | join("; ")' "$workdir/reading")
 
 curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
     ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
@@ -339,15 +414,20 @@ curl -fsS -X PATCH -H "content-type: application/json" -H "x-boss-user: $BOSS_US
 say "reading written onto ${job_id:0:8} as code_scanning"
 
 # Merge, never replace: PUT swaps the step's metadata wholesale.
-printf '%s' "$target" | jq -c --arg c "$conclusion" --arg a "$alerts" --arg r "$rules" --arg h "$head" '
+printf '%s' "$target" | jq -c --arg c "$conclusion" --arg a "$alerts" --arg r "$rules" --arg h "$head" \
+        --arg f "$failing" --arg s "$running" '
     {status: "completed",
      metadata: ((.read.metadata // {})
-                + {conclusion: $c, alerts: $a, rules: $r, head: $h, read_by: "read-publish-checks"})}' \
+                + {conclusion: $c, alerts: $a, rules: $r, head: $h, read_by: "read-publish-checks",
+                   failing: $f, still_running: $s})}' \
     > "$workdir/payload"
 curl -fsS -X PUT -H "content-type: application/json" -H "x-boss-user: $BOSS_USER" \
     ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
     --data-binary @"$workdir/payload" "$BASE/api/jobs/$job_id/steps/$step_id" > /dev/null 2>"$workdir/err" \
     || fail "the reading is on ${job_id:0:8} but completing read-checks failed — $(head -c 300 "$workdir/err" | tr '\n' ' '); complete the step by hand with conclusion=$conclusion alerts=$alerts rules=$rules"
+
+# What failed, by name, before the answer line — the verdict names it.
+[ -z "$failing" ] || say "failing: $failing"
 
 # The answer line, LAST: what the dispatcher rule
 # complete-publish-read-checks-on-read-publish-checks-answered reads.
