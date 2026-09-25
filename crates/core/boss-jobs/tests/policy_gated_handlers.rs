@@ -678,12 +678,16 @@ async fn put_step_done_rejects_unresolved_blockers() {
 }
 
 #[tokio::test]
-async fn auto_close_stamps_step_completed_on_when_supplied() {
+async fn auto_close_anchors_closed_on_on_the_servers_completion_day() {
     // When the last step on a Job flips to done, the auto-transition
-    // closes the Job. closed_on should anchor on the step's
-    // completed_on (which carries the sim-day in sim runs) rather
-    // than wall-clock NOW(). Mirrors the contract the step-completion
-    // → invoice flow already enforces.
+    // closes the Job. closed_on anchors on the step's completed_on,
+    // the same day the step-completion → invoice flow reads.
+    //
+    // This test used to pin the opposite half: a body `completed_on`
+    // (the sim-day) won, and closed_on followed it. That let any
+    // completing PUT choose its own day — a backdate — so the day is
+    // now the server clock's, like `completed_at` (backlog 42e7c6b9),
+    // and a body value is not read. The sim advances the clock itself.
     let policy: Arc<dyn PolicyClient> = Arc::new(
         // The step PUT first clears a coarse (Update, step) gate before
         // the mechanics under test run; grant it to the caller's role.
@@ -723,11 +727,21 @@ async fn auto_close_stamps_step_completed_on_when_supplied() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 
+    let done = jobs.get_step(&only_id).await.unwrap().expect("step exists");
+    assert_ne!(
+        done.completed_on,
+        Some(sim_day),
+        "a body cannot choose the day of its own completion"
+    );
+    assert_eq!(
+        done.completed_on,
+        done.completed_at.map(|t| t.date_naive()),
+        "the completion day is the date of the server's completion instant"
+    );
     let after = jobs.get_job(&job.id).await.unwrap().expect("job exists");
     assert_eq!(after.status, JobStatus::Closed);
     assert_eq!(
-        after.closed_on,
-        Some(sim_day),
+        after.closed_on, done.completed_on,
         "closed_on must anchor on the closing step's completed_on"
     );
 }

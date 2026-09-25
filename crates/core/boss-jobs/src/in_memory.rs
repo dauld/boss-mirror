@@ -186,6 +186,11 @@ impl InMemoryJobs {
             next.completed_by = existing.completed_by.clone();
             next.completed_at = existing.completed_at;
             next.metadata = existing.metadata.clone();
+            // What was completed stays what was completed — the Pg
+            // UPDATE's CASE on the same three (backlog 42e7c6b9).
+            next.title = existing.title.clone();
+            next.assignee_id = existing.assignee_id.clone();
+            next.notes = existing.notes.clone();
         }
         // The ready stamp is written once, at the write that lands the
         // step in Ready, and no later write moves it — the COALESCE in

@@ -50,7 +50,22 @@ impl PgJobs {
             .map_err(|e| JobsError::Storage(e.to_string()))?;
         let result = sqlx::query(
             r#"
-            UPDATE steps SET kind = $2, title = $3, assignee_id = $4,
+            UPDATE steps SET kind = $2,
+                -- What was completed stays what was completed (backlog
+                -- 42e7c6b9): these three were written with no terminal
+                -- CASE, so a bare PUT retitled a completed presence step
+                -- after its ceremony and the record showed a passkey
+                -- approval of a title no passkey saw. The handler
+                -- refuses such a write by name; this keeps a stale
+                -- whole-row copy from moving them either.
+                title = CASE
+                    WHEN status IN ('completed', 'skipped') THEN title
+                    ELSE $3
+                END,
+                assignee_id = CASE
+                    WHEN status IN ('completed', 'skipped') THEN assignee_id
+                    ELSE $4
+                END,
                 -- Terminal statuses are immutable at the row (the
                 -- state-machine invariant): a write whose merge was
                 -- computed against a pre-completion fetch (dispatcher
@@ -70,7 +85,11 @@ impl PgJobs {
                     WHEN status IN ('completed', 'skipped') THEN metadata
                     ELSE $9
                 END,
-                notes = $10, embedded_job = $11, updated_at = $12,
+                notes = CASE
+                    WHEN status IN ('completed', 'skipped') THEN notes
+                    ELSE $10
+                END,
+                embedded_job = $11, updated_at = $12,
                 -- The ready stamp is written ONCE, at the write that
                 -- lands the step in `ready` (a pending → ready
                 -- promotion arrives here), and no later write moves it

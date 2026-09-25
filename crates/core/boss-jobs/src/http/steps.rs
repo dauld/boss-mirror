@@ -886,8 +886,17 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // defect (job 903e6b90), and it says something better than this
     // could: which status the step is, and which one the caller tried
     // to set. Repeating the check here would preempt that message with
-    // a vaguer one. This block covers only the two fields that were
-    // still being dropped in silence.
+    // a vaguer one. This block covers the fields the row freezes that
+    // were still being dropped in silence.
+    //
+    // AND WHAT WAS COMPLETED: title, holder and notes (backlog
+    // 42e7c6b9, the review of car 52ad60e6). None of the three was
+    // checked here or frozen at the row, so after a ticketed completion
+    // a bare `PUT {"title": ...}` answered 204 and the completed
+    // presence step's stored title changed: the ops runner fails closed
+    // on its stamp, but the record then shows a passkey approval of a
+    // title no passkey saw. A correction to a finished step is `boss
+    // correct` (the hint below), never a rewrite of what was signed.
     if is_terminal {
         let mut frozen: Vec<&str> = Vec::new();
         if step.completed_on != old.completed_on {
@@ -895,6 +904,15 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         }
         if step.metadata != old.metadata {
             frozen.push("metadata");
+        }
+        if step.title != old.title {
+            frozen.push("title");
+        }
+        if step.assignee_id != old.assignee_id {
+            frozen.push("assignee_id");
+        }
+        if step.notes != old.notes {
+            frozen.push("notes");
         }
         if !frozen.is_empty() {
             return (
@@ -935,15 +953,20 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         }
     }
 
-    // Auto-stamp completed_on on the done-transition if the caller
-    // didn't send one. The simulator's LiveApiOutput sends the
-    // sim-day explicitly; SPA-driven step completion ("Mark done"
-    // button) doesn't, and falling through with NULL leaves the
-    // step undated → dispatcher rule handlers stamp wall-clock
-    // NOW() on every downstream row. Wall-clock is the right
-    // default *here* because the operator pressing the button
-    // really is acting in real time, but we let an explicit body
-    // value win.
+    // THE COMPLETION DAY IS THE SERVER'S (backlog 42e7c6b9), like
+    // `completed_at` and `completed_by` above: the stored value rides
+    // through every write, and the flip below stamps the clock's date.
+    // An explicit body value used to win — so the simulator could send
+    // its sim-day — which let any completing PUT choose its own day (a
+    // backdate), and let a PUT to an OPEN step plant a date the flip
+    // then kept. The simulator advances this service's clock to each
+    // completion's instant before it PUTs, so the clock already carries
+    // that instant, and its date is now the day recorded: the day and
+    // the instant of one completion cannot disagree (a sim step whose
+    // duration crosses midnight used to carry its start day beside a
+    // next-day `completed_at`). A terminal row's differing value was
+    // refused by name above; this reaches only open steps.
+    step.completed_on = old.completed_on;
     let is_flipping_to_done =
         old.status != StepStatus::Completed && step.status == StepStatus::Completed;
 
@@ -1081,7 +1104,10 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         }
     }
 
-    if is_flipping_to_done && step.completed_on.is_none() {
+    // Dated at the flip, never by the body (the pin above). Undated, the
+    // dispatcher's rule handlers would stamp wall-clock NOW() on every
+    // downstream row (invoices.issued_on, gl posted_on).
+    if is_flipping_to_done {
         step.completed_on = Some(boss_clock_client::now_from(&state.clock).await.date_naive());
     }
 
