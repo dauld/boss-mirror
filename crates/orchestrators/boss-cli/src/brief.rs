@@ -1387,12 +1387,33 @@ pub(crate) fn render(
     // verb's edge, so this renderer stays a function of its arguments.
     trailer: Option<&str>,
 ) -> Result<String> {
+    render_with(repo, job, profile, active, trailer, None)
+}
+
+/// [`render`], with what origin/main and the landed cars already say
+/// about the packet (`prior_work`, backlog 7562d7a0) placed directly
+/// under the packet: the reader meets the evidence that the fix may
+/// already exist before the procedure that asks them to build it. Both
+/// `boss brief` and `boss dispatch` read it the same way and pass it
+/// here, so the two cannot disagree about it.
+pub(crate) fn render_with(
+    repo: &Path,
+    job: Option<&Value>,
+    profile: &str,
+    active: Option<&Value>,
+    trailer: Option<&str>,
+    prior: Option<&crate::prior_work::PriorWork>,
+) -> Result<String> {
     let invs = invariants(repo)?;
     let lane = crate::documents::lane(repo, profile)?;
     let mut out = String::new();
     if let Some(job) = job {
         out.push_str(&packet_section(job));
         out.push('\n');
+        if let Some(named) = prior.and_then(crate::prior_work::section) {
+            out.push_str(&named);
+            out.push('\n');
+        }
         // ABOVE the specification it dates (794e8d61): a reader meets
         // the age of the prose before the prose.
         if let Some(protocol) = protocol_section(job, active) {
@@ -1458,14 +1479,26 @@ pub async fn run(packet_ref: Option<String>, profile_override: Option<String>) -
         }
         (None, None) => profile_for(None, active.as_ref()),
     };
+    // What is already named (7562d7a0): read as the dispatch reads it,
+    // so a human reading the brief before dispatching sees what the
+    // agent will.
+    let prior = match job.as_ref().and_then(crate::prior_work::item_of) {
+        Some(item) => {
+            let query = crate::prior_work::partial_cars_query(item);
+            let cars = crate::gate::api(&http, reqwest::Method::GET, &query, None).await;
+            Some(crate::prior_work::assemble(&repo, item, cars))
+        }
+        None => None,
+    };
     print!(
         "{}",
-        render(
+        render_with(
             &repo,
             job.as_ref(),
             &profile,
             active.as_ref(),
             crate::documents::supplied_trailer().as_deref(),
+            prior.as_ref(),
         )?
     );
     Ok(())

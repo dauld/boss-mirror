@@ -1181,6 +1181,30 @@ pub(crate) async fn dispatch_at(
         }
     }
 
+    // WHAT IS ALREADY NAMED (7562d7a0, 65a753b7): the door above refuses
+    // only on a car naming this packet as its item. A fix filed under the
+    // packet's PARENT, or landed as `partial_item` pieces, passed it and
+    // cost three runs on 2026-09-24/25 — but neither is a verdict (see
+    // `prior_work`), so it is read here, SAID before the claim, and put
+    // in front of the builder rather than refused. Forced or not: a
+    // forced dispatch is exactly "build the rest", and the rest is
+    // measured against what landed.
+    let prior = match crate::prior_work::item_of(&job) {
+        Some(item) => {
+            let cars = api_at(
+                Method::GET,
+                crate::prior_work::partial_cars_query(item),
+                None,
+            )
+            .await;
+            Some(crate::prior_work::assemble(repo, item, cars))
+        }
+        None => None,
+    };
+    if let Some(line) = prior.as_ref().and_then(crate::prior_work::warning) {
+        eprintln!("{line}");
+    }
+
     // The block: the packet's projection, else the active row's step,
     // both through the ONE reader `boss brief` also asks (dacee8cc).
     // Asked first with no row in hand, so the row is read only when
@@ -1269,12 +1293,13 @@ pub(crate) async fn dispatch_at(
                     .ok()
                     .flatten(),
             };
-            crate::brief::render(
+            crate::brief::render_with(
                 repo,
                 Some(&claimed),
                 &settings.profile,
                 active.as_ref(),
                 crate::documents::supplied_trailer().as_deref(),
+                prior.as_ref(),
             )?
         }
         BriefSource::Handed { prompt, .. } => prompt.to_string(),
@@ -4056,6 +4081,9 @@ mod wire_tests {
                 // a packet a merged car already names is refused while
                 // nothing has been claimed and nothing filed.
                 ("GET".to_string(), "/api/jobs".to_string()),
+                // What is already named (7562d7a0): the landed
+                // `partial_item` cars, also read while nothing is held.
+                ("GET".to_string(), "/api/jobs".to_string()),
                 ("GET".to_string(), "/api/workflows/backlog-item".to_string()),
                 (
                     "POST".to_string(),
@@ -4980,9 +5008,120 @@ mod wire_tests {
             "the run is filed: {calls:?}"
         );
         assert!(
-            !calls.iter().any(|(m, p, _)| m == "GET" && p == "/api/jobs"),
+            !calls
+                .iter()
+                .any(|(m, p, _)| m == "GET" && p.contains("backlog_item")),
             "and --force does not spend the read it would ignore: {calls:?}"
         );
+    }
+
+    /// WHAT IS ALREADY NAMED reaches the one who spends the run (backlog
+    /// 7562d7a0, 65a753b7). Measured 2026-09-24: 56727f95 was dispatched
+    /// with every buildable car of its plan landed as `partial_item`
+    /// cars, which no door reads, and run b072e827 spent itself finding
+    /// that out. Those cars are read BEFORE the claim — so the warning
+    /// is on stderr while nothing is held — and named in the brief,
+    /// between the packet and its invariants.
+    #[tokio::test]
+    async fn the_landed_parts_of_a_packet_are_named_in_its_brief() {
+        let part = json!({
+            "data": [{
+                "id": "0d9163d3-0000-4000-8000-000000000001",
+                "status": "closed",
+                "metadata": {
+                    "partial_item": PACKET,
+                    "branch": "feat/a-correction-names-what-it-corrects",
+                    "merge_ref": "5d1e2f3a4b5c",
+                    "outcome": "merged",
+                    "summary": "POST /api/jobs/{id}/steps/{step_id}/corrections with its three refusals.",
+                },
+            }],
+            "total": 1,
+        });
+        let (base, log) = {
+            let row = row_with_block();
+            let packet = packet_without_projection();
+            let run: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+            serve(move |method, path, target, body| match (method, path) {
+                ("GET", p) if p == format!("/api/jobs/{PACKET}") => ("200 OK", packet.to_string()),
+                ("GET", "/api/tenant/edit-level") => (
+                    "200 OK",
+                    json!({ "edit_level": Value::Null, "manifest": "t.toml" }).to_string(),
+                ),
+                ("GET", "/api/jobs") if target.contains("partial_item") => {
+                    ("200 OK", part.to_string())
+                }
+                ("GET", "/api/jobs") => ("200 OK", json!({ "data": [], "total": 0 }).to_string()),
+                ("GET", "/api/workflows/backlog-item") => ("200 OK", row.to_string()),
+                ("POST", p) if p.ends_with("/claim") => {
+                    ("200 OK", json!({ "status": "active" }).to_string())
+                }
+                ("POST", "/api/jobs") => {
+                    let mut filed = body.clone();
+                    filed["id"] = json!(RUN);
+                    filed["steps"] = json!([
+                        { "id": "run-briefed", "spec_slug": "briefed", "status": "ready",
+                          "metadata": { "authority_role": "platform-admin" } },
+                    ]);
+                    *run.lock().unwrap() = Some(filed);
+                    ("201 Created", json!({ "id": RUN }).to_string())
+                }
+                ("GET", p) if p == format!("/api/jobs/{RUN}") => {
+                    match run.lock().unwrap().clone() {
+                        Some(r) => ("200 OK", r.to_string()),
+                        None => ("404 Not Found", "no such job".into()),
+                    }
+                }
+                ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
+                    run_step_put(body)
+                }
+                ("PATCH", p) if p.contains("/steps/") => ("204 No Content", String::new()),
+                _ => ("404 Not Found", format!("unstubbed {method} {target}")),
+            })
+            .await
+        };
+        let prompt = dispatch_at(
+            &reqwest::Client::new(),
+            &base,
+            &repo(),
+            PACKET,
+            Some("build"),
+            None,
+            &Overrides::default(),
+            false,
+            "claude@algedonic.dev",
+            "emp-david",
+            "h",
+            BriefSource::Rendered,
+        )
+        .await
+        .expect("a landed part is evidence, not a refusal")
+        .prompt;
+
+        let named = prompt
+            .find("== ALREADY NAMED")
+            .expect("the section is in the brief");
+        let packet = prompt.find("== THE PACKET").expect("the packet");
+        let invariants = prompt.find("== THE INVARIANTS").expect("the invariants");
+        assert!(packet < named && named < invariants, "{prompt}");
+        assert!(
+            prompt.contains(
+                "0d9163d3 feat/a-correction-names-what-it-corrects — merged at 5d1e2f3a4b5c"
+            ),
+            "{prompt}"
+        );
+        assert!(prompt.contains("with its three refusals"), "{prompt}");
+
+        let calls = log.calls.lock().unwrap().clone();
+        let read = calls
+            .iter()
+            .position(|(m, p, _)| m == "GET" && p.contains("partial_item"))
+            .expect("the partial cars are read");
+        let claim = calls
+            .iter()
+            .position(|(_, p, _)| p.ends_with("/claim"))
+            .expect("claimed");
+        assert!(read < claim, "read while nothing is held: {calls:?}");
     }
 
     /// The run packet as `--report` reads it, with `reported` in the
