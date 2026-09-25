@@ -84,11 +84,24 @@ pub(crate) async fn serve(answers: Vec<(&'static str, Value)>) -> Stub {
                         .push(format!("{method} {} (409)", uri.path()));
                     return terminal_step_refusal(sid);
                 }
+                // And a step PUT carrying metadata is refused as the
+                // decided end state refuses it (e39a9d2a) — recorded, so
+                // a test sees the attempt and not a silent success.
+                let parsed: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                if method == Method::PUT
+                    && let Some((id, sid)) = step_path(uri.path())
+                    && let Some(refused) = end_state_step_put(id, sid, &parsed)
+                {
+                    log.lock()
+                        .unwrap()
+                        .push(format!("{method} {} (409)", uri.path()));
+                    return refused;
+                }
                 log.lock().unwrap().push(format!("{method} {}", uri.path()));
-                bodies.lock().unwrap().push((
-                    format!("{method} {}", uri.path()),
-                    serde_json::from_slice(&body).unwrap_or(Value::Null),
-                ));
+                bodies
+                    .lock()
+                    .unwrap()
+                    .push((format!("{method} {}", uri.path()), parsed));
                 return axum::Json(json!({ "id": "stub-created" })).into_response();
             }
             answer(&answers, &uri)
@@ -169,6 +182,73 @@ pub(crate) fn terminal_step_refusal(sid: &str) -> Response {
         .into_response()
 }
 
+/// The step PUT as the decided end state of design 93d2bddb has it
+/// (backlog e39a9d2a): a body carrying `metadata` is REFUSED 409 and
+/// routed to the step merge door, `PATCH .../steps/{sid}/metadata`.
+/// `None` for a body the PUT accepts (status, assignee, no metadata).
+///
+/// WHY EVERY STUB IN THIS CRATE ANSWERS THIS WAY. The live rule (stage
+/// 1) refuses only a body that OMITS a stored key, so a handler that
+/// read the step and PUT every key back passes it — until a concurrent
+/// writer adds a key between that read and the PUT, or until the rule
+/// tightens to any metadata body, which is one block in the step PUT
+/// once the writers have moved. A stub that accepted the read-merge-
+/// write would pin the handlers to the form the tighten breaks; this
+/// one pins them to the two writes that survive it. Every stub that
+/// stands in for a step PUT calls this — one definition, not a copy per
+/// handler.
+pub(crate) fn end_state_step_put(id: &str, sid: &str, body: &Value) -> Option<Response> {
+    body.get("metadata")?;
+    Some(
+        (
+            StatusCode::CONFLICT,
+            axum::Json(json!({
+                "error": "a step PUT carries no metadata — write the keys through the step \
+                          merge door, then PUT the status alone",
+                "step_id": sid,
+                "merge_door": format!("/api/jobs/{id}/steps/{sid}/metadata"),
+            })),
+        )
+            .into_response(),
+    )
+}
+
+/// A stub's step writes as `(step, body)` wire entries — the merge door
+/// recorded as `("<step>/metadata", fields)`, the step PUT as `(step,
+/// body)` — folded back into ONE entry per step write, the shape a test
+/// reads: a merge followed by that step's PUT is one `(step, {status,
+/// metadata: fields})`, a merge with no PUT after it is an annotation,
+/// `(step, {metadata: fields})`. `metadata` is what the write SENT,
+/// never the step's stored keys. A stub serving [`end_state_step_put`]
+/// has already refused any PUT carrying metadata, so a folded completion
+/// is always the merge first and the status alone after it (e39a9d2a).
+pub(crate) fn fold_step_writes(wire: &[(String, Value)]) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < wire.len() {
+        let (key, body) = &wire[i];
+        match key.strip_suffix("/metadata") {
+            Some(sid) => match wire.get(i + 1) {
+                Some((next, put)) if next == sid => {
+                    let mut completion = put.clone();
+                    completion["metadata"] = body.clone();
+                    out.push((sid.to_string(), completion));
+                    i += 2;
+                }
+                _ => {
+                    out.push((sid.to_string(), json!({ "metadata": body })));
+                    i += 1;
+                }
+            },
+            None => {
+                out.push((key.clone(), body.clone()));
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 fn answer(answers: &[(&'static str, Value)], uri: &Uri) -> Response {
     let asked: Vec<&str> = uri.query().unwrap_or_default().split('&').collect();
     answers
@@ -228,6 +308,47 @@ mod tests {
             stub.writes(),
             vec![
                 "PUT /api/jobs/j1/steps/j1-triage (409)".to_string(),
+                "PUT /api/jobs/j1/steps/j1-build".to_string(),
+            ]
+        );
+    }
+
+    /// And as the decided end state refuses it (e39a9d2a): a step PUT
+    /// carrying metadata is a 409 naming the merge door, while the
+    /// merge door itself and a status-only PUT are accepted.
+    #[tokio::test]
+    async fn a_step_put_carrying_metadata_is_refused_409_naming_the_merge_door() {
+        let stub = serve(vec![]).await;
+        let client = reqwest::Client::new();
+        let url = format!("{}/api/jobs/j1/steps/j1-build", stub.base);
+        let refused = client
+            .put(&url)
+            .json(&json!({ "status": "completed", "metadata": { "evidence": "x" } }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 409);
+        let why: Value = refused.json().await.unwrap();
+        assert_eq!(why["merge_door"], "/api/jobs/j1/steps/j1-build/metadata");
+        let merged = client
+            .patch(format!("{url}/metadata"))
+            .json(&json!({ "evidence": "x" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(merged.status().is_success());
+        let flipped = client
+            .put(&url)
+            .json(&json!({ "status": "completed" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(flipped.status().is_success());
+        assert_eq!(
+            stub.writes(),
+            vec![
+                "PUT /api/jobs/j1/steps/j1-build (409)".to_string(),
+                "PATCH /api/jobs/j1/steps/j1-build/metadata".to_string(),
                 "PUT /api/jobs/j1/steps/j1-build".to_string(),
             ]
         );

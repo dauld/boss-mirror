@@ -213,6 +213,13 @@ async fn a_completed_workflow_step_publishes_its_slug_on_step_done() {
         scope_done[0].payload["workflow_kind"], "ship-a-change",
         "step.done must carry the parent job's kind"
     );
+    // ...and the job's owner: the one waiting on the packet, whom a
+    // `notify_on_done` step's wait-is-over signal reaches when the step
+    // names no role — every pr-train step since v2 (backlog 58f0b536).
+    assert_eq!(
+        scope_done[0].payload["job_owner_id"], "emp-bootstrap-admin",
+        "step.done must carry the parent job's owner"
+    );
 }
 
 /// A step with no slug publishes `""` — present, a string, never null

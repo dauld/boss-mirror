@@ -91,8 +91,8 @@ use serde_json::{Value as Json, json};
 use tokio::io::AsyncWriteExt;
 
 use super::common::{
-    StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, get_json,
-    owner_for_filing, post_json, row_or_refuse, rows_or_refuse, sim_origin_value, write_json,
+    StepEvent, api_client, complete_step, dispatcher_reader_header, get_json, owner_for_filing,
+    post_json, row_or_refuse, rows_or_refuse, sim_origin_value, write_json,
 };
 use super::credential_issuer::{
     AccessApp, AccessAppSpec, AccessApps, AccessPolicy, AccessPolicySpec, SecretStore,
@@ -941,12 +941,16 @@ impl Reading {
     }
 }
 
-/// The one body the observe completion sends: the fields
-/// dns-zone-observation.toml requires at done, over the step's existing
-/// metadata (PATCH-on-PUT replaces `metadata` wholesale). `access` and
-/// `applied` ride beside them the way `counts` always has.
-pub fn observe_put_body(existing: &serde_json::Map<String, Json>, r: &Reading) -> Json {
-    let mut metadata = existing.clone();
+/// The fields the observe completion writes: what
+/// dns-zone-observation.toml requires at done, with `access` and
+/// `applied` beside them the way `counts` always has. ONLY these: they
+/// ride the step merge door, which keeps the step's existing metadata,
+/// and the status flips alone after them (backlog e39a9d2a) — this was
+/// one PUT of the step's metadata as read plus these keys, which the
+/// step PUT refuses once anything wrote the step in between, and
+/// refuses outright under the decided end state.
+pub fn observe_fields(r: &Reading) -> serde_json::Map<String, Json> {
+    let mut metadata = serde_json::Map::new();
     metadata.insert("verdicts".into(), Json::Array(r.zone.verdicts.clone()));
     metadata.insert("access".into(), Json::Array(r.access.clone()));
     metadata.insert("applied".into(), json!(r.applied));
@@ -957,7 +961,7 @@ pub fn observe_put_body(existing: &serde_json::Map<String, Json>, r: &Reading) -
         json!(if r.hard() == 0 { "match" } else { "findings" }),
     );
     metadata.insert("counts".into(), r.counts());
-    json!({ "status": "completed", "metadata": metadata })
+    metadata
 }
 
 /// The urgent packet a drifted zone becomes. Keyed like every estate
@@ -1535,12 +1539,6 @@ impl Handler for DnsObserve {
             // does nothing (the step API would 409 a write anyway).
             return Ok(());
         }
-        let existing = step
-            .get("metadata")
-            .and_then(Json::as_object)
-            .cloned()
-            .unwrap_or_default();
-
         // What the declarations reference, then each one resolved from
         // the system of record — before anything is read from
         // Cloudflare, so a declaration this observer cannot judge costs
@@ -1670,29 +1668,15 @@ impl Handler for DnsObserve {
             "none"
         };
 
-        let url = format!(
-            "{}/api/jobs/{}/steps/{}",
+        complete_step(
+            &self.client,
             self.base(),
             ev.job_id,
-            ev.step_id
-        );
-        let resp = self
-            .client
-            .put(&url)
-            .header("content-type", "application/json")
-            .header("x-boss-user", dispatcher_actor_header(rule))
-            .header("x-sim-origin", sim_origin_value())
-            .json(&observe_put_body(&existing, &reading))
-            .send()
-            .await
-            .map_err(|e| HandlerError::Downstream(format!("PUT {url}: {e}")))?;
-        if !resp.status().is_success() {
-            let st = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HandlerError::Downstream(format!(
-                "PUT {url} returned {st}: {body}"
-            )));
-        }
+            ev.step_id,
+            observe_fields(&reading),
+            rule,
+        )
+        .await?;
         tracing::info!(
             zone,
             packet = ev.job_id,
@@ -1763,36 +1747,35 @@ mod tests {
 
     #[test]
     fn the_observe_body_completes_with_the_verdicts_and_forks_on_hard() {
-        let mut existing = serde_json::Map::new();
-        existing.insert("spec_slug".into(), json!("observe"));
         let clean = reading(comparison(
             0,
             json!([{"record": "boss.algedonic.dev CNAME", "verdict": "MATCH"}]),
         ));
-        let b = observe_put_body(&existing, &clean);
-        assert_eq!(b["status"], "completed");
-        assert_eq!(b["metadata"]["result"], "match");
+        let b = observe_fields(&clean);
+        assert_eq!(b["result"], "match");
+        let mut keys: Vec<&str> = b.keys().map(String::as_str).collect();
+        keys.sort_unstable();
         assert_eq!(
-            b["metadata"]["spec_slug"], "observe",
-            "existing keys ride along"
+            keys,
+            [
+                "access", "applied", "counts", "result", "ssh_ca", "summary", "verdicts"
+            ],
+            "its own fields only — the merge door keeps the step's (e39a9d2a)"
         );
-        assert_eq!(b["metadata"]["verdicts"][0]["verdict"], "MATCH");
+        assert_eq!(b["verdicts"][0]["verdict"], "MATCH");
         assert!(
-            b["metadata"]["summary"]
+            b["summary"]
                 .as_str()
                 .unwrap()
                 .starts_with(&clean.zone.summary)
         );
-        assert_eq!(b["metadata"]["counts"]["zone"]["MATCH"], 1);
+        assert_eq!(b["counts"]["zone"]["MATCH"], 1);
 
         let drifted = reading(comparison(
             1,
             json!([{"record": "boss.algedonic.dev CNAME", "verdict": "DRIFT"}]),
         ));
-        assert_eq!(
-            observe_put_body(&existing, &drifted)["metadata"]["result"],
-            "findings"
-        );
+        assert_eq!(observe_fields(&drifted)["result"], "findings");
 
         // HELD is paperwork: the zone disagrees with the declaration
         // by design until the interlock releases, and that is not a
@@ -1802,23 +1785,14 @@ mod tests {
             json!([{"record": "boss.algedonic.dev CNAME", "verdict": "HELD", "held": "flip held — Access app absent"}]),
         ));
         assert_eq!(held.hard(), 0);
-        assert_eq!(
-            observe_put_body(&existing, &held)["metadata"]["result"],
-            "match"
-        );
-        assert_eq!(
-            observe_put_body(&existing, &held)["metadata"]["counts"]["zone"]["HELD"],
-            1
-        );
+        assert_eq!(observe_fields(&held)["result"], "match");
+        assert_eq!(observe_fields(&held)["counts"]["zone"]["HELD"], 1);
 
         // An Access finding is a finding.
         let mut access_drift = reading(comparison(0, json!([])));
         access_drift.access = vec![json!({"application": "x", "verdict": "DRIFT"})];
         assert_eq!(access_drift.hard(), 1);
-        assert_eq!(
-            observe_put_body(&existing, &access_drift)["metadata"]["result"],
-            "findings"
-        );
+        assert_eq!(observe_fields(&access_drift)["result"], "findings");
     }
 
     #[test]
@@ -3103,10 +3077,16 @@ measured = "2026-09-20: read from the IdP"
         converge_ingress: &'static str,
     ) -> (String, Captured) {
         use axum::extract::{Path, Query};
+        use axum::response::IntoResponse;
         use axum::{Json as AxJson, Router, routing::get, routing::post, routing::put};
 
         let captured: Captured = Default::default();
-        let (c1, c2, c3) = (captured.clone(), captured.clone(), captured.clone());
+        let (c1, c2, c3, c4) = (
+            captured.clone(),
+            captured.clone(),
+            captured.clone(),
+            captured.clone(),
+        );
         let alarms = Arc::new(open_alarms);
         let app = Router::new()
             .route(
@@ -3166,12 +3146,37 @@ measured = "2026-09-20: read from the IdP"
                 put(move |Path((id, sid)): Path<(String, String)>, AxJson(body): AxJson<Json>| {
                     let c = c3.clone();
                     async move {
+                        // The decided end state (e39a9d2a).
+                        if let Some(refused) =
+                            super::super::listing_stub::end_state_step_put(&id, &sid, &body)
+                        {
+                            c.lock()
+                                .unwrap()
+                                .push((format!("PUT /api/jobs/{id}/steps/{sid} (409)"), body));
+                            return refused;
+                        }
                         c.lock()
                             .unwrap()
                             .push((format!("PUT /api/jobs/{id}/steps/{sid}"), body));
-                        AxJson(json!({ "ok": true }))
+                        AxJson(json!({ "ok": true })).into_response()
                     }
                 }),
+            )
+            // The step merge door, recorded in order with the PUT.
+            .route(
+                "/api/jobs/{id}/steps/{sid}/metadata",
+                axum::routing::patch(
+                    move |Path((id, sid)): Path<(String, String)>, AxJson(body): AxJson<Json>| {
+                        let c = c4.clone();
+                        async move {
+                            c.lock().unwrap().push((
+                                format!("PATCH /api/jobs/{id}/steps/{sid}/metadata"),
+                                body,
+                            ));
+                            AxJson(json!({ "ok": true }))
+                        }
+                    },
+                ),
             )
             .route(
                 "/api/credentials/{id}",
@@ -3246,15 +3251,28 @@ measured = "2026-09-20: read from the IdP"
         c.lock().unwrap().clone()
     }
 
+    /// The observe step's completion as the stub saw it: the fields
+    /// through the step merge door, then a PUT carrying the status and
+    /// nothing else (e39a9d2a). Answers the merged fields.
     fn step_put(w: &[(String, Json)]) -> Json {
-        w.iter()
-            .find(|(p, _)| p == "PUT /api/jobs/obs-1/steps/step-observe")
-            .map(|(_, b)| b.clone())
-            .unwrap_or_else(|| panic!("no step completion among {w:?}"))
+        let merged = w
+            .iter()
+            .position(|(p, _)| p == MERGE_OBSERVE)
+            .unwrap_or_else(|| panic!("no merge onto the observe step among {w:?}"));
+        assert_eq!(
+            w.get(merged + 1),
+            Some(&(PUT_OBSERVE.to_string(), json!({"status": "completed"}))),
+            "the merge is followed by the flip, and the flip carries the status alone: {w:?}"
+        );
+        w[merged].1.clone()
     }
 
+    /// The two writes that complete the observe step, in order.
+    const MERGE_OBSERVE: &str = "PATCH /api/jobs/obs-1/steps/step-observe/metadata";
+    const PUT_OBSERVE: &str = "PUT /api/jobs/obs-1/steps/step-observe";
+
     fn boss_verdict(body: &Json) -> Json {
-        body["metadata"]["verdicts"]
+        body["verdicts"]
             .as_array()
             .unwrap()
             .iter()
@@ -3290,15 +3308,15 @@ measured = "2026-09-20: read from the IdP"
             "only the application that declares a CA gets one"
         );
         let w = writes(&captured);
-        assert_eq!(w.len(), 1, "no alarm: {w:?}");
+        assert_eq!(w.len(), 2, "the merge and the flip, no alarm: {w:?}");
         let body = step_put(&w);
-        assert_eq!(body["metadata"]["result"], "match");
+        assert_eq!(body["result"], "match");
         assert_eq!(
-            body["metadata"]["applied"],
+            body["applied"],
             json!(["Access short-lived certificate CA created on dev.algedonic.dev"])
         );
         assert_eq!(
-            body["metadata"]["ssh_ca"],
+            body["ssh_ca"],
             json!([{
                 "domain": "dev.algedonic.dev",
                 "public_key": "ecdsa-sha2-nistp256 CA-OF-app-dev.algedonic.dev",
@@ -3323,7 +3341,7 @@ measured = "2026-09-20: read from the IdP"
         assert!(access.writes().is_empty(), "{:?}", access.writes());
         let body = step_put(&writes(&captured));
         assert_eq!(
-            body["metadata"]["ssh_ca"],
+            body["ssh_ca"],
             json!([{
                 "domain": "dev.algedonic.dev",
                 "public_key": "ecdsa-sha2-nistp256 CA-OF-app-dev.algedonic.dev",
@@ -3352,9 +3370,9 @@ measured = "2026-09-20: read from the IdP"
             "a refused CA raises the alarm: {w:?}"
         );
         let body = step_put(&w);
-        assert_eq!(body["metadata"]["result"], "findings");
-        assert_eq!(body["metadata"]["ssh_ca"], json!([]));
-        let refused: Vec<&Json> = body["metadata"]["access"]
+        assert_eq!(body["result"], "findings");
+        assert_eq!(body["ssh_ca"], json!([]));
+        let refused: Vec<&Json> = body["access"]
             .as_array()
             .unwrap()
             .iter()
@@ -3392,17 +3410,16 @@ measured = "2026-09-20: read from the IdP"
         let w = writes(&captured);
         assert_eq!(
             w.len(),
-            1,
-            "one write: the step completion; no alarm: {w:?}"
+            2,
+            "the step completion — merge, then flip; no alarm: {w:?}"
         );
         let body = step_put(&w);
-        assert_eq!(body["status"], "completed");
-        assert_eq!(body["metadata"]["result"], "match");
-        assert_eq!(
-            body["metadata"]["kept"], "yes",
-            "existing step metadata rides along"
+        assert_eq!(body["result"], "match");
+        assert!(
+            body.get("kept").is_none(),
+            "the step's own keys are not re-sent: the merge door keeps them (e39a9d2a)"
         );
-        let verdicts = body["metadata"]["verdicts"].as_array().unwrap();
+        let verdicts = body["verdicts"].as_array().unwrap();
         assert_eq!(verdicts.len(), 5, "boss., id., playground., www. and dev.");
         assert!(
             verdicts.iter().all(|v| v["verdict"] == "MATCH"),
@@ -3422,7 +3439,7 @@ measured = "2026-09-20: read from the IdP"
             !body.to_string().contains("Zml4dHVyZS"),
             "tunnel secret leaked: {body}"
         );
-        let access_v = body["metadata"]["access"].as_array().unwrap();
+        let access_v = body["access"].as_array().unwrap();
         assert_eq!(
             access_v.len(),
             5,
@@ -3432,8 +3449,8 @@ measured = "2026-09-20: read from the IdP"
             access_v.iter().all(|v| v["verdict"] == "MATCH"),
             "{access_v:?}"
         );
-        assert_eq!(body["metadata"]["applied"], json!([]));
-        let summary = body["metadata"]["summary"].as_str().unwrap();
+        assert_eq!(body["applied"], json!([]));
+        let summary = body["summary"].as_str().unwrap();
         assert!(
             summary.contains(
                 "5 match, 0 drift, 0 absent, 0 undeclared — every declared record matches"
@@ -3494,24 +3511,24 @@ measured = "2026-09-20: read from the IdP"
         let w = writes(&captured);
         assert_eq!(
             w.len(),
-            1,
+            2,
             "no alarm: the reading after the writes matches: {w:?}"
         );
         let body = step_put(&w);
-        assert_eq!(body["metadata"]["result"], "match");
+        assert_eq!(body["result"], "match");
         let boss = boss_verdict(&body);
         assert_eq!(boss["verdict"], "MATCH", "{boss}");
         assert_eq!(boss["access"], "created");
         assert_eq!(boss["type"], "CNAME");
         assert_eq!(
-            body["metadata"]["applied"],
+            body["applied"],
             json!([
                 "Access application boss.algedonic.dev created",
                 "Access policy operators (allow) created on boss.algedonic.dev",
                 "boss.algedonic.dev CNAME created (replacing 1 record(s) at that name)",
             ])
         );
-        let summary = body["metadata"]["summary"].as_str().unwrap();
+        let summary = body["summary"].as_str().unwrap();
         assert!(
             summary.contains("applied: Access application boss.algedonic.dev created"),
             "{summary}"
@@ -3567,10 +3584,10 @@ measured = "2026-09-20: read from the IdP"
             "the record is created once the application reads present; nothing else is touched"
         );
         let w = writes(&captured);
-        assert_eq!(w.len(), 1, "no alarm: {w:?}");
+        assert_eq!(w.len(), 2, "the merge and the flip, no alarm: {w:?}");
         let body = step_put(&w);
-        assert_eq!(body["metadata"]["result"], "match");
-        let www = body["metadata"]["verdicts"]
+        assert_eq!(body["result"], "match");
+        let www = body["verdicts"]
             .as_array()
             .unwrap()
             .iter()
@@ -3580,7 +3597,7 @@ measured = "2026-09-20: read from the IdP"
         assert_eq!(www["verdict"], "MATCH", "{www}");
         assert_eq!(www["access"], "created");
         assert_eq!(
-            body["metadata"]["applied"],
+            body["applied"],
             json!([
                 "Access application www.algedonic.dev created",
                 "Access policy operators (allow) created on www.algedonic.dev",
@@ -3626,11 +3643,11 @@ measured = "2026-09-20: read from the IdP"
         let w = writes(&captured);
         assert_eq!(
             w.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-            vec!["POST /api/jobs", "PUT /api/jobs/obs-1/steps/step-observe"],
+            vec!["POST /api/jobs", MERGE_OBSERVE, PUT_OBSERVE],
             "the alarm, then the step: {w:?}"
         );
         let body = step_put(&w);
-        assert_eq!(body["metadata"]["result"], "findings");
+        assert_eq!(body["result"], "findings");
         let boss = boss_verdict(&body);
         assert_eq!(boss["verdict"], "ABSENT", "the zone as it is now: {boss}");
         assert_eq!(
@@ -3638,11 +3655,11 @@ measured = "2026-09-20: read from the IdP"
             "the account's answer, verbatim"
         );
         assert_eq!(
-            body["metadata"]["applied"],
+            body["applied"],
             json!([]),
             "nothing was written that the account took"
         );
-        let summary = body["metadata"]["summary"].as_str().unwrap();
+        let summary = body["summary"].as_str().unwrap();
         assert!(
             summary.contains("refused by the zone: boss.algedonic.dev: POST /zones/zone-1/dns_records returned 400"),
             "{summary}"
@@ -3699,7 +3716,7 @@ measured = "2026-09-20: read from the IdP"
             "the door's record created behind the tunnel interlock, nothing else touched"
         );
         let body = step_put(&writes(&captured));
-        let dev = body["metadata"]["verdicts"]
+        let dev = body["verdicts"]
             .as_array()
             .unwrap()
             .iter()
@@ -3760,8 +3777,8 @@ measured = "2026-09-20: read from the IdP"
             "the stale CNAME corrected in place, nothing else touched"
         );
         let body = step_put(&writes(&captured));
-        assert_eq!(body["metadata"]["result"], "match", "{body}");
-        let idp = body["metadata"]["verdicts"]
+        assert_eq!(body["result"], "match", "{body}");
+        let idp = body["verdicts"]
             .as_array()
             .unwrap()
             .iter()
@@ -3771,10 +3788,7 @@ measured = "2026-09-20: read from the IdP"
         assert_eq!(idp["verdict"], "MATCH");
         assert_eq!(idp["tunnel"], "routed");
         assert!(idp.get("access").is_none(), "{idp}");
-        assert_eq!(
-            body["metadata"]["applied"],
-            json!(["id.algedonic.dev CNAME corrected"])
-        );
+        assert_eq!(body["applied"], json!(["id.algedonic.dev CNAME corrected"]));
 
         // Before the sibling car converges: the converge's ingress line
         // does not name id. — HELD, alarm raised, nothing written.
@@ -3796,19 +3810,19 @@ measured = "2026-09-20: read from the IdP"
         let w = writes(&captured);
         assert_eq!(
             w.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-            vec!["PUT /api/jobs/obs-1/steps/step-observe"],
+            vec![MERGE_OBSERVE, PUT_OBSERVE],
             "{w:?}"
         );
         let body = step_put(&w);
         assert!(
-            body["metadata"]["summary"]
+            body["summary"]
                 .as_str()
                 .unwrap()
                 .contains("id.algedonic.dev: flip held — the converge does not route"),
             "{}",
-            body["metadata"]["summary"]
+            body["summary"]
         );
-        let idp = body["metadata"]["verdicts"]
+        let idp = body["verdicts"]
             .as_array()
             .unwrap()
             .iter()
@@ -3904,16 +3918,15 @@ measured = "2026-09-20: read from the IdP"
         let w = writes(&captured);
         assert_eq!(
             w.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-            vec!["POST /api/jobs", "PUT /api/jobs/obs-1/steps/step-observe"],
+            vec!["POST /api/jobs", MERGE_OBSERVE, PUT_OBSERVE],
             "the alarm, then the step: {w:?}"
         );
         let body = step_put(&w);
-        assert_eq!(body["status"], "completed");
-        assert_eq!(body["metadata"]["result"], "findings");
+        assert_eq!(body["result"], "findings");
         let boss = boss_verdict(&body);
         assert_eq!(boss["verdict"], "HELD", "{boss}");
         assert_eq!(boss["access"], "absent");
-        let access_v = body["metadata"]["access"].as_array().unwrap();
+        let access_v = body["access"].as_array().unwrap();
         let refused: Vec<&Json> = access_v
             .iter()
             .filter(|v| v["verdict"] == "REFUSED")
@@ -3929,8 +3942,8 @@ measured = "2026-09-20: read from the IdP"
             "the account's own answer, verbatim: {}",
             refused[0]
         );
-        assert_eq!(body["metadata"]["counts"]["access"]["REFUSED"], 1);
-        let summary = body["metadata"]["summary"].as_str().unwrap();
+        assert_eq!(body["counts"]["access"]["REFUSED"], 1);
+        let summary = body["summary"].as_str().unwrap();
         assert!(
             summary.contains("1 absent, 0 undeclared, 1 refused"),
             "{summary}"
@@ -3978,18 +3991,18 @@ measured = "2026-09-20: read from the IdP"
         let w = writes(&captured);
         assert_eq!(
             w.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
-            vec!["POST /api/jobs", "PUT /api/jobs/obs-1/steps/step-observe"],
+            vec!["POST /api/jobs", MERGE_OBSERVE, PUT_OBSERVE],
             "{w:?}"
         );
         let body = step_put(&w);
-        assert_eq!(body["metadata"]["result"], "findings");
+        assert_eq!(body["result"], "findings");
         let boss = boss_verdict(&body);
         assert_eq!(boss["verdict"], "HELD", "{boss}");
         assert_eq!(
             boss["access"], "no-allow-policy",
             "the app is there, its allow policy is not: {boss}"
         );
-        let refused: Vec<Json> = body["metadata"]["access"]
+        let refused: Vec<Json> = body["access"]
             .as_array()
             .unwrap()
             .iter()
@@ -4010,7 +4023,7 @@ measured = "2026-09-20: read from the IdP"
             refused[0]
         );
         assert_eq!(
-            body["metadata"]["applied"],
+            body["applied"],
             json!(["Access application boss.algedonic.dev created"]),
             "what WAS written is still recorded"
         );
@@ -4040,7 +4053,7 @@ measured = "2026-09-20: read from the IdP"
         );
         assert_eq!(zone.writes().len(), 2, "{:?}", zone.writes());
         let body = step_put(&writes(&captured));
-        assert_eq!(body["metadata"]["result"], "match", "{body}");
+        assert_eq!(body["result"], "match", "{body}");
         let boss = boss_verdict(&body);
         assert_eq!(boss["verdict"], "MATCH");
         assert_eq!(boss["access"], "present");
@@ -4110,7 +4123,7 @@ measured = "2026-09-20: read from the IdP"
         let order: Vec<&str> = w.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(
             order,
-            vec!["POST /api/jobs", "PUT /api/jobs/obs-1/steps/step-observe"],
+            vec!["POST /api/jobs", MERGE_OBSERVE, PUT_OBSERVE],
             "the Access DRIFT (a deny policy the declaration does not name) is a finding; the held flip is not"
         );
         let body = step_put(&w);
@@ -4118,7 +4131,7 @@ measured = "2026-09-20: read from the IdP"
         assert_eq!(boss["verdict"], "HELD", "{boss}");
         assert_eq!(boss["access"], "no-allow-policy");
         assert_eq!(boss["held"], "flip held — Access app has no allow policy");
-        let summary = body["metadata"]["summary"].as_str().unwrap();
+        let summary = body["summary"].as_str().unwrap();
         assert!(
             summary.contains("boss.algedonic.dev: flip held — Access app has no allow policy"),
             "{summary}"
@@ -4198,7 +4211,7 @@ measured = "2026-09-20: read from the IdP"
         let order: Vec<&str> = w.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(
             order,
-            vec!["POST /api/jobs", "PUT /api/jobs/obs-1/steps/step-observe"],
+            vec!["POST /api/jobs", MERGE_OBSERVE, PUT_OBSERVE],
             "the application ABSENT on the re-read is a finding, alarmed"
         );
         let body = step_put(&w);
@@ -4206,9 +4219,9 @@ measured = "2026-09-20: read from the IdP"
         assert_eq!(boss["verdict"], "HELD", "{boss}");
         assert_eq!(boss["access"], "absent");
         assert_eq!(boss["held"], "flip held — Access app absent");
-        assert_eq!(body["metadata"]["result"], "findings");
+        assert_eq!(body["result"], "findings");
         assert!(
-            body["metadata"]["summary"]
+            body["summary"]
                 .as_str()
                 .unwrap()
                 .contains("boss.algedonic.dev: flip held — Access app absent")
@@ -4236,13 +4249,13 @@ measured = "2026-09-20: read from the IdP"
         h.invoke(&zone_args(), &ctx()).await.unwrap();
 
         let w = writes(&captured);
-        assert_eq!(w.len(), 1, "{w:?}");
+        assert_eq!(w.len(), 2, "the merge and the flip: {w:?}");
         let body = &w[0].1;
         assert_eq!(
-            body["metadata"]["result"], "match",
+            body["result"], "match",
             "UNDECLARED is reported, not a failure"
         );
-        let verdicts = body["metadata"]["verdicts"].as_array().unwrap();
+        let verdicts = body["verdicts"].as_array().unwrap();
         let id = verdicts
             .iter()
             .find(|v| v["record"] == "id.algedonic.dev A")
@@ -4284,7 +4297,7 @@ measured = "2026-09-20: read from the IdP"
         let order: Vec<&str> = w.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(
             order,
-            vec!["POST /api/jobs", "PUT /api/jobs/obs-1/steps/step-observe"],
+            vec!["POST /api/jobs", MERGE_OBSERVE, PUT_OBSERVE],
             "the alarm is filed BEFORE the step completes"
         );
         let alarm = &w[0].1;
@@ -4302,8 +4315,7 @@ measured = "2026-09-20: read from the IdP"
             findings[0]["live"]["content"],
             "00000000-1111-4222-8333-444444444444.cfargotunnel.com"
         );
-        let step = &w[1].1;
-        assert_eq!(step["metadata"]["result"], "findings");
+        assert_eq!(step_put(&w)["result"], "findings");
     }
 
     #[tokio::test]
@@ -4328,12 +4340,16 @@ measured = "2026-09-20: read from the IdP"
             )]
         );
         let w = writes(&captured);
-        assert_eq!(w.len(), 1, "corrected, re-read, matched: no alarm: {w:?}");
+        assert_eq!(
+            w.len(),
+            2,
+            "corrected, re-read, matched: the merge and the flip, no alarm: {w:?}"
+        );
         let body = step_put(&w);
-        assert_eq!(body["metadata"]["result"], "match");
+        assert_eq!(body["result"], "match");
         assert_eq!(boss_verdict(&body)["verdict"], "MATCH");
         assert_eq!(
-            body["metadata"]["applied"],
+            body["applied"],
             json!(["boss.algedonic.dev CNAME corrected"])
         );
     }
@@ -4361,7 +4377,8 @@ measured = "2026-09-20: read from the IdP"
             order,
             vec![
                 "PATCH /api/jobs/alarm-1/metadata",
-                "PUT /api/jobs/obs-1/steps/step-observe"
+                MERGE_OBSERVE,
+                PUT_OBSERVE
             ]
         );
         let patch = &w[0].1;
@@ -4392,16 +4409,13 @@ measured = "2026-09-20: read from the IdP"
         h.invoke(&zone_args(), &ctx()).await.unwrap();
         let w = writes(&captured);
         let order: Vec<&str> = w.iter().map(|(p, _)| p.as_str()).collect();
-        assert_eq!(
-            order,
-            vec!["POST /api/jobs", "PUT /api/jobs/obs-1/steps/step-observe"]
-        );
+        assert_eq!(order, vec!["POST /api/jobs", MERGE_OBSERVE, PUT_OBSERVE]);
         let findings = w[0].1["metadata"]["findings"].as_array().unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0]["application"], "playground.algedonic.dev");
         assert_eq!(findings[0]["declared"]["session_duration"], "24h");
         assert_eq!(findings[0]["live"]["session_duration"], "720h");
-        assert_eq!(step_put(&w)["metadata"]["result"], "findings");
+        assert_eq!(step_put(&w)["result"], "findings");
     }
 
     // ----- refusals -----

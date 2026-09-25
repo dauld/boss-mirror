@@ -4,7 +4,7 @@
 
   import { session } from '@boss/web-kit/session/session.svelte';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
-  import { needsPresence, performPresenceCeremony } from './presence';
+  import { needsPresence, performPresenceCeremony, shownAfter } from './presence';
   import { describeWriteFailure, putStep, saveStep } from './stepWrite';
 
   type StepData = {
@@ -71,6 +71,12 @@
         return;
       }
       const required = step.sign_offs_required ?? [];
+      // The ticket this gesture's own ceremony was issued, if one ran.
+      // The completion below carries it: the jobs API judges a
+      // presence-gated step again on the request that completes it, and
+      // a bare PUT after the presence stamp answered 422 (backlog
+      // b568044a). Same step, same person, same shape — nothing wider.
+      let presenceTicket: string | undefined;
       if (required.includes(userRole)) {
         let stamp = await fetch(`/api/jobs/${jobId}/steps/${step.id}/sign-offs`, {
           method: 'POST',
@@ -83,7 +89,12 @@
         // fails, the refusal surfaces and the step waits (Q3).
         if (await needsPresence(stamp)) {
           try {
-            const ticket = await performPresenceCeremony(jobId, step.id);
+            // The step as this surface showed it, with the decision it
+            // just saved folded in — what the passkey may sign (fd7090cc).
+            const ticket = await performPresenceCeremony(jobId, step.id, {
+              title: step.title,
+              metadata: shownAfter(step.metadata, body.metadata),
+            });
             stamp = await fetch(`/api/jobs/${jobId}/steps/${step.id}/sign-offs`, {
               method: 'POST',
               headers: {
@@ -92,6 +103,7 @@
               },
               body: JSON.stringify({ role: userRole }),
             });
+            presenceTicket = ticket;
           } catch (e) {
             signError = e instanceof Error ? e.message : String(e);
             // The decision DID land — refresh so the surface renders
@@ -110,7 +122,7 @@
         }
       }
       if (d === 'approved' || d === 'rejected') {
-        const done = await putStep(jobId, step.id, { status: 'completed' });
+        const done = await putStep(jobId, step.id, { status: 'completed' }, presenceTicket);
         // 409 (stamps missing or stale) renders as the same
         // "sign-offs outstanding: …" line as before — describeWriteFailure
         // names the roles from the conflict body.

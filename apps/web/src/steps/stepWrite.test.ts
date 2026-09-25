@@ -253,5 +253,21 @@ describe('putStep', () => {
     expect(seenUrl).toBe('/api/jobs/job-1/steps/step-9');
     expect(seenInit?.method).toBe('PUT');
     expect(JSON.parse(String(seenInit?.body))).toEqual({ status: 'completed' });
+    // No ticket was handed in, so none is sent.
+    expect((seenInit?.headers as Record<string, string>)['x-presence-ticket']).toBeUndefined();
+  });
+
+  // Backlog b568044a: a presence-gated completion is judged on its own
+  // request, so the caller that ran the ceremony hands its ticket over
+  // and the PUT carries it in the header the gateway verifies.
+  test('carries a presence ticket it is handed, in x-presence-ticket', async () => {
+    let seenInit: RequestInit | undefined;
+    stubFetch(async (_url, init) => {
+      seenInit = init;
+      return new Response('{}', { status: 200 });
+    });
+    await putStep('job-1', 'step-9', { status: 'completed' }, 'ticket-1');
+    expect((seenInit?.headers as Record<string, string>)['x-presence-ticket']).toBe('ticket-1');
+    expect(JSON.parse(String(seenInit?.body))).toEqual({ status: 'completed' });
   });
 });

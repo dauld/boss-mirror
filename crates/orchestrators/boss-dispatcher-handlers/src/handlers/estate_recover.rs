@@ -86,8 +86,8 @@ use serde_json::{Map, Value, json};
 use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext};
 
 use super::common::{
-    RECOVERED_AT, Retraction, api_client, get_json, recovery_note, relapse_patch, retraction,
-    rows_or_refuse, write_json,
+    RECOVERED_AT, Retraction, api_client, complete_step, get_json, recovery_note, relapse_patch,
+    retraction, rows_or_refuse, write_json,
 };
 use super::estate_alarm::{DEDUP_PAGE, PERSIST_N, unrecovered_keys};
 
@@ -249,18 +249,20 @@ fn already_told(alarm: &Value) -> bool {
         .is_some_and(|v| !v.is_null())
 }
 
-/// The step completion that closes one recovered alarm — at `triage`,
-/// or at the `build`/`measure` a person routed it to: the step's
-/// existing keys carried through (PUT replaces metadata wholesale), the
-/// fields the backlog-item workflow requires at done (`disposition`,
-/// and `evidence` on triage), and the machine's stamps.
-pub(super) fn clear_step_body(r: &Recovery, existing: &Map<String, Value>, n: usize) -> Value {
-    let mut metadata = existing.clone();
-    metadata.insert("disposition".into(), json!("stale"));
-    metadata.insert("evidence".into(), json!(evidence(r, n)));
-    metadata.insert("cleared_by".into(), json!(CLEARED_BY));
-    metadata.insert("recovered_at".into(), json!(recovered_at(r)));
-    json!({"status": "completed", "metadata": metadata})
+/// The fields that close one recovered alarm — at `triage`, or at the
+/// `build`/`measure` a person routed it to: what the backlog-item
+/// workflow requires at done (`disposition`, and `evidence` on triage)
+/// and the machine's stamps. ONLY these: they ride the step merge door,
+/// which keeps every key the step already holds ([`complete_step`],
+/// backlog e39a9d2a) — this used to copy the step's own metadata in
+/// for a PUT that replaced it wholesale.
+pub(super) fn clear_step_fields(r: &Recovery, n: usize) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert("disposition".into(), json!("stale"));
+    fields.insert("evidence".into(), json!(evidence(r, n)));
+    fields.insert("cleared_by".into(), json!(CLEARED_BY));
+    fields.insert("recovered_at".into(), json!(recovered_at(r)));
+    fields
 }
 
 /// The merge that tells a routed alarm it has recovered when the
@@ -430,12 +432,8 @@ impl Handler for EstateRecover {
 
         for r in recovered(&open_rows, &rows, scope, host, PERSIST_N) {
             let key = &r.key;
-            let (slug, step_id, existing) = match &r.retraction {
-                Retraction::Complete {
-                    slug,
-                    step_id,
-                    metadata,
-                } => (slug, step_id, metadata),
+            let (slug, step_id) = match &r.retraction {
+                Retraction::Complete { slug, step_id } => (slug, step_id),
                 // A route the machine may not complete: tell the packet.
                 Retraction::Annotate { why_open } => {
                     if let Err(e) = write_json(
@@ -456,11 +454,12 @@ impl Handler for EstateRecover {
                     continue;
                 }
             };
-            if let Err(e) = write_json(
+            if let Err(e) = complete_step(
                 &self.client,
-                reqwest::Method::PUT,
-                &format!("{}/api/jobs/{}/steps/{step_id}", self.base(), r.job_id),
-                &clear_step_body(&r, existing, PERSIST_N),
+                self.base(),
+                &r.job_id,
+                step_id,
+                clear_step_fields(&r, PERSIST_N),
                 &ctx.rule_name,
             )
             .await
@@ -665,23 +664,13 @@ mod tests {
         assert_eq!(r.job_id, "fdd10ec8");
         assert_eq!(r.key, KEY);
         assert_eq!(r.host.as_deref(), Some("boss-gcp"));
-        let Retraction::Complete {
-            slug,
-            step_id,
-            metadata,
-        } = &r.retraction
-        else {
+        let Retraction::Complete { slug, step_id } = &r.retraction else {
             panic!("an untriaged alarm closes at its triage step");
         };
         assert_eq!(
             (slug.as_str(), step_id.as_str()),
             ("triage", "fdd10ec8-triage"),
             "the close is the triage step, addressed by id"
-        );
-        assert_eq!(
-            metadata.get("authority_role"),
-            Some(&json!("platform-admin")),
-            "the step's existing metadata rides back so the PUT does not drop it"
         );
         assert_eq!(
             r.clean_at,
@@ -897,12 +886,6 @@ mod tests {
         assert!(series_alarms(&open, "host", Some("boss-gcp")).is_empty());
     }
 
-    fn triage_metadata() -> Map<String, Value> {
-        let mut step_metadata = Map::new();
-        step_metadata.insert("authority_role".into(), json!("platform-admin"));
-        step_metadata
-    }
-
     fn a_recovery() -> Recovery {
         Recovery {
             job_id: "fdd10ec8".into(),
@@ -912,7 +895,6 @@ mod tests {
             retraction: Retraction::Complete {
                 slug: "triage".into(),
                 step_id: "fdd10ec8-triage".into(),
-                metadata: triage_metadata(),
             },
             clean_at: vec![at(45), at(40), at(35)],
         }
@@ -924,9 +906,7 @@ mod tests {
         // `disposition` (enum, required) and `evidence` (string,
         // required) at done. `stale` is the terminal the three hand
         // closes chose — "the claim no longer holds".
-        let body = clear_step_body(&a_recovery(), &triage_metadata(), 3);
-        assert_eq!(body["status"], "completed");
-        let m = &body["metadata"];
+        let m = clear_step_fields(&a_recovery(), 3);
         assert_eq!(m["disposition"], "stale");
         let evidence = m["evidence"].as_str().expect("evidence is a string");
         assert!(evidence.contains(KEY), "names the finding");
@@ -939,15 +919,18 @@ mod tests {
                 t.to_rfc3339()
             );
         }
-        assert_eq!(
-            m["authority_role"], "platform-admin",
-            "existing step metadata survives the PUT"
-        );
         assert_eq!(m["cleared_by"], CLEARED_BY);
         assert_eq!(
             m["recovered_at"],
             at(45).to_rfc3339(),
             "the newest clean comparison's own instant, not the machine's clock"
+        );
+        let mut keys: Vec<&str> = m.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["cleared_by", "disposition", "evidence", "recovered_at"],
+            "its own fields only — the merge door keeps the step's (e39a9d2a)"
         );
     }
 
@@ -964,7 +947,9 @@ mod tests {
 
     // ----- the writes, witnessed against a stub jobs API -----
 
-    use crate::handlers::listing_stub::{step_is_terminal, terminal_step_refusal};
+    use crate::handlers::listing_stub::{
+        end_state_step_put, step_is_terminal, terminal_step_refusal,
+    };
     use axum::response::IntoResponse;
     use axum::{Json, Router, extract::Path, extract::Query, routing::get};
     use std::sync::Mutex;
@@ -1022,8 +1007,31 @@ mod tests {
                                     .push((format!("{step_id} (409)"), body));
                                 return terminal_step_refusal(&step_id);
                             }
+                            // The decided end state (e39a9d2a).
+                            if let Some(refused) = end_state_step_put(&id, &step_id, &body) {
+                                puts.lock()
+                                    .unwrap()
+                                    .push((format!("{step_id} (409)"), body));
+                                return refused;
+                            }
                             puts.lock().unwrap().push((step_id, body));
                             axum::http::StatusCode::NO_CONTENT.into_response()
+                        }
+                    },
+                )
+            })
+            // The step merge door: recorded beside the step PUTs, in
+            // order, as `<step>/metadata`.
+            .route("/api/jobs/{id}/steps/{step_id}/metadata", {
+                let puts = puts.clone();
+                axum::routing::patch(
+                    move |Path((_, step_id)): Path<(String, String)>, Json(body): Json<Value>| {
+                        let puts = puts.clone();
+                        async move {
+                            puts.lock()
+                                .unwrap()
+                                .push((format!("{step_id}/metadata"), body));
+                            axum::http::StatusCode::NO_CONTENT
                         }
                     },
                 )
@@ -1078,11 +1086,16 @@ mod tests {
             .expect("both writes answered");
 
         let puts = puts.lock().unwrap();
-        assert_eq!(puts.len(), 1, "one recovery, one step completion");
-        assert_eq!(puts[0].0, "fdd10ec8-triage");
-        assert_eq!(puts[0].1["status"], "completed");
-        assert_eq!(puts[0].1["metadata"]["disposition"], "stale");
-        assert_eq!(puts[0].1["metadata"]["cleared_by"], CLEARED_BY);
+        assert_eq!(
+            puts.len(),
+            2,
+            "one recovery: the fields through the merge door, then the flip: {puts:?}"
+        );
+        assert_eq!(puts[0].0, "fdd10ec8-triage/metadata");
+        assert_eq!(puts[0].1["disposition"], "stale");
+        assert_eq!(puts[0].1["cleared_by"], CLEARED_BY);
+        assert_eq!(puts[1].0, "fdd10ec8-triage");
+        assert_eq!(puts[1].1, json!({"status": "completed"}));
         let patches = patches.lock().unwrap();
         assert_eq!(patches.len(), 1, "one recovery, one packet annotation");
         assert_eq!(patches[0].0, "fdd10ec8");
@@ -1129,11 +1142,19 @@ mod tests {
             .await
             .expect("both writes answered");
         let puts = puts.lock().unwrap();
-        assert_eq!(puts.len(), 1, "one step completion");
-        assert_eq!(puts[0].0, "e1fea3b2-build", "the step the packet waits on");
-        assert_eq!(puts[0].1["metadata"]["disposition"], "stale");
-        assert_eq!(puts[0].1["metadata"]["cleared_by"], CLEARED_BY);
-        assert_eq!(puts[0].1["metadata"]["agent_profile"], "builder");
+        assert_eq!(puts.len(), 2, "one step completion, two writes: {puts:?}");
+        assert_eq!(
+            puts[0].0, "e1fea3b2-build/metadata",
+            "the step the packet waits on"
+        );
+        assert_eq!(puts[0].1["disposition"], "stale");
+        assert_eq!(puts[0].1["cleared_by"], CLEARED_BY);
+        assert!(
+            puts[0].1.get("agent_profile").is_none(),
+            "the step's own keys are not re-sent: the merge door keeps them"
+        );
+        assert_eq!(puts[1].0, "e1fea3b2-build");
+        assert_eq!(puts[1].1, json!({"status": "completed"}));
         let patches = patches.lock().unwrap();
         assert_eq!(patches.len(), 1);
         assert_eq!(patches[0].1["recovered_at"], at(45).to_rfc3339());

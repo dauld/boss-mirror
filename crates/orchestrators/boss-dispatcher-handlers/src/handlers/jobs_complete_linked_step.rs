@@ -1199,16 +1199,19 @@ pub(crate) fn is_unset(v: Option<&serde_json::Value>) -> bool {
     }
 }
 
-/// Fill `merged` from a template: unset keys only — metadata a
-/// person already wrote is their record, not this obligation's to
-/// overwrite — with string values substituting the car's facts.
+/// The template's keys the step as read (`existing`) holds unset —
+/// metadata a person already wrote is their record, not this
+/// obligation's to overwrite — with string values substituting the
+/// car's facts. Only those keys: they ride the step merge door, which
+/// keeps the rest (backlog e39a9d2a).
 fn fill(
-    merged: &mut serde_json::Map<String, serde_json::Value>,
+    existing: &serde_json::Map<String, serde_json::Value>,
     template: &serde_json::Map<String, serde_json::Value>,
     shipped: &Shipped,
-) {
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut fields = serde_json::Map::new();
     for (k, v) in template {
-        if !is_unset(merged.get(k)) {
+        if !is_unset(existing.get(k)) {
             continue;
         }
         let v = match v {
@@ -1229,8 +1232,9 @@ fn fill(
             }
             other => other.clone(),
         };
-        merged.insert(k.clone(), v);
+        fields.insert(k.clone(), v);
     }
+    fields
 }
 
 /// What a verb that ran and failed left behind (v6): its exit, and the
@@ -1626,10 +1630,14 @@ impl JobsCompleteLinkedStep {
     }
 
     /// Complete `step` on `target_id`: the template's vocabulary
-    /// (absent keys only) plus the evidence under `evidence_key`,
-    /// merged into the step's existing metadata — PATCH-on-PUT
-    /// replaces top-level `metadata` wholesale, and `authority_role`
-    /// living there is what keeps the step gated.
+    /// (keys the step as read holds unset, only) plus the evidence
+    /// under `evidence_key` — through the step merge door, then the
+    /// status alone (`common::complete_step`, backlog e39a9d2a). This
+    /// was one PUT of the step's metadata AS READ plus those keys; the
+    /// PUT replaces metadata wholesale, so a key written to the step
+    /// between the read and the PUT was refused 409 under stage 1 and
+    /// is refused under the decided end state however the body is
+    /// built. The merge door keeps what it is not sent.
     async fn complete_step(
         &self,
         target_id: &str,
@@ -1642,49 +1650,30 @@ impl JobsCompleteLinkedStep {
         let Some(step_id) = step.get("id").and_then(|v| v.as_str()) else {
             return Ok(());
         };
-        let mut merged = match step.get("metadata").cloned() {
-            Some(serde_json::Value::Object(m)) => m,
+        let existing = match step.get("metadata") {
+            Some(serde_json::Value::Object(m)) => m.clone(),
             _ => serde_json::Map::new(),
         };
-        if let Some(template) = template {
-            fill(&mut merged, template, shipped);
-        }
-        merged.insert(evidence_key.to_string(), shipped.evidence.clone());
-
-        let step_url = format!(
-            "{}/api/jobs/{}/steps/{}",
+        let mut fields = template
+            .map(|t| fill(&existing, t, shipped))
+            .unwrap_or_default();
+        fields.insert(evidence_key.to_string(), shipped.evidence.clone());
+        super::common::complete_step(
+            &self.client,
             self.jobs_base.trim_end_matches('/'),
             target_id,
             step_id,
-        );
-        let body = json!({
-            "status": "completed",
-            "metadata": serde_json::Value::Object(merged),
-        });
-        let resp = self
-            .client
-            .put(&step_url)
-            .header("content-type", "application/json")
-            .header("x-boss-user", dispatcher_actor_header(rule))
-            .header("x-sim-origin", sim_origin_value())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| HandlerError::Downstream(format!("PUT {step_url}: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(HandlerError::Downstream(format!(
-                "PUT {step_url} returned {status}: {text}"
-            )));
-        }
-        Ok(())
+            fields,
+            rule,
+        )
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
     use axum::{Json, Router, extract::Path, routing::get};
     use std::sync::Mutex;
 
@@ -1819,9 +1808,21 @@ mod tests {
     /// completes with `disposition = "build"` — standing in for
     /// jobs-api's own re-evaluation on the write. The handler routes,
     /// re-reads, and must find the branch it opened.
+    ///
+    /// THE STEP DOORS AS THE DECIDED END STATE HAS THEM (e39a9d2a): a
+    /// step PUT carrying metadata is refused 409; the fields go through
+    /// the step merge door first. `puts` records each COMPLETION as
+    /// `(step_id, {status, metadata})`, where `metadata` is exactly what
+    /// the merge door received for that step since its last flip — what
+    /// the completion wrote, never the step's stored keys. A flip with no
+    /// merge before it records empty metadata, so the order is pinned.
     pub(super) async fn mock_jobs(jobs: Vec<serde_json::Value>) -> (String, Puts, Puts) {
         let patches: Puts = Arc::new(Mutex::new(Vec::new()));
         let puts: Puts = Arc::new(Mutex::new(Vec::new()));
+        let merged: Arc<
+            Mutex<std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>>>,
+        > = Arc::default();
+        let (put_merged, merge_merged) = (merged.clone(), merged.clone());
         let by_id: Arc<Mutex<std::collections::HashMap<String, serde_json::Value>>> =
             Arc::new(Mutex::new(
                 jobs.into_iter()
@@ -1832,6 +1833,7 @@ mod tests {
         let get_puts = puts.clone();
         let get_jobs = by_id.clone();
         let put_jobs = by_id.clone();
+        let merge_jobs = by_id.clone();
         let app = Router::new()
             .route(
                 "/api/jobs/{id}",
@@ -1855,10 +1857,46 @@ mod tests {
                           Json(body): Json<serde_json::Value>| {
                         let puts = get_puts.clone();
                         let by_id = put_jobs.clone();
+                        let merged = put_merged.clone();
                         async move {
-                            puts.lock().unwrap().push((step_id.clone(), body.clone()));
+                            // The decided end state (e39a9d2a).
+                            if let Some(refused) =
+                                super::super::listing_stub::end_state_step_put(&id, &step_id, &body)
+                            {
+                                return refused;
+                            }
+                            let wrote = merged.lock().unwrap().remove(&step_id).unwrap_or_default();
+                            let mut completion = body.clone();
+                            completion["metadata"] = serde_json::Value::Object(wrote);
+                            puts.lock().unwrap().push((step_id.clone(), completion));
                             if let Some(job) = by_id.lock().unwrap().get_mut(&id) {
                                 apply_step_put(job, &step_id, &body);
+                            }
+                            Json(json!({ "ok": true })).into_response()
+                        }
+                    },
+                ),
+            )
+            // The step merge door: merged into the stored step, and held
+            // as what this step's next completion wrote.
+            .route(
+                "/api/jobs/{id}/steps/{step_id}/metadata",
+                axum::routing::patch(
+                    move |Path((id, step_id)): Path<(String, String)>,
+                          Json(body): Json<serde_json::Value>| {
+                        let merged = merge_merged.clone();
+                        let by_id = merge_jobs.clone();
+                        async move {
+                            if let Some(sent) = body.as_object() {
+                                merged
+                                    .lock()
+                                    .unwrap()
+                                    .entry(step_id.clone())
+                                    .or_default()
+                                    .extend(sent.clone());
+                            }
+                            if let Some(job) = by_id.lock().unwrap().get_mut(&id) {
+                                merge_step_metadata(job, &step_id, &body);
                             }
                             Json(json!({ "ok": true }))
                         }
@@ -1883,20 +1921,38 @@ mod tests {
         (format!("http://{addr}"), puts, patches)
     }
 
-    /// The mock's PUT: overlay status + metadata on the stored step,
-    /// then re-evaluate the single predicate the route tests rely on.
+    /// The mock's merge door: the sent keys merged into the stored
+    /// step's metadata, every other key kept.
+    fn merge_step_metadata(job: &mut serde_json::Value, step_id: &str, sent: &serde_json::Value) {
+        let Some(steps) = job.get_mut("steps").and_then(|s| s.as_array_mut()) else {
+            return;
+        };
+        for step in steps.iter_mut() {
+            if step.get("id").and_then(|v| v.as_str()) == Some(step_id)
+                && let (Some(stored), Some(sent)) = (
+                    step.get_mut("metadata").and_then(|m| m.as_object_mut()),
+                    sent.as_object(),
+                )
+            {
+                for (k, v) in sent {
+                    stored.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+
+    /// The mock's PUT: overlay the status on the stored step (a body
+    /// carrying metadata never reaches here — it is refused), then
+    /// re-evaluate the single predicate the route tests rely on.
     fn apply_step_put(job: &mut serde_json::Value, step_id: &str, body: &serde_json::Value) {
         let Some(steps) = job.get_mut("steps").and_then(|s| s.as_array_mut()) else {
             return;
         };
         for step in steps.iter_mut() {
-            if step.get("id").and_then(|v| v.as_str()) == Some(step_id) {
-                if let Some(status) = body.get("status") {
-                    step["status"] = status.clone();
-                }
-                if let Some(metadata) = body.get("metadata") {
-                    step["metadata"] = metadata.clone();
-                }
+            if step.get("id").and_then(|v| v.as_str()) == Some(step_id)
+                && let Some(status) = body.get("status")
+            {
+                step["status"] = status.clone();
             }
         }
         let routed_to_build = steps.iter().any(|s| {
@@ -2529,10 +2585,13 @@ mod tests {
             evidence["generation"], "abc1234",
             "the generation the train carried is reachable: {evidence:#}"
         );
-        // The step's own metadata survives the write — PATCH-on-PUT
-        // replaces `metadata` wholesale, and `authority_role` living
-        // there is what keeps the step gated.
-        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
+        // The step's own metadata survives the write because the write
+        // does not carry it: the fields ride the step merge door, which
+        // keeps `authority_role` — what keeps the step gated — on the row.
+        assert!(
+            body["metadata"].get("authority_role").is_none(),
+            "the step's own keys are not re-sent: the merge door keeps them (e39a9d2a)"
+        );
     }
 
     /// v2's `done_metadata` (0ab5fa3a): the completion carries the
@@ -2591,9 +2650,9 @@ mod tests {
         let calls = puts.lock().unwrap().clone();
         assert_eq!(calls.len(), 1);
         let (_, body) = &calls[0];
-        assert_eq!(
-            body["metadata"]["verdict"], "declined",
-            "the person's verdict survives the obligation"
+        assert!(
+            body["metadata"].get("verdict").is_none(),
+            "the person's verdict survives the obligation: it is neither overwritten nor re-sent"
         );
         assert_eq!(
             body["metadata"]["answer"], "shipped: feat/x — Close the feedback loop",
@@ -2903,13 +2962,12 @@ mod tests {
             body["metadata"]["decided_by"]["branch"].is_null(),
             "a design has no branch; the evidence says null rather than inventing one"
         );
-        // The step's own keys survive the wholesale metadata replace.
-        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
+        // The step's own keys survive because the write does not carry
+        // them: the merge door keeps what it is not sent (e39a9d2a).
         assert!(
-            body["metadata"]["question"]
-                .as_str()
-                .is_some_and(|q| q.contains("c6bd173e")),
-            "the question the verb wrote is still on the completed step"
+            body["metadata"].get("authority_role").is_none()
+                && body["metadata"].get("question").is_none(),
+            "the question the verb wrote stays on the step, not re-sent: {body}"
         );
         assert!(
             patches.lock().unwrap().is_empty(),
@@ -3247,9 +3305,9 @@ mod tests {
             body["metadata"]["result"], "delivered",
             "the analyst ending the vocabulary admits (a9c6ed5b)"
         );
-        assert_eq!(
-            body["metadata"]["authority_role"], "platform-admin",
-            "the step's own metadata is merged, never replaced"
+        assert!(
+            body["metadata"].get("authority_role").is_none(),
+            "the step's own metadata is merged, never replaced — nor re-sent"
         );
         assert_eq!(
             body["metadata"]["delivered"]["step"], MEASURE_STEP,
@@ -3650,7 +3708,10 @@ mod answer_tests {
         // The evidence names the request, under the rule's own key.
         assert_eq!(body["metadata"]["tagged_by"]["car"], REQUEST);
         assert_eq!(body["metadata"]["tagged_by"]["outcome"], "answered");
-        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
+        assert!(
+            body["metadata"].get("authority_role").is_none(),
+            "the step's own keys are not re-sent: the merge door keeps them (e39a9d2a)"
+        );
         assert!(patches.lock().unwrap().is_empty(), "nothing to note");
     }
 
@@ -3762,11 +3823,10 @@ mod answer_tests {
             evidence: json!({}),
             answer: groups.as_object().cloned().unwrap_or_default(),
         };
-        let mut merged = serde_json::Map::new();
         let template: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"tag": "{tag}", "count": "{n} cars", "who": "{car}"}"#)
                 .unwrap();
-        fill(&mut merged, &template, &shipped);
+        let merged = fill(&serde_json::Map::new(), &template, &shipped);
         assert_eq!(merged["tag"], "v1.2.3");
         assert_eq!(
             merged["count"], "7 cars",

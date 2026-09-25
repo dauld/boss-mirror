@@ -86,6 +86,7 @@ use serde_json::{Value as Json, json};
 use super::common::{
     RECOVERED_AT, Retraction, api_client, dispatcher_reader_header, get_json, owner_for_filing,
     post_json, recovery_note, relapse_patch, retraction, rows_or_refuse, sim_origin_value,
+    step_completion_writes,
 };
 
 /// The two standing conditions a sensor alarms on. Each is its own
@@ -566,28 +567,28 @@ fn recovery_evidence(sensor_id: &str, condition: Condition, at: DateTime<Utc>) -
     )
 }
 
-/// The step completion that closes a recovered alarm — at `triage`, or
-/// at the `build`/`measure` a person routed it to (`common::retraction`,
-/// backlog 6072ff60). `existing` is that step's own metadata, carried
-/// through because a step PUT replaces it wholesale.
-pub fn recover_step_body(
-    existing: &serde_json::Map<String, Json>,
+/// The fields that close a recovered alarm — at `triage`, or at the
+/// `build`/`measure` a person routed it to (`common::retraction`,
+/// backlog 6072ff60). ONLY these: they ride the step merge door, which
+/// keeps every key the step holds (e39a9d2a) — this used to clone the
+/// step's own metadata in for a PUT that replaced it wholesale.
+pub fn recover_step_fields(
     sensor_id: &str,
     condition: Condition,
     at: DateTime<Utc>,
-) -> Json {
-    let mut metadata = existing.clone();
-    metadata.insert("disposition".into(), json!("stale"));
-    metadata.insert(
+) -> serde_json::Map<String, Json> {
+    let mut fields = serde_json::Map::new();
+    fields.insert("disposition".into(), json!("stale"));
+    fields.insert(
         "evidence".into(),
         json!(format!(
             "{} Closed by machine from the success, not by judgement.",
             recovery_evidence(sensor_id, condition, at)
         )),
     );
-    metadata.insert("cleared_by".into(), json!(CLEARED_BY));
-    metadata.insert(RECOVERED_AT.into(), json!(at.to_rfc3339()));
-    json!({"status": "completed", "metadata": metadata})
+    fields.insert("cleared_by".into(), json!(CLEARED_BY));
+    fields.insert(RECOVERED_AT.into(), json!(at.to_rfc3339()));
+    fields
 }
 
 /// The instant a firing reads the world at: the tick's `_at` when the
@@ -852,18 +853,16 @@ impl SensorPoll {
             None => {
                 tracing::warn!(finding = %key, packet = %id, "sensor.poll: the open alarm has no triage step to close");
             }
-            Some(Retraction::Complete {
-                slug,
-                step_id,
-                metadata,
-            }) => {
-                self.write(
-                    reqwest::Method::PUT,
-                    &format!("/api/jobs/{id}/steps/{step_id}"),
-                    &recover_step_body(&metadata, &sensor.id, condition, at),
-                    &sensor.id,
-                )
-                .await?;
+            // The fields through the step merge door, then the flip
+            // (e39a9d2a).
+            Some(Retraction::Complete { slug, step_id }) => {
+                for (method, path, body) in step_completion_writes(
+                    &id,
+                    &step_id,
+                    recover_step_fields(&sensor.id, condition, at),
+                ) {
+                    self.write(method, &path, &body, &sensor.id).await?;
+                }
                 tracing::info!(finding = %key, packet = %id, step = %slug, "sensor.poll closed the alarm: the condition no longer holds");
             }
             // A packet already told is not told again on every poll.
@@ -1343,7 +1342,12 @@ mod tests {
         let alarms = Arc::new(Mutex::new(open_alarms));
         let refuse_opens: Arc<Mutex<Option<(u16, String)>>> = Default::default();
         let refuse = refuse_opens.clone();
-        let (c1, c2, c3) = (captured.clone(), captured.clone(), captured.clone());
+        let (c1, c2, c3, c4) = (
+            captured.clone(),
+            captured.clone(),
+            captured.clone(),
+            captured.clone(),
+        );
         let (a1, a2, a3, a4) = (
             alarms.clone(),
             alarms.clone(),
@@ -1434,6 +1438,23 @@ mod tests {
                     }
                 }),
             )
+            // The step merge door (e39a9d2a), recorded in order with
+            // the PUTs.
+            .route(
+                "/api/jobs/{id}/steps/{sid}/metadata",
+                axum::routing::patch(
+                    move |Path((id, sid)): Path<(String, String)>, AxJson(body): AxJson<Json>| {
+                        let c = c4.clone();
+                        async move {
+                            c.lock().unwrap().push((
+                                format!("PATCH /api/jobs/{id}/steps/{sid}/metadata"),
+                                body,
+                            ));
+                            AxJson(json!({ "ok": true }))
+                        }
+                    },
+                ),
+            )
             .route(
                 "/api/jobs/{id}/steps/{sid}",
                 axum::routing::put(
@@ -1467,6 +1488,15 @@ mod tests {
                                     "step is completed; annotate via PATCH /api/jobs/{id}/metadata",
                                 )
                                     .into_response();
+                            }
+                            // The decided end state (e39a9d2a).
+                            if let Some(refused) =
+                                super::super::listing_stub::end_state_step_put(&id, &sid, &body)
+                            {
+                                c.lock()
+                                    .unwrap()
+                                    .push((format!("PUT /api/jobs/{id}/steps/{sid} (409)"), body));
+                                return refused;
                             }
                             // A completed step closes the packet, so it
                             // leaves the open listing — as the real
@@ -1718,13 +1748,15 @@ mod tests {
         assert_eq!(packets[1]["kind"], "receive-a-sponsorship");
         let puts = stub.writes("PUT /api/jobs/job-1/steps/job-1-triage");
         assert_eq!(puts.len(), 1, "{:?}", stub.writes("PUT"));
-        assert_eq!(puts[0].1["status"], "completed");
-        assert_eq!(puts[0].1["metadata"]["disposition"], "stale");
-        assert_eq!(
-            puts[0].1["metadata"]["authority_role"], "platform-admin",
-            "existing keys ride"
+        assert_eq!(puts[0].1, json!({"status": "completed"}), "the flip alone");
+        let merged = stub.writes("PATCH /api/jobs/job-1/steps/job-1-triage/metadata");
+        assert_eq!(merged.len(), 1, "{:?}", stub.writes("PATCH"));
+        assert_eq!(merged[0].1["disposition"], "stale");
+        assert!(
+            merged[0].1.get("authority_role").is_none(),
+            "the step's own keys are not re-sent: the merge door keeps them"
         );
-        assert_eq!(puts[0].1["metadata"]["cleared_by"], "sensor.poll");
+        assert_eq!(merged[0].1["cleared_by"], "sensor.poll");
     }
 
     // ----- the unopenable path (backlog f50a9ec1) -----
@@ -1905,16 +1937,15 @@ mod tests {
         // job-1 was the refused open; the alarm is job-2.
         let puts = stub.writes("PUT /api/jobs/job-2/steps/job-2-triage");
         assert_eq!(puts.len(), 1, "{:?}", stub.writes("PUT"));
-        assert_eq!(puts[0].1["status"], "completed");
-        assert_eq!(puts[0].1["metadata"]["disposition"], "stale");
-        assert_eq!(puts[0].1["metadata"]["cleared_by"], "sensor.poll");
+        assert_eq!(puts[0].1, json!({"status": "completed"}), "the flip alone");
+        let merged = stub.writes("PATCH /api/jobs/job-2/steps/job-2-triage/metadata");
+        assert_eq!(merged.len(), 1, "{:?}", stub.writes("PATCH"));
+        assert_eq!(merged[0].1["disposition"], "stale");
+        assert_eq!(merged[0].1["cleared_by"], "sensor.poll");
         assert!(
-            puts[0].1["metadata"]["evidence"]
-                .as_str()
-                .unwrap()
-                .contains("opened"),
+            merged[0].1["evidence"].as_str().unwrap().contains("opened"),
             "{}",
-            puts[0].1["metadata"]["evidence"]
+            merged[0].1["evidence"]
         );
 
         // Nothing more to open, nothing more to close.
@@ -2044,7 +2075,10 @@ mod tests {
             "the alarm closed: {:?}",
             stub_jobs.writes("PUT")
         );
-        assert_eq!(puts[0].1["metadata"]["disposition"], "stale");
+        assert_eq!(puts[0].1, json!({"status": "completed"}), "the flip alone");
+        let merged = stub_jobs.writes("PATCH /api/jobs/job-2/steps/job-2-triage/metadata");
+        assert_eq!(merged.len(), 1, "{:?}", stub_jobs.writes("PATCH"));
+        assert_eq!(merged[0].1["disposition"], "stale");
     }
 
     /// A 5xx / 409 from the open is weather, exactly as it was: the
@@ -2225,10 +2259,15 @@ mod tests {
         );
         let puts = stub.writes("PUT /api/jobs/alarm-r/steps/alarm-r-build");
         assert_eq!(puts.len(), 1, "{:?}", stub.writes("PUT"));
-        assert_eq!(puts[0].1["status"], "completed");
-        assert_eq!(puts[0].1["metadata"]["disposition"], "stale");
-        assert_eq!(puts[0].1["metadata"]["cleared_by"], "sensor.poll");
-        assert_eq!(puts[0].1["metadata"]["authority_role"], "platform-admin");
+        assert_eq!(puts[0].1, json!({"status": "completed"}), "the flip alone");
+        let merged = stub.writes("PATCH /api/jobs/alarm-r/steps/alarm-r-build/metadata");
+        assert_eq!(merged.len(), 1, "{:?}", stub.writes("PATCH"));
+        assert_eq!(merged[0].1["disposition"], "stale");
+        assert_eq!(merged[0].1["cleared_by"], "sensor.poll");
+        assert!(
+            merged[0].1.get("authority_role").is_none(),
+            "the step's own keys are not re-sent: the merge door keeps them"
+        );
     }
 
     /// A route an executor holds is not completed from under it: the

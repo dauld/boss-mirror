@@ -16,8 +16,12 @@
 //! A ready step with only an `authority_role` sends NOTHING (David,
 //! 2026-08-14: "we aren't ready for human on-call yet"). It is still
 //! routed — it sits in the role's pull queue — but nobody is paged for
-//! a duty that does not exist. A step with neither an assignee nor a
-//! role was always a no-op.
+//! a duty that does not exist. A READY step with neither an assignee
+//! nor a role was always a no-op.
+//!
+//! A MARKED done step that reaches no one is NOT a no-op: somebody asked
+//! to be told, so it dead-letters onto its packet (see
+//! `reached_no_one`, backlog eba750db).
 
 use super::common::{
     StepEvent, dispatcher_actor_header, dispatcher_reader_header, sim_origin_value,
@@ -124,7 +128,34 @@ impl Handler for MessagesNotify {
             .get("authority_role")
             .and_then(|v| v.as_str())
             .filter(|r| !r.is_empty());
-        if recipient_id.is_none() && role.is_none() {
+        let is_done = ctx.triggering_topic.starts_with("step.done.");
+        // THE JOB'S OWNER, for a done announcement only — the person
+        // waiting on the packet. The role arm below was this signal's
+        // ONLY recipient until pr-train v2 (backlog af796788, live
+        // 2026-09-18T12:53Z) moved every conductor step from
+        // `authority_role = "platform-admin"` to the conductor as its
+        // `audience`: right about who EXECUTES the step, and it left a
+        // done signal with no role and no assignee, so it fell into the
+        // no-op below without an error, a dead letter, or a failed
+        // firing. The last `done:` send was the 12:40Z train that day
+        // (backlog 58f0b536). Tried after the role, so a step that
+        // still names one is answered exactly as before; never for a
+        // READY topic, whose "no on-call broadcast" rule stands.
+        let owner = if is_done { ev.job_owner_id } else { None };
+        if recipient_id.is_none() && role.is_none() && owner.is_none() {
+            // A READY or ASSIGNED step naming no one is the pull queue's,
+            // and nobody asked for a push: a real no-op. A DONE topic is
+            // not — it reaches this handler only through
+            // `notify-on-step-done-marked`, because the step was MARKED
+            // to tell someone. Returning `Ok(())` there hid 619 marked
+            // completions on 216 trains for a week (backlog eba750db).
+            if is_done {
+                return Err(reached_no_one(
+                    ctx,
+                    &ev,
+                    "it carries no assignee, no authority_role and no job owner",
+                ));
+            }
             return Ok(());
         }
 
@@ -163,7 +194,6 @@ impl Handler for MessagesNotify {
         // happened to be absent. The topic is what the event IS; the
         // prefix is bookkeeping about message ids, and hanging
         // behaviour off it would be a coincidence rather than a rule.
-        let is_done = ctx.triggering_topic.starts_with("step.done.");
         if recipient_id.is_none() && !is_done {
             return Ok(());
         }
@@ -215,10 +245,17 @@ impl Handler for MessagesNotify {
                     HandlerError::Downstream(format!("people response not JSON: {e}"))
                 })?;
                 emps.sort_by(|a, b| a.id.cmp(&b.id));
-                // No active member in the role — leave it for the
-                // pull-side role queue; nothing to notify.
+                // No active member in the role. Only a DONE topic gets
+                // this far (every other role-only step returned above),
+                // so this is a marked wait-is-over signal with nobody to
+                // receive it: a vacant role on a protocol step, which is
+                // the thing to fix, and the dead-letter names it.
                 let Some(first) = emps.first() else {
-                    return Ok(());
+                    return Err(reached_no_one(
+                        ctx,
+                        &ev,
+                        &format!("no active member holds its authority_role {r}"),
+                    ));
                 };
                 (
                     first.id.clone(),
@@ -226,7 +263,24 @@ impl Handler for MessagesNotify {
                     "signal",
                 )
             }
-            (None, None) => return Ok(()),
+            // A `signal`, like the role arm it stands in for: the
+            // wait-is-over notice is true until the job closes, and
+            // `expire-signals-on-job-closed` retires signals only —
+            // a `direct` here would outlive every train in the inbox.
+            (None, None) => match owner {
+                Some(o) => (o.to_string(), format!("owned by {o}"), "signal"),
+                // Unreachable today — the first guard returns before a
+                // step with no one gets here — and an error rather than
+                // `Ok(())` so a later edit to that guard cannot reopen
+                // the silence this arm used to be.
+                None => {
+                    return Err(reached_no_one(
+                        ctx,
+                        &ev,
+                        "it carries no assignee, no authority_role and no job owner",
+                    ));
+                }
+            },
         };
 
         // Name the Subject, not just the step kind. Seven feedback
@@ -313,6 +367,36 @@ impl Handler for MessagesNotify {
     }
 }
 
+/// The error a MARKED step's done signal returns when it can reach no
+/// one (backlog eba750db).
+///
+/// WHERE IT LANDS — the dispatcher's own dead-letter channel, not a new
+/// one. `Permanent` makes the runner settle the event on its FIRST
+/// delivery and land `dead_letter` on the packet this step belongs to
+/// (`boss_dispatcher::rules::dead_letter`): the rule, this handler, the
+/// topic, the event id and the text below. That is read in three
+/// places — on the packet itself, where the one waiting on it looks;
+/// on `/it/registry/rules`, whose per-rule dead-letter count is how a
+/// firing rule tells stalled from idle; and in `audit_log`, as the
+/// metadata PATCH's `jobs.job.updated`. Permanent, because the same
+/// payload names no one on every redelivery.
+///
+/// NOT A NEW ALARM. A recorded dead-letter is a finding on its packet
+/// and its rule, and the alarm already standing on this channel fires
+/// when a dead-letter could NOT be recorded (the estate chain's
+/// `dead_letters_unrecorded`) — which is the silent case. A page per
+/// occurrence would be three per train while a role or owner is
+/// missing: noise about one cause, which the rules list already counts.
+fn reached_no_one(ctx: &InvocationContext, ev: &StepEvent<'_>, why: &str) -> HandlerError {
+    HandlerError::Permanent(format!(
+        "{rule} reached no one: step {step} on job {job} completed marked notify_on_done, \
+         and {why}, so no done signal was sent",
+        rule = ctx.rule_name,
+        step = ev.step_id,
+        job = ev.job_id,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +458,20 @@ mod tests {
         String,
         std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
     ) {
+        // Deliberately out of id order: the handler picks the
+        // deterministic on-call member (lowest id).
+        mock_services_with(serde_json::json!([{ "id": "emp-zz" }, { "id": "emp-aa" }])).await
+    }
+
+    /// The same stand-ins, with the role's active members given — `[]`
+    /// is a role nobody holds.
+    async fn mock_services_with(
+        members: serde_json::Value,
+    ) -> (
+        String,
+        String,
+        std::sync::Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+    ) {
         use axum::{
             Json, Router,
             routing::{get, post},
@@ -381,10 +479,9 @@ mod tests {
 
         let people = Router::new().route(
             "/api/people",
-            get(|| async {
-                // Deliberately out of id order: the handler picks the
-                // deterministic on-call member (lowest id).
-                Json(serde_json::json!([{ "id": "emp-zz" }, { "id": "emp-aa" }]))
+            get(move || {
+                let members = members.clone();
+                async move { Json(members) }
             }),
         );
         let people_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -583,6 +680,106 @@ mod tests {
             sent["id"],
             "notify:22222222-2222-2222-2222-222222222222:emp-aa"
         );
+    }
+
+    /// The job-owner arm is a FALLBACK for a done topic (backlog
+    /// 58f0b536): a done step that still names a role is answered by
+    /// the role's on-call member exactly as before pr-train v2, even
+    /// when the event also names the job's owner.
+    #[tokio::test]
+    async fn a_done_step_with_a_role_still_reaches_the_role_not_the_owner() {
+        let (people, messages, captured) = mock_services().await;
+        let h = MessagesNotify::with_client(reqwest::Client::new(), people, messages);
+        let mut payload = ready_payload();
+        payload["job_owner_id"] = serde_json::json!("emp-owner");
+        h.invoke(&[], &ctx_on("step.done.task", payload))
+            .await
+            .expect("notify");
+        let sent = captured.lock().unwrap().clone().expect("posted");
+        assert_eq!(sent["recipient_id"], "emp-aa");
+    }
+
+    /// The owner arm never reaches a READY topic: "no on-call
+    /// broadcast for a ready step" (David, 934cb22c) stands, and a
+    /// ready step with no assignee and no role stays the no-op it was
+    /// — with an owner on the event or not.
+    #[tokio::test]
+    async fn a_ready_step_never_falls_back_to_the_jobs_owner() {
+        let h = MessagesNotify::new("http://127.0.0.1:1", "http://127.0.0.1:1");
+        let mut payload = ready_payload();
+        payload["metadata"] = serde_json::json!({});
+        payload["job_owner_id"] = serde_json::json!("emp-owner");
+        let res = h.invoke(&[], &ctx(payload)).await;
+        assert!(
+            res.is_ok(),
+            "a ready step with only an owner touches nothing: {res:?}"
+        );
+    }
+
+    /// A step marked `notify_on_done` asked for someone to be told, so
+    /// completing it and reaching NO ONE is a delivery that failed, not
+    /// a no-op (backlog eba750db). It used to return `Ok(())`: 619
+    /// marked completions on 216 trains between 2026-09-18 and
+    /// 2026-09-25 sent nothing and left nothing a reader could find. A
+    /// PERMANENT error is what the runner dead-letters onto the packet
+    /// on the first delivery — the same payload names no one on every
+    /// redelivery, so spending the budget would only delay the record.
+    /// No HTTP either: the unreachable URLs would turn any call into a
+    /// Downstream error instead.
+    #[tokio::test]
+    async fn a_marked_done_step_that_names_no_one_dead_letters() {
+        let h = MessagesNotify::new("http://127.0.0.1:1", "http://127.0.0.1:1");
+        let mut payload = ready_payload();
+        payload["metadata"] = serde_json::json!({});
+        let res = h.invoke(&[], &ctx_on("step.done.task", payload)).await;
+        match res {
+            Err(HandlerError::Permanent(msg)) => {
+                assert!(
+                    msg.contains("22222222-2222-2222-2222-222222222222"),
+                    "the record names the step: {msg}"
+                );
+                assert!(
+                    msg.contains("no assignee, no authority_role and no job owner"),
+                    "the record says why no one was reached: {msg}"
+                );
+            }
+            other => panic!("a marked step reaching no one must dead-letter, got {other:?}"),
+        }
+    }
+
+    /// The same failure through the role arm: the marked step names a
+    /// role, and nobody active holds it. Nothing is sent, and the
+    /// dead-letter names the vacant role, which is the thing to fix.
+    #[tokio::test]
+    async fn a_marked_done_step_whose_role_nobody_holds_dead_letters() {
+        let (people, messages, captured) = mock_services_with(serde_json::json!([])).await;
+        let h = MessagesNotify::with_client(reqwest::Client::new(), people, messages);
+        let res = h
+            .invoke(&[], &ctx_on("step.done.task", ready_payload()))
+            .await;
+        match res {
+            Err(HandlerError::Permanent(msg)) => assert!(
+                msg.contains("platform-admin"),
+                "the record names the vacant role: {msg}"
+            ),
+            other => panic!("a vacant role on a marked step must dead-letter, got {other:?}"),
+        }
+        assert!(captured.lock().unwrap().is_none(), "nothing was sent");
+    }
+
+    /// The silences that STAY silent, pinned so the dead-letter above
+    /// cannot spread to them: a READY step that names only a role is
+    /// the pull queue's, by decision (David, 934cb22c: "we aren't ready
+    /// for human on-call yet"). Nobody asked for a push, so reaching
+    /// nobody is not a failure. (A ready step naming no one is pinned
+    /// by `a_step_with_neither_assignee_nor_role_stays_silent`.)
+    #[tokio::test]
+    async fn a_ready_step_with_only_a_role_stays_silent_by_design() {
+        let (people, messages, captured) = mock_services().await;
+        let h = MessagesNotify::with_client(reqwest::Client::new(), people, messages);
+        let res = h.invoke(&[], &ctx(ready_payload())).await;
+        assert!(res.is_ok(), "a role-only ready step is a no-op: {res:?}");
+        assert!(captured.lock().unwrap().is_none(), "nothing was sent");
     }
 
     #[tokio::test]

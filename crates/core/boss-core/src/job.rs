@@ -465,6 +465,18 @@ pub struct SignOffStamp {
 /// keys) so hashing is insertion-order independent. Fields that
 /// don't change what is being agreed to (status, assignee, sort
 /// order, plugin pin) are deliberately excluded.
+///
+/// A KEY IS WRITTEN JSON-ENCODED, as a value is (security review of
+/// backlog fd7090cc, 2026-09-24). It was written raw, so a key carrying
+/// `:` and `,` could spell its neighbours — `{"zz":1,"zzz":2}` and
+/// `{"zz:1,zzz":2}` hashed alike, and a stamp over one shape verified on
+/// the other. An encoded key ends where its closing quote does.
+/// infra/ops/ops-runner.sh computes this same hash in jq and is pinned
+/// equal to it by ops_runner_approval_sh.rs (CLAUDE.md §9a). Changing
+/// the form re-hashes every step, so a stamp taken on a still-open step
+/// before this landed no longer matches and must be taken again. The
+/// server never re-judges a completed step's stamps; the ops-runner
+/// does, on an approve step, but its approvals expire in ten minutes.
 pub fn step_shape_hash(title: &str, metadata: &serde_json::Value) -> String {
     use sha2::{Digest, Sha256};
     fn canonical(v: &serde_json::Value, out: &mut Vec<u8>) {
@@ -474,7 +486,8 @@ pub fn step_shape_hash(title: &str, metadata: &serde_json::Value) -> String {
                 keys.sort();
                 out.push(b'{');
                 for k in keys {
-                    out.extend_from_slice(k.as_bytes());
+                    let encoded = serde_json::Value::String(k.clone()).to_string();
+                    out.extend_from_slice(encoded.as_bytes());
                     out.push(b':');
                     canonical(&m[k], out);
                     out.push(b',');
@@ -995,6 +1008,20 @@ mod tests {
         let b = serde_json::json!({"qty": 6});
         assert_ne!(step_shape_hash("t", &a), step_shape_hash("t", &b));
         assert_ne!(step_shape_hash("t", &a), step_shape_hash("u", &a));
+    }
+
+    /// A KEY IS ENCODED, SO NO TWO SHAPES SHARE A CANONICAL FORM
+    /// (security review of fd7090cc, 2026-09-24). Keys were written raw,
+    /// `key:value,`, so a key carrying `:` and `,` could spell a
+    /// neighbour: `{"zz":1,"zzz":2}` and `{"zz:1,zzz":2}` both became
+    /// `{zz:1,zzz:2,}`, and a sign-off stamp over one shape verified on
+    /// the other. infra/ops/ops-runner.sh recomputes this hash in jq and
+    /// is pinned equal to it by ops_runner_approval_sh.rs.
+    #[test]
+    fn shape_hash_keys_cannot_collide_with_a_neighbouring_key() {
+        let a = serde_json::json!({"zz": 1, "zzz": 2});
+        let b = serde_json::json!({"zz:1,zzz": 2});
+        assert_ne!(step_shape_hash("t", &a), step_shape_hash("t", &b));
     }
 
     #[test]

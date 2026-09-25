@@ -141,6 +141,37 @@ impl CommerceRepository for PgCommerce {
         Ok((invoices, total))
     }
 
+    async fn open_ar_by_account(&self) -> Result<Vec<AccountOpenAr>, CommerceError> {
+        // Summed here, over every row, so the answer is exact at any
+        // volume (backlog 5257bfa9). The not-owed statuses are bound
+        // from the one Rust list rather than spelled in the SQL.
+        let not_owed: Vec<String> = InvoiceStatus::NOT_OWED
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            "SELECT account_id, \
+                    COALESCE(SUM(amount_cents), 0)::bigint, \
+                    COUNT(*)::bigint \
+             FROM invoices \
+             WHERE status <> ALL($1) \
+             GROUP BY account_id \
+             ORDER BY account_id",
+        )
+        .bind(&not_owed)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| CommerceError::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|(account_id, open_ar_cents, open_count)| AccountOpenAr {
+                account_id,
+                open_ar_cents,
+                open_count,
+            })
+            .collect())
+    }
+
     async fn invoice_by_id(&self, id: &str) -> Result<Option<Invoice>, CommerceError> {
         let row: Option<InvoiceRow> = sqlx::query_as("SELECT * FROM invoices WHERE id = $1")
             .bind(id)

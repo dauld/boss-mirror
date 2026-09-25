@@ -102,6 +102,17 @@
     const stale = new Set();
     // The stages of the current gesture, in the order they landed.
     let progress = [];
+    // The presence ticket the gateway issued for THIS surface's own
+    // signature — kept so the completion carries it (backlog b568044a,
+    // 2026-09-25). The jobs API judges assurance on every request that
+    // leaves the open states, from that request's own header, so a
+    // presence stamp followed by a bare completion PUT answered 422 and
+    // the step stayed ready after the stamp. It is only ever a ticket a
+    // ceremony on this step minted for this user, and it authorises
+    // nothing new: the server re-checks its step, person, shape and
+    // two-minute expiry on the PUT exactly as on the stamp, and a step
+    // edited since the ceremony refuses it. Nothing here mints one.
+    let presenceTicketHeld = null;
 
     const declared = (Array.isArray(step.fields) ? step.fields : []).filter(
       (f) => f && f.name && !TRIO.includes(f.name),
@@ -113,6 +124,19 @@
       const cur = (step.metadata || {})[f.name];
       fieldValues[f.name] = cur == null ? '' : String(cur);
     });
+    // WHAT A PASSKEY SIGNS IS SHOWN, NOT OFFERED FOR EDIT (adversarial
+    // re-review of fd7090cc, 2026-09-25). On a presence-assured step a
+    // declared field that already holds a value is the document the
+    // signature binds — an ops-request's `plan`, rendered on the host.
+    // As a one-line text input it lost its newlines on screen, so the
+    // approver read a flattened plan, and could edit it under the
+    // signature. It renders read-only in a <pre>, byte for byte, and the
+    // decision patch never re-writes it: this surface did not author it.
+    const signedDoc = new Set(
+      step.assurance_required === 'presence'
+        ? declared.filter((f) => nonEmptyString(fieldValues[f.name])).map((f) => f.name)
+        : [],
+    );
 
     // Whether Request changes COMPLETES this step, read off the step's
     // own metadata — the protocol's declaration, not this surface's
@@ -182,6 +206,17 @@
       declared.forEach((f) => {
         const id = `signoff-field-${step.id}-${f.name}`;
         const type = String(f.field_type || 'string');
+        if (signedDoc.has(f.name)) {
+          fieldsDiv.appendChild(
+            h(
+              'div',
+              { className: 'step-field' },
+              h('label', { for: id }, `${f.name} — what your passkey signs`),
+              h('pre', { className: 'step-signoff-signed', id }, fieldValues[f.name]),
+            ),
+          );
+          return;
+        }
         let input;
         if (type.includes('|')) {
           input = h('select', { className: 'step-signoff-input', id });
@@ -349,11 +384,29 @@
         .replace(/\+/g, '-')
         .replace(/\//g, '_')
         .replace(/=+$/, '');
+    //
+    // THE BEGIN NAMES WHAT THIS SURFACE SHOWED (backlog fd7090cc, the
+    // security re-review of 2026-09-25): the step as rendered, with this
+    // gesture's own decision folded in by decide() below — never a fresh
+    // read. The gateway hashes it and refuses (412) a begin whose shown
+    // step is not the step as it stands, so a plan swapped between the
+    // render and the key press is never what the passkey signs.
+    //
+    // This is the ONE place the mount-prop snapshot rightly leaves the
+    // page, and it is not a write: assert/begin stores nothing on the
+    // step, it only compares. The lost update step-plugins-own-their-keys
+    // refuses cannot happen here — a stale snapshot is refused 412, which
+    // is the whole point — so the snapshot is named for what it is.
     async function presenceTicket() {
+      const renderedMetadata = step.metadata || {};
       const begin = await fetch('/api/auth/passkey/assert/begin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: jobId, step_id: step.id }),
+        body: JSON.stringify({
+          job_id: jobId,
+          step_id: step.id,
+          shown: { title: step.title, metadata: renderedMetadata },
+        }),
       });
       if (begin.status === 409) throw new Error('No passkey enrolled — add one first.');
       if (!begin.ok) {
@@ -432,6 +485,7 @@
               },
               body: JSON.stringify({ role }),
             });
+            if (res.ok) presenceTicketHeld = ticket;
           }
         }
         if (!res.ok) {
@@ -475,6 +529,7 @@
         //    2026-09-02).
         const patch = {};
         declared.forEach((f) => {
+          if (signedDoc.has(f.name)) return;
           if (nonEmptyString(fieldValues[f.name])) patch[f.name] = fieldValues[f.name];
         });
         patch.decision = d;
@@ -539,9 +594,15 @@
           if (typeof onUpdate === 'function') onUpdate();
           return;
         }
+        // The completion carries the ticket this surface's signature was
+        // granted on, when it holds one: a presence-gated step is judged
+        // again on this request, and the stamp does not lend it its
+        // assurance (b568044a).
+        const doneHeaders = { 'Content-Type': 'application/json' };
+        if (presenceTicketHeld) doneHeaders['x-presence-ticket'] = presenceTicketHeld;
         const done = await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
           method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
+          headers: doneHeaders,
           body: JSON.stringify({ status: 'completed' }),
         });
         if (!done.ok) {

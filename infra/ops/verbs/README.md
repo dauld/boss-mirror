@@ -147,6 +147,31 @@ dispatcher rule file it on boss-gcp's checkout moving without any
 authority widening: a `jobs.spawn` packet carries no args, so it can
 only ask; `--for-real` is a word a packet carries on purpose.
 
+## Approval verbs
+
+A verb that declares `requires_approval` runs only under a passkey
+approval of a rendered plan (design 17835005; the runner half is backlog
+fd7090cc). Its file carries three more keys, each checked by the runner
+and by `boss ops` before anything is filed or rendered:
+
+- `plan_verb` — a read-only verb here, serving the same hosts, taking
+  exactly this verb's params less the last, which prints the plan on
+  stdout and `plan-sha256:` on stderr;
+- a last param named `plan_sha256`, required, `^[0-9a-f]{64}$` — the
+  runner appends sha256 of the SIGNED plan, and the script re-renders
+  and refuses bytes that no longer hash to it;
+- `approvers` — employee ids, e.g. `["emp-david"]`: only a presence
+  stamp whose `authority_id` is on this list approves (design 03451237
+  q2, David 2026-09-22: a named list, never a role, because a role is
+  registry data and a role gate hangs the approval on whoever can write
+  a policy row). Adding an approver is a reviewed change to this file.
+
+A completed approve step is not by itself an approval: Reject runs the
+same passkey ceremony and completes it too. The runner runs the write
+only when the step's `decision` — saved before the stamp, so inside the
+signed shape — is exactly `approved`; ops-request routes any other
+decision to `refused` (adversarial re-review of fd7090cc, 2026-09-25).
+
 ## Defense
 
 Stated once and relied on by `ops-runner.sh`: the runner never executes
@@ -155,7 +180,10 @@ no `sh -c`, no `eval`, no interpolation into program text. The patterns
 admit no whitespace and no leading `-`, so a validated arg can neither
 split into extra words nor be parsed as an option; `unit-status` also
 passes `--` so even a future pattern loosening cannot turn an arg into a
-flag there.
+flag there. An arg carrying any control character is refused before its
+pattern is consulted: jq's `$` also matches before a trailing newline,
+so `"word\n"` passed `^[a-z]+$` and grew the argv an empty word
+(security review of fd7090cc, 2026-09-24).
 
 JSON rather than TOML because the runner is sh + jq (directive 26d61c97:
 no python) and jq reads JSON natively — a hand-rolled TOML parser in sh

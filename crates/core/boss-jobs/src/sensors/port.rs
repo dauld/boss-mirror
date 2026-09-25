@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use super::types::{
-    BatchOutcome, NewReading, PollStamp, RETENTION_DAYS, Reading, SensorInput, SensorRow, Sweep,
+    BatchOutcome, NewReading, PollStamp, RETENTION_DAYS, Reading, ReadingsWindow, SensorInput,
+    SensorRow, Sweep,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -48,6 +49,16 @@ pub trait Sensors: Send + Sync {
     /// The readings of one sensor that still owe a packet
     /// (`packet_id IS NULL`), oldest observation first.
     async fn unstamped(&self, sensor_id: &str) -> Result<Vec<Reading>, SensorsError>;
+
+    /// One sensor's readings observed in `[since, until)`: how many,
+    /// how many carry a packet, and which packets (backlog 35baed54).
+    /// An undeclared sensor is `UnknownSensor`, never a count of zero.
+    async fn window(
+        &self,
+        sensor_id: &str,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<ReadingsWindow, SensorsError>;
 
     /// Stamp the packet opened for one reading. Stamping twice with
     /// the same id is a no-op; the first stamp wins (a reading has one

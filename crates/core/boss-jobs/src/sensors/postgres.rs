@@ -10,7 +10,8 @@ use sqlx::{PgPool, Row};
 
 use super::port::{Sensors, SensorsError};
 use super::types::{
-    BatchOutcome, NewReading, PUSH_ONLY_SOURCES, PollStamp, Reading, SensorInput, SensorRow,
+    BatchOutcome, NewReading, PUSH_ONLY_SOURCES, PollStamp, Reading, ReadingsWindow, SensorInput,
+    SensorRow,
 };
 
 const SENSOR_COLUMNS: &str = "id, source, credential, every_minutes, opens_kind, subject_kind, selector, \
@@ -148,6 +149,50 @@ impl Sensors for PgSensors {
         .await
         .map_err(storage)?;
         rows.iter().map(reading_of).collect()
+    }
+
+    async fn window(
+        &self,
+        sensor_id: &str,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<ReadingsWindow, SensorsError> {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sensors WHERE id = $1)")
+            .bind(sensor_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(storage)?;
+        if !exists {
+            return Err(SensorsError::UnknownSensor(sensor_id.to_string()));
+        }
+        // One statement, so the three numbers are of one snapshot; the
+        // window rides sensor_readings_observed_at_idx.
+        let row = sqlx::query(
+            "SELECT COUNT(*) AS arrived, COUNT(packet_id) AS stamped, \
+             COALESCE(ARRAY_AGG(DISTINCT packet_id ORDER BY packet_id) \
+                      FILTER (WHERE packet_id IS NOT NULL), '{}') AS packets \
+             FROM sensor_readings \
+             WHERE sensor_id = $1 AND observed_at >= $2 AND observed_at < $3",
+        )
+        .bind(sensor_id)
+        .bind(since)
+        .bind(until)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage)?;
+        let arrived: i64 = row.try_get("arrived").map_err(storage)?;
+        let stamped: i64 = row.try_get("stamped").map_err(storage)?;
+        let packets: Vec<String> = row.try_get("packets").map_err(storage)?;
+        let (arrived, stamped) = (arrived.max(0) as u64, stamped.max(0) as u64);
+        Ok(ReadingsWindow {
+            sensor_id: sensor_id.to_string(),
+            since,
+            until,
+            arrived,
+            stamped,
+            unstamped: arrived - stamped,
+            packets,
+        })
     }
 
     async fn stamp(

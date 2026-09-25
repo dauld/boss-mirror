@@ -41,6 +41,9 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 boss-testing = { path = "../../core/boss-testing", features = ["postgres"] }
+boss-policy-client = { path = "../../core/boss-policy-client" }
+http-body-util = "0.1"
+tower = { workspace = true }
 
 [lints]
 workspace = true

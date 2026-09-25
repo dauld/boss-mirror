@@ -142,8 +142,9 @@ use boss_dispatcher::rules::registry::RawRule;
 
 use super::cadence_roster::{ClockCadence, Guard, clock_cadences};
 use super::common::{
-    Retraction, TRIAGE_SLUG, api_client, empty_roster_refusal, get_json, owner_for_filing,
-    post_json, recovery_note, relapse_patch, retraction, rows_or_refuse, write_json,
+    Retraction, TRIAGE_SLUG, api_client, complete_step, empty_roster_refusal, get_json,
+    owner_for_filing, post_json, recovery_note, relapse_patch, retraction, rows_or_refuse,
+    write_json,
 };
 
 /// Arg-key prefix for one declared cadence. `interval_minutes.<kind>`
@@ -1153,18 +1154,21 @@ fn arriving_again(label: &str, v: &Verdict) -> String {
     )
 }
 
-/// The step completion that CLOSES a standing alarm when the kind
-/// starts arriving again — at `triage`, or at the `build`/`measure` a
-/// person routed it to (`common::retraction`, a2d8bad3). `disposition = "stale"` is the backlog-item
-/// terminal titled "Closed — the claim no longer holds", which is
-/// precisely true: the cadence is no longer silent.
+/// The fields that CLOSE a standing alarm when the kind starts
+/// arriving again — at `triage`, or at the `build`/`measure` a person
+/// routed it to (`common::retraction`, a2d8bad3). `disposition =
+/// "stale"` is the backlog-item terminal titled "Closed — the claim no
+/// longer holds", which is precisely true: the cadence is no longer
+/// silent.
 ///
-/// PUT on a step REPLACES top-level metadata, so the step's existing
-/// keys (`authority_role`) are carried through by the caller.
-pub fn clear_step_body(existing: &Map<String, Value>, label: &str, v: &Verdict) -> Value {
-    let mut metadata = existing.clone();
-    metadata.insert("disposition".into(), json!("stale"));
-    metadata.insert(
+/// ONLY these: they ride the step merge door, which keeps every key the
+/// step holds (`authority_role` among them) — the caller used to carry
+/// the step's own keys through for a PUT that replaced them wholesale
+/// (backlog e39a9d2a).
+pub fn clear_step_fields(label: &str, v: &Verdict) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert("disposition".into(), json!("stale"));
+    fields.insert(
         "evidence".into(),
         json!(format!(
             "{} The claim this alarm carried no longer holds; closed by machine, not by \
@@ -1172,8 +1176,8 @@ pub fn clear_step_body(existing: &Map<String, Value>, label: &str, v: &Verdict) 
             arriving_again(label, v)
         )),
     );
-    metadata.insert("cleared_by".into(), json!(CLEARED_BY));
-    json!({"status": "completed", "metadata": metadata})
+    fields.insert("cleared_by".into(), json!(CLEARED_BY));
+    fields
 }
 
 // ---------------------------------------------------------------------------
@@ -1462,16 +1466,15 @@ impl Handler for CadenceSilenceSweep {
                         "open alarm for {label} has no `{TRIAGE_SLUG}` step; cannot close itself"
                     ));
                 }
-                Some(Retraction::Complete {
-                    slug,
-                    step_id,
-                    metadata,
-                }) => {
-                    if let Err(e) = write_json(
+                // The fields through the step merge door, then the flip
+                // (e39a9d2a).
+                Some(Retraction::Complete { slug, step_id }) => {
+                    if let Err(e) = complete_step(
                         &self.client,
-                        reqwest::Method::PUT,
-                        &format!("{}/api/jobs/{id}/steps/{step_id}", self.base()),
-                        &clear_step_body(&metadata, label, v),
+                        self.base(),
+                        id,
+                        &step_id,
+                        clear_step_fields(label, v),
                         &ctx.rule_name,
                     )
                     .await
@@ -1945,8 +1948,8 @@ mod tests {
     /// When the kind comes back, the alarm closes ITSELF: the
     /// `backlog-item` triage step completes with the `stale`
     /// disposition, whose terminal is titled "Closed — the claim no
-    /// longer holds". The step's existing metadata survives, because
-    /// a step PUT replaces top-level metadata wholesale.
+    /// longer holds". The step's existing metadata survives because the
+    /// fields ride the merge door and name none of it (e39a9d2a).
     #[test]
     fn a_returning_kind_closes_its_own_alarm_without_losing_step_metadata() {
         let open = json!({
@@ -1957,24 +1960,20 @@ mod tests {
                 {"id": "s-1", "spec_slug": "triage", "metadata": {"authority_role": "platform-admin"}}
             ],
         });
-        let Some(Retraction::Complete {
-            step_id,
-            metadata: meta,
-            ..
-        }) = retraction(&open)
-        else {
+        let Some(Retraction::Complete { step_id, .. }) = retraction(&open) else {
             panic!("an untriaged alarm withdraws at its triage step");
         };
         assert_eq!(step_id, "s-1");
-        let body = clear_step_body(&meta, "maintenance-views-catchup", &Verdict::Fresh);
-        assert_eq!(body["status"], json!("completed"));
-        assert_eq!(body["metadata"]["disposition"], json!("stale"));
+        let fields = clear_step_fields("maintenance-views-catchup", &Verdict::Fresh);
+        assert_eq!(fields["disposition"], json!("stale"));
+        assert_eq!(fields["cleared_by"], json!(CLEARED_BY));
+        let mut keys: Vec<&str> = fields.keys().map(String::as_str).collect();
+        keys.sort_unstable();
         assert_eq!(
-            body["metadata"]["authority_role"],
-            json!("platform-admin"),
-            "a PUT replaces step metadata wholesale, so existing keys must be carried"
+            keys,
+            ["cleared_by", "disposition", "evidence"],
+            "its own fields only — the merge door keeps `authority_role`"
         );
-        assert_eq!(body["metadata"]["cleared_by"], json!(CLEARED_BY));
     }
 
     /// Backlog a2d8bad3 — alarm a6a4ae18 as the jobs API held it: raised
@@ -1996,24 +1995,17 @@ mod tests {
                  "metadata": {"authority_role": "platform-admin", "agent_profile": "builder"}}
             ],
         });
-        let Some(Retraction::Complete {
-            slug,
-            step_id,
-            metadata,
-        }) = retraction(&open)
-        else {
+        let Some(Retraction::Complete { slug, step_id }) = retraction(&open) else {
             panic!("a ready build is where a routed alarm withdraws");
         };
         assert_eq!((slug.as_str(), step_id.as_str()), ("build", "s-5"));
-        let body = clear_step_body(&metadata, "ops-request/github-mirror", &Verdict::Fresh);
-        assert_eq!(body["status"], json!("completed"));
+        let fields = clear_step_fields("ops-request/github-mirror", &Verdict::Fresh);
         assert_eq!(
-            body["metadata"]["disposition"],
+            fields["disposition"],
             json!("stale"),
             "build's `stale` routes to the terminal \"Closed — the claim no longer holds\""
         );
-        assert_eq!(body["metadata"]["agent_profile"], json!("builder"));
-        assert_eq!(body["metadata"]["cleared_by"], json!(CLEARED_BY));
+        assert_eq!(fields["cleared_by"], json!(CLEARED_BY));
 
         // And the machine's close on a HUMAN-routed packet is still a
         // machine clear: the triage step a person completed carries no
@@ -2022,7 +2014,11 @@ mod tests {
         let mut closed = open.clone();
         closed["status"] = json!("closed");
         closed["closed_on"] = json!("2026-09-21");
-        closed["steps"][2]["metadata"] = body["metadata"].clone();
+        // The build step as the merge door leaves it: its own keys,
+        // plus the fields.
+        for (k, v) in &fields {
+            closed["steps"][2]["metadata"][k] = v.clone();
+        }
         let settled = settled_recently(&[closed], at("2026-09-22T00:00:00Z"));
         assert!(
             settled.is_empty(),
@@ -2550,7 +2546,17 @@ mod tests {
             .expect("the close answered");
         assert_eq!(
             stub.writes(),
-            vec!["PUT /api/jobs/a6a4ae18/steps/a6a4ae18-build".to_string()]
+            vec![
+                "PATCH /api/jobs/a6a4ae18/steps/a6a4ae18-build/metadata".to_string(),
+                "PUT /api/jobs/a6a4ae18/steps/a6a4ae18-build".to_string(),
+            ]
+        );
+        let sent = stub.sent();
+        assert_eq!(sent[0].1["disposition"], "stale");
+        assert_eq!(
+            sent[1].1,
+            json!({"status": "completed"}),
+            "the flip carries the status alone (e39a9d2a)"
         );
     }
 }

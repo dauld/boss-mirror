@@ -61,7 +61,7 @@
 //! packet this one aged out. A tick that dies between two packets
 //! leaves the second for the next tick. Nothing is ever written twice.
 
-use super::common::{api_client, open_jobs_of_kind, write_json};
+use super::common::{api_client, complete_step, open_jobs_of_kind};
 use super::jobs_complete_linked_step::{is_open, is_unset, step_by_slug, template_arg};
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::Value;
@@ -216,20 +216,16 @@ impl Handler for JobsAgeOutStep {
             let Some(step_id) = step.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let mut merged = match step.get("metadata").cloned() {
-                Some(serde_json::Value::Object(m)) => m,
-                _ => serde_json::Map::new(),
-            };
+            let existing = step.get("metadata").and_then(|m| m.as_object());
             // The template's vocabulary, ABSENT keys only: a value a
             // person wrote on the step is their record.
-            if let Some(template) = &template {
-                for (k, v) in template {
-                    if is_unset(merged.get(k)) {
-                        merged.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-            merged.insert(
+            let mut fields: serde_json::Map<String, serde_json::Value> = template
+                .iter()
+                .flatten()
+                .filter(|(k, _)| is_unset(existing.and_then(|m| m.get(*k))))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            fields.insert(
                 evidence_key.to_string(),
                 json!({
                     "silent_hours": (silent * 100.0).round() / 100.0,
@@ -238,16 +234,18 @@ impl Handler for JobsAgeOutStep {
                     "rule": ctx.rule_name,
                 }),
             );
-            let url = format!("{}/api/jobs/{job_id}/steps/{step_id}", self.base());
-            let body = json!({
-                "status": "completed",
-                "metadata": serde_json::Value::Object(merged),
-            });
-            write_json(
+            // Those keys through the step merge door, then the status
+            // alone (backlog e39a9d2a): this PUT the step's metadata AS
+            // READ plus them, which the step PUT refuses once anything
+            // wrote the step in between, and refuses outright under the
+            // decided end state. The merge door keeps what it is not
+            // sent.
+            complete_step(
                 &self.client,
-                reqwest::Method::PUT,
-                &url,
-                &body,
+                self.base(),
+                job_id,
+                step_id,
+                fields,
                 &ctx.rule_name,
             )
             .await?;
@@ -264,6 +262,7 @@ impl Handler for JobsAgeOutStep {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
     use axum::{Json, Router, extract::Path, extract::Query, routing::get};
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -335,7 +334,9 @@ mod tests {
         ));
         let list_jobs = by_id.clone();
         let put_jobs = by_id.clone();
+        let merge_jobs = by_id.clone();
         let put_log = puts.clone();
+        let merge_log = puts.clone();
         let app = Router::new()
             .route(
                 "/api/jobs",
@@ -364,6 +365,12 @@ mod tests {
                         let puts = put_log.clone();
                         let by_id = put_jobs.clone();
                         async move {
+                            // The decided end state (e39a9d2a).
+                            if let Some(refused) =
+                                super::super::listing_stub::end_state_step_put(&id, &step_id, &body)
+                            {
+                                return refused;
+                            }
                             puts.lock()
                                 .unwrap()
                                 .push((id.clone(), step_id.clone(), body.clone()));
@@ -374,7 +381,41 @@ mod tests {
                                 for step in steps.iter_mut() {
                                     if step["id"] == json!(step_id) {
                                         step["status"] = body["status"].clone();
-                                        step["metadata"] = body["metadata"].clone();
+                                    }
+                                }
+                            }
+                            Json(json!({ "ok": true })).into_response()
+                        }
+                    },
+                ),
+            )
+            // The step merge door: merges into the stored step, and is
+            // recorded in order with the PUTs as `<step>/metadata`.
+            .route(
+                "/api/jobs/{id}/steps/{step_id}/metadata",
+                axum::routing::patch(
+                    move |Path((id, step_id)): Path<(String, String)>,
+                          Json(body): Json<serde_json::Value>| {
+                        let puts = merge_log.clone();
+                        let by_id = merge_jobs.clone();
+                        async move {
+                            puts.lock().unwrap().push((
+                                id.clone(),
+                                format!("{step_id}/metadata"),
+                                body.clone(),
+                            ));
+                            if let Some(job) = by_id.lock().unwrap().get_mut(&id)
+                                && let Some(steps) =
+                                    job.get_mut("steps").and_then(|s| s.as_array_mut())
+                            {
+                                for step in steps.iter_mut() {
+                                    if step["id"] == json!(step_id)
+                                        && let (Some(stored), Some(sent)) =
+                                            (step["metadata"].as_object_mut(), body.as_object())
+                                    {
+                                        for (k, v) in sent {
+                                            stored.insert(k.clone(), v.clone());
+                                        }
                                     }
                                 }
                             }
@@ -406,24 +447,36 @@ mod tests {
             .await
             .expect("the tick runs");
         let written = puts.lock().unwrap().clone();
-        assert_eq!(written.len(), 1, "exactly one step completed: {written:?}");
+        assert_eq!(
+            written.len(),
+            2,
+            "exactly one step completed — the merge, then the flip: {written:?}"
+        );
         let (job, step, body) = &written[0];
         assert_eq!(job, SILENT);
-        assert_eq!(step, &format!("{SILENT}-building"));
-        assert_eq!(body["status"], "completed");
-        assert_eq!(body["metadata"]["result"], "died");
-        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
-        assert_eq!(body["metadata"]["aged_out"]["silent_hours"], 5.0);
-        assert_eq!(body["metadata"]["aged_out"]["bound_hours"], 4.0);
+        assert_eq!(step, &format!("{SILENT}-building/metadata"));
+        assert_eq!(body["result"], "died");
+        assert!(
+            body.get("authority_role").is_none(),
+            "the step's own keys are not re-sent: the merge door keeps them (e39a9d2a)"
+        );
+        assert_eq!(body["aged_out"]["silent_hours"], 5.0);
+        assert_eq!(body["aged_out"]["bound_hours"], 4.0);
         assert_eq!(
-            body["metadata"]["aged_out"]["rule"],
+            body["aged_out"]["rule"],
             "agent-run-dies-when-building-is-silent"
+        );
+        assert_eq!(written[1].1, format!("{SILENT}-building"));
+        assert_eq!(
+            written[1].2,
+            json!({ "status": "completed" }),
+            "the flip alone"
         );
 
         h.invoke(&args(), &ctx(tick("2026-09-18T16:00:00Z")))
             .await
             .expect("the next tick runs");
-        assert_eq!(puts.lock().unwrap().len(), 1, "nothing is written twice");
+        assert_eq!(puts.lock().unwrap().len(), 2, "nothing is written twice");
     }
 
     /// A packet with no completion stamp is measured from its filing
@@ -440,9 +493,9 @@ mod tests {
             .await
             .expect("the tick runs");
         let written = puts.lock().unwrap().clone();
-        assert_eq!(written.len(), 1, "{written:?}");
+        assert_eq!(written.len(), 2, "the merge, then the flip: {written:?}");
         assert_eq!(written[0].0, SILENT);
-        assert_eq!(written[0].2["metadata"]["aged_out"]["silent_hours"], 6.0);
+        assert_eq!(written[0].2["aged_out"]["silent_hours"], 6.0);
     }
 
     /// A value a person wrote on the step is their record: the template
@@ -457,8 +510,11 @@ mod tests {
             .await
             .expect("the tick runs");
         let written = puts.lock().unwrap().clone();
-        assert_eq!(written.len(), 1);
-        assert_eq!(written[0].2["metadata"]["result"], "refused");
+        assert_eq!(written.len(), 2, "the merge, then the flip: {written:?}");
+        assert!(
+            written[0].2.get("result").is_none(),
+            "a recorded value is neither overwritten nor re-sent"
+        );
     }
 
     /// A daily firing carries no `_at`; the handler refuses rather than
@@ -567,17 +623,23 @@ mod tests {
             .await
             .expect("the tick runs");
         let written = puts.lock().unwrap().clone();
-        let mut ended: Vec<&str> = written.iter().map(|(j, _, _)| j.as_str()).collect();
+        // The merges: one per ended session, onto its `active` step.
+        let merges: Vec<_> = written
+            .iter()
+            .filter(|(_, s, _)| s.ends_with("/metadata"))
+            .collect();
+        let mut ended: Vec<&str> = merges.iter().map(|(j, _, _)| j.as_str()).collect();
         ended.sort();
         assert_eq!(ended, vec![SILENT, AGELESS], "{written:?}");
-        let silent = written.iter().find(|(j, _, _)| j == SILENT).unwrap();
-        assert_eq!(silent.2["metadata"]["ended"], "silent");
+        assert_eq!(written.len(), 4, "a merge and a flip for each: {written:?}");
+        let silent = merges.iter().find(|(j, _, _)| j == SILENT).unwrap();
+        assert_eq!(silent.2["ended"], "silent");
         assert_eq!(
-            silent.2["metadata"]["aged_out"]["silent_hours"], 7.0,
+            silent.2["aged_out"]["silent_hours"], 7.0,
             "measured from the last prompt, not the opening"
         );
-        let never = written.iter().find(|(j, _, _)| j == AGELESS).unwrap();
-        assert_eq!(never.2["metadata"]["aged_out"]["silent_hours"], 9.0);
+        let never = merges.iter().find(|(j, _, _)| j == AGELESS).unwrap();
+        assert_eq!(never.2["aged_out"]["silent_hours"], 9.0);
     }
 
     #[test]

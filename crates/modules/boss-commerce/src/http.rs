@@ -84,6 +84,7 @@ pub fn router<R: CommerceRepository + 'static>(state: CommerceApiState<R>) -> Ro
         .route("/api/commerce/health", get(health))
         .route("/api/commerce/revenue", get(list_revenue::<R>))
         .route("/api/commerce/summary", get(commerce_summary::<R>))
+        .route("/api/commerce/open-ar", get(open_ar_by_account::<R>))
         .route("/api/commerce/invoices", get(list_invoices::<R>))
         .route("/api/commerce/invoices/{id}", get(get_invoice::<R>))
         .route("/api/commerce/invoices/create", post(create_invoice::<R>))
@@ -140,6 +141,28 @@ async fn commerce_summary<R: CommerceRepository + 'static>(
     let today = state.clock.now().await.now.date_naive();
     match state.commerce.invoice_summary(today).await {
         Ok(summary) => Json(summary).into_response(),
+        Err(e) => error_response(e),
+    }
+}
+
+/// Open AR per account, in the paged envelope every list read speaks
+/// so the SPA reads it with `fetchPaged` — but never truncated: it is
+/// one row per owing account, summed over every invoice, so `total`
+/// is always `data.len()` (backlog 5257bfa9).
+async fn open_ar_by_account<R: CommerceRepository + 'static>(
+    State(state): State<Arc<CommerceApiState<R>>>,
+) -> Response {
+    match state.commerce.open_ar_by_account().await {
+        Ok(data) => {
+            let n = data.len() as i64;
+            Json(PaginatedResponse {
+                data,
+                total: n,
+                limit: n,
+                offset: 0,
+            })
+            .into_response()
+        }
         Err(e) => error_response(e),
     }
 }

@@ -67,6 +67,6 @@ pub use port::{Sensors, SensorsError, sweep_retention};
 pub use postgres::PgSensors;
 pub use seed::load_sensors_toml;
 pub use types::{
-    BatchOutcome, NewReading, PUSH_ONLY_SOURCES, PollStamp, RETENTION_DAYS, Reading, SensorInput,
-    SensorRow, Sweep, is_push_only, sensor_actor, validate_sensor,
+    BatchOutcome, NewReading, PUSH_ONLY_SOURCES, PollStamp, RETENTION_DAYS, Reading,
+    ReadingsWindow, SensorInput, SensorRow, Sweep, is_push_only, sensor_actor, validate_sensor,
 };

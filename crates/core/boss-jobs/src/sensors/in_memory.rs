@@ -4,12 +4,16 @@
 //! sweep keeps a reading still owed a packet and deletes a push-only
 //! sensor's reading by age alone.
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
 use super::port::{Sensors, SensorsError};
-use super::types::{BatchOutcome, NewReading, PollStamp, Reading, SensorInput, SensorRow};
+use super::types::{
+    BatchOutcome, NewReading, PollStamp, Reading, ReadingsWindow, SensorInput, SensorRow,
+};
 
 #[derive(Default)]
 pub struct InMemorySensors {
@@ -116,6 +120,34 @@ impl Sensors for InMemorySensors {
                 .then_with(|| a.external_id.cmp(&b.external_id))
         });
         Ok(out)
+    }
+
+    async fn window(
+        &self,
+        sensor_id: &str,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<ReadingsWindow, SensorsError> {
+        if !self.sensors.read().await.iter().any(|s| s.id == sensor_id) {
+            return Err(SensorsError::UnknownSensor(sensor_id.to_string()));
+        }
+        let rows = self.readings.read().await;
+        let inside: Vec<&Reading> = rows
+            .iter()
+            .filter(|r| r.sensor_id == sensor_id && r.observed_at >= since && r.observed_at < until)
+            .collect();
+        let packets: BTreeSet<String> = inside.iter().filter_map(|r| r.packet_id.clone()).collect();
+        let arrived = inside.len() as u64;
+        let stamped = inside.iter().filter(|r| r.packet_id.is_some()).count() as u64;
+        Ok(ReadingsWindow {
+            sensor_id: sensor_id.to_string(),
+            since,
+            until,
+            arrived,
+            stamped,
+            unstamped: arrived - stamped,
+            packets: packets.into_iter().collect(),
+        })
     }
 
     async fn stamp(

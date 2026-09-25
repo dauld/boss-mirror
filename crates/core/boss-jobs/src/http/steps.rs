@@ -1559,15 +1559,17 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         // extra fetch. (Read before the write; the step update
         // doesn't touch the job row.)
         if !step.kind.is_empty() {
-            let (subject_kind, subject_id, workflow_kind) = if let Some(job) = &parent_job {
-                (
-                    boss_core::primitives::Subject::kind(&job.subject).to_string(),
-                    boss_core::primitives::Subject::id(&job.subject).to_string(),
-                    job.kind.clone(),
-                )
-            } else {
-                (String::new(), String::new(), String::new())
-            };
+            let (subject_kind, subject_id, workflow_kind, job_owner_id) =
+                if let Some(job) = &parent_job {
+                    (
+                        boss_core::primitives::Subject::kind(&job.subject).to_string(),
+                        boss_core::primitives::Subject::id(&job.subject).to_string(),
+                        job.kind.clone(),
+                        job.owner_id.clone(),
+                    )
+                } else {
+                    (String::new(), String::new(), String::new(), String::new())
+                };
             step_events.push(stamp.event(
                 &format!("step.done.{}", step.kind),
                 serde_json::json!({
@@ -1582,6 +1584,15 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                     // ledger's projection `when` picks ONE workflow's step
                     // out of `step.done.task` by this (backlog a40541cb).
                     "workflow_kind": workflow_kind,
+                    // The parent job's owner ("" when unread): the
+                    // person a `notify_on_done` step's wait-is-over
+                    // signal reaches when the step names no role. The
+                    // step's own audience says who EXECUTES it — for a
+                    // pr-train that is the conductor since v2 — and the
+                    // one waiting on the packet is its owner. Without
+                    // this, v2 silenced every train's done: signal for
+                    // a week (backlog 58f0b536).
+                    "job_owner_id": job_owner_id,
                     "completed_on": step.completed_on,
                     "metadata": step.metadata,
                     // `notify_on_done` and `spec_slug` are BOTH hoisted

@@ -87,7 +87,9 @@
 //! that is the rule and the event disagreeing about what the event
 //! carries.
 
-use super::common::{api_client, get_json, open_jobs_of_kind, write_json};
+use super::common::{
+    api_client, complete_step as common_complete_step, get_json, open_jobs_of_kind,
+};
 use super::jobs_complete_linked_step::{is_open, is_unset, step_by_slug, template_arg};
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::Value;
@@ -149,11 +151,12 @@ impl JobsCompleteStepMatching {
         Ok(value_on_job(&job, &segments))
     }
 
-    /// Complete `step` on `job_id`: the template's vocabulary (unset
-    /// keys only) plus the triggering id under `evidence_key`, merged
-    /// into the step's existing metadata — PATCH-on-PUT replaces
-    /// top-level `metadata` wholesale, and `authority_role` living
-    /// there is what keeps the step gated.
+    /// Complete `step` on `job_id`: the template's vocabulary (keys the
+    /// step as read holds unset, only) plus the triggering id under
+    /// `evidence_key` — through the step merge door, then the status
+    /// alone (`common::complete_step`, backlog e39a9d2a). The step's
+    /// other keys are not re-sent: the merge door keeps them, where the
+    /// PUT this used to be replaced them with the copy it had read.
     async fn complete_step(
         &self,
         job_id: &str,
@@ -166,20 +169,15 @@ impl JobsCompleteStepMatching {
         let Some(step_id) = step.get("id").and_then(|v| v.as_str()) else {
             return Ok(());
         };
-        let mut merged = match step.get("metadata").cloned() {
-            Some(serde_json::Value::Object(m)) => m,
+        let existing = match step.get("metadata") {
+            Some(serde_json::Value::Object(m)) => m.clone(),
             _ => serde_json::Map::new(),
         };
-        if let Some(template) = template {
-            render(&mut merged, template, facts);
-        }
-        merged.insert(evidence_key.to_string(), json!(facts.triggering_id));
-        let url = format!("{}/api/jobs/{job_id}/steps/{step_id}", self.base());
-        let body = json!({
-            "status": "completed",
-            "metadata": serde_json::Value::Object(merged),
-        });
-        write_json(&self.client, reqwest::Method::PUT, &url, &body, rule).await
+        let mut fields = template
+            .map(|t| render(&existing, t, facts))
+            .unwrap_or_default();
+        fields.insert(evidence_key.to_string(), json!(facts.triggering_id));
+        common_complete_step(&self.client, self.base(), job_id, step_id, fields, rule).await
     }
 }
 
@@ -228,14 +226,15 @@ fn value_on_job(job: &serde_json::Value, segments: &[&str]) -> Option<String> {
     found.and_then(scalar_text)
 }
 
-/// Fill `merged` from a template: unset keys only — metadata a person
-/// already wrote is their record, not this obligation's to overwrite —
-/// with string values substituting the facts.
+/// The template's keys the step as read (`existing`) holds unset —
+/// metadata a person already wrote is their record, not this
+/// obligation's to overwrite — with string values substituting the
+/// facts. Only those keys: they ride the step merge door.
 fn render(
-    merged: &mut serde_json::Map<String, serde_json::Value>,
+    existing: &serde_json::Map<String, serde_json::Value>,
     template: &serde_json::Map<String, serde_json::Value>,
     facts: &Facts<'_>,
-) {
+) -> serde_json::Map<String, serde_json::Value> {
     let event_scalars: Vec<(String, String)> = facts
         .payload
         .as_object()
@@ -243,23 +242,24 @@ fn render(
         .flatten()
         .filter_map(|(k, v)| scalar_text(v).map(|s| (format!("{{event.{k}}}"), s)))
         .collect();
-    for (k, v) in template {
-        if !is_unset(merged.get(k)) {
-            continue;
-        }
-        let v = match v {
-            serde_json::Value::String(s) => {
-                let s = event_scalars
-                    .iter()
-                    .fold(s.replace("{value}", facts.value), |acc, (from, to)| {
-                        acc.replace(from, to)
-                    });
-                serde_json::Value::String(s)
-            }
-            other => other.clone(),
-        };
-        merged.insert(k.clone(), v);
-    }
+    template
+        .iter()
+        .filter(|(k, _)| is_unset(existing.get(*k)))
+        .map(|(k, v)| {
+            let v = match v {
+                serde_json::Value::String(s) => {
+                    let s = event_scalars
+                        .iter()
+                        .fold(s.replace("{value}", facts.value), |acc, (from, to)| {
+                            acc.replace(from, to)
+                        });
+                    serde_json::Value::String(s)
+                }
+                other => other.clone(),
+            };
+            (k.clone(), v)
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -379,6 +379,7 @@ impl Handler for JobsCompleteStepMatching {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
     use axum::{Json, Router, extract::Path, extract::Query, routing::get};
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -485,7 +486,9 @@ mod tests {
         let list_jobs = by_id.clone();
         let get_jobs = by_id.clone();
         let put_jobs = by_id.clone();
+        let merge_jobs = by_id.clone();
         let put_log = puts.clone();
+        let merge_log = puts.clone();
         let app = Router::new()
             .route(
                 "/api/jobs",
@@ -529,11 +532,50 @@ mod tests {
                         let puts = put_log.clone();
                         let by_id = put_jobs.clone();
                         async move {
+                            // The decided end state (e39a9d2a).
+                            if let Some(refused) =
+                                super::super::listing_stub::end_state_step_put(&id, &step_id, &body)
+                            {
+                                return refused;
+                            }
                             puts.lock()
                                 .unwrap()
                                 .push((id.clone(), step_id.clone(), body.clone()));
                             if let Some(job) = by_id.lock().unwrap().get_mut(&id) {
-                                apply_step_put(job, &step_id, &body);
+                                apply_step_write(job, &step_id, |step| {
+                                    if let Some(status) = body.get("status") {
+                                        step["status"] = status.clone();
+                                    }
+                                });
+                            }
+                            Json(json!({ "ok": true })).into_response()
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{step_id}/metadata",
+                axum::routing::patch(
+                    move |Path((id, step_id)): Path<(String, String)>,
+                          Json(body): Json<serde_json::Value>| {
+                        let puts = merge_log.clone();
+                        let by_id = merge_jobs.clone();
+                        async move {
+                            puts.lock().unwrap().push((
+                                id.clone(),
+                                format!("{step_id}/metadata"),
+                                body.clone(),
+                            ));
+                            if let Some(job) = by_id.lock().unwrap().get_mut(&id) {
+                                apply_step_write(job, &step_id, |step| {
+                                    if let (Some(stored), Some(sent)) =
+                                        (step["metadata"].as_object_mut(), body.as_object())
+                                    {
+                                        for (k, v) in sent {
+                                            stored.insert(k.clone(), v.clone());
+                                        }
+                                    }
+                                });
                             }
                             Json(json!({ "ok": true }))
                         }
@@ -546,19 +588,20 @@ mod tests {
         (format!("http://{addr}"), puts)
     }
 
-    /// The mock's PUT: overlay status + metadata on the stored step.
-    fn apply_step_put(job: &mut serde_json::Value, step_id: &str, body: &serde_json::Value) {
+    /// The mock's step write: apply `write` to the stored step — the
+    /// PUT's status, or the merge door's keys — so a second delivery
+    /// reads what the first wrote.
+    fn apply_step_write(
+        job: &mut serde_json::Value,
+        step_id: &str,
+        write: impl Fn(&mut serde_json::Value),
+    ) {
         let Some(steps) = job.get_mut("steps").and_then(|s| s.as_array_mut()) else {
             return;
         };
         for step in steps.iter_mut() {
             if step.get("id").and_then(|v| v.as_str()) == Some(step_id) {
-                if let Some(status) = body.get("status") {
-                    step["status"] = status.clone();
-                }
-                if let Some(metadata) = body.get("metadata") {
-                    step["metadata"] = metadata.clone();
-                }
+                write(step);
             }
         }
     }
@@ -581,33 +624,33 @@ mod tests {
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
 
         let calls = puts.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1, "exactly one step completed: {calls:?}");
+        assert_eq!(
+            calls.len(),
+            2,
+            "exactly one step completed — the merge, then the flip: {calls:?}"
+        );
         let (job, step, body) = &calls[0];
         assert_eq!(
             job, SITE_A,
             "the packet that published the hash the converge made live"
         );
-        assert_eq!(step, LIVE_A);
-        assert_eq!(body["status"], "completed");
+        assert_eq!(step, &format!("{LIVE_A}/metadata"));
+        assert_eq!(body["made_live_by"], CONVERGE, "the evidence is the id");
+        assert_eq!(body["converge"], CONVERGE, "{{event.id}} rendered");
+        assert_eq!(body["site_hash"], "abc123", "{{value}} rendered");
         assert_eq!(
-            body["metadata"]["made_live_by"], CONVERGE,
-            "the evidence is the id"
-        );
-        assert_eq!(
-            body["metadata"]["converge"], CONVERGE,
-            "{{event.id}} rendered"
-        );
-        assert_eq!(
-            body["metadata"]["site_hash"], "abc123",
-            "{{value}} rendered"
-        );
-        assert_eq!(
-            body["metadata"]["note"], "made live by maintenance-cluster-converge converged",
+            body["note"], "made live by maintenance-cluster-converge converged",
             "every marker scalar is a substitution"
         );
+        assert!(
+            body.get("authority_role").is_none(),
+            "the step's own keys are not re-sent: the merge door keeps them (e39a9d2a)"
+        );
+        assert_eq!((calls[1].0.as_str(), calls[1].1.as_str()), (SITE_A, LIVE_A));
         assert_eq!(
-            body["metadata"]["authority_role"], "platform-admin",
-            "existing step metadata survives the PUT"
+            calls[1].2,
+            json!({ "status": "completed" }),
+            "the flip alone"
         );
     }
 
@@ -624,8 +667,8 @@ mod tests {
         let h = JobsCompleteStepMatching::with_client(reqwest::Client::new(), base);
         h.invoke(&args(), &ctx(close_marker())).await.expect("runs");
         let calls = puts.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1, "{calls:?}");
-        assert_eq!(calls[0].1, LIVE_A, "an active step is open too");
+        assert_eq!(calls.len(), 2, "the merge, then the flip: {calls:?}");
+        assert_eq!(calls[1].1, LIVE_A, "an active step is open too");
     }
 
     /// A value no open packet recorded completes nothing.
@@ -662,7 +705,7 @@ mod tests {
             .expect("redelivery runs");
         assert_eq!(
             puts.lock().unwrap().len(),
-            1,
+            2,
             "the second delivery found `live` completed and wrote nothing"
         );
 
@@ -718,7 +761,7 @@ mod tests {
         a.push(("event_path".to_string(), Value::String("id".into())));
         let h = JobsCompleteStepMatching::with_client(reqwest::Client::new(), base);
         h.invoke(&a, &ctx(close_marker())).await.expect("runs");
-        assert_eq!(puts.lock().unwrap().len(), 1);
+        assert_eq!(puts.lock().unwrap().len(), 2, "the merge, then the flip");
     }
 
     /// `is_unset` semantics: a value a person already wrote on the step
@@ -735,16 +778,19 @@ mod tests {
             r#"{"converge": "{event.id}", "site_hash": "{value}", "verdict": "ok", "n": 3}"#,
         )
         .unwrap();
-        let mut merged: serde_json::Map<String, serde_json::Value> =
+        let existing: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"verdict": "a person's word", "converge": ""}"#).unwrap();
-        render(&mut merged, &template, &facts);
-        assert_eq!(merged["verdict"], "a person's word");
+        let fields = render(&existing, &template, &facts);
+        assert!(
+            !fields.contains_key("verdict"),
+            "a person's word is not written over — nor re-sent"
+        );
         assert_eq!(
-            merged["converge"], CONVERGE,
+            fields["converge"], CONVERGE,
             "the empty placeholder is unset"
         );
-        assert_eq!(merged["site_hash"], "abc123");
-        assert_eq!(merged["n"], 3, "non-strings are copied as they are");
+        assert_eq!(fields["site_hash"], "abc123");
+        assert_eq!(fields["n"], 3, "non-strings are copied as they are");
     }
 
     #[test]

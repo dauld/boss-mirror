@@ -42,6 +42,15 @@ export type Invoice = {
   paid_on: string | null;
 };
 
+/// One row of `GET /api/commerce/open-ar` (boss-commerce AccountOpenAr):
+/// an account's open receivables, summed by the service over every
+/// invoice it still owes. Accounts that owe nothing have no row.
+export type AccountOpenAr = {
+  account_id: string;
+  open_ar_cents: number;
+  open_count: number;
+};
+
 export type Job = {
   id: string;
   kind: string;

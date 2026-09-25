@@ -79,12 +79,16 @@ metadata_defaults = { trigger_kind = "operator", trigger_name = "operator-reques
 # moves and the stamp no longer matches it — so an approval cannot
 # survive an edit it never saw.
 #
-# INERT UNTIL SOMETHING SETS THE FLAG. `job.metadata.requires_approval`
-# is absent on every ops-request filed today, and an absent value reads
-# FALSE in boolean position (boss-expr), so this step never becomes
-# ready and `execute` is gated exactly as it was. That is deliberate,
-# and the same ordering the `commission-a-disk` verb used: the gate
-# exists before the power does.
+# READY ONLY WHERE THE FLAG IS SET. `boss ops` sets
+# `job.metadata.requires_approval` when the verb's allowlist file
+# declares `requires_approval` (backlog fd7090cc); on every other
+# request it is absent, and an absent value reads FALSE in boolean
+# position (boss-expr), so this step never becomes ready and `execute`
+# is gated exactly as before. The flag is ROUTING, never authority:
+# infra/ops/ops-runner.sh reads the requirement off the verb and the
+# approval off this step's sign-off record — it renders the verb's
+# `plan_verb` into `plan` here, and runs the write only once this step
+# is completed with a presence stamp bound to its current shape.
 [[workflow.step]]
 title = "approve"
 kind = "sign-off"
@@ -115,12 +119,35 @@ kind = "task"
 # WAITS FOR THE APPROVAL ONLY WHERE ONE IS REQUIRED. The absent flag
 # reads false, so every read verb filed today is ready exactly when it
 # was; a verb that declares `requires_approval` waits for the sign-off.
-ready_when = "steps.filed.done AND (NOT job.metadata.requires_approval OR steps.approve.done)"
+#
+# AND ONLY AN APPROVAL OPENS IT (adversarial re-review, 2026-09-25).
+# `steps.approve.done` alone was true of a REJECTED plan: Reject runs the
+# same ceremony as Approve on both surfaces (the decision saved, a
+# presence stamp over the shape that carries it, the step completed), so
+# execute went ready and the runner, which did not read the decision
+# either, ran the write. The decision is inside the signed shape; any
+# decision but `approved` leaves execute pending (never skipped by the
+# engine, because the predicate reads job metadata), and `refused` below
+# becomes ready and closes the request, which skips it.
+ready_when = "steps.filed.done AND (NOT job.metadata.requires_approval OR (steps.approve.done AND steps.approve.metadata.decision = \"approved\"))"
 title_template = "Run {metadata.verb} on {metadata.host}"
 # Gated the way the maintenance kinds gate `run`: the simulated
 # workforce must not role-match onto a real host read. The runner's
 # actor presents platform-admin.
 authority_role = "platform-admin"
+# A ROLE QUEUE, NEVER A NOMINATION (backlog fd7090cc, re-review of
+# 2026-09-25). The runner takes an APPROVED execute through the claim
+# door, as a claimant unique to its pass, and that door admits a ready
+# step only to an unheld row or its holder — the compare-and-set that
+# makes a passkey approval single-use. Undeclared, the dispatcher
+# nominated every execute to the agent executor ~50ms after ready (299
+# of 300 live requests), so every approved write would have been
+# refused at its claim. Not a fixed runner assignee instead: the door is
+# idempotent for its holder, so two passes signing as one fixed id
+# would both "claim". A read verb is completed without a claim and is
+# unaffected. Pinned by boss-dispatcher's
+# `an_ops_request_execute_is_left_for_its_role_queue`.
+claimable = true
 [[workflow.step.fields]]
 name = "disposition"
 field_type = "answered|refused"
@@ -145,7 +172,13 @@ terminal = { outcome = "answered" }
 [[workflow.step]]
 title = "refused"
 kind = "outcome"
-ready_when = "steps.execute.done AND steps.execute.metadata.disposition = \"refused\""
+# A PLAN THE APPROVER DID NOT APPROVE IS REFUSED TOO: rejected, changes
+# requested, or completed with no decision at all. Led by
+# `steps.approve.done`, so it is false on a fresh request and the
+# dispatcher's complete-on-ready rule cannot close one at open (the
+# workflow-design shape); `NOT (… = "approved")`, not `!=`, so an absent
+# decision reads as not approved.
+ready_when = "(steps.execute.done AND steps.execute.metadata.disposition = \"refused\") OR (steps.approve.done AND NOT (steps.approve.metadata.decision = \"approved\"))"
 title_template = "Refused — outside the allowlist"
 # `aborted`, matching backlog-item's `declined`: the request was turned
 # down, not taken back by its filer.

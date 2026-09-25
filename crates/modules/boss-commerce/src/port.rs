@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use boss_core::publisher::EventStamp;
 use chrono::{DateTime, NaiveDate, Utc};
 
-use crate::types::{Invoice, InvoiceSummary, RevenueLine};
+use crate::types::{AccountOpenAr, Invoice, InvoiceSummary, RevenueLine};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommerceError {
@@ -35,6 +35,13 @@ pub trait CommerceRepository: Send + Sync {
         offset: i64,
         account_id: Option<&str>,
     ) -> Result<(Vec<Invoice>, i64), CommerceError>;
+
+    /// Open receivables per account, summed over EVERY invoice: one
+    /// row per account that still owes anything (a status outside
+    /// `InvoiceStatus::NOT_OWED`), ordered by `account_id`. Unpaged,
+    /// because it is an aggregate — its size is the number of accounts
+    /// with open AR, not the number of invoices (backlog 5257bfa9).
+    async fn open_ar_by_account(&self) -> Result<Vec<AccountOpenAr>, CommerceError>;
 
     /// Return a single invoice by ID, or `None` if not found.
     async fn invoice_by_id(&self, id: &str) -> Result<Option<Invoice>, CommerceError>;

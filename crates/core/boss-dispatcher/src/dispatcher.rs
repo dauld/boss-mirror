@@ -1233,6 +1233,163 @@ mod tests {
         assert_eq!(left_for_role_queue(None), None);
     }
 
+    /// AN OPS-REQUEST'S EXECUTE IS NOBODY'S UNTIL A RUNNER PASS CLAIMS IT
+    /// (backlog fd7090cc, the re-review of 2026-09-25). The ops-runner
+    /// takes an approved execute through the claim door, signed as a
+    /// claimant unique to its pass, because that door is a
+    /// compare-and-set admitting a READY step only to an unheld row or to
+    /// its holder — which is what makes a passkey approval single-use.
+    /// But this dispatcher nominated every ops-request execute to the
+    /// agent executor about 50ms after it went ready (299 of the last
+    /// 300 live requests carried `assignee_id = agent-claude`), so every
+    /// runner claim would have been refused 409 and no approved write
+    /// would ever run. The protocol now declares the step a role queue
+    /// (`claimable`), and this reads the step exactly as the event
+    /// carries it, materialised from the tree's own bundle.
+    ///
+    /// Why a queue and not a declared runner assignee: the claim door is
+    /// idempotent for its holder, so a step born placed with one fixed
+    /// runner id would let two passes that both read `ready` both
+    /// "claim" it. Single-use needs the row unheld and each pass a
+    /// different claimant.
+    ///
+    /// The same case pins the precondition the re-review named: the live
+    /// row was v2, whose approve step required no sign-off, so the tree's
+    /// row must carry `platform-admin` there and pass the viability lint
+    /// `boss workflow publish` runs, or the fix cannot go live.
+    #[test]
+    fn an_ops_request_execute_is_left_for_its_role_queue() {
+        use boss_core::job::{JobId, StepId, Subject};
+        let spec =
+            boss_jobs::seed_loader::load_workflows(boss_jobs::registry::platform_bundle_path())
+                .expect("the platform bundle parses")
+                .into_iter()
+                .find(|w| w.kind == "ops-request")
+                .expect("ops-request ships in the platform bundle");
+        let problems = boss_jobs::workflow_lint::validate_workflow(&spec, &StepRegistry::v1());
+        assert!(
+            problems.is_empty(),
+            "the tree's ops-request must be publishable: {problems:?}"
+        );
+        let approve = spec
+            .steps
+            .iter()
+            .find(|s| s.title == "approve")
+            .expect("ops-request has an approve step");
+        assert_eq!(
+            approve.sign_offs_required,
+            vec!["platform-admin".to_string()],
+            "the approve step names who must stamp it"
+        );
+        let steps = boss_jobs::registry::materialize_steps(
+            &spec,
+            &Subject::new("custom", "forge"),
+            JobId::new(),
+            &serde_json::json!({"host": "forge", "verb": "reap-terminated-pods", "requires_approval": true}),
+            StepId::new,
+        );
+        let execute = steps
+            .iter()
+            .find(|s| s.spec_slug.as_deref() == Some("execute"))
+            .expect("ops-request has an execute step");
+        let payload: StepEventPayload =
+            serde_json::from_value(boss_jobs::events::step_state_payload(execute))
+                .expect("a serialised Step is a StepEventPayload");
+        assert!(
+            !born_placed(&payload),
+            "execute is born unheld: {:?}",
+            payload.assignee_id
+        );
+        assert_eq!(
+            left_for_role_queue(payload.metadata.as_ref()),
+            Some("claimable"),
+            "the dispatcher must leave execute unassigned, or the runner's claim is refused"
+        );
+        assert_eq!(
+            payload
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("authority_role"))
+                .and_then(|v| v.as_str()),
+            Some("platform-admin"),
+            "a queue is still gated on its role"
+        );
+    }
+
+    /// ONLY AN APPROVAL OPENS AN OPS-REQUEST'S EXECUTE (adversarial
+    /// re-review of fd7090cc, 2026-09-25). Reject runs the same ceremony
+    /// as Approve on both surfaces — the decision saved, a presence stamp
+    /// over the shape carrying it, the approve step completed — and
+    /// execute was ready on `steps.approve.done` alone, so a rejected plan
+    /// opened the write. This drives the tree's own row through the
+    /// readiness engine: `approved` makes execute ready and leaves the
+    /// request open; any other decision, or none, leaves execute pending
+    /// (a predicate that reads job metadata is never engine-skipped) and
+    /// makes the `refused` terminal ready, whose completion closes the
+    /// request and skips the rest.
+    #[test]
+    fn an_ops_request_runs_only_on_an_approved_decision() {
+        use boss_core::job::{JobId, StepId, StepStatus, Subject};
+        let spec =
+            boss_jobs::seed_loader::load_workflows(boss_jobs::registry::platform_bundle_path())
+                .expect("the platform bundle parses")
+                .into_iter()
+                .find(|w| w.kind == "ops-request")
+                .expect("ops-request ships in the platform bundle");
+        let job_md = serde_json::json!({"host": "forge", "verb": "reap-terminated-pods", "requires_approval": true});
+        let subject = Subject::new("custom", "forge");
+        let after = |decision: Option<serde_json::Value>| {
+            let mut steps = boss_jobs::registry::materialize_steps(
+                &spec,
+                &subject,
+                JobId::new(),
+                &job_md,
+                StepId::new,
+            );
+            let at = |steps: &[boss_core::job::Step], slug: &str| {
+                steps
+                    .iter()
+                    .position(|s| s.spec_slug.as_deref() == Some(slug))
+                    .expect("ops-request carries the step")
+            };
+            let filed = at(&steps, "filed");
+            steps[filed].status = StepStatus::Completed;
+            boss_jobs::registry::reevaluate(&spec, &mut steps, &subject, &job_md);
+            let approve = at(&steps, "approve");
+            assert_eq!(
+                steps[approve].status,
+                StepStatus::Ready,
+                "the flag makes approve ready"
+            );
+            steps[approve].status = StepStatus::Completed;
+            if let Some(d) = decision {
+                steps[approve].metadata["decision"] = d;
+            }
+            boss_jobs::registry::reevaluate(&spec, &mut steps, &subject, &job_md);
+            (
+                steps[at(&steps, "execute")].status,
+                steps[at(&steps, "refused")].status,
+            )
+        };
+        assert_eq!(
+            after(Some(serde_json::json!("approved"))),
+            (StepStatus::Ready, StepStatus::Pending),
+            "an approved plan opens execute and leaves the request open"
+        );
+        for d in [
+            Some(serde_json::json!("rejected")),
+            Some(serde_json::json!("changes-requested")),
+            Some(serde_json::json!(true)),
+            None,
+        ] {
+            assert_eq!(
+                after(d.clone()),
+                (StepStatus::Pending, StepStatus::Ready),
+                "decision {d:?} must never open execute; it closes the request refused"
+            );
+        }
+    }
+
     /// FNV-1a is a fixed function of the input bytes — the SAME bytes hash to
     /// the SAME value on every call, host, and process (no per-process seed).
     #[test]

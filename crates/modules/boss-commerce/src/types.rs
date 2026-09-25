@@ -45,6 +45,19 @@ impl InvoiceStatus {
     pub fn is_paid(&self) -> bool {
         self.0 == Self::PAID
     }
+
+    /// The statuses that are no longer owed: paid, and written off —
+    /// the write-off credits 1100 A/R, so the receivable is gone even
+    /// though no cash came in. Every other status, a tenant's own
+    /// included, is still owed. One list, read by both adapters of
+    /// `open_ar_by_account` (backlog 5257bfa9) — the SPA's Finance
+    /// InvoicesTab draws "outstanding" with the same two out.
+    pub const NOT_OWED: [&'static str; 2] = [Self::PAID, Self::WRITTEN_OFF];
+
+    /// True while the invoice is still a receivable.
+    pub fn is_owed(&self) -> bool {
+        !Self::NOT_OWED.contains(&self.0.as_str())
+    }
 }
 
 impl std::fmt::Display for InvoiceStatus {
@@ -226,6 +239,20 @@ pub struct RevenueLine {
 // /api/commerce/summary endpoint so the UI can render headline stats
 // without downloading every invoice.
 // ---------------------------------------------------------------------------
+
+/// One account's open receivables, summed by the service over every
+/// invoice it holds — `GET /api/commerce/open-ar`. /ux/accounts read
+/// the invoice LIST and summed it in the browser, and the list hands
+/// over at most 1,000 rows, so past that the figure was short with
+/// nothing on the page saying so (backlog 5257bfa9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountOpenAr {
+    pub account_id: AccountId,
+    /// Sum of `amount_cents` over the account's owed invoices.
+    pub open_ar_cents: i64,
+    /// How many invoices that sum covers.
+    pub open_count: i64,
+}
 
 /// One AR aging bucket: how many unpaid invoices and how much outstanding
 /// within a days-past-due range.

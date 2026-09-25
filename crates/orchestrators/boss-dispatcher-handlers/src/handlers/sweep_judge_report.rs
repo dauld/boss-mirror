@@ -43,8 +43,9 @@
 //!    `findings = "none"`, `measured` = the verb and its verdict — plus
 //!    `reading` (the verdict line, copied not retyped) and `source` (the
 //!    report's id) so a reader of the step follows the evidence to the
-//!    packet that measured it. The step's existing metadata rides back:
-//!    PUT replaces top-level `metadata` wholesale.
+//!    packet that measured it. Those fields go through the step merge
+//!    door and the status alone through the PUT (backlog e39a9d2a), so
+//!    the step's existing metadata is kept without being re-sent.
 //! 5. UNCLEAN: complete nothing. The verdict line and the report's id
 //!    are MERGED onto the step's metadata (`PATCH /steps/{id}/metadata`,
 //!    `reading` + `source`) so the agent reads the finding on the step
@@ -88,7 +89,7 @@
 //! ready. Every noun is a rule arg — `target`, `verb` — so a sweep
 //! whose measurement gains a verdict is one rule file dropped in.
 
-use super::common::{api_client, get_json, row_or_refuse, write_json};
+use super::common::{api_client, complete_step, get_json, row_or_refuse, write_json};
 use super::jobs_complete_linked_step::{VerbFailure, step_by_slug, unusable_link, verb_failure};
 use async_trait::async_trait;
 use boss_dispatcher::rules::expr::Value;
@@ -187,21 +188,21 @@ pub(crate) fn unmeasured_note(
     })
 }
 
-/// PURE: the body that completes a sweep's `inspect` step from a clean
-/// report — the step's existing metadata plus the fields the step
-/// requires and the evidence this handler adds. ONE definition, so a
+/// PURE: the fields that complete a sweep's `inspect` step from a clean
+/// report — the fields the step requires and the evidence this handler
+/// adds, and only those: they ride the step merge door, which keeps the
+/// step's own keys (e39a9d2a). ONE definition, so a
 /// test can hold it against the fields maintenance-sweep.toml declares
 /// (`the_clean_completion_validates_against_the_inspect_step`).
-pub(crate) fn clean_completion_body(
-    existing: &serde_json::Map<String, serde_json::Value>,
+pub(crate) fn clean_completion_fields(
     verb: &str,
     host: &str,
     verdict: &str,
     report_id: &str,
     actor: &str,
     at: &str,
-) -> serde_json::Value {
-    let mut merged = existing.clone();
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut merged = serde_json::Map::new();
     merged.insert("findings".into(), json!("none"));
     merged.insert(
         "measured".into(),
@@ -220,7 +221,7 @@ pub(crate) fn clean_completion_body(
             "checked_at": at,
         }]),
     );
-    json!({ "status": "completed", "metadata": serde_json::Value::Object(merged) })
+    merged
 }
 
 pub struct MaintenanceSweepJudge {
@@ -377,9 +378,20 @@ impl Handler for MaintenanceSweepJudge {
                 // (`automation:rule:<name>`), so the item and the step
                 // agree on who checked it.
                 let actor = format!("automation:rule:{rule}");
-                let body =
-                    clean_completion_body(&existing, verb, host, verdict, report_id, &actor, &at);
-                write_json(&self.client, reqwest::Method::PUT, &step_url, &body, rule).await?;
+                // The fields through the step merge door, then the flip
+                // alone (backlog e39a9d2a): this PUT the step's metadata
+                // AS READ plus these keys, which the step PUT refuses
+                // once anything wrote the step in between, and refuses
+                // outright under the decided end state.
+                complete_step(
+                    &self.client,
+                    self.base(),
+                    sweep_id,
+                    step_id,
+                    clean_completion_fields(verb, host, verdict, report_id, &actor, &at),
+                    rule,
+                )
+                .await?;
                 tracing::info!(rule = %rule, sweep = %sweep_id, report = %report_id, "{verdict} — inspect completed and routed to Clear");
             }
             Reading::Finding(verdict) => {
@@ -427,6 +439,7 @@ impl Handler for MaintenanceSweepJudge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
     use axum::{Json, Router, extract::Path, routing::get};
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -577,6 +590,17 @@ mod tests {
                           Json(body): Json<serde_json::Value>| {
                         let (w, by_id) = (ws.clone(), ps.clone());
                         async move {
+                            // The decided end state (e39a9d2a).
+                            if let Some(refused) =
+                                super::super::listing_stub::end_state_step_put(&id, &step_id, &body)
+                            {
+                                w.lock().unwrap().push((
+                                    "PUT (409)".into(),
+                                    format!("/api/jobs/{id}/steps/{step_id}"),
+                                    body,
+                                ));
+                                return refused;
+                            }
                             w.lock().unwrap().push((
                                 "PUT".into(),
                                 format!("/api/jobs/{id}/steps/{step_id}"),
@@ -584,17 +608,14 @@ mod tests {
                             ));
                             if let Some(job) = by_id.lock().unwrap().get_mut(&id) {
                                 for step in job["steps"].as_array_mut().into_iter().flatten() {
-                                    if step["id"] == json!(step_id) {
-                                        if let Some(s) = body.get("status") {
-                                            step["status"] = s.clone();
-                                        }
-                                        if let Some(m) = body.get("metadata") {
-                                            step["metadata"] = m.clone();
-                                        }
+                                    if step["id"] == json!(step_id)
+                                        && let Some(s) = body.get("status")
+                                    {
+                                        step["status"] = s.clone();
                                     }
                                 }
                             }
-                            Json(json!({ "ok": true }))
+                            Json(json!({ "ok": true })).into_response()
                         }
                     },
                 ),
@@ -640,8 +661,9 @@ mod tests {
 
     /// A clean report routes the sweep to Clear FIRST and then completes
     /// its inspect step with the step's required fields, the verdict
-    /// copied as `reading`, the report's id as `source`, and the step's
-    /// existing metadata kept.
+    /// copied as `reading`, the report's id as `source` — merged through
+    /// the step merge door, which keeps the step's existing metadata —
+    /// and only then flips the status alone (e39a9d2a).
     #[tokio::test]
     async fn a_clean_verdict_routes_to_clear_and_completes_the_inspect_step() {
         let (base, writes) = mock_jobs(vec![
@@ -654,7 +676,7 @@ mod tests {
             .await
             .unwrap();
         let w = writes.lock().unwrap().clone();
-        assert_eq!(w.len(), 2, "route + complete, nothing else: {w:?}");
+        assert_eq!(w.len(), 3, "route, merge, flip — nothing else: {w:?}");
         assert_eq!(
             (w[0].0.as_str(), w[0].1.as_str()),
             ("PATCH", &*format!("/api/jobs/{SWEEP}/metadata"))
@@ -666,10 +688,17 @@ mod tests {
         );
         assert_eq!(
             (w[1].0.as_str(), w[1].1.as_str()),
+            (
+                "PATCH",
+                &*format!("/api/jobs/{SWEEP}/steps/{INSPECT}/metadata")
+            )
+        );
+        assert_eq!(
+            (w[2].0.as_str(), w[2].1.as_str()),
             ("PUT", &*format!("/api/jobs/{SWEEP}/steps/{INSPECT}"))
         );
-        let m = &w[1].2["metadata"];
-        assert_eq!(w[1].2["status"], "completed");
+        assert_eq!(w[2].2, json!({ "status": "completed" }), "the flip alone");
+        let m = &w[1].2;
         assert_eq!(m["reading"], "verdict: clean", "the verdict line, copied");
         assert_eq!(m["source"], REPORT, "the packet that measured it");
         assert_eq!(m["findings"], "none");
@@ -679,9 +708,9 @@ mod tests {
                 .is_some_and(|s| s.contains("disk-report") && s.contains("verdict: clean")),
             "measured names the verb and the verdict: {m}"
         );
-        assert_eq!(
-            m["authority_role"], "platform-admin",
-            "PUT replaces metadata wholesale, so the existing keys ride back"
+        assert!(
+            m.get("authority_role").is_none(),
+            "the step's own keys are not re-sent: the merge door keeps them"
         );
         assert_eq!(
             m["items"][0]["checked_by"],
@@ -786,7 +815,7 @@ mod tests {
     /// report as `source` (unclean) and writes nothing more.
     #[tokio::test]
     async fn a_redelivery_writes_nothing_more() {
-        for (output, expect_writes) in [(CLEAN_OUTPUT, 2), (TIGHT_OUTPUT, 1)] {
+        for (output, expect_writes) in [(CLEAN_OUTPUT, 3), (TIGHT_OUTPUT, 1)] {
             let (base, writes) = mock_jobs(vec![
                 report("disk-report", Some(SWEEP), output),
                 sweep("disk-headroom", "ready"),
@@ -878,10 +907,7 @@ mod tests {
             .find(|st| st.title == INSPECT_STEP)
             .expect("the sweep has an inspect step")
             .clone();
-        let mut existing = serde_json::Map::new();
-        existing.insert("authority_role".into(), json!("platform-admin"));
-        let body = clean_completion_body(
-            &existing,
+        let fields = clean_completion_fields(
             "disk-report",
             "forge",
             "verdict: clean",
@@ -891,7 +917,7 @@ mod tests {
         );
         boss_jobs::step_registry::StepRegistry::validate_authored_fields(
             &inspect.fields,
-            &body["metadata"],
+            &serde_json::Value::Object(fields),
         )
         .unwrap_or_else(|e| panic!("the step API would refuse this body: {e:?}"));
     }

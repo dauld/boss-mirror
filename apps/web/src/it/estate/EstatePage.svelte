@@ -15,6 +15,7 @@
     fetchEstate,
     latestByScope,
     latestComparison,
+    latestPerHost,
     LOOP_OK_OUTCOMES,
     loopAge,
     loopHost,
@@ -139,6 +140,30 @@
             <span class="estate-when">{formatRelative(clusterCmp.observed_at, loadedAt)}</span>
           </div>
         {/if}
+        <!-- THE HOST COMPARISON (backlog 2d8d983b, page audit 2cff1d6e
+             GAP 1): each host's newest self-scoped comparison, from its
+             own scoped read. Until this, every host row's drift and
+             boss-gcp's disk_tight were recorded and never shown here. -->
+        {#if estate.hostComparisons.kind === 'failed'}
+          <p class="estate-fail load-failed">Host comparisons unavailable: {estate.hostComparisons.error}</p>
+        {:else if estate.hostComparisons.kind === 'ready'}
+          {@const hc = estate.hostComparisons.data}
+          {#each latestPerHost(hc.rows) as c (c.host ?? '')}
+            {@const v = comparisonVerdict(c)}
+            <div class="estate-obs-row">
+              <span class="estate-scope">host comparison</span>
+              <span class={v.ok ? 'estate-ok' : 'estate-drift'}>{c.host ?? 'host not named on the row'}: {v.text}</span>
+              <span class="estate-when">{formatRelative(c.observed_at, loadedAt)}</span>
+            </div>
+          {:else}
+            <div class="estate-obs-row"><span class="estate-scope">host comparison</span><span>no host comparison recorded yet</span></div>
+          {/each}
+          {#if hc.total != null && hc.total > hc.rows.length}
+            <!-- A limit is not a filter: the reader caps a page at 50 and a
+                 daily host falls off it, so say how far back this one reached. -->
+            <p class="estate-cover">The newest {hc.rows.length} of {hc.total} host comparisons, back to {loopAge(hc.oldest, loadedAt)}: a host whose last comparison is older has no line here.</p>
+          {/if}
+        {/if}
       </div>
     {/if}
 
@@ -250,7 +275,8 @@
   .estate-ok { color: var(--signal); }
   .estate-drift { color: var(--warn); }
   .estate-door { display: flex; flex-direction: column; gap: 8px; }
-  .estate-hint { color: var(--static); font-size: 12px; max-width: 60ch; }
+  .estate-hint, .estate-cover { color: var(--static); font-size: 12px; max-width: 60ch; }
+  .estate-cover { margin: 0; }
   .estate-hint code { font-family: var(--font-mono); }
   .estate-hint strong { color: var(--fog); font-weight: 500; }
   /* One click selects the whole snippet — copyable without a button. */

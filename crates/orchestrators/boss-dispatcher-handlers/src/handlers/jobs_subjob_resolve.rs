@@ -9,12 +9,13 @@
 //!   1. `GET /api/jobs/{child}` → read the child's
 //!      `metadata.parent_step_id`, `metadata.parent_job_id`, and the
 //!      terminal `metadata.outcome`.
-//!   2. `GET /api/jobs/{parent_job}` → locate the parent step row and
-//!      grab its current metadata (so the write-back merges rather than
-//!      wipes — PATCH-on-PUT replaces top-level `metadata` wholesale).
+//!   2. `PATCH /api/jobs/{parent_job}/steps/{parent_step}/metadata`
+//!      with the child outcome as `subjob_outcome` — the step merge
+//!      door, which keeps every key it is not sent.
 //!   3. `PUT /api/jobs/{parent_job}/steps/{parent_step}` with
-//!      `status = "completed"` and the child outcome merged into
-//!      `metadata.subjob_outcome`.
+//!      `status = "completed"` and nothing else (backlog e39a9d2a: the
+//!      parent was read and its whole metadata PUT back until the step
+//!      PUT's refusal of a metadata body made that the wrong door).
 //!
 //! Completing the parent step drives the parent Job's own re-eval (the
 //! delegate-subjob step's downstream predicates can now flip), closing
@@ -32,7 +33,7 @@ use boss_dispatcher::rules::handler::{Handler, HandlerError, InvocationContext, 
 use serde_json::json;
 use std::sync::Arc;
 
-use super::common::{dispatcher_actor_header, dispatcher_reader_header, sim_origin_value};
+use super::common::{complete_step, dispatcher_reader_header, sim_origin_value};
 
 pub struct JobsSubjobResolve {
     client: reqwest::Client,
@@ -137,56 +138,25 @@ impl Handler for JobsSubjobResolve {
             .unwrap_or("")
             .to_string();
 
-        // Fetch the parent Job to read the parent step's current
-        // metadata — PATCH-on-PUT replaces top-level `metadata`
-        // wholesale, so we merge `subjob_outcome` into the existing keys
-        // rather than clobber them.
-        let parent = self.get_job(parent_job_id).await?;
-        let parent_step_meta = parent
-            .get("steps")
-            .and_then(|v| v.as_array())
-            .and_then(|steps| {
-                steps
-                    .iter()
-                    .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(parent_step_id))
-            })
-            .and_then(|s| s.get("metadata").cloned())
-            .unwrap_or(json!({}));
-
-        let mut merged_meta = match parent_step_meta {
-            serde_json::Value::Object(m) => m,
-            _ => serde_json::Map::new(),
-        };
-        merged_meta.insert("subjob_outcome".to_string(), json!(outcome));
-
-        let step_url = format!(
-            "{}/api/jobs/{}/steps/{}",
+        // Complete the parent step: `subjob_outcome` through the step
+        // merge door, then the status alone (backlog e39a9d2a). This
+        // read the parent step's metadata, merged the outcome in and
+        // PUT the whole map back, because the PUT replaces metadata
+        // wholesale — correct only while nothing wrote the step
+        // between the read and the PUT, and refused outright under the
+        // decided end state. The merge door keeps every key it is not
+        // sent, so the parent is not read at all.
+        let mut fields = serde_json::Map::new();
+        fields.insert("subjob_outcome".to_string(), json!(outcome));
+        complete_step(
+            &self.client,
             self.jobs_base.trim_end_matches('/'),
             parent_job_id,
             parent_step_id,
-        );
-        let put_body = json!({
-            "status": "completed",
-            "metadata": serde_json::Value::Object(merged_meta),
-        });
-        let resp = self
-            .client
-            .put(&step_url)
-            .header("content-type", "application/json")
-            .header("x-boss-user", dispatcher_actor_header(&ctx.rule_name))
-            .header("x-sim-origin", sim_origin_value())
-            .json(&put_body)
-            .send()
-            .await
-            .map_err(|e| HandlerError::Downstream(format!("PUT {step_url}: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(HandlerError::Downstream(format!(
-                "PUT {step_url} returned {status}: {body}"
-            )));
-        }
-        Ok(())
+            fields,
+            &ctx.rule_name,
+        )
+        .await
     }
 }
 
@@ -202,6 +172,47 @@ mod tests {
             triggering_topic: "jobs.job.closed".into(),
             event_payload: payload,
         }
+    }
+
+    /// THE OUTCOME THROUGH THE MERGE DOOR, THEN THE FLIP (backlog
+    /// e39a9d2a, stage 2 of design 93d2bddb). This read the parent
+    /// step's metadata, added `subjob_outcome` and PUT the whole map
+    /// back with the status, so a key written to the parent step
+    /// between that read and the PUT was refused 409 (stage 1) — and
+    /// under the decided end state every such PUT is. Now it sends the
+    /// one key it owns through the step merge door and PUTs the status
+    /// alone; the parent is not read at all.
+    #[tokio::test]
+    async fn the_outcome_goes_through_the_merge_door_and_the_flip_carries_no_metadata() {
+        use crate::handlers::listing_stub::serve;
+        // No parent fixture: a read of the parent would 404 and fail
+        // the firing, so passing proves the parent is not read.
+        let stub = serve(vec![(
+            "/api/jobs/child-1",
+            json!({ "id": "child-1", "metadata": {
+                "parent_job_id": "parent-1",
+                "parent_step_id": "ps-1",
+                "outcome": "approved",
+            }}),
+        )])
+        .await;
+        JobsSubjobResolve::new(&stub.base)
+            .invoke(&[], &ctx(json!({ "id": "child-1" })))
+            .await
+            .expect("both writes answered");
+        assert_eq!(
+            stub.sent(),
+            vec![
+                (
+                    "PATCH /api/jobs/parent-1/steps/ps-1/metadata".to_string(),
+                    json!({ "subjob_outcome": "approved" }),
+                ),
+                (
+                    "PUT /api/jobs/parent-1/steps/ps-1".to_string(),
+                    json!({ "status": "completed" }),
+                ),
+            ]
+        );
     }
 
     #[tokio::test]

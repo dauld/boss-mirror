@@ -71,7 +71,7 @@ use boss_jobs::credentials::RotationPhase;
 use serde_json::{Value as JsonValue, json};
 use std::sync::Arc;
 
-use super::common::{StepEvent, dispatcher_actor_header, dispatcher_reader_header};
+use super::common::{StepEvent, dispatcher_reader_header};
 use super::credential_issuer::{ForgeTokenIssuer, SecretStore, TokenInfo};
 
 // ---------------------------------------------------------------------------
@@ -145,11 +145,12 @@ pub struct CredentialRotateForgejo {
     secrets: Arc<dyn SecretStore>,
 }
 
-/// One step of the rotation packet as the jobs-api lists it.
+/// One step of the rotation packet as the jobs-api lists it. No
+/// metadata: a completion merges its own fields through the step merge
+/// door, so nothing here reads what the step already holds (e39a9d2a).
 struct StepView {
     id: String,
     status: String,
-    metadata: serde_json::Map<String, JsonValue>,
 }
 
 impl CredentialRotateForgejo {
@@ -214,22 +215,21 @@ impl CredentialRotateForgejo {
                 StepView {
                     id: id.to_string(),
                     status: status.to_string(),
-                    metadata: s
-                        .get("metadata")
-                        .and_then(|v| v.as_object())
-                        .cloned()
-                        .unwrap_or_default(),
                 },
             );
         }
         Ok(out)
     }
 
-    /// Complete one packet step with evidence fields, merging the
-    /// step's existing metadata (PATCH-on-PUT replaces `metadata`
-    /// wholesale). Already-completed steps are left alone — that is
-    /// the redelivery path. A slug the packet lacks is skipped: the
-    /// packet's workflow version decides which phases it records.
+    /// Complete one packet step with evidence fields: the fields
+    /// through the step merge door, then the status alone
+    /// (`common::complete_step`, backlog e39a9d2a) — this merged them
+    /// into the step's metadata as read and PUT the whole map back,
+    /// which the step PUT refuses once anything wrote the step in
+    /// between, and refuses outright in the decided end state.
+    /// Already-completed steps are left alone — that is the redelivery
+    /// path. A slug the packet lacks is skipped: the packet's workflow
+    /// version decides which phases it records.
     async fn complete_step(
         &self,
         rule_name: &str,
@@ -245,29 +245,19 @@ impl CredentialRotateForgejo {
         if step.status == "completed" {
             return Ok(());
         }
-        let mut metadata = step.metadata.clone();
-        for (k, v) in evidence {
-            metadata.insert((*k).to_string(), json!(v));
-        }
-        let url = format!("{}/api/jobs/{job_id}/steps/{}", self.jobs(), step.id);
-        let resp = self
-            .client
-            .put(&url)
-            .header("Content-Type", "application/json")
-            .header("x-boss-user", dispatcher_actor_header(rule_name))
-            .header("x-sim-origin", super::common::sim_origin_value())
-            .json(&json!({ "status": "completed", "metadata": metadata }))
-            .send()
-            .await
-            .map_err(|e| HandlerError::Downstream(format!("PUT {url}: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(HandlerError::Downstream(format!(
-                "PUT {url} returned {status}: {text}"
-            )));
-        }
-        Ok(())
+        let fields = evidence
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), json!(v)))
+            .collect();
+        super::common::complete_step(
+            &self.client,
+            self.jobs(),
+            job_id,
+            &step.id,
+            fields,
+            rule_name,
+        )
+        .await
     }
 
     /// Land one rotation phase on the log through the registry's
@@ -799,10 +789,12 @@ mod tests {
         step_statuses: &'static [(&'static str, &'static str)],
     ) -> (String, Captured, Captured) {
         use axum::extract::Path;
+        use axum::response::IntoResponse;
         use axum::{Json, Router, routing::get, routing::post, routing::put};
 
         let captured: Captured = Default::default();
         let cap = captured.clone();
+        let merge_cap = captured.clone();
         let rotations: Captured = Default::default();
         let rot = rotations.clone();
         let jobs = Router::new()
@@ -826,10 +818,30 @@ mod tests {
             .route(
                 "/api/jobs/{id}/steps/{step_id}",
                 put(
-                    move |Path((_id, sid)): Path<(String, String)>, Json(body): Json<JsonValue>| {
+                    move |Path((id, sid)): Path<(String, String)>, Json(body): Json<JsonValue>| {
                         let cap = cap.clone();
                         async move {
+                            // The decided end state (e39a9d2a).
+                            if let Some(refused) =
+                                super::super::listing_stub::end_state_step_put(&id, &sid, &body)
+                            {
+                                return refused;
+                            }
                             cap.lock().unwrap().push((sid, body));
+                            Json(json!({ "ok": true })).into_response()
+                        }
+                    },
+                ),
+            )
+            // The step merge door, recorded in order with the PUTs as
+            // `<step>/metadata`.
+            .route(
+                "/api/jobs/{id}/steps/{step_id}/metadata",
+                axum::routing::patch(
+                    move |Path((_id, sid)): Path<(String, String)>, Json(body): Json<JsonValue>| {
+                        let cap = merge_cap.clone();
+                        async move {
+                            cap.lock().unwrap().push((format!("{sid}/metadata"), body));
                             Json(json!({ "ok": true }))
                         }
                     },
@@ -951,9 +963,10 @@ mod tests {
         );
 
         // Recorded: issue, install, verify, revoke completed in order
-        // with required-at-done evidence, existing metadata kept, and
-        // no secret value anywhere in any body.
-        let puts = captured.lock().unwrap().clone();
+        // with required-at-done evidence, existing metadata kept (by the
+        // merge door: it is never re-sent), and no secret value anywhere
+        // in any body.
+        let puts = super::super::listing_stub::fold_step_writes(&captured.lock().unwrap());
         let order: Vec<&str> = puts.iter().map(|(sid, _)| sid.as_str()).collect();
         assert_eq!(
             order,
@@ -961,7 +974,10 @@ mod tests {
         );
         for (_, body) in &puts {
             assert_eq!(body["status"], "completed");
-            assert_eq!(body["metadata"]["kept"], "yes");
+            assert!(
+                body["metadata"].get("kept").is_none(),
+                "the step's own keys are not re-sent: the merge door keeps them (e39a9d2a)"
+            );
             let flat = body.to_string();
             let value = issuer.values.lock().unwrap()["boss-dev-forge-token-7ee101aa"].clone();
             assert!(

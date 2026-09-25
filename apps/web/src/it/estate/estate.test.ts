@@ -6,8 +6,10 @@ import {
   devDoorSteps,
   ESTATE_LOOPS,
   fetchEstate,
+  HOST_COMPARISONS_READ,
   latestByScope,
   latestComparison,
+  latestPerHost,
   loopAge,
   loopHost,
   loopPlan,
@@ -16,6 +18,7 @@ import {
   OPS_REQUEST_KIND,
   OPS_RUNNER_ROLE,
   parseComparisons,
+  parseHostComparisons,
   parseLoopPackets,
   parseNodes,
   parseObservations,
@@ -159,6 +162,104 @@ describe('observations and comparisons', () => {
   });
 });
 
+// THE HOST COMPARISON (backlog 2d8d983b; page audit 2cff1d6e, GAP 1).
+// The page rendered the cluster's verdict only, so every host row's
+// drift (forge memory declared 30, observed 31) and boss-gcp's
+// disk_tight (13 G free against a 17 G floor) never reached it. A host
+// comparison is self-scoped — compare_host in estate_compare.rs stamps
+// `host` and counts observed / observed_not_declared / drift /
+// disk_tight, with no declared total.
+
+/** A host comparison as the reader serves it, shaped by compare_host. */
+function hostCmp(host: string | null, observed_at: string, counts: Record<string, number> = {}): unknown {
+  return {
+    payload: {
+      scope: 'host', observed_at, host,
+      counts: { observed: 1, observed_not_declared: 0, drift: 0, disk_tight: 0, ...counts },
+    },
+  };
+}
+
+describe('the host comparison', () => {
+  test('the parser keeps the host a self-scoped comparison names; a cluster row names none', () => {
+    const rows = parseComparisons([
+      hostCmp('forge', '2026-09-23T16:15:00Z', { drift: 1 }),
+      { payload: { scope: 'kubernetes-nodes', observed_at: '2026-09-23T16:16:00Z', counts: { observed: 5 } } },
+    ]);
+    expect(rows.map((r) => r.host)).toEqual(['forge', null]);
+  });
+
+  test('the newest row per host wins, one line per host, in host order', () => {
+    // Newest first, as the reader serves it: forge's older drift-free
+    // row is hidden by its newer one, and boss-gcp's daily row — older
+    // than both — still has a line of its own (the per-host collapse
+    // 3d1678ba names for the observation series).
+    const latest = latestPerHost(parseComparisons([
+      hostCmp('forge', '2026-09-23T16:15:00Z', { drift: 1 }),
+      hostCmp('forge', '2026-09-23T16:00:00Z'),
+      hostCmp('boss-gcp', '2026-09-23T10:25:00Z', { drift: 1, disk_tight: 1 }),
+    ]));
+    expect(latest.map((c) => [c.host, c.observed_at])).toEqual([
+      ['boss-gcp', '2026-09-23T10:25:00Z'],
+      ['forge', '2026-09-23T16:15:00Z'],
+    ]);
+  });
+
+  test('a host short of disk AND drifted names both, and is not clean', () => {
+    const [c] = parseComparisons([hostCmp('boss-gcp', '2026-09-23T10:25:00Z', { drift: 1, disk_tight: 1 })]);
+    const v = comparisonVerdict(c as Comparison);
+    expect(v.ok).toBe(false);
+    expect(v.text).toBe('1 drifted from declaration; 1 short of disk');
+  });
+
+  test('a clean host reads its observed count only — it carries no declared total to print as 0', () => {
+    const [c] = parseComparisons([hostCmp('forge', '2026-09-23T16:15:00Z')]);
+    expect(comparisonVerdict(c as Comparison)).toEqual({ ok: true, text: '1 observed — no drift' });
+  });
+
+  test('a host nobody declared is named as undeclared, not as "in the cluster"', () => {
+    const [c] = parseComparisons([hostCmp('mystery-box', '2026-09-23T16:15:00Z', { observed_not_declared: 1 })]);
+    const v = comparisonVerdict(c as Comparison);
+    expect(v.ok).toBe(false);
+    expect(v.text).toBe('1 observed but not declared');
+  });
+
+  test('the scoped read keeps host rows, its total and the oldest instant it reached', () => {
+    const page = parseHostComparisons({
+      data: [
+        hostCmp('forge', '2026-09-23T16:15:00Z'),
+        // A server that ignored ?scope= would hand back other series;
+        // they are not host comparisons, whatever the page asked for.
+        { payload: { scope: 'host-units', observed_at: '2026-09-23T16:14:00Z', host: 'forge', counts: {} } },
+        hostCmp('boss-gcp', '2026-09-23T10:25:00Z'),
+      ],
+      total: 612,
+    });
+    expect(page.rows.map((r) => r.host)).toEqual(['forge', 'boss-gcp']);
+    expect(page.total).toBe(612);
+    expect(page.oldest).toBe('2026-09-23T10:25:00Z');
+  });
+
+  test('fetchEstate reads the host series scoped, apart from the unscoped page of 20', async () => {
+    const asked: string[] = [];
+    globalThis.fetch = (async (url: RequestInfo | URL) => {
+      const u = String(url);
+      asked.push(u);
+      const body = u === HOST_COMPARISONS_READ
+        ? { data: [hostCmp('forge', '2026-09-23T16:15:00Z', { drift: 1 })], total: 1 }
+        : u.includes('/nodes') ? [node()] : [];
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as unknown as typeof fetch;
+    const s = await fetchEstate();
+    expect(HOST_COMPARISONS_READ).toBe('/api/estate/comparisons?scope=host&limit=50');
+    expect(asked).toContain(HOST_COMPARISONS_READ);
+    expect(s.hostComparisons.kind).toBe('ready');
+    if (s.hostComparisons.kind === 'ready') {
+      expect(s.hostComparisons.data.rows.map((r) => [r.host, r.counts.drift])).toEqual([['forge', 1]]);
+    }
+  });
+});
+
 describe('fetchEstate', () => {
   test('an unreachable registry lands as failed, never as an empty estate', async () => {
     globalThis.fetch = (async () => {
@@ -168,6 +269,7 @@ describe('fetchEstate', () => {
     expect(s.nodes.kind).toBe('failed');
     expect(s.observations.kind).toBe('failed');
     expect(s.comparisons.kind).toBe('failed');
+    expect(s.hostComparisons.kind).toBe('failed');
   });
 
   test('good reads land ready with parsed rows', async () => {

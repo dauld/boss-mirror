@@ -65,9 +65,9 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value as Json, json};
 
 use super::common::{
-    RECOVERED_AT, Retraction, api_client, empty_roster_refusal, get_json, jobs_where,
-    open_jobs_of_kind, owner_for_filing, post_json, recovery_note, retraction, rows_or_refuse,
-    with_lane, write_json,
+    RECOVERED_AT, Retraction, api_client, complete_step, empty_roster_refusal, get_json,
+    jobs_where, open_jobs_of_kind, owner_for_filing, post_json, recovery_note, retraction,
+    rows_or_refuse, with_lane, withdrawal_fields, write_json,
 };
 use super::jobs_age_out_step::last_moved;
 
@@ -280,22 +280,6 @@ pub fn alarms_by_step(rows: &[Json]) -> BTreeMap<String, Json> {
         .collect()
 }
 
-/// The completion that withdraws an alarm at the step it waits on. The
-/// step's own metadata rides back: a step PUT replaces it wholesale.
-fn withdraw_body(existing: &serde_json::Map<String, Json>, evidence: &str, at: &str) -> Json {
-    let mut metadata = existing.clone();
-    metadata.insert("disposition".into(), json!("stale"));
-    metadata.insert(
-        "evidence".into(),
-        json!(format!(
-            "{evidence} Closed by machine from the reading, not by judgement."
-        )),
-    );
-    metadata.insert("cleared_by".into(), json!(HANDLER));
-    metadata.insert(RECOVERED_AT.into(), json!(at));
-    json!({"status": "completed", "metadata": metadata})
-}
-
 pub struct JobsAgentStepOverdue {
     client: reqwest::Client,
     jobs_base: String,
@@ -339,16 +323,15 @@ impl JobsAgentStepOverdue {
                 tracing::warn!(rule, packet = %id, "{HANDLER}: the open alarm has no triage step to close");
                 Ok("unclosable")
             }
-            Some(Retraction::Complete {
-                step_id: sid,
-                metadata,
-                ..
-            }) => {
-                write_json(
+            // The fields through the step merge door, then the flip
+            // (e39a9d2a).
+            Some(Retraction::Complete { step_id: sid, .. }) => {
+                complete_step(
                     &self.client,
-                    reqwest::Method::PUT,
-                    &format!("{}/api/jobs/{id}/steps/{sid}", self.base()),
-                    &withdraw_body(&metadata, &evidence, &now.to_rfc3339()),
+                    self.base(),
+                    id,
+                    &sid,
+                    withdrawal_fields(&evidence, HANDLER, &now.to_rfc3339()),
                     rule,
                 )
                 .await?;
@@ -713,15 +696,17 @@ mod tests {
         .await;
         handler(&stub).invoke(&args(), &ctx()).await.unwrap();
         let sent = stub.sent();
-        assert_eq!(sent.len(), 1, "{sent:?}");
-        assert_eq!(sent[0].0, "PUT /api/jobs/al-1/steps/al-1-triage");
-        let m = &sent[0].1["metadata"];
+        assert_eq!(sent.len(), 2, "the merge, then the flip: {sent:?}");
+        assert_eq!(sent[0].0, "PATCH /api/jobs/al-1/steps/al-1-triage/metadata");
+        let m = &sent[0].1;
         assert_eq!(m["disposition"], "stale");
         assert_eq!(m["cleared_by"], HANDLER);
-        assert_eq!(
-            m["authority_role"], "platform-admin",
-            "the step's own metadata rides back"
+        assert!(
+            m.get("authority_role").is_none(),
+            "the step's own keys are not re-sent: the merge door keeps them"
         );
+        assert_eq!(sent[1].0, "PUT /api/jobs/al-1/steps/al-1-triage");
+        assert_eq!(sent[1].1, json!({"status": "completed"}));
     }
 
     #[tokio::test]

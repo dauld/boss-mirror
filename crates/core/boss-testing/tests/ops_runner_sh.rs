@@ -417,6 +417,62 @@ fn every_refusal_path_names_its_reason_on_the_step() {
     );
 }
 
+/// AN ARG IS ONE WORD, OR IT IS REFUSED (security review of fd7090cc,
+/// 2026-09-24). jq's `test` runs Oniguruma in Perl syntax, where `$`
+/// matches before a TRAILING NEWLINE — measured on jq 1.6:
+/// `"target-a\n" | test("^[a-z-]{1,20}$")` is `true`. The argv is then
+/// rebuilt from jq's output one line per word, so that newline became a
+/// SECOND, empty word, and every placeholder after it moved one place —
+/// on an approval verb, the place the signed plan's hash rides. So a
+/// control character anywhere in an arg is refused by name before any
+/// pattern is consulted, and every pattern must match the WHOLE string.
+#[test]
+fn an_arg_carrying_a_newline_or_a_control_character_is_refused() {
+    needs_jq!();
+    let root = scratch("control-chars");
+    stub_sor(&root);
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "echo-word",
+            r#"{"about":"test","hosts":["forge"],"argv":["echo","{1}","{2}"],
+                "params":[{"name":"word","pattern":"^[a-z-]{1,20}$"},
+                          {"name":"tail","pattern":"^[a-z]{1,5}$","optional":true}]}"#,
+        )],
+    );
+    for (args, shown) in [
+        (r#"["target-a\n"]"#, "U+000A"),
+        (r#"["target-a\n","x"]"#, "U+000A"),
+        (r#"["targ\u0001et"]"#, "U+0001"),
+        (r#"["target-a\r"]"#, "U+000D"),
+        (r#"["target-a\u007f"]"#, "U+007F"),
+    ] {
+        packet(&root, "echo-word", args);
+        let (out, payload) = run(&root, &verbs, &[]);
+        let md = payload.unwrap_or_else(|| panic!("{args}: no step completed: {out}"));
+        assert_eq!(md["disposition"], "refused", "{args}: {md} / {out}");
+        let reason = md["reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("control character") && reason.contains("word"),
+            "{args}: the refusal names the arg and why: {reason}"
+        );
+        assert!(
+            reason.contains(shown),
+            "{args}: and names the character by code point, not raw: {reason}"
+        );
+        assert!(
+            !reason.chars().any(|c| c == '\n' || c == '\u{1}'),
+            "{args}: the reason itself carries no control character: {reason:?}"
+        );
+    }
+    // And the clean word still runs.
+    packet(&root, "echo-word", r#"["target-a"]"#);
+    let (out, payload) = run(&root, &verbs, &[]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "answered", "{md} / {out}");
+    assert_eq!(md["output"], "target-a\n", "{md}");
+}
+
 /// An optional literal that is absent DROPS its placeholder word: the
 /// verb runs with no trailing empty argument (which `echo` would show
 /// as a trailing space), and present it rides through verbatim.
@@ -1391,23 +1447,23 @@ fn iso_at(epoch: u64) -> String {
     String::from_utf8(out.stdout).unwrap().trim().to_string()
 }
 
-/// A verb that declares `requires_approval` is REFUSED until something
-/// can verify an approval — and the refusal says which verb, and why.
+/// A verb that declares `requires_approval` is REFUSED unless the runner
+/// verified an approval — and the refusal says which verb, and why.
 ///
-/// This is the safety half of design 17835005 (passkey-approved,
-/// machine-executed destructive operations), and it lands BEFORE the
-/// thing that issues approvals, deliberately. The design's own claim is
-/// that the guard matters more than the approval: a verb whose
-/// dangerous outcome is excluded by machine-checkable preconditions can
-/// be handed to the machine, and one that cannot must not be. Declaring
-/// the requirement first means the first such verb is inert on arrival
-/// — the system never gains the power before it gains the gate.
+/// This was the safety half of design 17835005 (passkey-approved,
+/// machine-executed destructive operations), and it landed BEFORE the
+/// thing that issues approvals, deliberately: the guard matters more than
+/// the approval, so the first such verb was inert on arrival. The
+/// approval channel landed later (backlog fd7090cc; its cases are
+/// `ops_runner_approval_sh.rs`), and this case keeps the floor under it:
+/// a request with no approve step at all — nothing any approval could
+/// ride on — is still refused, naming the verb.
 ///
 /// FAIL CLOSED IS THE WHOLE POINT. A runner that cannot check an
 /// approval must refuse, never assume; `commission-a-disk` partitions a
 /// block device, and the failure mode of assuming is a wiped host.
 #[test]
-fn a_verb_requiring_approval_is_refused_while_no_approval_can_be_verified() {
+fn a_verb_requiring_approval_is_refused_without_a_verified_approval() {
     needs_jq!();
     let root = scratch("requires-approval");
     stub_sor(&root);

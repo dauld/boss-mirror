@@ -83,8 +83,9 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value as Json, json};
 
 use super::common::{
-    RECOVERED_AT, Retraction, api_client, get_json, open_jobs_of_kind, owner_for_filing, post_json,
-    recovery_note, relapse_patch, retraction, rows_or_refuse, with_lane, write_json,
+    RECOVERED_AT, Retraction, api_client, complete_step, get_json, open_jobs_of_kind,
+    owner_for_filing, post_json, recovery_note, relapse_patch, retraction, rows_or_refuse,
+    with_lane, withdrawal_fields, write_json,
 };
 use super::sensor_poll::firing_instant;
 
@@ -450,27 +451,6 @@ pub fn open_alarms(listing: &Json) -> Result<BTreeMap<String, OpenAlarm>, String
         .collect())
 }
 
-/// The completion that withdraws a recovered alarm at the step it is
-/// waiting on (`common::retraction`). `existing` is that step's own
-/// metadata: a step PUT replaces it wholesale.
-pub fn recover_step_body(
-    existing: &serde_json::Map<String, Json>,
-    evidence: &str,
-    at: DateTime<Utc>,
-) -> Json {
-    let mut metadata = existing.clone();
-    metadata.insert("disposition".into(), json!("stale"));
-    metadata.insert(
-        "evidence".into(),
-        json!(format!(
-            "{evidence} Closed by machine from the reading, not by judgement."
-        )),
-    );
-    metadata.insert("cleared_by".into(), json!(CLEARED_BY));
-    metadata.insert(RECOVERED_AT.into(), json!(at.to_rfc3339()));
-    json!({"status": "completed", "metadata": metadata})
-}
-
 fn recovery_evidence(q: Option<&HostQueue>, host: &str, now: DateTime<Utc>) -> String {
     let state = match q {
         None => "no open request".to_string(),
@@ -606,14 +586,15 @@ impl OpsQueueAlarm {
                 tracing::warn!(host, packet = %alarm.id, "ops.queue.alarm: the open alarm has no triage step to close");
                 Ok("unclosable")
             }
-            Some(Retraction::Complete {
-                step_id, metadata, ..
-            }) => {
-                write_json(
+            // Withdrawn at the step it is waiting on: the fields
+            // through the step merge door, then the flip (e39a9d2a).
+            Some(Retraction::Complete { step_id, .. }) => {
+                complete_step(
                     &self.client,
-                    reqwest::Method::PUT,
-                    &format!("{}/api/jobs/{}/steps/{step_id}", self.base(), alarm.id),
-                    &recover_step_body(&metadata, &evidence, now),
+                    self.base(),
+                    &alarm.id,
+                    &step_id,
+                    withdrawal_fields(&evidence, CLEARED_BY, &now.to_rfc3339()),
                     rule,
                 )
                 .await?;
@@ -990,10 +971,12 @@ mod tests {
         .await;
         handler(&stub).invoke(&[], &ctx()).await.unwrap();
         let sent = stub.sent();
-        assert_eq!(sent.len(), 1, "{sent:?}");
-        assert_eq!(sent[0].0, "PUT /api/jobs/al-1/steps/al-1-triage");
-        assert_eq!(sent[0].1["metadata"]["disposition"], "stale");
-        assert_eq!(sent[0].1["metadata"]["cleared_by"], CLEARED_BY);
+        assert_eq!(sent.len(), 2, "the merge, then the flip: {sent:?}");
+        assert_eq!(sent[0].0, "PATCH /api/jobs/al-1/steps/al-1-triage/metadata");
+        assert_eq!(sent[0].1["disposition"], "stale");
+        assert_eq!(sent[0].1["cleared_by"], CLEARED_BY);
+        assert_eq!(sent[1].0, "PUT /api/jobs/al-1/steps/al-1-triage");
+        assert_eq!(sent[1].1, json!({"status": "completed"}));
     }
 
     #[tokio::test]

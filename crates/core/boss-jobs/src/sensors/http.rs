@@ -1,7 +1,9 @@
 //! Axum routes for sensors: the registry's list and its one write (the
 //! tenant batch), and the poller's four doors — record readings, read
 //! what still owes a packet, stamp the packet, mark the poll — plus the
-//! retention sweep. Dispatcher handlers own no database (the census-door
+//! retention sweep, and a retro's one read: the readings a sensor
+//! observed over a window, counted with the packets they opened
+//! (`GET /api/sensors/{id}/readings?since=…`, backlog 35baed54). Dispatcher handlers own no database (the census-door
 //! precedent), so every write the `sensor.poll` handler makes lands
 //! here, signed as the sensor's own actor.
 //!
@@ -35,6 +37,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use boss_core::publish::KeptRow;
@@ -44,8 +47,8 @@ use crate::trust::{can_read, is_trusted};
 
 use super::port::{Sensors, SensorsError, sweep_retention};
 use super::types::{
-    NewReading, PUSH_ONLY_SOURCES, PollStamp, SensorBatch, SensorInput, SensorRow, sensor_actor,
-    validate_sensor,
+    NewReading, PUSH_ONLY_SOURCES, PollStamp, RETENTION_DAYS, SensorBatch, SensorInput, SensorRow,
+    sensor_actor, validate_sensor,
 };
 
 pub struct SensorsApiState {
@@ -58,7 +61,7 @@ pub fn router(state: SensorsApiState) -> Router {
         .route("/api/sensors", get(list))
         .route("/api/sensors/batch", post(publish))
         .route("/api/sensors/sweep", post(sweep))
-        .route("/api/sensors/{id}/readings", get(unstamped).post(record))
+        .route("/api/sensors/{id}/readings", get(readings).post(record))
         .route(
             "/api/sensors/{id}/readings/{external_id}/packet",
             put(stamp),
@@ -169,15 +172,26 @@ pub fn sensor_differs(held: &SensorRow, declared: &SensorInput) -> Vec<String> {
     out
 }
 
+/// The readings door's two questions, and nothing else — so a full
+/// readings listing does not exist to be paged, and a parameter the
+/// door does not read is a 400 rather than a silently wider answer
+/// (the listing's lesson, backlog 7f3e871a).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReadingsQuery {
-    /// The one filter the poller needs; the door answers nothing else
-    /// so a full readings listing does not exist to be paged.
+    /// The poller's question: the readings that still owe a packet.
     #[serde(default)]
     unstamped: Option<bool>,
+    /// A retro's question (backlog 35baed54): the readings observed in
+    /// `[since, until)` — counted, not listed — and the packets they
+    /// opened. `until` defaults to now.
+    #[serde(default)]
+    since: Option<DateTime<Utc>>,
+    #[serde(default)]
+    until: Option<DateTime<Utc>>,
 }
 
-async fn unstamped(
+async fn readings(
     State(state): State<Arc<SensorsApiState>>,
     CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
@@ -186,17 +200,53 @@ async fn unstamped(
     if !can_read(&user) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if q.unstamped != Some(true) {
-        return (
+    match (q.unstamped, q.since) {
+        (Some(true), None) if q.until.is_none() => match state.repo.unstamped(&id).await {
+            Ok(rows) => {
+                Json(serde_json::json!({ "data": rows, "total": rows.len() })).into_response()
+            }
+            Err(e) => err_response(e),
+        },
+        (None, Some(since)) => {
+            let now = boss_clock_client::wall_now();
+            let until = q.until.unwrap_or(now);
+            if let Err(why) = countable(since, until, now) {
+                return (StatusCode::BAD_REQUEST, why).into_response();
+            }
+            match state.repo.window(&id, since, until).await {
+                Ok(w) => Json(w).into_response(),
+                Err(e) => err_response(e),
+            }
+        }
+        _ => (
             StatusCode::BAD_REQUEST,
-            "the readings door answers ?unstamped=true only — the readings that still owe a packet",
+            "the readings door answers ?unstamped=true (the readings that still owe a packet) \
+             or ?since=<rfc3339>[&until=<rfc3339>] (the readings observed in that window, \
+             counted, with the packets they opened) — one or the other",
         )
-            .into_response();
+            .into_response(),
     }
-    match state.repo.unstamped(&id).await {
-        Ok(rows) => Json(serde_json::json!({ "data": rows, "total": rows.len() })).into_response(),
-        Err(e) => err_response(e),
+}
+
+/// Can `[since, until)` be counted from what the table still holds?
+/// Not if it ends before it starts, and not if it reaches past the
+/// retention sweep: a stamped reading older than [`RETENTION_DAYS`] is
+/// gone, so the count would be short with nothing to say so.
+fn countable(since: DateTime<Utc>, until: DateTime<Utc>, now: DateTime<Utc>) -> Result<(), String> {
+    if until <= since {
+        return Err(format!(
+            "the window [{since}, {until}) is empty: until must be later than since"
+        ));
     }
+    let kept_from = now - chrono::Duration::days(RETENTION_DAYS);
+    if since < kept_from {
+        return Err(format!(
+            "since {since} is before {kept_from}: readings are swept after the \
+             {RETENTION_DAYS}-day retention, so a window reaching further back would \
+             count short"
+        ));
+    }
+    Ok(())
 }
 
 async fn record(
@@ -619,6 +669,160 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// A retro counts a sensor's week through the door (backlog
+    /// 35baed54): `?since=` (and `until=`, exclusive) answers how many
+    /// readings were OBSERVED in the window, how many opened a packet,
+    /// and which packets — a stamped reading no longer leaves the
+    /// count, which is what the unstamped-only door did to it.
+    #[tokio::test]
+    async fn a_window_counts_what_arrived_and_what_opened_a_packet() {
+        use chrono::{Duration, SecondsFormat};
+        let repo = Arc::new(InMemorySensors::new());
+        let (status, body) = send(
+            app(&repo),
+            "POST",
+            "/api/sensors/batch",
+            Some(batch()),
+            seed(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let now = boss_clock_client::wall_now();
+        let at = |d: Duration| (now - d).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let readings = json!([
+            {"external_id": "before", "observed_at": at(Duration::days(10)), "payload": {}},
+            {"external_id": "ch_1", "observed_at": at(Duration::days(3)), "payload": {}},
+            {"external_id": "ch_2", "observed_at": at(Duration::days(2)), "payload": {}},
+            {"external_id": "after", "observed_at": at(Duration::hours(1)), "payload": {}}
+        ]);
+        let (status, body) = send(
+            app(&repo),
+            "POST",
+            "/api/sensors/stripe-sponsorships/readings",
+            Some(readings),
+            sensor_actor(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        for (ext, packet) in [("before", "job-0"), ("ch_1", "job-1")] {
+            let (status, body) = send(
+                app(&repo),
+                "PUT",
+                &format!("/api/sensors/stripe-sponsorships/readings/{ext}/packet"),
+                Some(json!({ "packet_id": packet })),
+                sensor_actor(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        }
+        let since = at(Duration::days(7));
+        let until = at(Duration::days(1));
+        let (status, body) = send(
+            app(&repo),
+            "GET",
+            &format!("/api/sensors/stripe-sponsorships/readings?since={since}&until={until}"),
+            None,
+            probe_reader(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let w: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(w["sensor_id"], "stripe-sponsorships");
+        assert_eq!(w["arrived"], 2, "{w}");
+        assert_eq!(w["stamped"], 1, "{w}");
+        assert_eq!(w["unstamped"], 1, "{w}");
+        assert_eq!(w["packets"], json!(["job-1"]), "{w}");
+        assert_eq!(w["since"], since);
+        assert_eq!(w["until"], until);
+
+        // `until` defaults to now: the reading an hour old is counted.
+        let (status, body) = send(
+            app(&repo),
+            "GET",
+            &format!("/api/sensors/stripe-sponsorships/readings?since={since}"),
+            None,
+            probe_reader(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let w: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(w["arrived"], 3, "{w}");
+    }
+
+    /// Every way the windowed read could answer a count that is not
+    /// one is a refusal that names why: an undeclared sensor (404, not
+    /// a confident zero), a window reaching past the retention sweep
+    /// (whose stamped readings are gone), a window that ends before it
+    /// starts, and the two filters mixed.
+    #[tokio::test]
+    async fn a_window_the_door_cannot_count_is_refused_by_name() {
+        use chrono::{Duration, SecondsFormat};
+        let repo = Arc::new(InMemorySensors::new());
+        send(
+            app(&repo),
+            "POST",
+            "/api/sensors/batch",
+            Some(batch()),
+            seed(),
+        )
+        .await;
+        let now = boss_clock_client::wall_now();
+        let at = |d: Duration| (now - d).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let week = at(Duration::days(7));
+
+        let (status, body) = send(
+            app(&repo),
+            "GET",
+            &format!("/api/sensors/nobody/readings?since={week}"),
+            None,
+            probe_reader(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(body.contains("nobody"), "{body}");
+
+        let old = at(Duration::days(super::super::RETENTION_DAYS + 1));
+        let (status, body) = send(
+            app(&repo),
+            "GET",
+            &format!("/api/sensors/stripe-sponsorships/readings?since={old}"),
+            None,
+            probe_reader(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("retention"), "{body}");
+
+        let (status, body) = send(
+            app(&repo),
+            "GET",
+            &format!(
+                "/api/sensors/stripe-sponsorships/readings?since={week}&until={}",
+                at(Duration::days(8))
+            ),
+            None,
+            probe_reader(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        for q in [
+            format!("unstamped=true&since={week}"),
+            format!("until={week}"),
+            "sincee=2026-09-01T00:00:00Z".to_string(),
+        ] {
+            let (status, body) = send(
+                app(&repo),
+                "GET",
+                &format!("/api/sensors/stripe-sponsorships/readings?{q}"),
+                None,
+                probe_reader(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{q}: {body}");
+        }
     }
 
     fn gateway() -> Option<String> {

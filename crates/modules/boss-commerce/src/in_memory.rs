@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use boss_core::publisher::EventStamp;
 
 use crate::port::{CommerceError, CommerceRepository};
-use crate::types::{Invoice, InvoiceSummary, RevenueLine};
+use crate::types::{AccountOpenAr, Invoice, InvoiceSummary, RevenueLine};
 
 pub struct InMemoryCommerce {
     invoices: Vec<Invoice>,
@@ -77,6 +77,34 @@ impl CommerceRepository for InMemoryCommerce {
             filtered[start..end].iter().map(|&i| i.clone()).collect(),
             total,
         ))
+    }
+
+    async fn open_ar_by_account(&self) -> Result<Vec<AccountOpenAr>, CommerceError> {
+        let written_off = self
+            .written_off
+            .lock()
+            .map_err(|e| CommerceError::Storage(format!("written_off lock: {e}")))?
+            .clone();
+        let by_account = self
+            .invoices
+            .iter()
+            .filter(|i| i.status.is_owed() && !written_off.contains(&i.id))
+            .fold(
+                std::collections::BTreeMap::<&str, (i64, i64)>::new(),
+                |mut acc, i| {
+                    let e = acc.entry(i.account_id.as_str()).or_default();
+                    *e = (e.0 + i.amount_cents, e.1 + 1);
+                    acc
+                },
+            );
+        Ok(by_account
+            .into_iter()
+            .map(|(account_id, (open_ar_cents, open_count))| AccountOpenAr {
+                account_id: account_id.to_string(),
+                open_ar_cents,
+                open_count,
+            })
+            .collect())
     }
 
     async fn invoice_by_id(&self, id: &str) -> Result<Option<Invoice>, CommerceError> {

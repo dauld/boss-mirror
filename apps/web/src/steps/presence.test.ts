@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { performPresenceCeremony } from './presence';
+import { performPresenceCeremony, shownAfter } from './presence';
 
 // Backlog 2e893e27 (2026-09-21): performPresenceCeremony caught
 // navigator.credentials.get with a bare `catch {` and threw one
@@ -57,9 +57,14 @@ const domError = (name: string) => {
   return e;
 };
 
+const SHOWN = {
+  title: 'Approve the plan: wipe on forge',
+  metadata: { plan: 'PLAN wipe target-a\n', args: ['target-a'] },
+} as const;
+
 const failureOf = async (): Promise<string> => {
   try {
-    await performPresenceCeremony('job-1', 'step-1');
+    await performPresenceCeremony('job-1', 'step-1', SHOWN);
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
@@ -115,5 +120,46 @@ describe('a presence ceremony failure says WHICH failure', () => {
     const msg = await failureOf();
     expect(msg).toContain('410');
     expect(msg).toContain('challenge already spent or expired');
+  });
+});
+
+// Backlog fd7090cc, the security re-review of 2026-09-25: the begin sent
+// only the ids, so the gateway bound the challenge to the step as it
+// read it at that instant — not to what the approver had on screen. The
+// begin now names the step content the surface SHOWED, and the gateway
+// refuses (412) a begin whose shown content is not the step as it stands.
+describe('a presence ceremony signs what was shown', () => {
+  test('the begin carries the ids and the shown title and metadata', async () => {
+    let sent: unknown = null;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/assert/begin')) sent = JSON.parse(String(init?.body));
+      return new Response('changed', { status: 412 });
+    }) as unknown as typeof fetch;
+    await failureOf();
+    expect(sent).toEqual({ job_id: 'job-1', step_id: 'step-1', shown: SHOWN });
+  });
+
+  test('a step that changed since it was shown says so', async () => {
+    stubFetch({
+      status: 412,
+      body: 'this step changed since it was shown — reload it and read it again before approving',
+    });
+    const msg = await failureOf();
+    expect(msg).toContain('changed since it was shown');
+    expect(msg).not.toContain('No passkey enrolled');
+  });
+});
+
+describe('shownAfter folds a surface’s own write the way the merge door does', () => {
+  test('a key sent is set, a key sent as null or undefined is deleted', () => {
+    expect(
+      shownAfter({ a: 1, b: 'x', c: true }, { b: 'y', c: null, d: 'new', e: undefined }),
+    ).toEqual({ a: 1, b: 'y', d: 'new' });
+  });
+
+  test('the rendered metadata is not mutated', () => {
+    const rendered = { a: 1 };
+    shownAfter(rendered, { a: 2 });
+    expect(rendered).toEqual({ a: 1 });
   });
 });

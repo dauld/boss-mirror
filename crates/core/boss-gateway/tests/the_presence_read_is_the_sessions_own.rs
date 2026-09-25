@@ -135,7 +135,14 @@ async fn a_job_or_step_id_that_is_not_a_uuid_is_refused_before_any_request() {
 async fn the_step_read_carries_exactly_one_identity_and_it_is_the_sessions() {
     let (base, seen) = recording_upstream().await;
     let router = router(base);
-    let (status, body) = begin(&router, json!({ "job_id": JOB, "step_id": STEP })).await;
+    // The step as the stub serves it, named as shown — a begin must say
+    // what the approver saw (a_passkey_signs_what_was_shown.rs).
+    let (status, body) = begin(
+        &router,
+        json!({ "job_id": JOB, "step_id": STEP,
+                "shown": { "title": "Approve", "metadata": {} } }),
+    )
+    .await;
     // The read succeeded and found the step; the stub's employee holds
     // no passkey, so the ceremony stops there.
     assert_eq!(status, StatusCode::CONFLICT, "{body}");

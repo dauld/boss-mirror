@@ -736,7 +736,26 @@ pub trait JobsRepository: Send + Sync {
     /// short zip would record fewer events than rows and the replayed
     /// projection would hold fewer steps than the live one. The
     /// replay guard is per row, as before: a job or step whose id
-    /// already exists inserts nothing and records nothing.
+    /// already exists inserts nothing and records nothing. Each step
+    /// row is stamped with its plugin version by the rule
+    /// [`JobsRepository::add_step_at`] states.
+    ///
+    /// A BIRTH-BY-JOB SUBJECT IS MINTED HERE, AND THAT IS
+    /// ADAPTER-SCOPED (backlog 82448947). A subject kind whose
+    /// SubjectKind row carries `metadata.birth = "job"` (`workflow`,
+    /// `custom`) has no domain table: the job about it IS its birth
+    /// record. The Postgres adapter mints its `subjects` identity row
+    /// in the same transaction as the job insert, insert-if-absent;
+    /// a domain kind, or a retired one, mints nothing. Pinned by
+    /// `birth_by_workflows_pass_gate_and_create_mints_identity` in
+    /// `tests/subject_existence_pg.rs`.
+    ///
+    /// The in-memory adapter does NOT implement this: it has no
+    /// identity table to mint into, and this trait has no read of
+    /// one, so the mint is invisible through the port and no port-level
+    /// test can hold it — the Pg test is its only pin. What returns is
+    /// the same either way. A new adapter that keeps subject
+    /// identities must mint them here and say so.
     async fn create_job_with_steps_at(
         &self,
         job: &Job,
@@ -1015,6 +1034,27 @@ pub trait JobsRepository: Send + Sync {
         self.add_step_at(step, Utc::now(), &[]).await
     }
 
+    /// Write one step row, recording `events` with it; a step whose id
+    /// already exists inserts nothing and records nothing.
+    ///
+    /// THE ROW IS STAMPED WITH ITS PLUGIN VERSION (backlog 82448947).
+    /// A step written with `step_plugin_version = 0` is stored at the
+    /// version of the step plugin active for its `kind` at the write,
+    /// and at 0 when no plugin serves the kind; a non-zero version the
+    /// caller supplies is kept (a replay seeding its own). The stamp
+    /// is a snapshot, so a plugin republished or retired later never
+    /// moves which bundle an existing step renders against. Every
+    /// adapter stamps from the step-plugin registry it reads: the
+    /// Postgres adapter from the `step_plugins` table inside the
+    /// insert's transaction, the in-memory adapter from the registry
+    /// given to `InMemoryJobs::with_step_plugins` — none given is an
+    /// empty registry, so it keeps the caller's value, as Postgres
+    /// does over a table with no active row. The stamp changes what
+    /// [`JobsRepository::get_step`] returns, and one body of
+    /// assertions holds both adapters to it:
+    /// `tests/the_adapters_agree_on_a_steps_plugin_version_pg.rs`.
+    /// [`JobsRepository::create_job_with_steps_at`] writes each of its
+    /// steps by the same rule.
     async fn add_step_at(
         &self,
         step: &Step,

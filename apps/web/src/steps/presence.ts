@@ -9,7 +9,11 @@
 // single-step ticket), and retries the sign-off with the ticket in
 // `x-presence-ticket` — which the gateway swaps for the trusted
 // header. No fallback path exists on purpose (Q3): if the actor has
-// no passkey or declines the prompt, the step waits.
+// no passkey or declines the prompt, the step waits. The begin names
+// the step as this page rendered it, and the gateway refuses one that
+// has changed since (fd7090cc). That guards an honest page from a swap
+// between its render and the key press; it is not proof of what was on
+// screen, because the page itself supplies what it names.
 
 const b64urlToBytes = (s: string): Uint8Array => {
   const pad = s.length % 4 === 2 ? '==' : s.length % 4 === 3 ? '=' : '';
@@ -41,19 +45,52 @@ export async function needsPresence(resp: Response): Promise<boolean> {
 }
 
 /**
+ * The step as the approver was SHOWN it: the title and metadata the
+ * surface rendered, with any write of the surface's own folded in
+ * ({@link shownAfter}). The gateway hashes it with the one shape-hash
+ * definition and refuses (412) a begin whose shown step is not the step
+ * as it stands, so an honest page never has a swap made after its render
+ * signed (backlog fd7090cc, security re-review of 2026-09-25). The page
+ * supplies this value, so it binds nothing a dishonest page displayed.
+ */
+export type ShownStep = Readonly<{
+  title: string;
+  metadata: Readonly<Record<string, unknown>>;
+}>;
+
+/**
+ * `rendered` with `patch` applied the way the step metadata door applies
+ * it: a key sent is set, a key sent as null is deleted — and undefined
+ * travels as null through `saveStep`, so it deletes too. A new object;
+ * `rendered` is untouched.
+ */
+export function shownAfter(
+  rendered: Readonly<Record<string, unknown>>,
+  patch: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...rendered };
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null || v === undefined) delete out[k];
+    else out[k] = v;
+  }
+  return out;
+}
+
+/**
  * Run the full ceremony for one step. Resolves to the ticket value for
  * the `x-presence-ticket` header. Rejects with a human-readable Error
- * when the actor has no enrolled passkey, declines the prompt, or the
- * gateway refuses the assertion.
+ * when the actor has no enrolled passkey, declines the prompt, the step
+ * changed since it was shown, or the gateway refuses the assertion.
  */
 export async function performPresenceCeremony(
   jobId: string,
   stepId: string,
+  shown: ShownStep,
 ): Promise<string> {
   const begin = await fetch('/api/auth/passkey/assert/begin', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ job_id: jobId, step_id: stepId }),
+    body: JSON.stringify({ job_id: jobId, step_id: stepId, shown }),
   });
   if (begin.status === 409) {
     throw new Error(

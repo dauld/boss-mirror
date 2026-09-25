@@ -206,14 +206,26 @@ export async function saveStep(
 
 /// The standard step PUT (PATCH semantics server-side). A body that
 /// carries `metadata` belongs in [`saveStep`] instead.
+///
+/// `presenceTicket` is the ticket a passkey ceremony on THIS step just
+/// issued, handed over by the surface that ran it (backlog b568044a,
+/// 2026-09-25). The jobs API judges a presence-gated step again on the
+/// request that completes it, from that request's own header, so a
+/// completion sent bare after a presence stamp answered 422 and the step
+/// stayed ready. This function mints nothing and widens nothing: the
+/// gateway verifies the ticket and the jobs API re-checks its step,
+/// person, shape and expiry on this PUT exactly as on the stamp.
 export function putStep(
   jobId: string,
   stepId: string,
   body: unknown,
+  presenceTicket?: string,
 ): Promise<StepWriteResult> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (presenceTicket) headers['x-presence-ticket'] = presenceTicket;
   return writeStep(`/api/jobs/${jobId}/steps/${stepId}`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
   });
 }

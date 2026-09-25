@@ -58,6 +58,12 @@ pub(crate) struct Validated {
     pub args: Vec<String>,
     pub title: String,
     pub mutating: bool,
+    /// The verb declares `requires_approval`: the packet is filed with
+    /// `requires_approval: true`, which is what makes ops-request v2's
+    /// `approve` step ready, and `args` stops before `plan_sha256` —
+    /// the runner appends the SIGNED plan's hash itself (backlog
+    /// fd7090cc, design 17835005).
+    pub requires_approval: bool,
 }
 
 /// Apply the allowlist's rules to a call, exactly as `ops-runner.sh`
@@ -101,12 +107,71 @@ pub(crate) fn validate(
             }
         );
     }
-    let params: Vec<&Value> = spec
+    let mut params: Vec<&Value> = spec
         .get("params")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .collect();
+    // AN APPROVAL VERB IS FILED WITHOUT ITS HASH (backlog fd7090cc).
+    // Until this, nothing set `requires_approval` on a filed request, so
+    // ops-request v2's `approve` step never became ready, and this verb
+    // demanded `plan_sha256` of the filer — a hash only the passkey's
+    // signature may choose. The runner renders the plan onto the approve
+    // step, and after the signature appends sha256 of the SIGNED plan
+    // itself; a filer-supplied one is refused there, so it is refused
+    // here first. A verb whose last param is not `plan_sha256`, or that
+    // names no `plan_verb`, is one the runner closes refused (its script
+    // cannot void a drifted plan, or there is nothing to sign), so that
+    // is refused here too — `commission-a-disk` today.
+    // Read the way the runner reads it: anything but an absent or
+    // literal `false` declaration is REQUIRED, so a typo cannot turn the
+    // gate off at either end.
+    let requires_approval = !matches!(
+        spec.get("requires_approval"),
+        None | Some(Value::Null) | Some(Value::Bool(false))
+    );
+    if requires_approval {
+        let last = params
+            .last()
+            .and_then(|p| p.get("name"))
+            .and_then(Value::as_str);
+        let plan_verb = spec.get("plan_verb").and_then(Value::as_str);
+        if last != Some("plan_sha256") || plan_verb.is_none() {
+            bail!(
+                "boss ops: REFUSED — `{verb}` declares requires_approval, but {}. The host's \
+                 runner refuses an approval verb that cannot re-render its plan and refuse one \
+                 that moved since it was signed (design 17835005), so this packet would only \
+                 close refused.",
+                if plan_verb.is_none() {
+                    "names no plan_verb, so there is no plan to sign"
+                } else {
+                    "its last param is not plan_sha256"
+                }
+            );
+        }
+        // WHO MAY APPROVE IS NAMED, BY EMPLOYEE ID (design 03451237 q2,
+        // David 2026-09-22: a role is registry data, so a role gate makes
+        // the approval depend on whoever can write a policy row). The
+        // runner closes refused a verb that names nobody, so filing one is
+        // refused here first — judged the way the runner judges it: a
+        // non-empty array of non-empty strings.
+        let approvers_named = spec
+            .get("approvers")
+            .and_then(Value::as_array)
+            .is_some_and(|a| {
+                !a.is_empty() && a.iter().all(|x| x.as_str().is_some_and(|s| !s.is_empty()))
+            });
+        if !approvers_named {
+            bail!(
+                "boss ops: REFUSED — `{verb}` declares requires_approval, but names no approvers \
+                 (a non-empty list of employee ids in infra/ops/verbs/{verb}.json), so no \
+                 passkey could approve it and the host's runner would only close it refused \
+                 (design 03451237 q2)."
+            );
+        }
+        params.pop();
+    }
     if args.len() > params.len() {
         bail!(
             "boss ops: REFUSED — `{verb}` takes {} arg(s) ({}), got {}: {:?}",
@@ -177,7 +242,21 @@ pub(crate) fn validate(
         args: out,
         title,
         mutating,
+        requires_approval,
     })
+}
+
+/// The packet's job metadata: the request as the runner reads it, and
+/// `requires_approval` when the verb declares it — the flag that makes
+/// the `approve` step ready. It is a routing fact, never an approval:
+/// the runner reads the requirement off the verb and the approval off
+/// the step's sign-off record.
+pub(crate) fn request_metadata(v: &Validated) -> Value {
+    let mut md = json!({"host": v.host, "verb": v.verb, "args": v.args});
+    if v.requires_approval {
+        md["requires_approval"] = json!(true);
+    }
+    md
 }
 
 /// The answer a closed ops-request carries on its `execute` step.
@@ -192,14 +271,41 @@ pub(crate) struct Answer {
 /// Read the `execute` step's record off a packet, or `None` while the
 /// host has not answered.
 pub(crate) fn answer_of(job: &Value) -> Option<Answer> {
-    let step = job
-        .get("steps")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some("execute"))?;
-    let md = step.get("metadata")?;
-    let disposition = md.get("disposition").and_then(Value::as_str)?.to_string();
+    let step_of = |slug: &str| {
+        job.get("steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(slug))
+    };
+    // A request the runner closed through its `refused` terminal while
+    // `execute` still waited behind the approve step — a verb that
+    // cannot carry an approval, or a plan verb that refused — answers
+    // there, with the reason on that step.
+    let closed_refused = || {
+        let s = step_of("refused")?;
+        if s.get("status").and_then(Value::as_str) != Some("completed") {
+            return None;
+        }
+        let md = s.get("metadata")?;
+        Some(Answer {
+            disposition: "refused".to_string(),
+            exit_code: None,
+            output: md.get("reason").and_then(Value::as_str)?.to_string(),
+            runner_host: md
+                .get("runner_host")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        })
+    };
+    let Some(md) = step_of("execute").and_then(|s| s.get("metadata")) else {
+        return closed_refused();
+    };
+    let Some(disposition) = md.get("disposition").and_then(Value::as_str) else {
+        return closed_refused();
+    };
+    let disposition = disposition.to_string();
     Some(Answer {
         disposition,
         exit_code: md
@@ -261,10 +367,19 @@ pub async fn run(
             v.verb, v.host
         );
     }
+    if v.requires_approval {
+        eprintln!(
+            "boss ops: `{}` requires a passkey approval — the runner on {} renders its plan onto \
+             the packet's approve step, and runs it only after that step is signed with a \
+             passkey (within ten minutes of the signature, once).",
+            v.verb, v.host
+        );
+    }
+    let metadata = request_metadata(&v);
     if dry_run {
         println!(
-            "boss ops: DRY RUN — would file ops-request \"{}\" (host {}, verb {}, args {:?})",
-            v.title, v.host, v.verb, v.args
+            "boss ops: DRY RUN — would file ops-request \"{}\" (metadata {metadata})",
+            v.title
         );
         return Ok(());
     }
@@ -276,7 +391,7 @@ pub async fn run(
         None,
         Some(&v.host),
         &owner,
-        Some(json!({"host": v.host, "verb": v.verb, "args": v.args})),
+        Some(metadata),
     );
     let created = crate::gate::api(&http, reqwest::Method::POST, "/api/jobs", Some(body))
         .await?
@@ -501,11 +616,141 @@ mod tests {
             let host = spec["hosts"][0].as_str().expect("a host");
             // No args: a verb whose every param has a default or is optional validates;
             // one with a required param refuses naming it — either way it is readable.
+            // commission-a-disk is the one approval verb the runner cannot carry (its
+            // script takes no plan_sha256), and is refused for that before any arg.
             match validate(&v, host, name, &[]) {
                 Ok(ok) => assert!(ok.title.ends_with(&format!("on {host}"))),
+                Err(e) if name == "commission-a-disk" => {
+                    assert!(e.to_string().contains("plan_sha256"), "{name}: {e}")
+                }
                 Err(e) => assert!(e.to_string().contains("needs arg"), "{name}: {e}"),
             }
         }
+    }
+
+    /// AN APPROVAL VERB IS FILED WITH THE FLAG AND WITHOUT THE HASH
+    /// (backlog fd7090cc). Measured on origin/main 87c2e366: nothing set
+    /// `requires_approval` on a filed ops-request, so the approve step
+    /// was never reached, and this verb asked the filer for `plan_sha256`
+    /// — the one value only a passkey signature may choose. Now the
+    /// packet carries the flag, the args stop before the hash, and a
+    /// filer who supplies one is refused, as the runner would.
+    #[test]
+    fn an_approval_verb_files_the_flag_and_never_the_hash() {
+        let v = shipped_allowlist().expect("the verb files parse");
+        let ok = validate(&v, "forge", "reap-terminated-pods", &[]).unwrap();
+        assert!(ok.requires_approval);
+        assert!(ok.args.is_empty(), "{:?}", ok.args);
+        assert_eq!(
+            request_metadata(&ok),
+            json!({"host": "forge", "verb": "reap-terminated-pods", "args": [],
+                   "requires_approval": true})
+        );
+        let ok = validate(
+            &v,
+            "forge",
+            "merge-tenant-main",
+            &["playground".into(), "tenant/merge-1".into()],
+        )
+        .unwrap();
+        assert_eq!(ok.args, vec!["playground", "tenant/merge-1"]);
+        assert_eq!(request_metadata(&ok)["requires_approval"], true);
+
+        let hash = "0".repeat(64);
+        let e = validate(
+            &v,
+            "forge",
+            "reap-terminated-pods",
+            std::slice::from_ref(&hash),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("takes 0 arg(s)"), "{e}");
+        let e = validate(
+            &v,
+            "forge",
+            "merge-tenant-main",
+            &["playground".into(), "tenant/merge-1".into(), hash],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("takes 2 arg(s)"), "{e}");
+
+        // A read carries no flag at all — an absent value reads false in
+        // the approve step's predicate, so every read runs as it did.
+        let ok = validate(&v, "forge", "uptime", &[]).unwrap();
+        assert!(!ok.requires_approval);
+        assert!(request_metadata(&ok).get("requires_approval").is_none());
+
+        // The disk verb stays inert: the runner would close it refused.
+        let e = validate(
+            &v,
+            "forge",
+            "commission-a-disk",
+            &["/dev/disk/by-id/nvme-X-0000".into(), "/srv/data".into()],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("requires_approval") && e.contains("plan_sha256"),
+            "{e}"
+        );
+    }
+
+    /// AN APPROVAL VERB NAMES WHO MAY APPROVE IT (design 03451237 q2:
+    /// named employee ids, not a role). The runner closes refused a verb
+    /// that names nobody, so filing one is refused here first, the way a
+    /// verb with no plan verb is — and the shipped verbs name David.
+    #[test]
+    fn an_approval_verb_that_names_no_approver_is_refused_at_filing() {
+        let mut v = shipped_allowlist().expect("the verb files parse");
+        assert_eq!(
+            v["verbs"]["reap-terminated-pods"]["approvers"],
+            json!(["emp-david"])
+        );
+        for bad in [
+            Value::Null,
+            json!([]),
+            json!("emp-david"),
+            json!([""]),
+            json!([7]),
+        ] {
+            let spec = v["verbs"]["reap-terminated-pods"].as_object_mut().unwrap();
+            if bad.is_null() {
+                spec.remove("approvers");
+            } else {
+                spec.insert("approvers".into(), bad.clone());
+            }
+            let e = validate(&v, "forge", "reap-terminated-pods", &[])
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("approvers"), "{bad}: {e}");
+        }
+    }
+
+    /// A request the runner closed through its `refused` terminal —
+    /// execute still pending behind the approve step — answers there,
+    /// so `--wait` ends on the reason instead of timing out.
+    #[test]
+    fn a_request_closed_refused_before_execute_answers_with_its_reason() {
+        let v = validate(&fixture(), "forge", "uptime", &[]).unwrap();
+        let job = json!({"steps": [
+            {"spec_slug": "execute", "status": "skipped", "metadata": {"authority_role": "platform-admin"}},
+            {"spec_slug": "refused", "status": "completed",
+             "metadata": {"outcome_kind": "aborted", "runner_host": "forge",
+                          "reason": "the plan verb plan-a-pod-reap refused (exit 78)"}}
+        ]});
+        let a = answer_of(&job).expect("the refused terminal is an answer");
+        assert_eq!(a.disposition, "refused");
+        assert!(a.output.contains("plan-a-pod-reap refused"), "{a:?}");
+        let (line, ok) = verdict_line("abcd1234", &v, &a);
+        assert!(!ok && line.starts_with("boss ops: refused"), "{line}");
+        // A refused step not yet completed is no answer.
+        let open = json!({"steps": [
+            {"spec_slug": "execute", "status": "pending", "metadata": {}},
+            {"spec_slug": "refused", "status": "pending", "metadata": {"outcome_kind": "aborted"}}
+        ]});
+        assert!(answer_of(&open).is_none());
     }
 
     /// `unit-list` takes one glob of unit-name characters and nothing a

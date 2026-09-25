@@ -16,6 +16,13 @@ pub struct InMemoryJobs {
     inner: Mutex<State>,
     recorded: Mutex<Vec<boss_core::event::Event>>,
     refusals: Mutex<Vec<crate::refusals::RecordedRefusal>>,
+    /// The step-plugin registry a new step's `step_plugin_version` is
+    /// stamped from — this adapter's `step_plugins` table. `None` is
+    /// an empty registry: no plugin serves any kind, so every step is
+    /// written at the version its caller gave, exactly as the Pg
+    /// adapter writes against a table with no active row (backlog
+    /// 82448947).
+    step_plugins: Option<std::sync::Arc<dyn crate::step_plugins::StepPluginRegistry>>,
 }
 
 #[derive(Default)]
@@ -55,6 +62,17 @@ struct State {
 impl InMemoryJobs {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Stamp new steps from `registry`, as the Pg adapter stamps from
+    /// the `step_plugins` table in its own database — pass the same
+    /// registry the test publishes through.
+    pub fn with_step_plugins(
+        mut self,
+        registry: std::sync::Arc<dyn crate::step_plugins::StepPluginRegistry>,
+    ) -> Self {
+        self.step_plugins = Some(registry);
+        self
     }
 
     /// Events the outbox paths recorded — test visibility (the
@@ -97,6 +115,28 @@ impl InMemoryJobs {
         if let Ok(mut state) = self.inner.lock() {
             state.unreadable_jobs.insert(job_key(job_id));
         }
+    }
+
+    /// `step` as this adapter will write it: a `step_plugin_version`
+    /// of 0 takes the active plugin version for its kind, 0 again when
+    /// nothing serves the kind, and a non-zero one is kept — the rule
+    /// the Pg adapter's `active_plugin_version` lookup applies inside
+    /// its step INSERT. Resolved before the state lock, which an await
+    /// must not hold.
+    async fn stamp_plugin_version(&self, step: &Step) -> Result<Step, JobsError> {
+        let mut stamped = step.clone();
+        let Some(registry) = self.step_plugins.as_ref() else {
+            return Ok(stamped);
+        };
+        if stamped.step_plugin_version != 0 {
+            return Ok(stamped);
+        }
+        match registry.get_active(&step.kind).await {
+            Ok(active) => stamped.step_plugin_version = active.version,
+            Err(crate::step_plugins::StepPluginError::NotFound(_)) => {}
+            Err(e) => return Err(JobsError::Storage(e.to_string())),
+        }
+        Ok(stamped)
     }
 
     fn record_all(&self, events: &[boss_core::event::Event]) {
@@ -290,6 +330,10 @@ impl JobsRepository for InMemoryJobs {
         // Mirror the Pg replay guard per row: an existing id is a
         // no-op that records nothing — and keeps its original
         // admission instant.
+        let mut stamped = Vec::with_capacity(steps.len());
+        for step in steps {
+            stamped.push(self.stamp_plugin_version(step).await?);
+        }
         let mut recorded = Vec::with_capacity(job_events.len() + step_events.len());
         {
             let mut state = self.inner.lock().expect("poisoned");
@@ -305,7 +349,7 @@ impl JobsRepository for InMemoryJobs {
                 state.job_created_at.insert(key, now);
                 recorded.extend_from_slice(job_events);
             }
-            for (step, event) in steps.iter().zip(step_events) {
+            for (step, event) in stamped.iter().zip(step_events) {
                 if insert_step_locked(&mut state, step, now) {
                     recorded.push(event.clone());
                 }
@@ -817,9 +861,10 @@ impl JobsRepository for InMemoryJobs {
         now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
+        let step = self.stamp_plugin_version(step).await?;
         let inserted = {
             let mut state = self.inner.lock().expect("poisoned");
-            insert_step_locked(&mut state, step, now)
+            insert_step_locked(&mut state, &step, now)
         };
         if inserted {
             self.record_all(events);
@@ -2294,6 +2339,75 @@ mod tests {
         assert!(
             PG_PIN.contains("fn a_claim_as_the_registered_id_takes_a_step_held_by_its_alias"),
             "the Pg pin the port doc names must still hold the admission test"
+        );
+    }
+
+    /// The `///` block directly above `decl` in the port.
+    fn port_doc_above(decl: &str) -> String {
+        const PORT: &str = include_str!("port.rs");
+        let end = PORT
+            .find(decl)
+            .unwrap_or_else(|| panic!("the port declares {decl}"));
+        let doc: Vec<&str> = PORT[..end]
+            .lines()
+            .rev()
+            .take_while(|l| l.trim_start().starts_with("///"))
+            .collect();
+        doc.into_iter().rev().collect::<Vec<_>>().join("\n")
+    }
+
+    /// The two step-and-subject writes the Pg adapter made and the port
+    /// never stated (backlog 82448947, found beside 28dcc735's alias
+    /// rule): the plugin-version stamp on every step insert, and the
+    /// identity row a birth-by-job subject is minted with at
+    /// admission. Each doc must state its rule and name the test that
+    /// holds it; `include_str!` of each pin makes a renamed or deleted
+    /// pin a compile error here rather than a dangling name in prose.
+    #[test]
+    fn the_port_doc_states_the_plugin_stamp_and_the_subject_mint_and_names_their_pins() {
+        const STAMP_PIN: &str =
+            include_str!("../tests/the_adapters_agree_on_a_steps_plugin_version_pg.rs");
+        const MINT_PIN: &str = include_str!("../tests/subject_existence_pg.rs");
+
+        let add_step = port_doc_above("    async fn add_step_at(");
+        for needle in [
+            "step_plugin_version",
+            "step_plugins",
+            "the_adapters_agree_on_a_steps_plugin_version_pg",
+        ] {
+            assert!(
+                add_step.contains(needle),
+                "the add_step_at port doc must name {needle}; it reads:\n{add_step}"
+            );
+        }
+
+        let admit = port_doc_above("    async fn create_job_with_steps_at(");
+        for needle in [
+            "add_step_at",
+            "subjects",
+            "birth",
+            "subject_existence_pg",
+            "birth_by_workflows_pass_gate_and_create_mints_identity",
+            "in-memory adapter",
+        ] {
+            assert!(
+                admit.contains(needle),
+                "the create_job_with_steps_at port doc must name {needle}; it reads:\n{admit}"
+            );
+        }
+
+        for pin in [
+            "fn the_in_memory_adapter_stamps_a_steps_plugin_version",
+            "fn the_pg_adapter_stamps_a_steps_plugin_version",
+        ] {
+            assert!(
+                STAMP_PIN.contains(pin),
+                "the stamp pin must still hold {pin}"
+            );
+        }
+        assert!(
+            MINT_PIN.contains("fn birth_by_workflows_pass_gate_and_create_mints_identity"),
+            "the Pg pin the port doc names must still hold the mint test"
         );
     }
 }

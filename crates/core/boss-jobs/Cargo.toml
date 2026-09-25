@@ -113,6 +113,10 @@ name = "the_adapters_agree_on_a_steps_assurance_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "the_adapters_agree_on_a_steps_plugin_version_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "a_finished_packets_status_does_not_move_pg"
 required-features = ["postgres"]
 

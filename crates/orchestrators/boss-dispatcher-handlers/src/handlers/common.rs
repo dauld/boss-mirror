@@ -26,6 +26,11 @@ pub struct StepEvent<'a> {
     /// STRONGER routing signal than a role — a role says someone like
     /// you should do this, an assignee says you specifically.
     pub assignee_id: Option<&'a str>,
+    /// The parent job's owner, when the event names one — `step.done`
+    /// carries it (`job_owner_id`) so a wait-is-over signal reaches the
+    /// person waiting on the packet when the step names no role
+    /// (backlog 58f0b536). `""` and absent both read as `None`.
+    pub job_owner_id: Option<&'a str>,
     pub metadata: &'a serde_json::Map<String, Value>,
 }
 
@@ -60,6 +65,10 @@ impl<'a> StepEvent<'a> {
             .get("assignee_id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty());
+        let job_owner_id = obj
+            .get("job_owner_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
         let completed_on = obj
             .get("completed_on")
             .and_then(|v| v.as_str())
@@ -79,6 +88,7 @@ impl<'a> StepEvent<'a> {
             subject_id,
             completed_on,
             assignee_id,
+            job_owner_id,
             metadata,
         })
     }
@@ -594,35 +604,90 @@ pub(crate) async fn write_json(
     Ok(())
 }
 
+/// The writes that complete step `sid` on packet `jid` carrying
+/// `fields`, in order: the fields through the step's MERGE door, then
+/// the status alone through the step PUT. Paths only — the caller
+/// prefixes its base. Empty `fields` is the flip alone. Pure, so the
+/// shape is pinned without a socket.
+///
+/// WHY TWO WRITES AND NOT THE ONE PUT EVERY HANDLER HERE USED TO SEND
+/// (backlog e39a9d2a, stage 2 of design 93d2bddb). A handler read the
+/// step, merged its own keys into what it read, and PUT `{status,
+/// metadata}` back. The step PUT replaces metadata wholesale, so that
+/// read-merge-write is correct only while nothing writes the step
+/// between the handler's read and its PUT: stage 1 refuses such a PUT
+/// 409 when it omits a key someone added meanwhile, and David's decided
+/// end state refuses ANY metadata body on the PUT — the tighten is one
+/// block in `update_step`, waiting on writers like these. The merge
+/// door lands the keys against the row as it stands, so it can neither
+/// race nor shed a key it does not name, and a handler no longer needs
+/// the step's metadata at all to write its own. It goes FIRST because
+/// required-at-done fields are judged when the step flips; if the flip
+/// is then refused the step stays open carrying the fields, and a
+/// redelivery merges the same keys again — the outcome a refused PUT
+/// left. The same shape as `boss_jobs::car::StepWrite` (the auto-park
+/// path) and boss-cli's `train::step_completion_writes`.
+pub(crate) fn step_completion_writes(
+    jid: &str,
+    sid: &str,
+    fields: serde_json::Map<String, Value>,
+) -> Vec<(reqwest::Method, String, Value)> {
+    let path = format!("/api/jobs/{jid}/steps/{sid}");
+    let merge = (!fields.is_empty()).then(|| {
+        (
+            reqwest::Method::PATCH,
+            format!("{path}/metadata"),
+            Value::Object(fields),
+        )
+    });
+    merge
+        .into_iter()
+        .chain(std::iter::once((
+            reqwest::Method::PUT,
+            path,
+            serde_json::json!({ "status": "completed" }),
+        )))
+        .collect()
+}
+
+/// Complete step `sid` on packet `jid` with `fields`: the
+/// [`step_completion_writes`], each through [`write_json`] against
+/// `base`, stopping at the first refusal.
+pub(crate) async fn complete_step(
+    client: &reqwest::Client,
+    base: &str,
+    jid: &str,
+    sid: &str,
+    fields: serde_json::Map<String, Value>,
+    rule_name: &str,
+) -> Result<(), HandlerError> {
+    for (method, path, body) in step_completion_writes(jid, sid, fields) {
+        write_json(client, method, &format!("{base}{path}"), &body, rule_name).await?;
+    }
+    Ok(())
+}
+
 /// The step a machine completes to close a `backlog-item` alarm it
 /// raised. The kind routes on `triage.disposition`, and `stale` is the
 /// terminal whose title is literally "Closed — the claim no longer
 /// holds" (infra/platform/workflows/backlog-item.toml).
 pub(crate) const TRIAGE_SLUG: &str = "triage";
 
-/// The `triage` step of one alarm packet, as (id, existing metadata).
+/// The id of the `triage` step of one alarm packet.
 ///
 /// Lived in `cadence_silence` until `estate.recover` closed alarms the
 /// same way (backlog ef421cd3) — one definition of "the step that
-/// closes an alarm", not a second copy (CLAUDE.md §9a). The existing
-/// metadata rides back because PUT on a step REPLACES top-level
-/// metadata, and `authority_role` living there is what keeps the step
-/// gated.
-pub(crate) fn triage_step(job: &Value) -> Option<(String, serde_json::Map<String, Value>)> {
+/// closes an alarm", not a second copy (CLAUDE.md §9a). It used to hand
+/// back the step's metadata too, for a completion PUT that replaced it
+/// wholesale; a completion now merges its own keys through the step
+/// merge door ([`complete_step`], e39a9d2a), so nothing needs it.
+pub(crate) fn triage_step(job: &Value) -> Option<String> {
     job.get("steps")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .find(|s| s.get("spec_slug").and_then(Value::as_str) == Some(TRIAGE_SLUG))
-        .and_then(|s| {
-            let id = s.get("id").and_then(Value::as_str)?.to_string();
-            let meta = s
-                .get("metadata")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            Some((id, meta))
-        })
+        .and_then(|s| s.get("id").and_then(Value::as_str).map(str::to_string))
 }
 
 /// The routed steps a machine may complete to withdraw an alarm once a
@@ -636,13 +701,10 @@ const WITHDRAWING_SLUGS: [&str; 2] = ["measure", "build"];
 /// cleared (backlog a2d8bad3).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Retraction {
-    /// Complete this step with `disposition = stale`. `metadata` is the
-    /// step's own, because a step PUT replaces it wholesale.
-    Complete {
-        slug: String,
-        step_id: String,
-        metadata: serde_json::Map<String, Value>,
-    },
+    /// Complete this step with `disposition = stale`, through
+    /// [`complete_step`] — the step's own keys are not carried, because
+    /// the merge door keeps every key it is not sent (e39a9d2a).
+    Complete { slug: String, step_id: String },
     /// No step the machine may complete: say on the PACKET that the
     /// condition cleared, and why it is still open.
     Annotate { why_open: String },
@@ -694,7 +756,7 @@ pub(crate) fn retraction(job: &Value) -> Option<Retraction> {
             .map(str::to_string)
     };
     let status_of = |s: &Value| s.get("status").and_then(Value::as_str).map(str::to_string);
-    let (triage_id, triage_meta) = triage_step(job)?;
+    let triage_id = triage_step(job)?;
     let triage = steps
         .iter()
         .find(|s| slug_of(s).as_deref() == Some(TRIAGE_SLUG))?;
@@ -707,7 +769,6 @@ pub(crate) fn retraction(job: &Value) -> Option<Retraction> {
         return Some(Retraction::Complete {
             slug: TRIAGE_SLUG.to_string(),
             step_id: triage_id,
-            metadata: triage_meta,
         });
     }
     let routed = triage
@@ -723,11 +784,6 @@ pub(crate) fn retraction(job: &Value) -> Option<Retraction> {
                 return Some(Retraction::Complete {
                     slug: slug.to_string(),
                     step_id: step.get("id").and_then(Value::as_str)?.to_string(),
-                    metadata: step
-                        .get("metadata")
-                        .and_then(Value::as_object)
-                        .cloned()
-                        .unwrap_or_default(),
                 });
             }
             Some("active") => {
@@ -748,6 +804,34 @@ pub(crate) fn retraction(job: &Value) -> Option<Retraction> {
              withdrawal the machine may complete"
         ),
     })
+}
+
+/// The fields that withdraw a recovered alarm at the step
+/// [`retraction`] names, for a machine that judged the condition from a
+/// reading: `stale` — the backlog-item terminal "the claim no longer
+/// holds" — with the evidence, who cleared it and when. ONLY these: they
+/// ride the step merge door ([`complete_step`]), which keeps every key
+/// the step holds (e39a9d2a).
+///
+/// One definition, since the queue alarm, the flight overdue and the
+/// agent-step overdue each carried the same body a copy apiece, each
+/// with the step's own metadata cloned in for a PUT that replaced it.
+pub(crate) fn withdrawal_fields(
+    evidence: &str,
+    cleared_by: &str,
+    at: &str,
+) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    m.insert("disposition".into(), Value::String("stale".into()));
+    m.insert(
+        "evidence".into(),
+        Value::String(format!(
+            "{evidence} Closed by machine from the reading, not by judgement."
+        )),
+    );
+    m.insert("cleared_by".into(), Value::String(cleared_by.into()));
+    m.insert(RECOVERED_AT.into(), Value::String(at.into()));
+    m
 }
 
 /// The packet-metadata key a recovery is stamped under — the same key
@@ -969,14 +1053,9 @@ mod tests {
         ] {
             let job = alarm(vec![step("filed", "completed", json!({})), triage]);
             match retraction(&job) {
-                Some(Retraction::Complete {
-                    slug,
-                    step_id,
-                    metadata,
-                }) => {
+                Some(Retraction::Complete { slug, step_id }) => {
                     assert_eq!(slug, TRIAGE_SLUG);
                     assert_eq!(step_id, "s-triage");
-                    assert_eq!(metadata["authority_role"], "platform-admin");
                 }
                 other => panic!("an untriaged alarm completes triage, got {other:?}"),
             }
@@ -1009,17 +1088,9 @@ mod tests {
             ),
         ]);
         match retraction(&job) {
-            Some(Retraction::Complete {
-                slug,
-                step_id,
-                metadata,
-            }) => {
+            Some(Retraction::Complete { slug, step_id }) => {
                 assert_eq!(slug, "build");
                 assert_eq!(step_id, "s-build");
-                assert_eq!(
-                    metadata["agent_profile"], "builder",
-                    "a PUT replaces step metadata wholesale, so the build's keys ride back"
-                );
             }
             other => panic!("a ready build is where the alarm withdraws, got {other:?}"),
         }
@@ -1223,5 +1294,42 @@ mod lane_pin {
         // A filer with nothing to keep still records the lane.
         let bare = with_lane(serde_json::Value::Null, InputChannel::PipelineFailure);
         assert_eq!(bare["input_channel"], "pipeline-failure");
+    }
+
+    /// Backlog e39a9d2a: a completion is the fields through the step
+    /// merge door FIRST (required-at-done fields are judged at the
+    /// flip), then a PUT whose body carries the status and nothing
+    /// else — the one form that survives the step PUT refusing any
+    /// metadata body.
+    #[test]
+    fn a_completion_merges_its_fields_then_flips_the_status_alone() {
+        use serde_json::json;
+        let mut fields = serde_json::Map::new();
+        fields.insert("disposition".into(), json!("stale"));
+        let writes = step_completion_writes("j1", "s1", fields);
+        assert_eq!(
+            writes,
+            vec![
+                (
+                    reqwest::Method::PATCH,
+                    "/api/jobs/j1/steps/s1/metadata".to_string(),
+                    json!({ "disposition": "stale" }),
+                ),
+                (
+                    reqwest::Method::PUT,
+                    "/api/jobs/j1/steps/s1".to_string(),
+                    json!({ "status": "completed" }),
+                ),
+            ]
+        );
+        assert_eq!(
+            step_completion_writes("j1", "s1", serde_json::Map::new()),
+            vec![(
+                reqwest::Method::PUT,
+                "/api/jobs/j1/steps/s1".to_string(),
+                json!({ "status": "completed" }),
+            )],
+            "no fields is the flip alone — never an empty merge"
+        );
     }
 }

@@ -69,7 +69,38 @@ export type ComparisonCounts = Readonly<{
 export type Comparison = Readonly<{
   observed_at: string;
   scope: string;
+  /** The host a SELF-SCOPED comparison is about — compare_host stamps
+   *  it (estate_compare.rs, the raiser's series key); the cluster and
+   *  door comparisons carry none, and neither does a literal built
+   *  before this key was read, hence optional. */
+  host?: string | null;
   counts: ComparisonCounts;
+}>;
+
+// THE HOST COMPARISON (backlog 2d8d983b; page audit 2cff1d6e, GAP 1).
+// Until this read the page rendered the cluster's verdict only, while
+// every host row carried a finding: measured 2026-09-23, each forge
+// row 15:17Z-16:17Z drift 1 (memory declared 30, observed 31), and
+// boss-gcp's 10:25Z row disk_tight 1 (13 G free against a 17 G floor)
+// plus drift 1. None of it reached the estate surface.
+//
+// SCOPED, not taken from the unscoped page of 20 the rest of the
+// section reads (75027a93): forge compares every 15 minutes and
+// boss-gcp once a day, so a mixed page spent by the five-minute series
+// held boss-gcp's row about one hour in twenty-four. The reader caps a
+// page at 50 (jobs.rs estate_events) and filters by scope only, so even
+// scoped a daily host falls off after ~12 h of forge rows (49 forge, 1
+// boss-gcp at the 2026-09-23 measure) — which is why the page states
+// how far back its page reached whenever it is not the whole series,
+// rather than letting an absent host read as silence.
+export const HOST_COMPARISONS_READ = '/api/estate/comparisons?scope=host&limit=50';
+
+/** One page of the host series: the host rows, the series' total, and
+ *  the oldest instant the page reached (null when it is empty). */
+export type HostComparisonPage = Readonly<{
+  rows: readonly Comparison[];
+  total: number | null;
+  oldest: string | null;
 }>;
 
 // THE LOOPS (backlog 0d9b2960; page audit 2cff1d6e, GAP 10). The
@@ -140,6 +171,7 @@ export type EstateState = Readonly<{
   nodes: Remote<readonly EstateNode[]>;
   observations: Remote<readonly Observation[]>;
   comparisons: Remote<readonly Comparison[]>;
+  hostComparisons: Remote<HostComparisonPage>;
   loops: readonly LoopRow[];
 }>;
 
@@ -250,6 +282,7 @@ export function parseComparisons(raw: unknown): readonly Comparison[] {
     return [{
       observed_at: typeof p.observed_at === 'string' ? p.observed_at : '',
       scope: p.scope,
+      host: typeof p.host === 'string' ? p.host : null,
       counts: {
         observed: n('observed'),
         participating_declared: n('participating_declared'),
@@ -278,12 +311,41 @@ export function latestComparison(rows: readonly Comparison[], scope: string): Co
   return rows.find((r) => r.scope === scope) ?? null;
 }
 
+/** The host series' page as the reader serves it (`{data, total}`),
+ *  kept to host rows whatever came back. */
+export function parseHostComparisons(raw: unknown): HostComparisonPage {
+  const rows = parseComparisons(raw).filter((c) => c.scope === 'host');
+  const total = (raw as { total?: unknown } | null)?.total;
+  return {
+    rows,
+    total: typeof total === 'number' ? total : null,
+    oldest: rows.at(-1)?.observed_at ?? null,
+  };
+}
+
+/** Newest comparison per host — rows arrive newest-first, so the first
+ *  row naming a host is its latest word — in host order, so a refresh
+ *  does not reshuffle the lines. */
+export function latestPerHost(rows: readonly Comparison[]): readonly Comparison[] {
+  const out = new Map<string, Comparison>();
+  for (const r of rows) {
+    const key = r.host ?? '';
+    if (!out.has(key)) out.set(key, r);
+  }
+  return [...out.values()].sort((a, b) => (a.host ?? '').localeCompare(b.host ?? ''));
+}
+
 /** Zero everywhere-it-matters is the good state and says so; anything
- *  else names what disagrees. */
+ *  else names what disagrees. A self-scoped (host) comparison counts
+ *  no declared total and observes only itself, so its words differ in
+ *  those two places and nowhere else. */
 export function comparisonVerdict(c: Comparison): { ok: boolean; text: string } {
   const k = c.counts;
+  const selfScoped = c.host != null;
   const problems: string[] = [];
-  if (k.observed_not_declared > 0) problems.push(`${k.observed_not_declared} in the cluster but undeclared`);
+  if (k.observed_not_declared > 0) {
+    problems.push(`${k.observed_not_declared} ${selfScoped ? 'observed but not declared' : 'in the cluster but undeclared'}`);
+  }
   if (k.declared_not_observed > 0) problems.push(`${k.declared_not_observed} declared but not seen`);
   if (k.drift > 0) problems.push(`${k.drift} drifted from declaration`);
   // Headroom, not paperwork: a machine out of room stops the pipeline,
@@ -291,6 +353,7 @@ export function comparisonVerdict(c: Comparison): { ok: boolean; text: string } 
   if ((k.disk_tight ?? 0) > 0) problems.push(`${k.disk_tight} short of disk`);
   if ((k.disk_unmeasured ?? 0) > 0) problems.push(`${k.disk_unmeasured} with no free-space reading`);
   if (problems.length === 0) {
+    if (selfScoped) return { ok: true, text: `${k.observed} observed — no drift` };
     return { ok: true, text: `${k.observed} observed, ${k.participating_declared} declared — no drift` };
   }
   return { ok: false, text: problems.join('; ') };
@@ -366,11 +429,12 @@ async function fetchLoop(plan: LoopPlan): Promise<LoopRow> {
 
 export async function fetchEstate(): Promise<EstateState> {
   const nodesRead = fetchRemote('/api/estate/nodes', parseNodes);
-  const [nodes, observations, comparisons, loops] = await Promise.all([
+  const [nodes, observations, comparisons, hostComparisons, loops] = await Promise.all([
     nodesRead,
     fetchRemote('/api/estate/observations?limit=20', parseObservations),
     fetchRemote('/api/estate/comparisons?limit=20', parseComparisons),
+    fetchRemote(HOST_COMPARISONS_READ, parseHostComparisons),
     nodesRead.then((n) => Promise.all(loopPlan(n).map(fetchLoop))),
   ]);
-  return { nodes, observations, comparisons, loops };
+  return { nodes, observations, comparisons, hostComparisons, loops };
 }

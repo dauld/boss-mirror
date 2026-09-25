@@ -20,8 +20,7 @@
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import OverflowBanner from '@boss/web-kit/ui/OverflowBanner.svelte';
   import TierChip from './TierChip.svelte';
-  import type { Asset, Job, Account } from './types';
-  import type { Invoice } from '../finance/types';
+  import type { Asset, Job, Account, AccountOpenAr } from './types';
   import { fetchPaged, isCapped, type Paged } from '../data/paginated';
   import { fetchAccountsPage } from './api';
   import { moduleEnabled } from '@boss/web-kit/session/manifest.svelte';
@@ -55,7 +54,7 @@
   // wrong, which is why it outlived the page that shared the defect.
   const supportOn = $derived(moduleEnabled('support'));
 
-  let invoicesPage = $state<Paged<Invoice> | null>(null);
+  let openArPage = $state<Paged<AccountOpenAr> | null>(null);
   // What each secondary read did. Their `failed` arms were dropped on
   // the floor (`dPaged.kind === 'ready' ? dPaged.page : null`), and the
   // tenant-shaping below hides an all-zero column — so a failed read
@@ -64,11 +63,13 @@
   // there is nothing true to put in it, but the page now says why.
   let devicesRead = $state<ReadState>(okRead);
   let jobsRead = $state<ReadState>(okRead);
-  let invoicesRead = $state<ReadState>(okRead);
+  let openArRead = $state<ReadState>(okRead);
 
   let devices = $derived(devicesPage?.data ?? []);
   let jobs = $derived(jobsPage?.data ?? []);
-  let invoices = $derived(invoicesPage?.data ?? []);
+  let openArByAccount = $derived(
+    new Map((openArPage?.data ?? []).map((r) => [r.account_id, r.open_ar_cents])),
+  );
 
   $effect(() => {
     let cancelled = false;
@@ -76,7 +77,7 @@
     (async () => {
       try {
         const includeJobs = supportOn;
-        const [pPaged, dPaged, jPaged, iPaged] = await Promise.all([
+        const [pPaged, dPaged, jPaged, arPaged] = await Promise.all([
           // The directory itself is enveloped since backlog 2d1d298e
           // (2026-09-23) — it was an unbounded bare array, so this list
           // could not say when it was incomplete.
@@ -89,10 +90,14 @@
           includeJobs
             ? fetchPaged<Job>('/api/jobs?department=support&limit=5000')
             : Promise.resolve(null),
-          // Open AR — pull invoices, filter client-side to unpaid.
-          // Bounded at 10k; the OverflowBanner below surfaces
-          // truncation if a tenant blows past it.
-          fetchPaged<Invoice>('/api/commerce/invoices?limit=10000'),
+          // Open AR — the service's per-account sum over every invoice
+          // still owed. This read was `/api/commerce/invoices?limit=10000`
+          // summed here, and its comment promised an OverflowBanner that
+          // never existed; the service clamps that list to 1,000 rows,
+          // so past a thousand invoices the money figure was short in
+          // silence (backlog 5257bfa9). An aggregate is one row per
+          // owing account and is never truncated.
+          fetchPaged<AccountOpenAr>('/api/commerce/open-ar'),
         ]);
         if (pPaged.kind === 'failed') throw new Error(pPaged.error);
         if (!cancelled) {
@@ -103,10 +108,10 @@
           // account list itself.
           devicesPage = dPaged.kind === 'ready' ? dPaged.page : null;
           jobsPage = jPaged && jPaged.kind === 'ready' ? jPaged.page : null;
-          invoicesPage = iPaged.kind === 'ready' ? iPaged.page : null;
+          openArPage = arPaged.kind === 'ready' ? arPaged.page : null;
           devicesRead = readStateOf(dPaged);
           jobsRead = jPaged ? readStateOf(jPaged) : okRead;
-          invoicesRead = readStateOf(iPaged);
+          openArRead = readStateOf(arPaged);
           loading = false;
         }
       } catch (e) {
@@ -131,9 +136,7 @@
           j.status !== 'closed' &&
           j.status !== 'cancelled',
       ).length;
-      const openArCents = invoices
-        .filter((i) => i.account_id === c.id && i.paid_on == null)
-        .reduce((sum, i) => sum + (i.amount_cents ?? 0), 0);
+      const openArCents = openArByAccount.get(c.id) ?? 0;
       return {
         account: c,
         deviceCount: accountDevices.length,
@@ -194,7 +197,7 @@
     [
       { what: 'installed devices', read: devicesRead, column: 'Equipment' },
       { what: 'service jobs', read: jobsRead, column: 'Open SRs' },
-      { what: 'invoices', read: invoicesRead, column: 'Open AR' },
+      { what: 'open receivables', read: openArRead, column: 'Open AR' },
     ].flatMap((f) => (f.read.kind === 'failed' ? [{ ...f, error: f.read.error }] : [])),
   );
 

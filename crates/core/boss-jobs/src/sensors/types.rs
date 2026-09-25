@@ -242,6 +242,25 @@ pub struct Reading {
     pub packet_id: Option<String>,
 }
 
+/// One sensor's readings over a window — the count a retro reads
+/// (backlog 35baed54). The window is `[since, until)` over
+/// `observed_at`, the instant the SOURCE gives and the one the
+/// retention sweep ages by. `arrived` counts every reading in it,
+/// `stamped` those that opened a packet (`unstamped` is the rest), and
+/// `packets` names the packets, sorted and distinct. Until this, the
+/// readings door answered the unstamped readings only, so a reading
+/// that opened a packet left every count the moment it did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadingsWindow {
+    pub sensor_id: String,
+    pub since: DateTime<Utc>,
+    pub until: DateTime<Utc>,
+    pub arrived: u64,
+    pub stamped: u64,
+    pub unstamped: u64,
+    pub packets: Vec<String>,
+}
+
 /// What a poll stamps on its sensor when it is done: when it ran, and
 /// the newest observation it saw (absent when it saw none, or could not
 /// read — the cursor never moves backwards and never on a failed read).

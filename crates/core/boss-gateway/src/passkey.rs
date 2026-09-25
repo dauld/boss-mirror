@@ -673,6 +673,44 @@ pub async fn register_finish(
 pub struct AssertBeginBody {
     job_id: String,
     step_id: String,
+    /// The step content the approver was SHOWN — its title and metadata
+    /// as the surface rendered them, with the surface's own writes
+    /// folded in. The challenge binds the step's CURRENT shape, so a
+    /// begin whose shown content does not hash to it is refused: a swap
+    /// made after an honest page rendered is never signed (backlog
+    /// fd7090cc, re-review of 2026-09-25). The page supplies this, so it
+    /// is not proof of what was on screen. `Option` only so its absence
+    /// is refused in words rather than by the extractor's.
+    shown: Option<ShownStep>,
+}
+
+/// What a surface rendered of the step it is about to have signed.
+#[derive(Deserialize)]
+pub struct ShownStep {
+    title: String,
+    metadata: Value,
+}
+
+/// Why a begin's shown content cannot be what the passkey signs, or
+/// `None` when it is exactly the step as it stands. Hashed with the one
+/// definition — `boss_core::job::step_shape_hash`, the function the
+/// jobs service binds a presence stamp with — so the browser carries no
+/// copy of the canonical form (CLAUDE.md §9a).
+fn shown_mismatch(shown: Option<&ShownStep>, current_shape: &str) -> Option<ErrResp> {
+    let Some(shown) = shown else {
+        return Some(err(
+            StatusCode::BAD_REQUEST,
+            "the ceremony names no shown step content — the surface must send the title \
+             and metadata it rendered, so a step changed since then is refused",
+        ));
+    };
+    if boss_core::job::step_shape_hash(&shown.title, &shown.metadata) == current_shape {
+        return None;
+    }
+    Some(err(
+        StatusCode::PRECONDITION_FAILED,
+        "this step changed since it was shown — reload it and read it again before approving",
+    ))
 }
 
 pub async fn assert_begin(
@@ -750,6 +788,16 @@ pub async fn assert_begin(
     let title = step["title"].as_str().unwrap_or_default();
     let metadata = step.get("metadata").cloned().unwrap_or(Value::Null);
     let shape_hash = boss_core::job::step_shape_hash(title, &metadata);
+    // WHAT IS SIGNED IS WHAT WAS SHOWN, checked before any passkey is
+    // read or challenge minted.
+    if let Some(r) = shown_mismatch(body.shown.as_ref(), &shape_hash) {
+        let reason = if r.0 == StatusCode::BAD_REQUEST {
+            "no shown content"
+        } else {
+            "step changed since it was shown"
+        };
+        return refused(reason, r);
+    }
 
     let nonce = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let challenge = presence_challenge(&shape_hash, &nonce);

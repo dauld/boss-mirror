@@ -15,7 +15,8 @@
 //   reads  — 3 with the support module off, 4 with it on (the live
 //            instance): the account directory, /api/assets,
 //            /api/jobs?department=support (support on only), and
-//            /api/commerce/invoices?limit=10000;
+//            /api/commerce/open-ar (the service's per-account sum —
+//            it was /api/commerce/invoices?limit=10000 until 5257bfa9);
 //   writes — 0;
 //   controls — 1 search input; tier buttons: All + one per (account,
 //            tier) Class + No tier when an account has none (backlog
@@ -24,12 +25,13 @@
 //            account link per row, and the row itself navigates to the
 //            same place (the link owns its own click, so that is ONE
 //            navigation — backlog 18890a16); up to
-//            3 OverflowBanners (accounts, devices, service jobs — none
-//            for invoices).
+//            3 OverflowBanners (accounts, devices, service jobs — the
+//            open-AR read is an aggregate and is never truncated).
 //
 // Lines that pin a FILED gap's current behaviour name the gap: 4ddeb106
-// (the page is built for the used-device-shop tenant — a DESIGN question)
-// and 5257bfa9 (open AR is computed from 10,000 invoices client-side).
+// (the page is built for the used-device-shop tenant — a DESIGN question).
+// 5257bfa9 (open AR was computed from a capped invoice list client-side)
+// is answered: its lines below now pin the answer.
 // They are meant to be edited by the car that answers the gap, so the
 // answer shows up here as a changed expectation instead of a
 // silently-passing one. Lines marked UNFILED pin behaviour this spec
@@ -58,13 +60,13 @@ const paged = (data: ReadonlyArray<unknown>, limit: number, total = data.length)
 const ACCOUNTS_URL = '/api/people/accounts?limit=1000';
 const ASSETS_URL = '/api/assets?limit=1000';
 const JOBS_URL = '/api/jobs?department=support&limit=5000';
-const INVOICES_URL = '/api/commerce/invoices?limit=10000';
-const PAGE_READS: ReadonlySet<string> = new Set([ACCOUNTS_URL, ASSETS_URL, JOBS_URL, INVOICES_URL]);
+const OPEN_AR_URL = '/api/commerce/open-ar';
+const PAGE_READS: ReadonlySet<string> = new Set([ACCOUNTS_URL, ASSETS_URL, JOBS_URL, OPEN_AR_URL]);
 
 const ACCOUNTS = /\/api\/people\/accounts\?limit=1000$/;
 const ASSETS = /\/api\/assets\?limit=1000$/;
 const JOBS = /\/api\/jobs\?department=support&limit=5000$/;
-const INVOICES = /\/api\/commerce\/invoices\?limit=10000$/;
+const OPEN_AR = /\/api\/commerce\/open-ar$/;
 
 // ── Fixtures ────────────────────────────────────────────────────────
 
@@ -129,17 +131,14 @@ const JOBS_BODY = [
   job('job-3', 'acct-anchor', 'cancelled'),
 ];
 
-const invoice = (id: string, account_id: string, amount_cents: number, paid_on: string | null) => ({
-  id, account_id, amount_cents, currency: 'USD', status: paid_on ? 'paid' : 'open',
-  issued_on: '2026-08-01', due_on: '2026-09-01', paid_on,
+/// One row of `GET /api/commerce/open-ar` (AccountOpenAr): the service's
+/// sum over every invoice the account still owes.
+const openAr = (account_id: string, open_ar_cents: number, open_count: number) => ({
+  account_id, open_ar_cents, open_count,
 });
-/// Zed owes $1,250 on one unpaid invoice and has paid another; Anchor's
-/// only invoice is paid, so its Open AR cell is a dash.
-const INVOICES_BODY = [
-  invoice('inv-1', 'acct-zed', 125_000, null),
-  invoice('inv-2', 'acct-zed', 5_000, '2026-09-01'),
-  invoice('inv-3', 'acct-anchor', 40_000, '2026-08-15'),
-];
+/// Zed owes $1,250 on one open invoice; Anchor owes nothing, so the
+/// service has no row for it and its Open AR cell is a dash.
+const OPEN_AR_BODY = [openAr('acct-zed', 125_000, 1)];
 
 /// The fleet table, cell by cell, in server order.
 const FLEET_HEADINGS = [
@@ -162,13 +161,13 @@ async function installFleet(page: Page): Promise<void> {
   await page.route(ACCOUNTS, (r) => json(r, paged(FLEET, 1000)));
   await page.route(ASSETS, (r) => json(r, paged(ASSETS_BODY, 1000)));
   await page.route(JOBS, (r) => json(r, paged(JOBS_BODY, 5000)));
-  await page.route(INVOICES, (r) => json(r, paged(INVOICES_BODY, 10_000)));
+  await page.route(OPEN_AR, (r) => json(r, paged(OPEN_AR_BODY, OPEN_AR_BODY.length)));
 }
 
 /// The live instance: the manifest it serves (MODULES_LIVE, support on),
 /// INLINED as the gateway inlines it into index.html
 /// (`window.__BOSS_TENANT_MANIFEST__`, 5578e42d) so the shell is ready
-/// before first paint, and the live directory. Assets and invoices
+/// before first paint, and the live directory. Assets and open AR
 /// answer empty: neither service is on the machine door's port table,
 /// so their live volume is undetermined (the audit's measure step), and
 /// empty is the honest stand-in. The ticket read answers empty because
@@ -187,7 +186,7 @@ async function installLive(page: Page): Promise<void> {
   await page.route(ACCOUNTS, (r) => json(r, paged([SPONSOR], 1000)));
   await page.route(ASSETS, (r) => json(r, paged([], 1000)));
   await page.route(JOBS, (r) => json(r, paged([], 5000)));
-  await page.route(INVOICES, (r) => json(r, paged([], 10_000)));
+  await page.route(OPEN_AR, (r) => json(r, paged([], 0)));
 }
 
 /// The shell's own non-GET: App.svelte records every route open
@@ -239,7 +238,7 @@ test.describe(`/ux/accounts — the live instance (the manifest recorded ${LIVE_
     expect(await settledReads(page, () => seen.reads.length, 4)).toBe(4);
     expect([...seen.reads].sort()).toEqual([...PAGE_READS].sort());
     // Gap 4ddeb106: three of the four reads are a device fleet's (assets),
-    // a service desk's (tickets) and an AR ledger's (invoices); on this
+    // a service desk's (tickets) and an AR ledger's (open AR); on this
     // instance they answer nothing an account row shows, so their four
     // columns stay hidden.
 
@@ -324,25 +323,34 @@ test.describe('/ux/accounts — the fleet shape (support on): the list', () => {
     expect(seen.writes.map((r) => `${r.method()} ${r.url()}`)).toEqual([]);
   });
 
-  // Gap 5257bfa9: open AR is the sum of the account's invoices with no
-  // paid_on, filtered in the browser from one 10,000-row read.
-  test('Open AR sums only unpaid invoices, filtered client-side from the one invoices read', async ({ page }) => {
+  // Backlog 5257bfa9, answered: Open AR was summed in the browser from
+  // `/api/commerce/invoices?limit=10000` — a list the service clamps to
+  // 1,000 rows — so past a thousand invoices the money figure was short
+  // and no banner said so. The service sums every invoice now
+  // (boss-commerce tests/open_ar.rs pins the sum past the clamp); the
+  // page shows the account's figure as served and reads no invoice list.
+  test('Open AR is the service\'s per-account sum, read once, and no invoice list is read', async ({ page }) => {
     const seen = watch(page);
+    const invoiceLists: string[] = [];
+    page.on('request', (req) => {
+      const url = new URL(req.url());
+      if (url.pathname === '/api/commerce/invoices') invoiceLists.push(`${url.pathname}${url.search}`);
+    });
     await installFleet(page);
-    await page.route(INVOICES, (r) =>
-      json(r, paged([...INVOICES_BODY, invoice('inv-4', 'acct-zed', 2_550, null)], 10_000)),
-    );
+    await page.route(OPEN_AR, (r) => json(r, paged([openAr('acct-zed', 127_550, 2)], 1)));
     await mountFleet(page);
-    // 125,000 + 2,550 cents, whole-dollar precision.
+    // 127,550 cents, whole-dollar precision.
     await expect(body(page).locator('tbody tr').nth(1).locator('td').nth(6)).toHaveText('$1,276');
-    expect(seen.reads.filter((r) => r === INVOICES_URL)).toHaveLength(1);
+    expect(await settledReads(page, () => seen.reads.length, 4)).toBe(4);
+    expect(seen.reads.filter((r) => r === OPEN_AR_URL)).toHaveLength(1);
+    expect(invoiceLists).toEqual([]);
   });
 
   test('columns whose value is zero for every row are hidden, one by one', async ({ page }) => {
     await installFleet(page);
     await page.route(ASSETS, (r) => json(r, paged([asset('a-3', 'installed', null)], 1000)));
     await page.route(JOBS, (r) => json(r, paged([job('job-2', 'acct-zed', 'closed')], 5000)));
-    await page.route(INVOICES, (r) => json(r, paged([invoice('inv-3', 'acct-anchor', 40_000, '2026-08-15')], 10_000)));
+    await page.route(OPEN_AR, (r) => json(r, paged([], 0)));
     await mountFleet(page);
 
     await expect(body(page).locator('thead th')).toHaveText([
@@ -590,7 +598,7 @@ test.describe('/ux/accounts — a fourth tier, added as one Class row', () => {
 
 // ── Overflow banners ────────────────────────────────────────────────
 
-test.describe('/ux/accounts — a capped read says so, except the invoices read', () => {
+test.describe('/ux/accounts — a capped read says so', () => {
   test('a capped directory, device read and ticket read each raise their banner', async ({ page }) => {
     await installFleet(page);
     await page.route(ACCOUNTS, (r) => json(r, paged(FLEET, 1000, 1_500)));
@@ -608,17 +616,11 @@ test.describe('/ux/accounts — a capped read says so, except the invoices read'
     await expect(title(page)).toHaveText('3 accounts');
   });
 
-  // Gap 5257bfa9, and UNFILED beside it: the read's own comment says
-  // "the OverflowBanner below surfaces truncation", but there is no
-  // invoices banner. Past 10,000 invoices Open AR is short and nothing
-  // on the page says so.
-  test('a capped invoices read raises no banner', async ({ page }) => {
-    await installFleet(page);
-    await page.route(INVOICES, (r) => json(r, paged(INVOICES_BODY, 10_000, 25_000)));
-    await mountFleet(page);
-    await expect(body(page).locator('tbody tr').nth(1).locator('td').nth(6)).toHaveText('$1,250');
-    await expect(banners(page)).toHaveCount(0);
-  });
+  // Backlog 5257bfa9 pinned here that a capped invoices read raised no
+  // banner, so Open AR was short in silence. There is no capped read
+  // left to disclose: the open-AR read is one row per owing account,
+  // summed by the service over every invoice, and is never truncated
+  // (the Open AR test above pins that no invoice list is read).
 });
 
 // ── Empty, loading, and failed reads ────────────────────────────────
@@ -631,7 +633,7 @@ test.describe('/ux/accounts — empty, loading, and a failed read', () => {
     await page.route(ACCOUNTS, (r) => json(r, paged([], 1000)));
     await page.route(ASSETS, (r) => json(r, paged([], 1000)));
     await page.route(JOBS, (r) => json(r, paged([], 5000)));
-    await page.route(INVOICES, (r) => json(r, paged([], 10_000)));
+    await page.route(OPEN_AR, (r) => json(r, paged([], 0)));
     await mountPage(page, PATH);
 
     await expect(status(page)).toHaveText('No accounts match those filters.');
@@ -699,7 +701,7 @@ test.describe('/ux/accounts — empty, loading, and a failed read', () => {
   for (const [name, re, url, what, gone] of [
     ['GET /api/assets', ASSETS, ASSETS_URL, 'installed devices', 'Equipment'],
     ['GET /api/jobs?department=support', JOBS, JOBS_URL, 'service jobs', 'Open SRs'],
-    ['GET /api/commerce/invoices', INVOICES, INVOICES_URL, 'invoices', 'Open AR'],
+    ['GET /api/commerce/open-ar', OPEN_AR, OPEN_AR_URL, 'open receivables', 'Open AR'],
   ] as const) {
     test(`a failed ${name} hides the ${gone} column and says why`, async ({ page }) => {
       await installFleet(page);

@@ -244,23 +244,6 @@ impl PackagingAllocate {
         Ok(v.get("total").and_then(|x| x.as_i64()).unwrap_or(0))
     }
 
-    async fn put_step(
-        &self,
-        job_id: &str,
-        step_id: &str,
-        body: JsonValue,
-        rule: &str,
-    ) -> Result<(), HandlerError> {
-        let url = format!(
-            "{}/api/jobs/{}/steps/{}",
-            self.jobs_base.trim_end_matches('/'),
-            job_id,
-            step_id
-        );
-        self.write_step(reqwest::Method::PUT, &url, body, rule)
-            .await
-    }
-
     /// One step write — the PUT, or the merge door's PATCH — refused
     /// loudly on a non-2xx, naming the method, the url and the answer.
     async fn write_step(
@@ -291,9 +274,9 @@ impl PackagingAllocate {
     }
 
     /// Write the packaged qty + excise onto the produce step that yields
-    /// `sku`. Metadata is cloned + overwritten (PUT replaces top-level keys
-    /// wholesale). No status change — the step stays pending until the fork
-    /// lets it become ready and the workforce packages it.
+    /// `sku` ([`produce_stamp`]), through the step merge door. No status
+    /// change — the step stays pending until the fork lets it become
+    /// ready and the workforce packages it.
     async fn stamp_produce_qty(
         &self,
         job_id: &str,
@@ -303,42 +286,23 @@ impl PackagingAllocate {
         keg_bbl: f64,
         rule: &str,
     ) -> Result<(), HandlerError> {
-        for s in steps {
-            let Some(sid) = s.get("id").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let Some(md) = s.get("metadata").and_then(|v| v.as_object()) else {
-                continue;
-            };
-            let Some(produces) = md.get("produces_products").and_then(|v| v.as_array()) else {
-                continue;
-            };
-            if !produces
-                .iter()
-                .any(|p| p.get("sku").and_then(|v| v.as_str()) == Some(sku))
-            {
-                continue;
-            }
-            let mut new_produces = produces.clone();
-            for p in new_produces.iter_mut() {
-                if p.get("sku").and_then(|v| v.as_str()) == Some(sku) {
-                    p["qty"] = json!(kegs);
-                }
-            }
-            let mut new_md = md.clone();
-            new_md.insert(
-                "produces_products".to_string(),
-                JsonValue::Array(new_produces),
-            );
-            new_md.insert(
-                "excise_bbl".to_string(),
-                json!((kegs as f64 * keg_bbl).round() as i64),
-            );
-            return self
-                .put_step(job_id, sid, json!({ "metadata": new_md }), rule)
-                .await;
-        }
-        Ok(())
+        let levied = (kegs as f64 * keg_bbl).round() as i64;
+        let Some((sid, fields)) = produce_stamp(steps, sku, kegs, levied) else {
+            return Ok(());
+        };
+        let url = format!(
+            "{}/api/jobs/{}/steps/{}/metadata",
+            self.jobs_base.trim_end_matches('/'),
+            job_id,
+            sid
+        );
+        self.write_step(
+            reqwest::Method::PATCH,
+            &url,
+            JsonValue::Object(fields),
+            rule,
+        )
+        .await
     }
 }
 
@@ -471,6 +435,54 @@ impl Handler for PackagingAllocate {
     }
 }
 
+/// The produce-step key the levied volume is stamped under — the name
+/// the tenant's ledger rule reads.
+const LEVIED_KEY: &str = "excise_bbl";
+
+/// PURE: the first step of `steps` that produces `sku`, and the two keys
+/// that stamp its packaged quantity: `produces_products` with `sku`'s
+/// `qty` set, and the volume the tax is levied on. ONLY those two — they
+/// ride the step merge door, which keeps the step's other keys on the row
+/// (backlog e39a9d2a). This was a PUT of the step's whole metadata as the
+/// Job read it before the loop, and the PUT replaces metadata wholesale.
+///
+/// NOT FIXED HERE, and worth its own item: `produces_products` is itself
+/// built from that pre-loop read, so two SKUs stamped onto ONE produce
+/// step still overwrite each other's `qty` (the second write carries the
+/// first SKU's stale 0). Every produce step the seeded tenant declares
+/// yields one SKU, so it has not bitten.
+fn produce_stamp(
+    steps: &[JsonValue],
+    sku: &str,
+    qty: i64,
+    levied_volume: i64,
+) -> Option<(String, serde_json::Map<String, JsonValue>)> {
+    steps.iter().find_map(|s| {
+        let sid = s.get("id").and_then(|v| v.as_str())?;
+        let produces = s.pointer("/metadata/produces_products")?.as_array()?;
+        if !produces
+            .iter()
+            .any(|p| p.get("sku").and_then(|v| v.as_str()) == Some(sku))
+        {
+            return None;
+        }
+        let stamped: Vec<JsonValue> = produces
+            .iter()
+            .map(|p| {
+                let mut p = p.clone();
+                if p.get("sku").and_then(|v| v.as_str()) == Some(sku) {
+                    p["qty"] = json!(qty);
+                }
+                p
+            })
+            .collect();
+        let mut fields = serde_json::Map::new();
+        fields.insert("produces_products".into(), JsonValue::Array(stamped));
+        fields.insert(LEVIED_KEY.into(), json!(levied_volume));
+        Some((sid.to_string(), fields))
+    })
+}
+
 /// PURE: the per-format fork outcomes the allocation step records —
 /// `outcome_<key>` = `package` or `skip` — and nothing else, because
 /// they ride the step merge door, which keeps every key it is not sent.
@@ -555,6 +567,35 @@ mod tests {
             JsonValue::Object(out),
             json!({"outcome_half": "package", "outcome_SKU-B": "skip"})
         );
+    }
+
+    /// THE PRODUCE STAMP MERGES ITS TWO KEYS AND NOTHING ELSE (backlog
+    /// e39a9d2a, stage 2). The packaged quantity was written by PUTting
+    /// the produce step's whole metadata back — the copy the Job read
+    /// before the loop, plus the new quantity and levied volume — so the
+    /// PUT, which replaces metadata wholesale, carried every other key
+    /// along from a read that could be stale. It now names only those
+    /// two keys, through the step merge door, so the step's other keys
+    /// stay as they are on the row.
+    #[test]
+    fn the_produce_stamp_names_only_the_quantity_and_the_levied_volume() {
+        let steps = vec![
+            json!({"id": "s-alloc", "metadata": {"target_skus": ["SKU-A"]}}),
+            json!({"id": "s-half", "metadata": {
+                "authority_role": "platform-admin",
+                "produces_products": [{"sku": "SKU-A", "qty": 0}, {"sku": "SKU-C", "qty": 4}],
+            }}),
+        ];
+        let (sid, fields) = produce_stamp(&steps, "SKU-A", 20, 10).expect("SKU-A is produced");
+        assert_eq!(sid, "s-half");
+        let mut expected = serde_json::Map::new();
+        expected.insert(
+            "produces_products".into(),
+            json!([{"sku": "SKU-A", "qty": 20}, {"sku": "SKU-C", "qty": 4}]),
+        );
+        expected.insert(LEVIED_KEY.into(), json!(10));
+        assert_eq!(fields, expected);
+        assert!(produce_stamp(&steps, "SKU-Z", 1, 1).is_none());
     }
 
     #[test]

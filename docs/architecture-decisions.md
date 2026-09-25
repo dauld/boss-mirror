@@ -1771,9 +1771,58 @@ ops-request's `approve` step, the first presence-assured step in the
 system — the plan rides in that step's metadata, so the WebAuthn
 assertion over its shape hash signs the plan's bytes with no second hash
 to keep in agreement, and an edit after the ceremony voids the stamp.
-The capability a runner would verify is not built, so the ops-runner
-refuses every `requires_approval` verb: the gate exists before the
-power.
+Then the runner half (backlog `fd7090cc`, 2026-09-24): `boss ops` files
+an approval verb with `requires_approval` and without its hash; the
+runner renders the verb's declared `plan_verb` on the host onto the
+approve step, and closes the request refused, with the plan verb's
+words, when that refuses; it runs the write only when the approve step
+is completed with a presence stamp for every required role, bound to
+the step's current shape hash (recomputed on the host and pinned equal
+to the server's), signed within ten minutes; it claims `execute` active
+before the argv runs and never runs an active one; and it hands the
+write sha256 of the SIGNED plan as `plan_sha256`, so the write's own
+re-render refuses drift. q2's weakness stands as stated: the runner
+trusts the SoR's sign-off record. `commission-a-disk` stays inert until
+its script takes that hash. The car's security review (2026-09-24)
+held it for seven further tightenings, all built: the stamp must be by
+an employee the verb file names in `approvers` (03451237 q2's named
+list, not a role); `step_shape_hash` JSON-encodes its keys, in Rust and
+in the runner's jq, because raw keys let `{"zz":1,"zzz":2}` and
+`{"zz:1,zzz":2}` share a canonical form; the runner signs the verb,
+host and args with the plan and the hash of the bytes it rendered, and
+compares the request to them before building an argv; it re-renders the
+plan verb before claiming and refuses a signed plan that is not those
+bytes; it re-reads the job immediately before a claim that is a
+compare-and-set through the claim door, signed as a claimant unique to
+the pass; an execute left `active` records "claimed, outcome unknown"
+on the request and is never closed `refused`; and an arg carrying a
+control character is refused, because jq's `$` matches before a
+trailing newline. The re-review (2026-09-25) found the claim could
+never succeed live: the dispatcher nominated every ops-request execute
+to the agent executor ~50ms after ready, and the claim door admits a
+ready step only unheld or to its holder. ops-request's execute is now
+`claimable` (a role queue, never a nomination — not a fixed runner
+assignee, because the door is idempotent for its holder and single-use
+needs each pass a different claimant); a held execute is refused by
+name, and "claimed, outcome unknown" is recorded only for a holder
+shaped like one of the runner's own passes. The presence ceremony now
+names the step content the surface rendered, and the gateway's
+`assert_begin` refuses (412) one that does not hash to the step as it
+stands. That guards an HONEST page from a swap between its render and
+the key press; it does not prove what was on screen, because the page
+supplies the content it names. The sign-off surface shows a
+presence step's signed document (the `plan`) read-only and verbatim,
+never as a text input that drops its newlines. The adversarial
+re-review (2026-09-25) found a REJECTION ran the write: Reject runs the
+same ceremony as Approve, so a rejected plan arrived as a completed
+approve step with a valid bound presence stamp. The runner now requires
+the approve step's `decision` (inside the signed shape) to be exactly
+`approved`, and ops-request's execute is ready only on that decision;
+any other decision, or none, readies the `refused` terminal. Still
+open: the approve step's runner-written keys
+(`plan`, `verb`, `host`, `args`, `rendered_plan_sha256`) are writable by
+anyone who can write the step — the runner's re-render and the ceremony
+binding refuse a swap, but do not prevent one.
 
 **Presence authorises a break-glass enrolment, and the bootstrap token
 retires** (design `03451237`, David 2026-09-22, all four questions

@@ -274,3 +274,49 @@ async fn a_push_only_sensor_lands_without_a_period_and_its_readings_are_swept_by
             .unwrap();
     assert_eq!(left, ["owed", "view-new"]);
 }
+
+/// The windowed count a retro reads (backlog 35baed54): readings
+/// OBSERVED in `[since, until)`, how many carry a packet, and which
+/// packets — the same answer the in-memory twin gives, and an
+/// undeclared sensor is named rather than counted as zero.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_counts_arrivals_stamps_and_packets() {
+    let db = TestDb::new().await;
+    let repo = PgSensors::new(db.pool.clone());
+    repo.publish("acme", &[input("s"), input("other")])
+        .await
+        .unwrap();
+    repo.record(
+        "s",
+        &[
+            reading("before", t(-1)),
+            reading("ch_1", t(0)),
+            reading("ch_2", t(5)),
+            reading("ch_3", t(9)),
+            reading("at-until", t(10)),
+        ],
+    )
+    .await
+    .unwrap();
+    repo.record("other", &[reading("ch_1", t(1))])
+        .await
+        .unwrap();
+    repo.stamp("s", "ch_1", "job-b").await.unwrap();
+    repo.stamp("s", "ch_3", "job-a").await.unwrap();
+    repo.stamp("s", "before", "job-z").await.unwrap();
+
+    let w = repo.window("s", t(0), t(10)).await.unwrap();
+    assert_eq!(w.sensor_id, "s");
+    assert_eq!((w.arrived, w.stamped, w.unstamped), (3, 2, 1), "{w:?}");
+    assert_eq!(w.packets, ["job-a", "job-b"], "sorted, this window only");
+    assert_eq!((w.since, w.until), (t(0), t(10)));
+
+    let empty = repo.window("s", t(20), t(30)).await.unwrap();
+    assert_eq!((empty.arrived, empty.stamped), (0, 0));
+    assert!(empty.packets.is_empty());
+
+    assert!(matches!(
+        repo.window("nobody", t(0), t(10)).await,
+        Err(SensorsError::UnknownSensor(_))
+    ));
+}
