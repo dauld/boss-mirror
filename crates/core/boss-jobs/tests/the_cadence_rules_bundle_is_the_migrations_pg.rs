@@ -149,13 +149,41 @@ async fn ahead_of_live(registry: &PgCadence, names: &[String]) -> usize {
         .count()
 }
 
+/// The bundle's rules no migration ever seeded — rules BORN in the
+/// bundle, which since the cutover is the only way a rule can be born
+/// (`migrations-declare-schema-only` refuses the insert). The first was
+/// `train-dock-refresh` (design 42279fb2, 2026-09-25).
+///
+/// Derived, like [`ahead_of_live`], never assumed zero: the pins below
+/// took "the bundle names exactly the migrations' names" as the whole
+/// completeness check, which was true only until the first rule was
+/// added the way the lint requires — and then PIN 1 would have refused
+/// the only legal way to add one.
+fn born_in_bundle(migrated_names: &[String]) -> Vec<String> {
+    bundle()
+        .iter()
+        .map(|s| s.name().to_string())
+        .filter(|n| !migrated_names.contains(n))
+        .collect()
+}
+
+/// Every name either side knows, so a read after the seed sees a rule
+/// born in the bundle as well as the migrations' own.
+fn every_declared_name(migrated_names: &[String]) -> Vec<String> {
+    let mut all = migrated_names.to_vec();
+    all.extend(born_in_bundle(migrated_names));
+    all
+}
+
 /// PIN 1 — every active row the migrations produce is declared in the
-/// bundle, column for column, and the bundle declares nothing else.
+/// bundle, column for column; anything else the bundle declares is a
+/// rule born there, which no migration may seed.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_bundle_declares_every_active_row_the_migrations_produce() {
     let db = TestDb::new().await;
     let registry = PgCadence::new(db.pool.clone());
-    let live = active_rows(&registry, &every_name(&db).await).await;
+    let migrated_names = every_name(&db).await;
+    let live = active_rows(&registry, &migrated_names).await;
     assert!(!live.is_empty(), "the migrations seed at least one rule");
     for (name, why) in RETIRED_BY_DECISION {
         assert!(
@@ -168,14 +196,16 @@ async fn the_bundle_declares_every_active_row_the_migrations_produce() {
     let from_migrations = declarations(&expected_from(live));
     let from_bundle = declarations(&bundle());
 
+    let born = born_in_bundle(&migrated_names);
     let migration_names: Vec<&String> = from_migrations.keys().collect();
-    let bundle_names: Vec<&String> = from_bundle.keys().collect();
+    let bundle_names: Vec<&String> = from_bundle.keys().filter(|n| !born.contains(n)).collect();
     assert_eq!(
         migration_names, bundle_names,
-        "the bundle's names must be exactly the migrations' active names less \
-         RETIRED_BY_DECISION (a rule the migrations seed and the bundle does not \
-         declare has no home once migrations declare schema only — unless its \
-         retirement is written down in that list)"
+        "the bundle's names must be the migrations' active names less \
+         RETIRED_BY_DECISION, plus only rules born in the bundle (a rule the \
+         migrations seed and the bundle does not declare has no home once \
+         migrations declare schema only — unless its retirement is written down in \
+         that list)"
     );
     // THE BUNDLE MAY BE AHEAD; IT MAY NEVER BE BEHIND; AND WHERE THE
     // VERSIONS MATCH, EVERY COLUMN MUST AGREE.
@@ -225,7 +255,9 @@ async fn the_bundle_declares_every_active_row_the_migrations_produce() {
 async fn an_emptied_registry_is_rebuilt_from_the_bundle_alone() {
     let db = TestDb::new().await;
     let registry = PgCadence::new(db.pool.clone());
-    let names = every_name(&db).await;
+    // Read back every name either side knows: a rule born in the bundle
+    // is in no migrated row, and the rebuilt registry must hold it too.
+    let names = every_declared_name(&every_name(&db).await);
     // WHAT THE SEED MUST REBUILD IS THE BUNDLE, because the bundle is
     // the home (backlog cab50f4c). Reading the expectation off the
     // migrations instead would assert that an emptied registry comes
@@ -316,15 +348,17 @@ async fn a_present_registry_is_left_untouched() {
     // BEFORE the seed, because the seed is what changes it: read after,
     // and every row it just published looks like it was never ahead.
     let ahead = ahead_of_live(&registry, &names).await;
+    let born = born_in_bundle(&names).len();
 
     let report = seed_cadence_rules(&registry, &bundle(), &actor(), chrono::Utc::now(), false)
         .await
         .expect("a present registry is not a failure");
     // Every row is Present EXCEPT the ones the bundle has moved ahead,
-    // which publish — that is the edit path, not a surprise.
+    // which publish — that is the edit path, not a surprise — and the
+    // ones born in the bundle, which no migration seeded.
     assert_eq!(
         report.count(|o| matches!(o, SeedOutcome::Present)),
-        bundle().len() - ahead,
+        bundle().len() - ahead - born,
         "every bundle row at the live version is already present: {report}"
     );
     assert_eq!(
@@ -332,10 +366,16 @@ async fn a_present_registry_is_left_untouched() {
         ahead,
         "and exactly the rows the bundle moved ahead are published: {report}"
     );
-    // NOTHING IS INSERTED, which is the property this pin is really
-    // for: a seed over a present registry must never create a rule
-    // that was not already there, whatever the versions say.
-    assert_eq!(report.count(|o| matches!(o, SeedOutcome::Inserted)), 0);
+    // NOTHING THE REGISTRY HELD IS INSERTED AGAIN, which is the property
+    // this pin is really for: a seed over a present registry creates
+    // only the rules born in the bundle since the migrations ran —
+    // exactly what a deployed system of record sees on the boot that
+    // first carries one.
+    assert_eq!(
+        report.count(|o| matches!(o, SeedOutcome::Inserted)),
+        born,
+        "only a rule born in the bundle is inserted: {report}"
+    );
 
     let rows_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cadence_rules")
         .fetch_one(&db.pool)
@@ -347,8 +387,9 @@ async fn a_present_registry_is_left_untouched() {
     // Asserting a flat count assumed no rule ever leads.
     assert_eq!(
         rows_after,
-        rows_before + i64::try_from(ahead).expect("a small count"),
-        "a seed writes one row per version bump and nothing else"
+        rows_before + i64::try_from(ahead + born).expect("a small count"),
+        "a seed writes one row per version bump, one per rule born in the bundle, and \
+         nothing else"
     );
 
     // The rules that did NOT move are untouched, declaration for

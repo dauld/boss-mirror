@@ -470,16 +470,14 @@ spec:
             # so — boss-content-api records it as every row's `bucket`.
             - {name: BOSS_FILES_ROOT, value: /var/lib/boss/files}
             - {name: BOSS_AUTH_PROVIDER, value: local-auth}
-            # Deliberate: this is a public demonstration. Anonymous
-            # visitors get a synthetic audit-readonly session — read every
-            # projection, write nothing — so the brewery renders without a
-            # login, and the write path is what's under scrutiny.
+            # Whether an anonymous visitor may browse, and what it reads.
             # PER INSTANCE since backlog 0d2d7daa (2026-09-16): the value
-            # is `guest = true|false` in infra/cluster/instances.toml,
-            # rendered "1"|"0" by render-instance.sh. Prod is the source,
-            # so this line and prod's `guest` line change together — the
-            # flip car sets prod to false ("0" here) and the playground
-            # keeps "1".
+            # is `guest = false | "basic" | "audit"` in
+            # infra/cluster/instances.toml, rendered "0" | "basic" |
+            # "audit" by render-instance.sh (design 2830b6b7,
+            # 2026-09-25). Prod is the source, so this line and prod's
+            # `guest` line change together: the operating site takes no
+            # guests ("0" here), and the playground renders "audit".
             - {name: BOSS_GUEST_ACCESS, value: "0"}
             # THE TENANT DIRECTORY (backlog f4f5c387, car 2 of fcc1d57b;
             # David 2026-09-16 'Let's do it'). One directory holding

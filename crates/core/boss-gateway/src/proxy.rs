@@ -6,7 +6,7 @@
 //!      Login + cookie minting runs through local-auth (the v1 OSS
 //!      auth path).
 //!   1a. Refuse any method but GET/HEAD/OPTIONS from a read-only
-//!      session (the guest's `audit-readonly`) with a named 403, before
+//!      session (a guest's `visitor` or `audit-readonly`) with a named 403, before
 //!      any upstream is contacted — [`read_only_write_refusal`].
 //!   2. Forward the request to the owning service's HTTP port,
 //!      stripping hop-by-hop headers both ways, streaming the body.
@@ -150,10 +150,11 @@ pub(crate) fn writer_gate(
 /// fallback below names is no longer fetched by the web), and an
 /// allowlist of "POSTs that are really reads" is a list of holes.
 ///
-/// Read-only is `boss_core::roles::is_read_only_role` of the session's
-/// effective role (a roleless session is audit-readonly, as the
-/// role-header layer tells every service). Design 2830b6b7's `visitor`
-/// role joins that ONE predicate and is refused here with no edit.
+/// Read-only is `boss_core::roles::is_read_only_floor` of the session's
+/// effective role — `audit-readonly` and design 2830b6b7's `visitor`,
+/// the two roles a guest can carry — and a roleless session acts as a
+/// `visitor`, as the role-header layer tells every service. A role that
+/// joins that ONE list is refused here with no edit.
 pub(crate) fn read_only_write_refusal(
     session: &Session,
     method: &Method,
@@ -161,7 +162,7 @@ pub(crate) fn read_only_write_refusal(
 ) -> Option<Response> {
     let role = session.effective_role();
     let safe = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
-    if safe || !boss_core::roles::is_read_only_role(role) {
+    if safe || !boss_core::roles::is_read_only_floor(role) {
         return None;
     }
     warn!(
@@ -218,8 +219,8 @@ pub async fn handle_app(
         }
         return unauthorized();
     };
-    // The simulator's control writes were refused to audit-readonly by
-    // the service's own operator gate; the edge now refuses them first,
+    // The simulator's control writes were refused to the read-only
+    // floor by the service's own operator gate; the edge now refuses them first,
     // the same as every other upstream's (backlog 07e797b4).
     if let Some(refusal) = read_only_write_refusal(&session, req.method(), req.uri().path()) {
         return refusal;

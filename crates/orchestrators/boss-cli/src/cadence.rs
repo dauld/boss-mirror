@@ -82,8 +82,32 @@ use boss_core::calendar::{BusinessCalendar, Cadence, fires_on_with_calendar};
 
 /// The `boss train` verbs a cadence rule may fire — the same set the
 /// CLI exposes. Pinned here so a hand-edited registry row cannot make
-/// the loop spawn arbitrary arguments.
-const VERBS: &[&str] = &["preflight", "reconcile", "board", "run"];
+/// the loop spawn arbitrary arguments. `refresh` is the dock's own pass
+/// (design 42279fb2, rule `train-dock-refresh`); the table's verb CHECK
+/// is held to this list by `every_conductor_verb_is_one_the_table_accepts`.
+const VERBS: &[&str] = &["preflight", "reconcile", "board", "run", "refresh"];
+
+/// How many minutes a departure waits for the dock's re-gate round on
+/// the current main — D2 of design 42279fb2 — READ from the registry's
+/// active rows rather than decided here: the bound is protocol data, on
+/// `train-board-on-dock-depth` since its v9, and an operator moves it
+/// with a version bump like any other cadence number.
+///
+/// Every active rule that DEPARTS a train may declare one, and the
+/// largest wins: the hold is a property of a departure, and a board run
+/// by the window rule, by hand or by the depth rule is the same
+/// departure. A rule that departs nothing holds nothing (the table
+/// refuses the column there too), and anything but a positive count is
+/// no hold — never a hold forever, because a departure that cannot leave
+/// is the one failure this bound exists to make impossible.
+pub(crate) fn regate_hold_minutes(rows: &[CadenceRuleRow]) -> u32 {
+    rows.iter()
+        .filter(|r| departs_a_train(&r.verb))
+        .filter_map(|r| r.regate_hold_minutes)
+        .filter_map(|m| u32::try_from(m).ok())
+        .max()
+        .unwrap_or(0)
+}
 
 /// How far a calendar rule looks back for its most recent elapsed
 /// firing day. Comfortably covers a month, so monthly rules resolve;
@@ -242,7 +266,7 @@ fn log(msg: impl std::fmt::Display) {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CadenceRule {
     pub name: String,
-    /// A `boss train` verb: preflight | reconcile | board | run.
+    /// A `boss train` verb (`VERBS`), or `open:<kind>`.
     pub verb: String,
     pub basis: Basis,
 }
@@ -1568,6 +1592,7 @@ pub(crate) fn render_lineage(name: &str, rows: &[Value]) -> String {
             "cadence",
             "anchor_date",
             "business_calendar",
+            "regate_hold_minutes",
         ]
         .iter()
         .filter_map(|k| {
@@ -1763,6 +1788,7 @@ mod door_tests {
             cadence: Some("daily".into()),
             anchor_date: Some(NaiveDate::from_ymd_opt(2026, 8, 28).unwrap()),
             business_calendar: None,
+            regate_hold_minutes: None,
         }
     }
 
@@ -1827,6 +1853,7 @@ mod door_tests {
             cadence: None,
             anchor_date: None,
             business_calendar: None,
+            regate_hold_minutes: None,
         }]));
         let base = serve(cadence.clone()).await;
         let wire = crate::steps::Wire::at(base, named());
@@ -1921,6 +1948,100 @@ mod tests {
         for v in VERBS {
             assert_eq!(parse_action(v).unwrap(), Action::Train((*v).to_string()));
         }
+    }
+
+    /// D1 of design 42279fb2: the dock refreshes on a rule of its own.
+    /// `refresh` is a conductor verb, and it departs nothing — so the
+    /// loop never holds it for the track (the verb holds itself), and an
+    /// exit-0 refresh is never mistaken for an idle BOARD.
+    #[test]
+    fn a_refresh_is_a_conductor_verb_that_departs_nothing() {
+        assert_eq!(
+            parse_action("refresh").unwrap(),
+            Action::Train("refresh".into())
+        );
+        assert!(!departs_a_train("refresh"));
+        assert_eq!(recorded_rc("refresh", 0, false), 0);
+    }
+
+    /// A FACT THAT LIVES TWICE (CLAUDE.md §9a): the verbs this loop will
+    /// spawn, and the verbs `cadence_rules` accepts. A verb here the
+    /// table refuses is a rule the bundle seed cannot land — the boot
+    /// that tries fails, naming the rule — so the newest migration that
+    /// restates `cadence_rules_verb_check` must name every one.
+    #[test]
+    fn every_conductor_verb_is_one_the_table_accepts() {
+        let dir = boss_testing::repo_root().join("infra/postgres/schema");
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("the schema directory lists")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                std::fs::read_to_string(p)
+                    .is_ok_and(|t| t.contains("ADD CONSTRAINT cadence_rules_verb_check"))
+            })
+            .collect();
+        // Schema files apply in the order of their leading number.
+        files.sort_by_key(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.split(['-', '.']).next())
+                .and_then(|n| n.parse::<u64>().ok())
+                .unwrap_or(0)
+        });
+        let newest = files.last().expect("a migration restates the verb check");
+        let text = std::fs::read_to_string(newest).expect("reads");
+        for v in VERBS {
+            assert!(
+                text.contains(&format!("'{v}'")),
+                "{} does not accept the conductor verb {v:?} — the seed could not land a \
+                 rule that fires it",
+                newest.display()
+            );
+        }
+    }
+
+    /// D2 of design 42279fb2: the departure hold is READ from the
+    /// registry, never a number of the conductor's own. The bound on any
+    /// active rule that departs a train; the largest if two declare one;
+    /// none (0) when no rule does, or when a value is not a real count.
+    #[test]
+    fn the_departure_hold_is_read_from_the_departing_rules() {
+        let row = |name: &str, verb: &str, hold: Option<i32>| CadenceRuleRow {
+            name: name.into(),
+            verb: verb.into(),
+            basis: "queue-depth".into(),
+            every_minutes: None,
+            at_times: None,
+            min_dock_depth: Some(1),
+            cooldown_minutes: Some(30),
+            cadence: None,
+            anchor_date: None,
+            business_calendar: None,
+            regate_hold_minutes: hold,
+        };
+        assert_eq!(regate_hold_minutes(&[]), 0, "no registry, no hold");
+        assert_eq!(
+            regate_hold_minutes(&[row("train-board-on-dock-depth", "board", Some(15))]),
+            15
+        );
+        assert_eq!(
+            regate_hold_minutes(&[
+                row("train-board-on-dock-depth", "board", Some(15)),
+                row("train-window", "run", Some(20)),
+                row("train-reconcile", "reconcile", Some(90)),
+            ]),
+            20,
+            "a verb that departs nothing holds nothing"
+        );
+        assert_eq!(
+            regate_hold_minutes(&[row("train-board-on-dock-depth", "board", Some(-5))]),
+            0,
+            "a negative count is no hold, never a hold forever"
+        );
+        assert_eq!(
+            regate_hold_minutes(&[row("train-board-on-dock-depth", "board", None)]),
+            0
+        );
     }
 
     #[test]

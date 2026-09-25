@@ -75,6 +75,7 @@ fn depth_rule() -> CadenceRuleRow {
         cadence: None,
         anchor_date: None,
         business_calendar: None,
+        regate_hold_minutes: None,
     }
 }
 
@@ -90,6 +91,7 @@ fn clock_rule() -> CadenceRuleRow {
         cadence: None,
         anchor_date: None,
         business_calendar: None,
+        regate_hold_minutes: None,
     }
 }
 
@@ -106,6 +108,7 @@ fn reconcile_rule() -> CadenceRuleRow {
         cadence: None,
         anchor_date: None,
         business_calendar: None,
+        regate_hold_minutes: None,
     }
 }
 

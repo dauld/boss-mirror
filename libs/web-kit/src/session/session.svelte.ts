@@ -50,7 +50,7 @@ export const session = $state<SessionEnvelope>({
 /// demo-mode sin was dressing a visitor in a REAL employee's name,
 /// role and department; the fix is not to strip the visitor of a
 /// renderable identity, it is to give them their own: named Guest,
-/// carrying the audit-readonly role they actually hold, colliding
+/// carrying the read-only role they actually hold, colliding
 /// with no roster id, assignable to nothing.
 export async function loadSession(): Promise<void> {
   // 1. Fetch the roster first — it's the universe for every lookup.

@@ -64,7 +64,9 @@ When `boss-services` logs `all services up`, open
 **http://localhost:4443**. Every visitor signs in: use the
 bootstrap-admin email you set in `.env` + the default password
 `change-me` for a `platform-admin` session (full write access), or
-click **Browse as a guest** for a read-only look around. Rotate
+click **Browse as a guest** for a read-only look at what this
+install lets a stranger read — a basic `visitor` by default (see
+[Authentication](#authentication)). Rotate
 the password right after — see [Authentication](#authentication).
 
 Stop the stack with `docker compose down`. Add `-v` to wipe the
@@ -211,10 +213,20 @@ Every visitor signs in. Local-auth
 bootstrap-admin email + password mints a `platform-admin`
 session with full write access.
 
-A deployment with `BOSS_GUEST_ACCESS=1` adds a **Browse as a
-guest** button to that page. It signs the visitor in as
-`guest@algedonic.dev` with the `audit-readonly` role — read
-every projection, write nothing. Leave it unset and the button is not offered.
+`BOSS_GUEST_ACCESS` decides whether that page also offers a
+**Browse as a guest** button, and what the guest may read. It
+takes one of three answers, and the quickstart ships `basic`:
+
+| value | what a stranger who clicks the button gets |
+|---|---|
+| `basic` (the quickstart's) | a session as `guest@algedonic.dev` with the `visitor` role. It reads only what this install's policy grants `visitor` (rules naming that role in the tenant's `policy_rules.toml`), and nothing else: a page whose data the role cannot read shows empty or refused, not an error. |
+| `audit` | the `audit-readonly` role: Read on every shipped resource, the employee roster and the books included. Right for a public demo whose company is synthetic; wrong for your own records. |
+| `0`, or unset | no button. A login is the only way in. |
+
+A guest writes nothing under either role — every write is refused
+at the gateway before it reaches a service. `1`, the value earlier
+versions documented, still means `basic`; any other value is
+refused by name in the gateway's log, and no guest is offered.
 
 Earlier versions did this without the button: a middleware
 minted the `audit-readonly` session for anyone who arrived
@@ -251,8 +263,8 @@ before deploying anywhere reachable — it's the HMAC key the
 gateway uses to sign session cookies. The default value
 (`please-rotate-me-in-prod-do-not-leak`) is correctly named.
 
-To withdraw the guest button, unset `BOSS_GUEST_ACCESS`
-(remove the line from `docker-compose.yml`). A login is then the
+To withdraw the guest button, set `BOSS_GUEST_ACCESS: "0"` in
+`docker-compose.yml` (or remove the line). A login is then the
 only way in.
 
 > ⚠  This is the v1 launch auth — file-backed credentials, no

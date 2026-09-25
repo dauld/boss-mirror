@@ -29,6 +29,12 @@ pub(crate) const DOT_SEGMENTS: [&str; 12] = [
     ".", "%2e", "%2E", "..", "%2e%2e", "%2E%2e", "%2e%2E", "%2E%2E", ".%2e", ".%2E", "%2e.", "%2E.",
 ];
 
+/// The guest these tests mint: the system-audit `audit-readonly`, the
+/// one the guest door handed out when they were written (design
+/// 2830b6b7 split it into Basic and Audit; the refusal comes before
+/// routing, so either role meets the same 400).
+const GUEST: GuestAccess = GuestAccess::Audit;
+
 /// A door of every kind: the sessionless by-design feed, a declared
 /// public family, gated proxies, the simulator app proxy, the plugin
 /// files, the SPA and its assets, and the root.
@@ -55,7 +61,7 @@ async fn gateway() -> (axum::Router, super::a_read_only_session_cannot_write::Hi
     ])
     .expect("declarable reads");
     (
-        dot_segments::mount(gateway_declaring(&upstream, &reads)),
+        dot_segments::mount(gateway_declaring(&upstream, GUEST, &reads)),
         hits,
     )
 }
@@ -95,7 +101,7 @@ async fn unrefused(
 #[tokio::test]
 async fn the_sessionless_doors_cannot_reach_the_jobs_api_by_traversal() {
     let (app, hits) = gateway().await;
-    let guest = guest_cookie(app.clone()).await;
+    let guest = guest_cookie(app.clone(), GUEST).await;
     let named = [
         "/ics/%2e%2e/api/jobs".to_string(),
         "/api/workflows/%2e%2e/jobs".to_string(),
@@ -124,7 +130,7 @@ async fn the_sessionless_doors_cannot_reach_the_jobs_api_by_traversal() {
 #[tokio::test]
 async fn every_dot_segment_spelling_is_refused_before_routing() {
     let (app, hits) = gateway().await;
-    let guest = guest_cookie(app.clone()).await;
+    let guest = guest_cookie(app.clone(), GUEST).await;
     let mut paths: Vec<String> = DOORS
         .iter()
         .flat_map(|door| {

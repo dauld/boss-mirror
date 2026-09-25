@@ -51,12 +51,14 @@ const STUB_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\">\
 and deploy it to <code>BOSS_SIM_STATIC_DIR</code>.</p></body></html>";
 
 /// Sim controls mutate the shared clock + trim audit_log, so they're for
-/// signed-in operators only — never demo/anonymous visitors (who get an
-/// audit-readonly gateway session) or the guest fallback. Mirrors
-/// jobs-api's `operator_guard`.
+/// signed-in operators only — never anonymous visitors (whose gateway
+/// session carries a read-only-floor role: `visitor`, or `audit-readonly`
+/// where the instance opts in — design 2830b6b7) or the headerless
+/// `guest` fallback. Mirrors jobs-api's `operator_guard`, and asks the
+/// same `boss_core::roles::is_read_only_floor` rather than a role name.
 fn operator_guard(user: &CurrentUser) -> Option<Response> {
     let role = user.0.role.as_str();
-    if role == "audit-readonly" || role == "guest" {
+    if boss_core::roles::is_read_only_floor(role) || role == "guest" {
         return Some(
             (
                 StatusCode::FORBIDDEN,
@@ -317,3 +319,40 @@ async fn main() -> Result<()> {
 }
 
 use tokio::net::TcpListener;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boss_policy_client::{AccessTier, User};
+
+    fn as_role(role: &str) -> CurrentUser {
+        CurrentUser(User {
+            id: "x".into(),
+            role: role.into(),
+            access_tier: AccessTier::User,
+            territory_account_ids: Vec::new(),
+            direct_report_ids: Vec::new(),
+            department: None,
+        })
+    }
+
+    /// Design 2830b6b7: the same floor as jobs-api's guard. The OSS
+    /// guest's `visitor` is refused; keyed on the name `audit-readonly`
+    /// it would have driven the engine.
+    #[test]
+    fn every_read_only_floor_role_and_the_headerless_guest_are_refused() {
+        for role in boss_core::roles::READ_ONLY_FLOOR_ROLES
+            .into_iter()
+            .chain(["guest"])
+        {
+            let refused = operator_guard(&as_role(role));
+            assert_eq!(
+                refused.map(|r| r.status()),
+                Some(StatusCode::FORBIDDEN),
+                "{role} must not drive the simulator"
+            );
+        }
+        assert!(operator_guard(&as_role(boss_core::roles::VISITOR_ROLE)).is_some());
+        assert!(operator_guard(&as_role("platform-admin")).is_none());
+    }
+}

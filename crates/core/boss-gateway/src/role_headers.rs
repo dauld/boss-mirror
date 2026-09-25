@@ -155,11 +155,12 @@ fn build_user_json(session: &Session) -> String {
     // identifies downstream as `guest@algedonic.dev` — which is what
     // should appear against anything it touches.
     let id = session.employee_id.as_deref().unwrap_or(&session.username);
-    // Default-fall-through is `audit-readonly` so that any session
-    // reaching a backend without an explicit role gets read-everywhere
-    // / write-nothing semantics — belt-and-suspenders for any path
-    // that lands here with role == None. The fallback is the Session's
-    // own, shared with the proxy's read-only refusal.
+    // Default-fall-through is `visitor` (design 2830b6b7; it was
+    // `audit-readonly`, the widest read) so that any session reaching a
+    // backend without an explicit role gets the least access and writes
+    // nothing — belt-and-suspenders for any path that lands here with
+    // role == None. The fallback is the Session's own, shared with the
+    // proxy's read-only refusal.
     let role = session.effective_role();
     // serde_json for robust escaping of id/role — some usernames
     // contain characters (`.`, `-`) that are header-safe but we want
@@ -207,6 +208,23 @@ mod tests {
             "got: {json}"
         );
         assert!(json.contains("\"role\":\"audit-readonly\""), "got: {json}");
+    }
+
+    /// A session with no role tells every service it is a `visitor` —
+    /// the least access — not `audit-readonly`, the widest read (design
+    /// 2830b6b7). The fallback is `Session::effective_role`, the same
+    /// one the proxy's read-only refusal asks (07e797b4), so a roleless
+    /// session is read-only downstream AND at the edge.
+    #[test]
+    fn a_session_without_a_role_is_announced_as_a_visitor() {
+        let session = Session::new("nobody@example.com", 3600);
+        let json = build_user_json(&session);
+        let role = boss_core::roles::VISITOR_ROLE;
+        assert!(
+            json.contains(&format!("\"role\":\"{role}\"")),
+            "got: {json}"
+        );
+        assert!(boss_core::roles::is_read_only_floor(role));
     }
 
     #[test]

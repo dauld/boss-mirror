@@ -74,15 +74,43 @@
 # That is filed separately; this car only moves the boarding rule to a
 # version above the live lineage so the decision actually takes effect.
 #
+# VERSION 9 ADDS `regate_hold_minutes = 15` (backlog 4890165b, design
+# 42279fb2, approved 2026-09-25). Live lineage read before the bump:
+# v1..v8, v8 active at depth 1 / cooldown 30 — so v9 is above it.
+#
+# A departure now WAITS, bounded, for the dock's re-gate round on the
+# current main. Measured on the item's triage over the ten trains to
+# 19:26Z that day: 22 cars boarded, 58 left-behind rows, 42 of them
+# "waiting for a gate slot to re-gate on current main"; and at 19:26 the
+# dock replayed a car onto 22c1a876 in the same pass that departed train
+# #686, which merged 777a5888 and changed four files that car changes —
+# the re-gate was stale before it finished. Main moves only by trains,
+# so a round of re-gates launched on main M stays valid until the next
+# departure; holding that departure for the round lets it carry every
+# car the round turned green, and moves main once for all of them.
+#
+# 15 because the median dock re-gate measured since 12:00Z that day was
+# 13.9 min (builder gates 15.3): a longer hold waits on the tail, a
+# shorter one leaves the median re-gate behind. The hold is counted from
+# the OLDEST re-gate in flight on the current main, so a re-gate that
+# launches late in a round never extends it, and a held board is an idle
+# firing — the cooldown above does not start from it.
+#
+# WHAT WOULD CHANGE IT: cars boarded per train not rising above 2 while
+# the dock holds five or more (the round is not the constraint), or
+# already-fresh cars' dock time growing by more than a gate while trains
+# do not grow (the hold costs more than it batches).
+#
 # To change this rule, bump `version` — and check the LIVE lineage
 # first (`GET /api/cadence/rules/<name>/versions`), not just this file.
 # ---------------------------------------------------------------------------
 
 [[cadence_rule]]
 name = "train-board-on-dock-depth"
-version = 8
+version = 9
 status = "active"
 verb = "board"
 basis = "queue-depth"
 min_dock_depth = 1
 cooldown_minutes = 30
+regate_hold_minutes = 15

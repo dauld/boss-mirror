@@ -56,11 +56,13 @@
 #     directory the image ships, /opt/boss/tenant for a `tenant_repo`
 #     the converge delivers as a ConfigMap (instances.toml says how);
 #   * the BOSS_SIM_ENABLED value;
-#   * the BOSS_GUEST_ACCESS value — `guest = true|false` in
-#     instances.toml, rendered "1"|"0", the two spellings the gateway
-#     reads (backlog 0d2d7daa, 2026-09-16: anonymous read-only sessions
-#     are right for the public example and wrong for the operating
-#     company's site, so each instance says);
+#   * the BOSS_GUEST_ACCESS value — `guest = false | "basic" | "audit"`
+#     in instances.toml, rendered "0" | "basic" | "audit", spellings the
+#     gateway's GuestAccess parses (backlog 0d2d7daa, 2026-09-16:
+#     anonymous read-only sessions are right for the public example and
+#     wrong for the operating company's site, so each instance says;
+#     design 2830b6b7, 2026-09-25: and says WHICH read — a basic
+#     `visitor`, or the system-audit read the playground opts into);
 #   * the public hostname (BOSS_PUBLIC_URL — since 21c17ebc, 2026-09-17,
 #     there is no TLS front: Cloudflare terminates TLS at the edge and
 #     the tunnel proxies to the gateway), everywhere the source's appears;
@@ -96,8 +98,9 @@
 #     `owner/name` — or the RETIRED `tenant = "<manifest path>"` key,
 #     which must not read as "no source";
 #   * a sim value that is not true or false; a guest value that is not
-#     true or false (or is missing — silence must not read as "guests
-#     may read"); a hostname that is not one;
+#     false, basic or audit (or is missing — silence must not read as
+#     "guests may read"; or is `true`, refused by name because it does
+#     not say which read); a hostname that is not one;
 #   * a site that is not a hostname, that equals any instance's
 #     hostname or another instance's site (one name, two routes), or
 #     that is declared on an image-sourced instance — the converge
@@ -134,7 +137,7 @@ refuse() { # <headline> [detail lines...]
 
 usage() {
     refuse "usage" \
-        "$ME <namespace> <tenant> <sim: true|false> <hostname> <guest: true|false> [<site>] [--out-dir DIR]" \
+        "$ME <namespace> <tenant> <sim: true|false> <hostname> <guest: false|basic|audit> [<site>] [--out-dir DIR]" \
         "$ME --all DIR | --instances | --roster"
 }
 
@@ -242,20 +245,38 @@ tenant_of() {
 check_sim() {
     case "$1" in true|false) ;; *) refuse "sim \`$1\`: BOSS_SIM_ENABLED is true or false" ;; esac
 }
+# check_guest <answer> [<where>] — false | basic | audit (design
+# 2830b6b7, decided 2026-09-25: one key, three answers). `true` is
+# refused BY NAME: it said "a guest may read" before a guest had a
+# choice of reads, and reading it as either answer would decide for the
+# instance what the design asks it to declare.
 check_guest() {
-    case "$1" in true|false) ;; *) refuse "guest \`$1\`: BOSS_GUEST_ACCESS is true or false (rendered \"1\" or \"0\")" ;; esac
+    local where="${2:+ ($2)}"
+    case "$1" in
+        false|basic|audit) ;;
+        true) refuse "guest \`true\`$where no longer says which read a guest gets (design 2830b6b7) — declare guest = \"basic\" (a visitor: what the install's policy grants that role) or guest = \"audit\" (audit-readonly: Read on every shipped resource), or false for no guest" ;;
+        *) refuse "guest \`$1\`$where: BOSS_GUEST_ACCESS is false, \"basic\" or \"audit\" (rendered \"0\", \"basic\", \"audit\")" ;;
+    esac
 }
-# guest_value <true|false> — the string the manifest carries: the
-# gateway reads BOSS_GUEST_ACCESS == "1" as on and anything else as off.
-guest_value() { [ "$1" = true ] && printf '1\n' || printf '0\n'; }
+# guest_value <false|basic|audit> — the string the manifest carries,
+# one of the spellings boss-gateway's GuestAccess::from_env_value
+# parses: "0" is Off, "basic" a visitor, "audit" audit-readonly. Never
+# "1" (which the gateway still reads as basic, for installs that set it
+# before the answer had three values), and never a role name.
+guest_value() {
+    case "$1" in
+        false) printf '0\n' ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
 # guest_of <section> — the instance's `guest`, refused by name when the
-# line is missing: an instance that inherited the source's "1" by
-# silence would hand anonymous visitors the company's read-only view.
+# line is missing: an instance that inherited a guest answer by silence
+# would hand anonymous visitors the company's read-only view.
 guest_of() {
     local v
     v=$(param "$1" guest)
-    [ -n "$v" ] || refuse "${INSTANCES#"$TREE"/}: instance [$1] must declare guest = true|false (BOSS_GUEST_ACCESS — may an anonymous visitor read?)"
-    check_guest "$v"
+    [ -n "$v" ] || refuse "${INSTANCES#"$TREE"/}: instance [$1] must declare guest = false | \"basic\" | \"audit\" (BOSS_GUEST_ACCESS — may an anonymous visitor read, and what?)"
+    check_guest "$v" "${INSTANCES#"$TREE"/}: instance [$1]"
     printf '%s\n' "$v"
 }
 check_hostname() {

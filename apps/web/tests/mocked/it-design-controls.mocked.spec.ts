@@ -45,7 +45,9 @@
 //   2  8c0e11d8  open    — "Nothing is waiting on a decision" while
 //                          kinds declaring this page their surface wait
 //                          (FOUNDER DECISION, at draft-design)
-//   3  84d97547  open    — the Status column prints the constant `open`
+//   3  84d97547  FIXED   — the Status column printed the constant `open`
+//                          and is gone; the Answers column already
+//                          reads the review step it would have shown
 //   4  b56aa2c7  open    — the lede claims priority order, and priority
 //                          is not shown
 //   5  08372fdb  FIXED   — WORKING: decided designs at fold
@@ -272,19 +274,19 @@ test.describe('/it/design — the route and the words it says', () => {
     await expect(page.locator('.design-lede')).toHaveText(
       'In the station\'s order: priority, then age. The first row is the one it would hand out next.',
     );
-    await expect(queueTable(page).locator('thead th')).toHaveText(['Packet', 'Status', 'Answers', 'Opened', 'Review']);
+    await expect(queueTable(page).locator('thead th')).toHaveText(['Packet', 'Answers', 'Opened', 'Review']);
     const rows = queueTable(page).locator('tbody tr');
     await expect(rows).toHaveCount(3);
     await expect(rows.nth(0).locator('td')).toHaveText([
-      'Admit every packet through one edge', 'open', 'saved · 2 of 3 answered', '2d ago', 'Review',
+      'Admit every packet through one edge', 'saved · 2 of 3 answered', '2d ago', 'Review',
     ]);
     // No steps on the wire for this packet: its progress is unread, and
     // "—" says so. It never reads as "not started".
     await expect(rows.nth(1).locator('td')).toHaveText([
-      'A design whose steps the envelope did not carry', 'open', '—', '9d ago', 'Review',
+      'A design whose steps the envelope did not carry', '—', '9d ago', 'Review',
     ]);
     await expect(rows.nth(2).locator('td')).toHaveText([
-      'An untouched design', 'open', 'not started · 2 questions', '1d ago', 'Review',
+      'An untouched design', 'not started · 2 questions', '1d ago', 'Review',
     ]);
   });
 
@@ -295,11 +297,19 @@ test.describe('/it/design — the route and the words it says', () => {
     await expect(queueRow(page, 'An untouched design').locator('td.design-progress')).not.toHaveClass(/design-saved/);
   });
 
-  test('CURRENT, gap 3 (84d97547): the Status column prints the constant "open" on every row', async ({ page }) => {
+  test('gap 3 (84d97547) is FIXED — the queue has no Status column, because no row could print anything but "open"', async ({ page }) => {
     await install(page);
     await mountPage(page, PATH, TITLE);
-    // The station admits only open packets, so no row can print anything else.
-    await expect(queueTable(page).locator('td.design-status')).toHaveText(['open', 'open', 'open']);
+    // The station's predicate admits only `status = "open"` packets
+    // (infra/platform/stations/design-review.toml), so a packet-status
+    // column was one constant repeated. The review step's status was
+    // the other candidate, and it is no better: the predicate admits
+    // only `ready` or `active`, and Save leaves a review `ready`, so
+    // the Answers column (which counts `active` as saved) is the one
+    // that tells the rows apart.
+    await expect(queueTable(page).locator('thead th')).not.toContainText(['Status']);
+    await expect(queueTable(page).locator('td.design-status')).toHaveCount(0);
+    await expect(queueTable(page).locator('tbody td').filter({ hasText: /^\s*open\s*$/ })).toHaveCount(0);
   });
 
   test('CURRENT, gap 4 (b56aa2c7): the lede claims priority order, and no row shows a priority', async ({ page }) => {

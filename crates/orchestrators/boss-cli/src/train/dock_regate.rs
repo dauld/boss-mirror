@@ -341,6 +341,77 @@ pub(crate) fn in_flight(stamp: &RegateStamp, verdict: Option<&str>) -> InFlight 
     }
 }
 
+// ---------------------------------------------------------------------------
+// THE ROUND A DEPARTURE WAITS FOR (backlog 4890165b, design 42279fb2, D2)
+//
+// Main moves only when a train merges, so a re-gate launched on main M is
+// still the right test of its car until the NEXT departure — and that
+// departure is exactly what used to make it stale. Measured at 19:26 on
+// 2026-09-25: the dock replayed a car onto 22c1a876 in the same pass that
+// departed train #686, whose merge (777a5888) changed four of that car's
+// files. With a lone car still shipping (depth 1), each car that did come
+// fresh left in its own one- or two-car train and re-staled the rest.
+//
+// So a board that has cars ready HOLDS while the dock has re-gates in
+// flight on the current main, and departs once the oldest of them is
+// `regate_hold_minutes` old (the registry's number, 15 — the median dock
+// re-gate that day was 13.9 min). Counted from the OLDEST so a re-gate
+// launched late in a round can never extend it: the hold is one gate,
+// never a moving target. A re-gate on a main that has since moved is not
+// this departure's round, and a stamp with no readable launch time cannot
+// bound a wait, so it holds nothing.
+// ---------------------------------------------------------------------------
+
+/// One re-gate the dock has in flight: the main it was launched for, and
+/// when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InRound {
+    pub main: String,
+    pub since: DateTime<Utc>,
+}
+
+/// Why a departure waits: the round on `main`, how many re-gates are in
+/// it, how old the oldest is, and the bound it waits against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoundHold {
+    pub main: String,
+    pub in_flight: usize,
+    pub oldest_minutes: i64,
+    pub hold_minutes: u32,
+}
+
+/// PURE: does a departure on `main` wait for the dock's round? `None` =
+/// depart.
+pub(crate) fn departure_hold(
+    round: &[InRound],
+    main: &str,
+    now: DateTime<Utc>,
+    hold_minutes: u32,
+) -> Option<RoundHold> {
+    if hold_minutes == 0 {
+        return None;
+    }
+    let on_main: Vec<&InRound> = round.iter().filter(|r| r.main == main).collect();
+    let oldest = on_main.iter().map(|r| r.since).min()?;
+    let oldest_minutes = (now - oldest).num_minutes().max(0);
+    (oldest_minutes < i64::from(hold_minutes)).then(|| RoundHold {
+        main: main.to_string(),
+        in_flight: on_main.len(),
+        oldest_minutes,
+        hold_minutes,
+    })
+}
+
+/// When the dock launched the re-gate a car's stamp records — the `at`
+/// every stamp has carried since 969a1092. `None` when absent or
+/// unreadable.
+pub(crate) fn launched_at(car: &Value) -> Option<DateTime<Utc>> {
+    car.pointer(&format!("/metadata/{BASE_REGATE}/at"))
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&Utc))
+}
+
 /// The gate-run metadata a dock re-gate carries: a park intent, so its
 /// green refreshes the parked car (`ParkAction::Refresh` keys on
 /// `park_summary` alone), and the mark that says the dock filed it.
@@ -796,6 +867,81 @@ mod tests {
                 .is_empty(),
             "a car with no summary still gets an intent the handler reads"
         );
+    }
+
+    fn in_round(main: &str, at: &str) -> InRound {
+        InRound {
+            main: main.into(),
+            since: at.parse().unwrap(),
+        }
+    }
+
+    /// D2 of design 42279fb2, measured on its founding pass: at 19:26 on
+    /// 2026-09-25 the dock replayed a car onto 22c1a876 and, in the SAME
+    /// pass, train #686 departed and moved main to 777a5888 — four of that
+    /// car's files. A departure must wait for the round started on the
+    /// main it would move, bounded, and counted from the OLDEST re-gate in
+    /// it so a late launch never extends the wait.
+    #[test]
+    fn a_departure_waits_bounded_for_the_round_on_the_current_main() {
+        let now: DateTime<Utc> = "2026-09-25T19:40:00Z".parse().unwrap();
+        let main = "22c1a876aaaa";
+        let round = [
+            in_round(main, "2026-09-25T19:35:00Z"),
+            in_round(main, "2026-09-25T19:38:00Z"),
+            in_round("0ldma1n0bbbb", "2026-09-25T19:10:00Z"),
+        ];
+        assert_eq!(
+            departure_hold(&round, main, now, 15),
+            Some(RoundHold {
+                main: main.into(),
+                in_flight: 2,
+                oldest_minutes: 5,
+                hold_minutes: 15,
+            }),
+            "two re-gates on this main, the oldest five minutes in: hold"
+        );
+        let later: DateTime<Utc> = "2026-09-25T19:50:00Z".parse().unwrap();
+        assert_eq!(
+            departure_hold(&round, main, later, 15),
+            None,
+            "fifteen minutes from the OLDEST, not the newest: the bound is reached, depart"
+        );
+        assert_eq!(
+            departure_hold(&round, "777a5888cccc", now, 15),
+            None,
+            "a round on a main that has since moved is not this departure's round"
+        );
+        assert_eq!(
+            departure_hold(&[], main, now, 15),
+            None,
+            "no round, no hold"
+        );
+        assert_eq!(
+            departure_hold(&round, main, now, 0),
+            None,
+            "a registry that declares no hold holds nothing"
+        );
+    }
+
+    /// The hold is dated from the stamp the launch wrote (`at`), which is
+    /// already on every re-gate stamp; a stamp without a readable one
+    /// cannot bound a wait, so it holds nothing.
+    #[test]
+    fn a_launch_is_dated_by_its_stamp() {
+        let at: DateTime<Utc> = "2026-09-25T19:35:00Z".parse().unwrap();
+        let s = RegateStamp {
+            head: "cafef00d".into(),
+            gate_run: "run-1".into(),
+            ..RegateStamp::for_main("22c1a876", &[])
+        };
+        let car = json!({"metadata": {BASE_REGATE: s.to_value(at)}});
+        assert_eq!(launched_at(&car), Some(at));
+        assert_eq!(
+            launched_at(&json!({"metadata": {BASE_REGATE: {"main": "m", "at": "yesterday"}}})),
+            None
+        );
+        assert_eq!(launched_at(&json!({"metadata": {}})), None);
     }
 
     /// The two car-shaped refusals `rebase_onto_main` builds hold the car;

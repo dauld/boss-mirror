@@ -145,11 +145,16 @@
             In the station's order: priority, then age. The first row is
             the one it would hand out next.
           </p>
+          <!-- No Status column (backlog 84d97547). It printed the packet's
+               status, and the station admits only `open` packets, so every
+               row said `open`. The review step's status was no better — the
+               station admits only `ready` or `active`, and Save leaves a
+               review `ready` — so Answers is the column that tells rows
+               apart. -->
           <table class="design-table">
             <thead>
               <tr>
                 <th>Packet</th>
-                <th>Status</th>
                 <th>Answers</th>
                 <th>Opened</th>
                 <th>Review</th>
@@ -159,7 +164,6 @@
               {#each rows as packet (packet.id)}
                 <tr>
                   <td><strong>{packet.title}</strong></td>
-                  <td class="design-status">{packet.status}</td>
                   <td
                     class="design-progress"
                     class:design-saved={packet.progress.kind === 'saved'}
@@ -213,14 +217,6 @@
   }
   .design-table tr:last-child td {
     border-bottom: none;
-  }
-  .design-status {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: var(--ls-label);
-    text-transform: uppercase;
-    color: var(--static);
-    white-space: nowrap;
   }
   .design-progress {
     font-family: var(--font-mono);

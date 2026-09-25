@@ -223,14 +223,16 @@ fn the_instance_list_declares_prod_and_the_playground() {
         inst[""]["source"], "prod",
         "the directory is written for prod"
     );
-    // GUEST ACCESS IS PER INSTANCE (backlog 0d2d7daa, 2026-09-16).
-    // BOSS_GUEST_ACCESS=1 hands an anonymous visitor a read-only
-    // session — right for the public example, wrong for the operating
-    // site behind Access. The playground keeps it; the flip (2026-09-16)
-    // set `guest = false` here and `"0"` in boss.yaml together.
+    // GUEST ACCESS IS PER INSTANCE (backlog 0d2d7daa, 2026-09-16), and
+    // since design 2830b6b7 (2026-09-25) it says WHICH read a guest
+    // gets: false | "basic" (a `visitor`) | "audit" (audit-readonly).
+    // David, 2026-09-25: "boss.algedonic.dev won't support any guests.
+    // Playground will support anonymous guests with the system-audit
+    // policy grant." The flip (2026-09-16) set prod false here and "0"
+    // in boss.yaml together; that pin stays.
     assert_eq!(
-        play["guest"], "true",
-        "anonymous read-only sessions stay on for the public playground"
+        play["guest"], "audit",
+        "the public playground opts its guests into the system-audit read"
     );
     assert_eq!(
         prod["guest"], "false",
@@ -355,8 +357,12 @@ fn the_playground_render_substitutes_the_four_parameters() {
         "the sim flag was substituted, not duplicated"
     );
     assert!(
-        boss_yaml.contains("BOSS_GUEST_ACCESS, value: \"1\""),
-        "the playground keeps anonymous read-only sessions (guest = true)"
+        boss_yaml.contains("BOSS_GUEST_ACCESS, value: \"audit\""),
+        "the playground's guests read as audit-readonly (guest = \"audit\")"
+    );
+    assert!(
+        !boss_yaml.contains("BOSS_GUEST_ACCESS, value: \"0\""),
+        "the guest value was substituted, not duplicated"
     );
     let play_tenant = instances_of(&repo_root())["playground"]["tenant_dir"].clone();
     assert!(
@@ -406,21 +412,124 @@ fn the_playground_render_substitutes_the_four_parameters() {
         "the source value was substituted away"
     );
     // guest = false renders the value the gateway reads as "no guest
-    // button" (boss-gateway/src/main.rs: guest_access iff == "1") —
-    // the line the flip car puts on prod. Substituted, not duplicated.
+    // button" (boss-gateway local_auth.rs GuestAccess::from_env_value:
+    // "0" is Off) — the line the flip car put on prod.
     assert!(
         stream.contains("BOSS_GUEST_ACCESS, value: \"0\""),
         "guest = false renders BOSS_GUEST_ACCESS \"0\":\n{stream}"
     );
-    assert!(!stream.contains("BOSS_GUEST_ACCESS, value: \"1\""));
     // And the delivered mount of a repo-sourced instance (f4f5c387):
     // `tenant` is nowhere in the tree by design.
     let (rc, stream, err) = run(
         &tree,
-        &["boss-other", "tenant", "true", "other.example", "true"],
+        &["boss-other", "tenant", "true", "other.example", "basic"],
     );
     assert_eq!(rc, 0, "{err}");
     assert!(stream.contains("BOSS_TENANT_DIR, value: /opt/boss/tenant}"));
+}
+
+#[test]
+fn each_guest_answer_renders_exactly_the_value_the_gateway_reads() {
+    // Design 2830b6b7 (decided 2026-09-25): ONE instance key with three
+    // answers, rendered as the three BOSS_GUEST_ACCESS spellings the
+    // gateway parses — never a role name, and never "1", which the
+    // gateway still reads as basic only so an unedited OSS install keeps
+    // working. Each answer lands on the one line, substituted for the
+    // source's "0", and the line appears exactly once.
+    let tree = fixture("guest-answers");
+    for (answer, rendered) in [("false", "0"), ("basic", "basic"), ("audit", "audit")] {
+        let (rc, stream, err) = run(
+            &tree,
+            &["boss-other", "tenant", "true", "other.example", answer],
+        );
+        assert_eq!(rc, 0, "guest {answer}: {err}");
+        let lines: Vec<&str> = stream
+            .lines()
+            .filter(|l| l.contains("BOSS_GUEST_ACCESS"))
+            .map(str::trim)
+            .collect();
+        assert_eq!(
+            lines,
+            [format!(
+                "- {{name: BOSS_GUEST_ACCESS, value: \"{rendered}\"}}"
+            )],
+            "guest {answer} renders BOSS_GUEST_ACCESS \"{rendered}\", once"
+        );
+    }
+    // The fact lives twice — the renderer's three spellings and the
+    // gateway's parser — so every spelling the renderer can emit is one
+    // the parser names (CLAUDE.md §9a). A spelling the gateway did not
+    // know would boot the instance with no guest, logged but unseen.
+    let parser =
+        std::fs::read_to_string(repo_root().join("crates/core/boss-gateway/src/local_auth.rs"))
+            .unwrap();
+    let body = parser
+        .split_once("pub fn from_env_value(")
+        .expect("local_auth.rs defines GuestAccess::from_env_value")
+        .1;
+    let body = body.split_once("\n    }\n").map_or(body, |(b, _)| b);
+    for rendered in ["0", "basic", "audit"] {
+        assert!(
+            body.contains(&format!("Some(\"{rendered}\")")),
+            "the renderer emits BOSS_GUEST_ACCESS \"{rendered}\" and \
+             GuestAccess::from_env_value does not name it"
+        );
+    }
+}
+
+#[test]
+fn the_renderer_refuses_guest_true_by_name() {
+    // `true` said "a guest may read" before a guest had a choice of
+    // reads; since 2830b6b7 it has not said WHICH, and reading it as
+    // either would decide for the instance what the design asks it to
+    // declare. So it is refused, naming the value and both answers.
+    let tree = fixture("guest-true");
+    let toml = std::fs::read_to_string(tree.join(INSTANCES)).unwrap();
+    let (head, play) = toml.split_once("[playground]").unwrap();
+    let old = play
+        .lines()
+        .find(|l| l.trim_start().starts_with("guest ="))
+        .expect("the playground declares guest")
+        .to_string();
+    let play = play.replacen(&format!("{old}\n"), "guest = true\n", 1);
+    write_file(&tree.join(INSTANCES), &format!("{head}[playground]{play}"));
+    let out = tree.join("out");
+    let (rc, _, err) = run(&tree, &["--all", out.to_str().unwrap()]);
+    assert_eq!(rc, REFUSED, "guest = true must refuse the render: {err}");
+    assert!(
+        err.contains("[playground]") && err.contains("true"),
+        "the refusal names the instance and the value: {err}"
+    );
+    assert!(
+        err.contains("\"basic\"") && err.contains("\"audit\""),
+        "the refusal names both answers that replace it: {err}"
+    );
+    assert!(
+        !out.join("boss").exists(),
+        "nothing was rendered — not even the source instance"
+    );
+}
+
+#[test]
+fn the_oss_quickstart_offers_a_basic_guest() {
+    // The newcomer path (David, 2026-09-25: "We can have the default for
+    // the OSS repo be guest accounts with only basic access, whatever
+    // that means for that install"). The quickstart states the answer by
+    // name rather than leaning on "1" reading as basic, so what a new
+    // install hands a stranger is readable in the file it runs.
+    let compose =
+        std::fs::read_to_string(repo_root().join("infra/oss-quickstart/docker-compose.yml"))
+            .unwrap();
+    let lines: Vec<&str> = compose
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#') && l.contains("BOSS_GUEST_ACCESS"))
+        .collect();
+    assert_eq!(
+        lines,
+        ["BOSS_GUEST_ACCESS: \"basic\""],
+        "the OSS quickstart's guest is a basic visitor, declared once"
+    );
 }
 
 #[test]
@@ -474,31 +583,49 @@ fn the_renderer_refuses_bad_parameters() {
     let prod_tenant = tenant_of(&instances_of(&tree)["prod"]);
     let tenant = prod_tenant.as_str();
     let cases: &[(&[&str], &str)] = &[
-        (&["prod", tenant, "false", "h.example", "true"], "namespace"),
         (
-            &["boss-dev", tenant, "false", "h.example", "true"],
-            "namespace",
-        ),
-        (&["Boss", tenant, "false", "h.example", "true"], "namespace"),
-        (
-            &["boss_x", tenant, "false", "h.example", "true"],
+            &["prod", tenant, "false", "h.example", "basic"],
             "namespace",
         ),
         (
-            &["boss-x", "../etc/passwd", "false", "h.example", "true"],
+            &["boss-dev", tenant, "false", "h.example", "basic"],
+            "namespace",
+        ),
+        (
+            &["Boss", tenant, "false", "h.example", "basic"],
+            "namespace",
+        ),
+        (
+            &["boss_x", tenant, "false", "h.example", "basic"],
+            "namespace",
+        ),
+        (
+            &["boss-x", "../etc/passwd", "false", "h.example", "basic"],
             "tenant",
         ),
         (
-            &["boss-x", "infra/cluster", "false", "h.example", "true"],
+            &["boss-x", "infra/cluster", "false", "h.example", "basic"],
             "tenant",
         ),
         (
-            &["boss-x", "examples/nope", "false", "h.example", "true"],
+            &["boss-x", "examples/nope", "false", "h.example", "basic"],
             "tenant",
         ),
-        (&["boss-x", tenant, "yes", "h.example", "true"], "sim"),
-        (&["boss-x", tenant, "true", "bad host", "true"], "hostname"),
+        (&["boss-x", tenant, "yes", "h.example", "basic"], "sim"),
+        (&["boss-x", tenant, "true", "bad host", "basic"], "hostname"),
+        // The guest answer is false | basic | audit (2830b6b7): `true`
+        // no longer says which read, "1" and "0" are the gateway's
+        // spellings rather than the instance's answer, and a role name
+        // is never an answer.
+        (&["boss-x", tenant, "true", "h.example", "true"], "guest"),
         (&["boss-x", tenant, "true", "h.example", "1"], "guest"),
+        (&["boss-x", tenant, "true", "h.example", "0"], "guest"),
+        (&["boss-x", tenant, "true", "h.example", "Audit"], "guest"),
+        (&["boss-x", tenant, "true", "h.example", "visitor"], "guest"),
+        (
+            &["boss-x", tenant, "true", "h.example", "audit-readonly"],
+            "guest",
+        ),
         (&["boss-x", tenant, "true", "h.example"], "usage"),
         (&["boss-x", tenant, "true"], "usage"),
     ];
@@ -567,12 +694,12 @@ fn the_renderer_refuses_a_manifest_the_roster_does_not_classify() {
 #[test]
 fn the_renderer_refuses_an_instance_that_does_not_say_whether_guests_may_read() {
     // A missing `guest` must not read as "guest access on": an
-    // instance that inherited the manifest's "1" by silence would hand
+    // instance that inherited a guest answer by silence would hand
     // anonymous visitors the operating company's read-only view.
     let tree = fixture("no-guest");
     let toml = std::fs::read_to_string(tree.join(INSTANCES)).unwrap();
     let (head, play) = toml.split_once("[playground]").unwrap();
-    let play = play.replacen("guest = true\n", "", 1);
+    let play = play.replacen("guest = \"audit\"\n", "", 1);
     assert_ne!(
         play, toml,
         "the fixture removes the playground's guest line"

@@ -314,6 +314,37 @@ export function latestByScope(rows: readonly Observation[]): ReadonlyMap<string,
   return out;
 }
 
+/** One host's newest reading in the host observation series. */
+export type HostReading = Readonly<{
+  host: string;
+  node: ObservedNode;
+  observed_at: string;
+  observer: string;
+}>;
+
+/** Newest reading per HOST in the `host` series — rows arrive
+ *  newest-first, so the first row naming a host is its latest word —
+ *  in host order (backlog 3d1678ba; page audit 2cff1d6e, GAP 2).
+ *  latestByScope kept one row for the whole series, and forge observes
+ *  itself every ~15 minutes while boss-gcp does once a day, so
+ *  boss-gcp's reading showed for at most one forge interval: measured
+ *  2026-09-23, its 10:25Z row held 13 G free against a 17 G floor and
+ *  the page never drew it. Keyed on nodes[].id, which is the host each
+ *  observe-host.sh row reports about itself. */
+export function latestHostReadings(rows: readonly Observation[]): readonly HostReading[] {
+  const out = new Map<string, HostReading>();
+  for (const r of rows) {
+    if (r.scope !== 'host') continue;
+    for (const n of r.nodes) {
+      // parseObservations passes nodes through unvalidated; a row with
+      // no id names no host to key on.
+      if (typeof n.id !== 'string') continue;
+      if (!out.has(n.id)) out.set(n.id, { host: n.id, node: n, observed_at: r.observed_at, observer: r.observer });
+    }
+  }
+  return [...out.values()].sort((a, b) => a.host.localeCompare(b.host));
+}
+
 export function latestComparison(rows: readonly Comparison[], scope: string): Comparison | null {
   return rows.find((r) => r.scope === scope) ?? null;
 }

@@ -625,7 +625,7 @@ fn the_delivered_site_is_exempt_by_derivation_only_where_a_site_is_declared() {
     std::fs::create_dir_all(tree.join("infra/cluster/manifests")).unwrap();
     write_file(
         &tree.join(INSTANCES),
-        "source = \"prod\"\n\n[prod]\nnamespace = \"boss\"\ntenant_repo = \"david/algedonic-llc\"\ntenant_ref = \"main\"\nsim = false\nhostname = \"h.example\"\nsite = \"www.h.example\"\nguest = false\n\n[play]\nnamespace = \"boss-play\"\ntenant_repo = \"david/play\"\ntenant_ref = \"main\"\nsim = true\nhostname = \"p.example\"\nguest = true\n",
+        "source = \"prod\"\n\n[prod]\nnamespace = \"boss\"\ntenant_repo = \"david/algedonic-llc\"\ntenant_ref = \"main\"\nsim = false\nhostname = \"h.example\"\nsite = \"www.h.example\"\nguest = false\n\n[play]\nnamespace = \"boss-play\"\ntenant_repo = \"david/play\"\ntenant_ref = \"main\"\nsim = true\nhostname = \"p.example\"\nguest = \"audit\"\n",
     );
     let (rc, derived, err) = run_script(SWEEP, &tree, &["--exemptions-derived"]);
     assert_eq!(rc, 0, "{err}");

@@ -102,10 +102,13 @@ export type ReviewProgress =
   | Readonly<{ kind: 'untouched'; asked: number }>
   | Readonly<{ kind: 'saved'; answered: number; asked: number }>;
 
-/** An open review packet as the queue panel renders it. */
+/** An open review packet as the queue panel renders it.
+ *
+ *  No `status` (backlog 84d97547): the station admits only open
+ *  packets, so it was one constant, and the column that printed it
+ *  went with it. What a row's review has got to is `progress`. */
 export type ReviewPacket = Readonly<{
   id: string;
-  status: string;
   opened_on: string;
   title: string;
   progress: ReviewProgress;
@@ -223,7 +226,6 @@ export function queueRows(
     const step = reviewStepOf(steps?.[p.id]);
     return {
       id: p.id,
-      status: p.status,
       opened_on: p.opened_on,
       title: p.title,
       progress: reviewProgress(step),

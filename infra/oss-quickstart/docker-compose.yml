@@ -136,13 +136,17 @@ services:
       # the boss-files volume below, so uploads outlive the container.
       BOSS_FILES_ROOT: /var/lib/boss/files
       # Guest access: adds a "Browse as a guest" button to /login
-      # (POST /api/auth/guest) that mints an `audit-readonly`
-      # session — read every projection, write nothing. Sessions
-      # exist only when asked for; anonymous requests get nothing.
+      # (POST /api/auth/guest). `basic`, the OSS default (design
+      # 2830b6b7, 2026-09-25), mints a `visitor` session: it reads
+      # only what this install's policy grants the `visitor` role,
+      # and writes nothing. `audit` mints `audit-readonly` instead —
+      # Read on every shipped resource, the employee roster and the
+      # books included — for an install whose data is all synthetic.
+      # `0` (or removing the line) offers no guest. Sessions exist
+      # only when asked for; anonymous requests get nothing.
       # Local-auth login on the same page: bootstrap-admin email +
       # password mints platform-admin (full write access).
-      # Real-tenant deployments should remove this line.
-      BOSS_GUEST_ACCESS: "1"
+      BOSS_GUEST_ACCESS: "basic"
       # Tenant manifest the gateway loads for /api/finance/revenue-categories
       # and other tenant-scoped lookups. The docker image carries the
       # brewery seeds at /opt/boss/examples/brewery/seeds/; production

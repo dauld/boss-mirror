@@ -53,6 +53,12 @@ pub struct CadenceRuleRow {
     /// every day is a business day.
     #[serde(default)]
     pub business_calendar: Option<String>,
+    /// A departing rule (`board`, `run`): how many minutes a departure
+    /// waits for the dock's re-gate round on the current main, counted
+    /// from the oldest re-gate in it (design 42279fb2). Absent means no
+    /// hold; the table refuses it on any verb that departs no train.
+    #[serde(default)]
+    pub regate_hold_minutes: Option<i32>,
 }
 
 /// One row of `cadence_rules` as DECLARED — the wire row plus the

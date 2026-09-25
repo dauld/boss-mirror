@@ -68,6 +68,27 @@ fn rule_zero_says_how_to_run_more_than_one_command_before_any_rule_shows_one() {
     }
 }
 
+/// MEASURED 2026-09-23 (backlog 83081e2b, runs 21976a09 and a2fcdc4f):
+/// the guard also refuses a SINGLE `boss step complete <packet> --step
+/// <s> --field-file …` as running a string — it reads `complete` as a
+/// command runner — so two builders rediscovered that a boss verb goes
+/// through a script too. Rule 0 named git, boss-api loops and heredocs,
+/// and no boss verb, so "one plain command" read as covering them.
+#[test]
+fn rule_zero_names_the_boss_verbs_that_run_from_a_script() {
+    let text = rules();
+    let zero = rule_zero(&text).unwrap_or_default();
+    for verb in ["boss step complete", "boss job file", "boss gate"] {
+        assert!(
+            zero.contains(&format!("`{verb}")),
+            "rule 0 of {RULES} must name `{verb}` among the commands written to a \
+             script first — the worktree guard refuses a boss verb even as one \
+             command, and builders rediscover it without the name (backlog 83081e2b): \
+             {zero}"
+        );
+    }
+}
+
 #[test]
 fn no_command_the_rules_show_is_a_shape_the_worktree_guard_refuses() {
     let text = rules();

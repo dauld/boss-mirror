@@ -177,6 +177,87 @@ async fn a_calendar_rule_is_served_whole() {
     assert_eq!(retro.business_calendar, None);
 }
 
+/// The dock's two registry facts (design 42279fb2): a boarding rule's
+/// `regate_hold_minutes` is SERVED, so the conductor reads the bound the
+/// registry declares rather than a number of its own; the `refresh` verb
+/// is a row the table accepts; and a hold on a verb that departs no train
+/// is refused by the table itself — a number nothing would read.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_departure_hold_is_served_and_only_a_departure_may_carry_one() {
+    use boss_jobs::cadence::{CadenceRegistry, CadenceRuleRow, CadenceRuleSpec};
+    let db = TestDb::new().await;
+    let repo = PgCadence::new(db.pool.clone());
+    let actor = boss_core::actor::ActorId::Automation("cadence-test".into());
+    let now = Utc.with_ymd_and_hms(2026, 9, 25, 20, 0, 0).unwrap();
+    let row = |name: &str, verb: &str, basis: &str| CadenceRuleRow {
+        name: name.into(),
+        verb: verb.into(),
+        basis: basis.into(),
+        every_minutes: None,
+        at_times: None,
+        min_dock_depth: None,
+        cooldown_minutes: None,
+        cadence: None,
+        anchor_date: None,
+        business_calendar: None,
+        regate_hold_minutes: None,
+    };
+    let spec = |row: CadenceRuleRow, version: i32| CadenceRuleSpec {
+        version,
+        status: boss_jobs::registry::WorkflowStatus::Active,
+        row,
+        created_at: now,
+    };
+
+    let live = repo
+        .live_versions("train-board-on-dock-depth")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.version)
+        .max()
+        .expect("the migrations seed the boarding rule");
+    let board = CadenceRuleRow {
+        min_dock_depth: Some(1),
+        cooldown_minutes: Some(30),
+        regate_hold_minutes: Some(15),
+        ..row("train-board-on-dock-depth", "board", "queue-depth")
+    };
+    repo.publish_declared(spec(board, live + 1), &actor, now)
+        .await
+        .expect("a boarding rule carrying a hold publishes");
+    let served = repo.active_rules().await.unwrap();
+    let board = served
+        .iter()
+        .find(|r| r.name == "train-board-on-dock-depth")
+        .expect("the boarding rule is served");
+    assert_eq!(
+        board.regate_hold_minutes,
+        Some(15),
+        "a hold the conductor cannot read is a hold that never holds"
+    );
+
+    let refresh = CadenceRuleRow {
+        every_minutes: Some(2),
+        ..row("train-dock-refresh", "refresh", "wall")
+    };
+    repo.publish_declared(spec(refresh, 1), &actor, now)
+        .await
+        .expect("the table accepts the refresh verb");
+
+    let held_reconcile = CadenceRuleRow {
+        every_minutes: Some(10),
+        regate_hold_minutes: Some(15),
+        ..row("a-held-reconcile", "reconcile", "wall")
+    };
+    assert!(
+        repo.publish_declared(spec(held_reconcile, 1), &actor, now)
+            .await
+            .is_err(),
+        "a reconcile departs nothing, so a hold on it is refused by the table"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn active_rules_excludes_retired_ones() {
     let db = TestDb::new().await;

@@ -1178,6 +1178,16 @@ enum TrainAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Walk the loading dock between departures: judge every parked
+    /// car's base the way boarding does and launch the re-gates it owes
+    /// on current main — assembling nothing, departing nothing — and
+    /// only while no train holds the track (fired every two minutes by
+    /// the `train-dock-refresh` cadence rule; design 42279fb2).
+    Refresh {
+        /// Say what would happen without writing anywhere
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Cancel an open train that will not arrive: close its PR
     /// unmerged, release the boarded cars back to the dock (each one
     /// re-enters the next boarding, with the reason on its record),
@@ -1671,6 +1681,7 @@ async fn main() -> Result<()> {
                 TrainAction::Reconcile { dry_run } => (train::Phase::Reconcile, dry_run),
                 TrainAction::Board { dry_run } => (train::Phase::Board, dry_run),
                 TrainAction::Run { dry_run } => (train::Phase::Run, dry_run),
+                TrainAction::Refresh { dry_run } => (train::Phase::Refresh, dry_run),
                 TrainAction::Cancel {
                     train,
                     reason,
