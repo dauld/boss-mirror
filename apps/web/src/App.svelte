@@ -104,7 +104,7 @@
   import ModuleDisabled from './shell/ModuleDisabled.svelte';
   import { moduleEnabled } from '@boss/web-kit/session/manifest.svelte';
 
-  let route = $state<Route>(parseRoute(window.location.pathname));
+  let route = $state<Route>(parseRoute(window.location.pathname, window.location.search));
 
   // Which surfaces get opened (backlog 628f182b): one POST per
   // client-side navigation, the route PATTERN and the time, the actor
@@ -195,7 +195,7 @@
     loadClasses('employee');
     loadDepartments();
     const onPop = () => {
-      route = parseRoute(window.location.pathname);
+      route = parseRoute(window.location.pathname, window.location.search);
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);

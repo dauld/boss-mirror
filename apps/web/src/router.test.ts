@@ -7,18 +7,56 @@
 // Add an entry here every time `router.ts` learns a new path.
 // Run via `bun test`.
 
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { notFoundBack, parseRoute } from './router';
 
-// `/jobs` reads `window.location.search` for filter query params.
-// Stub a minimal window shape so the test runs in bun's
-// non-DOM context.
-beforeAll(() => {
-  if (typeof (globalThis as { window?: unknown }).window === 'undefined') {
-    (globalThis as { window: unknown }).window = {
-      location: { search: '' },
+// No window is planted here. parseRoute takes the query string as its
+// second argument; it read `window.location.search` until backlog
+// cb211b39, and this file planted a window for it that it never took
+// down — so every LATER file in bun's one process that called
+// parseRoute passed on a window it never set up. nav-catalog.test.ts
+// was one: it failed alone, and failed PR #244's gate on GitHub, whose
+// runner ordered the files differently.
+describe('parseRoute reads no global', () => {
+  test('every query-reading branch takes the query from its argument, never from window', () => {
+    // A window whose location THROWS, so a read of it fails this test
+    // whatever order the files run in — an absent window would pass
+    // here whenever an earlier file happened to plant one.
+    const g = globalThis as { window?: unknown };
+    const had = 'window' in g;
+    const prev = g.window;
+    g.window = {
+      get location(): never {
+        throw new Error('parseRoute read window.location');
+      },
     };
-  }
+    try {
+      expect(parseRoute('/ux/products', '?q=ipa')).toEqual({ kind: 'products', q: 'ipa' });
+      expect(parseRoute('/ux/finance', '?tab=invoices')).toEqual({
+        kind: 'finance',
+        view: { tab: 'invoices', entry: '', fact: '' },
+      });
+      expect(parseRoute('/ux/search', '?q=cascade')).toEqual({ kind: 'search', q: 'cascade' });
+      expect(parseRoute('/ux/jobs', '?status=closed')).toEqual({ kind: 'jobs', jobStatus: 'closed' });
+      expect(parseRoute('/ux/jobs/j-1/steps/s-1', '?from=%2Fit')).toEqual({
+        kind: 'stepFocus',
+        jobId: 'j-1',
+        stepId: 's-1',
+        from: '/it',
+      });
+    } finally {
+      if (had) g.window = prev;
+      else delete g.window;
+    }
+  });
+
+  test('an omitted query is no query', () => {
+    expect(parseRoute('/ux/finance')).toEqual({
+      kind: 'finance',
+      view: { tab: 'overview', entry: '', fact: '' },
+    });
+    expect(parseRoute('/ux/jobs')).toEqual({ kind: 'jobs' });
+  });
 });
 
 describe('parseRoute — every specific path matches its specific case', () => {
@@ -257,12 +295,7 @@ describe('parseRoute — wildcard does not shadow specific cases', () => {
 // 1c2db4c2), so the route must hand it to the page on a reload or a
 // shared link; absent and empty both mean no query.
 describe('products list search from the query string', () => {
-  const at = (search: string) => {
-    (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
-      location: { search, pathname: '/ux/products' },
-    };
-    return parseRoute('/ux/products') as { kind: string; q?: string };
-  };
+  const at = (search: string) => parseRoute('/ux/products', search) as { kind: string; q?: string };
 
   test('a query is carried through', () => {
     const r = at('?q=pale+ale');
@@ -285,12 +318,7 @@ describe('products list search from the query string', () => {
 // 2ab44d55): NewJournalEntryPage lands on ?entry=<id> after a post, and
 // the route must hand that to the page rather than drop it.
 describe('finance view from the query string', () => {
-  const at = (search: string) => {
-    (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
-      location: { search, pathname: '/ux/finance' },
-    };
-    return parseRoute('/ux/finance');
-  };
+  const at = (search: string) => parseRoute('/ux/finance', search);
 
   test('a posted entry is carried through, onto the Trial Balance', () => {
     expect(at('?entry=ent-1')).toEqual({
@@ -315,7 +343,7 @@ describe('finance view from the query string', () => {
   });
 
   test('an invoice page does not read the finance query', () => {
-    expect(at('?entry=ent-1') && parseRoute('/ux/finance/inv-1')).toEqual({
+    expect(parseRoute('/ux/finance/inv-1', '?entry=ent-1')).toEqual({
       kind: 'invoice',
       invoiceId: 'inv-1',
     });
@@ -324,19 +352,13 @@ describe('finance view from the query string', () => {
 
 describe('global search results route', () => {
   test('/search carries the query through', () => {
-    (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
-      location: { search: '?q=cascade', pathname: '/ux/search' },
-    };
-    const r = parseRoute('/ux/search');
+    const r = parseRoute('/ux/search', '?q=cascade');
     expect(r.kind).toBe('search');
     expect((r as { q: string }).q).toBe('cascade');
   });
 
   test('/search with no query is still the search route, not the catch-all', () => {
-    (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
-      location: { search: '', pathname: '/ux/search' },
-    };
-    const r = parseRoute('/ux/search');
+    const r = parseRoute('/ux/search', '');
     expect(r.kind).toBe('search');
     expect((r as { q: string }).q).toBe('');
   });
@@ -350,12 +372,7 @@ describe('global search results route', () => {
 // dropped the empty value, so that link showed open jobs only (backlog
 // 03e198e5, found by page-audit 473f4f92 GAP 7).
 describe('jobs list status filter from the query string', () => {
-  const at = (search: string) => {
-    (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
-      location: { search, pathname: '/ux/jobs' },
-    };
-    return parseRoute('/ux/jobs') as { kind: string; jobStatus?: string };
-  };
+  const at = (search: string) => parseRoute('/ux/jobs', search) as { kind: string; jobStatus?: string };
 
   test('an explicit empty status is carried as the empty string (all statuses)', () => {
     const r = at('?owner_id=emp-1&status=');
@@ -379,12 +396,7 @@ describe('jobs list status filter from the query string', () => {
 // filter, so it narrowed nothing. Deleted rather than implemented just
 // in case (backlog 45ca0f89, found by page-audit 473f4f92 GAP 8).
 describe('jobs list subject filter from the query string', () => {
-  const at = (search: string) => {
-    (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
-      location: { search, pathname: '/ux/jobs' },
-    };
-    return parseRoute('/ux/jobs') as Record<string, unknown>;
-  };
+  const at = (search: string) => parseRoute('/ux/jobs', search) as Record<string, unknown>;
 
   test('filter_subject_kind is not a route field: nothing downstream reads it', () => {
     const r = at('?filter_subject_kind=account&subject_id=account-00001');
@@ -421,16 +433,13 @@ describe('full-page step route', () => {
     // David, 40fe7291: Back from a design review landed on the job
     // page instead of the queue he came from. Only the lens knows
     // where back is, so it says so on the URL.
-    (globalThis as { window?: { location: { search: string } } }).window = {
-      location: { search: '?from=%2Fit%2Fdesign&from_label=Design%20Review' },
-    };
-    const r = parseRoute('/ux/jobs/job-123/steps/step-456');
+    const r = parseRoute(
+      '/ux/jobs/job-123/steps/step-456',
+      '?from=%2Fit%2Fdesign&from_label=Design%20Review',
+    );
     expect(r.kind).toBe('stepFocus');
     expect((r as { from?: string }).from).toBe('/it/design');
     expect((r as { fromLabel?: string }).fromLabel).toBe('Design Review');
-    (globalThis as { window: { location: { search: string } } }).window = {
-      location: { search: '' },
-    };
   });
 
   test('refuses a Back target that leaves the app', () => {
@@ -438,16 +447,13 @@ describe('full-page step route', () => {
     // an open redirect. Protocol-relative `//host` is the one that
     // looks in-app at a glance, which is why it is tested by name.
     for (const hostile of ['//evil.example', 'https://evil.example', 'evil']) {
-      (globalThis as { window?: { location: { search: string } } }).window = {
-        location: { search: `?from=${encodeURIComponent(hostile)}` },
-      };
-      const r = parseRoute('/ux/jobs/job-123/steps/step-456');
+      const r = parseRoute(
+        '/ux/jobs/job-123/steps/step-456',
+        `?from=${encodeURIComponent(hostile)}`,
+      );
       expect(r.kind).toBe('stepFocus');
       expect((r as { from?: string }).from).toBeUndefined();
     }
-    (globalThis as { window: { location: { search: string } } }).window = {
-      location: { search: '' },
-    };
   });
 
   test('does not steal the plain job-detail route', () => {

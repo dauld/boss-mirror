@@ -23,12 +23,12 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { ENTITY_KINDS, entityHref, type EntityKind } from '@boss/web-kit/ui/entity-href';
 import { parseRoute, type Route } from './router';
 
-// `href` reads window.location.pathname (the /dashboard mount probe)
-// and `/jobs` reads window.location.search. Stub both for bun's
-// non-DOM context. Patched field by field rather than assigned whole:
-// bun runs every test file in one process, and router.test.ts installs
-// a window of its own with only `search` — whichever stub lands first,
-// both fields have to end up present.
+// `href` reads window.location.pathname (the /dashboard mount probe),
+// so stub that one field for bun's non-DOM context. parseRoute takes
+// its query as an argument (backlog cb211b39) and needs no window.
+// Patched field by field rather than assigned whole: bun runs every
+// test file in one process, so another file's window may already be
+// there.
 beforeAll(() => {
   const g = globalThis as unknown as {
     window?: { location?: Record<string, unknown> };
@@ -36,7 +36,6 @@ beforeAll(() => {
   if (!g.window) g.window = { location: {} };
   if (!g.window.location) g.window.location = {};
   g.window.location.pathname ??= '/';
-  g.window.location.search ??= '';
 });
 
 // One row per kind — the route its href must resolve to. `Record` over

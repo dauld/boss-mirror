@@ -25,22 +25,9 @@
 // of a Svelte `<script>` block), which meant the drift-catching test
 // could itself drift.
 
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, it, expect } from 'bun:test';
 import { parseRoute } from '../router';
 import { ROUTE_CATALOG } from './nav-catalog';
-
-// parseRoute touches `window.location.search` inside its `/jobs`
-// branch. Stub a minimal Location for tests so we don't need
-// happy-dom for one property access.
-const originalWindow = (globalThis as { window?: unknown }).window;
-beforeAll(() => {
-  (globalThis as { window?: { location: { search: string; pathname: string } } }).window = {
-    location: { search: '', pathname: '/' },
-  };
-});
-afterAll(() => {
-  (globalThis as { window?: unknown }).window = originalWindow;
-});
 
 // Every catalog path, straight from the registry the sidebar renders.
 // Plus the plain sub-page links declared inline in nav groups (they

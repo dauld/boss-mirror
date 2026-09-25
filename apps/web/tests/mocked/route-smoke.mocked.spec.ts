@@ -206,13 +206,10 @@ test.describe('the crawl covers every registered surface', () => {
 
 /// The pattern a crawled path opens as — the router's parse, spelled by
 /// routePattern the way surface-opens records it and the catalog names a
-/// parameterised path. parseRoute reads the query string off `window`
-/// for /jobs and /search; this is Node and ROUTES carries no query, so
-/// it gets the one field it reads, empty (as interaction-crawl's
-/// servedBySpa does).
+/// parameterised path. ROUTES carries no query, so parseRoute is handed
+/// none (it takes the query as an argument, backlog cb211b39).
 async function patternOf(): Promise<(path: string) => string> {
   const { parseRoute } = await import('../../src/router');
   const { routePattern } = await import('../../src/shell/surface-opens');
-  (globalThis as { window?: unknown }).window = { location: { search: '' } };
   return (path) => routePattern(parseRoute(path), path);
 }

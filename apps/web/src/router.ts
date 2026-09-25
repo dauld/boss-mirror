@@ -191,7 +191,14 @@ export function notFoundBack(pathname: string): { href: string; label: string } 
     : { href: '/ux', label: 'Back to My Day' };
 }
 
-export function parseRoute(pathname: string): Route {
+/// `search` is the query string (`window.location.search` at the SPA's
+/// call site, leading `?` and all). It is an ARGUMENT, not a read of
+/// `window`: the router read that global until backlog cb211b39, so
+/// every caller outside a browser had to plant a window first, and one
+/// test file's planted window made another file pass only when bun
+/// happened to run it second. Omitted, it is no query — which is what a
+/// path with no query means.
+export function parseRoute(pathname: string, search = ''): Route {
   const raw = routable(pathname);
   if (raw === '/login') return { kind: 'login' };
 
@@ -317,12 +324,12 @@ export function parseRoute(pathname: string): Route {
   if (partM) return { kind: 'part', partSku: segment(partM[1]!) };
 
   if (p === '/products') {
-    return { kind: 'products', q: new URLSearchParams(window.location.search).get('q') ?? '' };
+    return { kind: 'products', q: new URLSearchParams(search).get('q') ?? '' };
   }
   const prodM = p.match(/^\/products\/([^/]+)$/);
   if (prodM) return { kind: 'product', productSku: segment(prodM[1]!) };
 
-  if (p === '/finance') return { kind: 'finance', view: readFinanceView(window.location.search) };
+  if (p === '/finance') return { kind: 'finance', view: readFinanceView(search) };
   if (p === '/finance/new') return { kind: 'newInvoice' };
   if (p === '/finance/journal-entries/new') return { kind: 'newJournalEntry' };
   // Wildcard MUST come after every specific `/finance/X` case above —
@@ -365,7 +372,7 @@ export function parseRoute(pathname: string): Route {
   if (shopM) return { kind: 'shopProduct', sku: segment(shopM[1]!) };
 
   if (p === '/search') {
-    const sp = new URLSearchParams(window.location.search);
+    const sp = new URLSearchParams(search);
     return { kind: 'search', q: sp.get('q') ?? '' };
   }
 
@@ -381,7 +388,7 @@ export function parseRoute(pathname: string): Route {
   if (sm) return { kind: 'jobDetail', jobId: segment(sm[1]!) };
 
   if (p === '/jobs') {
-    const sp = new URLSearchParams(window.location.search);
+    const sp = new URLSearchParams(search);
     const jk = sp.get('kind');
     const jkp = sp.get('kind_prefix');
     const js = sp.get('status');
@@ -411,7 +418,7 @@ export function parseRoute(pathname: string): Route {
   // /jobs/(.+), swallowed the whole `{id}/steps/{stepId}` tail as a job id.
   const sfm = p.match(/^\/jobs\/([^/]+)\/steps\/([^/]+)$/);
   if (sfm) {
-    const sp = new URLSearchParams(window.location.search);
+    const sp = new URLSearchParams(search);
     const r: Route = { kind: 'stepFocus', jobId: sfm[1]!, stepId: sfm[2]! };
     // Where "back" goes, and what to call it. Only the lens that sent
     // the operator here knows — the step surface cannot infer it, and

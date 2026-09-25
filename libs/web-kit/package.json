@@ -19,6 +19,6 @@
     "svelte": "^5.55.9"
   },
   "scripts": {
-    "test:unit": "bun test src/"
+    "test:unit": "bun ../../apps/web/scripts/each-test-file-alone.ts src"
   }
 }

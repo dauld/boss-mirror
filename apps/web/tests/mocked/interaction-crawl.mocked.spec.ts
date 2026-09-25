@@ -148,10 +148,7 @@ const OFF_SPA: ReadonlyArray<RegExp> = [
 /// its patterns (CLAUDE.md §9a).
 function servedBySpa(href: string): boolean {
   const [path = '', query = ''] = href.split('#')[0]!.split('?');
-  // parseRoute reads the query string off `window` for /jobs and
-  // /search. This is Node, so give it the one field it reads.
-  (globalThis as { window?: unknown }).window = { location: { search: query ? `?${query}` : '' } };
-  return parseRoute(path).kind !== 'notFound';
+  return parseRoute(path, query ? `?${query}` : '').kind !== 'notFound';
 }
 
 // ---------------------------------------------------------------------------
