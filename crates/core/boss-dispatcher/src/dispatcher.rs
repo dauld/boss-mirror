@@ -1185,18 +1185,95 @@ async fn assign(ctx: &DispatcherCtx, job_id: &str, step_id: &str, emp_id: &str) 
             continue;
         }
         let text = resp.text().await.unwrap_or_default();
+        if finished_before_assignment(status.as_u16(), &text) {
+            debug!(
+                job_id,
+                step_id, emp_id, "step finished before its assignment arrived; nothing to hold"
+            );
+            return Ok(());
+        }
         anyhow::bail!("PUT {url} returned {status}: {text}");
     }
+}
+
+/// The jobs API's refusal of a holder change on a step that is already
+/// completed or skipped. Since backlog 42e7c6b9 a finished step's
+/// `assignee_id` is frozen and a PUT that would move it is refused 409
+/// by name — it used to be written onto the finished row in silence,
+/// re-attributing who held it. For this caller that refusal is the
+/// answer "nobody needs to hold it now": a redelivered `step.ready`, or
+/// one that loses the race with a fast completion, would otherwise NAK
+/// to the dead-letter stream over work that is already done.
+fn finished_before_assignment(status: u16, body: &str) -> bool {
+    if status != 409 {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    let terminal = matches!(
+        v.get("step_status").and_then(|s| s.as_str()),
+        Some("completed" | "skipped")
+    );
+    let holder_refused = v
+        .get("refused_fields")
+        .and_then(|f| f.as_array())
+        .is_some_and(|f| f.iter().any(|x| x.as_str() == Some("assignee_id")));
+    terminal && holder_refused
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         Partition, StepEventPayload, born_placed, capability_executor, eligible_candidates,
-        event_partition, executor_for, is_active_holder, left_for_role_queue, owner_assignee,
-        owner_id_from_job_body, partition_permits, pick_index, pick_index_for, roster_union,
-        stable_hash,
+        event_partition, executor_for, finished_before_assignment, is_active_holder,
+        left_for_role_queue, owner_assignee, owner_id_from_job_body, partition_permits, pick_index,
+        pick_index_for, roster_union, stable_hash,
     };
+
+    /// The jobs API's refusal body for a holder change on a finished step
+    /// (its shape is pinned on the jobs side by
+    /// `each_frozen_field_is_refused_by_name_on_a_completed_step`).
+    fn terminal_refusal(step_status: &str, fields: &[&str]) -> String {
+        serde_json::json!({
+            "error": "step is terminal — these fields are immutable",
+            "step_id": "00000000-0000-0000-0000-000000000001",
+            "step_status": step_status,
+            "refused_fields": fields,
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_step_finished_before_its_assignment_is_nothing_to_hold() {
+        assert!(finished_before_assignment(
+            409,
+            &terminal_refusal("completed", &["assignee_id"])
+        ));
+        assert!(finished_before_assignment(
+            409,
+            &terminal_refusal("skipped", &["assignee_id"])
+        ));
+    }
+
+    #[test]
+    fn every_other_refusal_is_still_an_error() {
+        // A refusal that is not about the holder, or not of a finished
+        // step, or not a 409 at all, still NAKs as before.
+        assert!(!finished_before_assignment(
+            409,
+            &terminal_refusal("completed", &["metadata"])
+        ));
+        assert!(!finished_before_assignment(
+            409,
+            &terminal_refusal("ready", &["assignee_id"])
+        ));
+        assert!(!finished_before_assignment(
+            422,
+            &terminal_refusal("completed", &["assignee_id"])
+        ));
+        assert!(!finished_before_assignment(409, "step is completed"));
+    }
     use crate::config::AssignmentStrategy;
     use boss_jobs::step_registry::StepRegistry;
     use std::collections::HashMap;

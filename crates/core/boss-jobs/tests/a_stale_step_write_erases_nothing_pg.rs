@@ -1,13 +1,14 @@
 //! Postgres half of `update_step_if_unchanged_at` (backlog e381689d).
 //!
-//! The in-memory adapter compares the stored metadata under its lock;
-//! this adapter carries the comparison in the UPDATE's own WHERE clause,
-//! so no window is left between the check and the write. Two
-//! implementations of one rule, so the rule is pinned against the real
-//! SQL: a write whose read the row no longer holds is refused as
-//! `StepChanged` and writes neither row nor outbox event; a write over
-//! an unchanged row lands; a terminal row is not judged; a missing row
-//! is still `StepNotFound`. The shape is the one measured on run
+//! The in-memory adapter judges under its lock; this adapter judges the
+//! row under `FOR UPDATE` in the write's own transaction, so no window
+//! is left between the check and the write. Two implementations of one
+//! rule, so the rule is pinned against the real SQL: a write whose read
+//! the row no longer holds is refused as `StepChanged` and writes
+//! neither row nor outbox event; a write over an unchanged row lands; a
+//! terminal row read before it finished is refused too (backlog
+//! 6ec22d71, which also made the judgement the row's version rather
+//! than its metadata); a missing row is still `StepNotFound`. The shape is the one measured on run
 //! 6b6fe011 on 2026-09-25: a merge committed between the assignment
 //! PUT's read and its whole-row write, and the write erased it.
 
@@ -80,7 +81,7 @@ async fn a_write_whose_read_the_row_no_longer_holds_is_refused_and_writes_nothin
     let step = briefed(&repo, "00000000-0000-0000-0000-00000000e391").await;
 
     // The assignment PUT reads …
-    let read = repo.get_step(&step.id).await.unwrap().unwrap();
+    let (read, version) = repo.get_step_versioned(&step.id).await.unwrap().unwrap();
     // … the merge door commits …
     repo.merge_step_metadata_at(
         &step.id,
@@ -99,7 +100,7 @@ async fn a_write_whose_read_the_row_no_longer_holds_is_refused_and_writes_nothin
         boss_jobs::events::step_state_payload(&stale),
     );
     let answer = repo
-        .update_step_if_unchanged_at(&stale, &read.metadata, chrono::Utc::now(), &[event])
+        .update_step_if_unchanged_at(&stale, version, chrono::Utc::now(), &[event])
         .await;
 
     assert!(
@@ -124,11 +125,11 @@ async fn a_write_over_the_row_it_read_lands() {
     let db = TestDb::new().await;
     let repo = boss_jobs::PgJobs::new(db.pool.clone());
     let step = briefed(&repo, "00000000-0000-0000-0000-00000000e392").await;
-    let read = repo.get_step(&step.id).await.unwrap().unwrap();
+    let (read, version) = repo.get_step_versioned(&step.id).await.unwrap().unwrap();
     let mut next = read.clone();
     next.assignee_id = Some("agent-claude".into());
     next.metadata["note"] = serde_json::json!("written");
-    repo.update_step_if_unchanged_at(&next, &read.metadata, chrono::Utc::now(), &[])
+    repo.update_step_if_unchanged_at(&next, version, chrono::Utc::now(), &[])
         .await
         .unwrap();
     let stored = repo.get_step(&step.id).await.unwrap().unwrap();
@@ -137,10 +138,14 @@ async fn a_write_over_the_row_it_read_lands() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_terminal_row_is_not_judged() {
+async fn a_stale_write_over_a_row_that_went_terminal_is_refused() {
+    // Was `a_terminal_row_is_not_judged` until backlog 6ec22d71: the
+    // write answered Ok over the frozen row while its event recorded the
+    // stale values, which the rebuild replays.
     let db = TestDb::new().await;
     let repo = boss_jobs::PgJobs::new(db.pool.clone());
     let step = briefed(&repo, "00000000-0000-0000-0000-00000000e393").await;
+    let (_, version) = repo.get_step_versioned(&step.id).await.unwrap().unwrap();
     let mut done = repo.get_step(&step.id).await.unwrap().unwrap();
     done.status = StepStatus::Completed;
     done.metadata["prompt_bytes"] = serde_json::json!("36128");
@@ -148,9 +153,13 @@ async fn a_terminal_row_is_not_judged() {
 
     let mut stale = step.clone();
     stale.status = StepStatus::Completed;
-    repo.update_step_if_unchanged_at(&stale, &step.metadata, chrono::Utc::now(), &[])
-        .await
-        .unwrap();
+    let answer = repo
+        .update_step_if_unchanged_at(&stale, version, chrono::Utc::now(), &[])
+        .await;
+    assert!(
+        matches!(answer, Err(JobsError::StepChanged { id }) if id == step.id),
+        "got {answer:?}"
+    );
     let stored = repo.get_step(&step.id).await.unwrap().unwrap();
     assert_eq!(stored.metadata["prompt_bytes"], "36128", "frozen");
 }
@@ -161,10 +170,14 @@ async fn a_missing_row_is_still_not_found() {
     let repo = boss_jobs::PgJobs::new(db.pool.clone());
     let j = job("00000000-0000-0000-0000-00000000e394");
     repo.create_job(&j).await.unwrap();
-    let mut ghost = Step::new(j.id, "task", "Never written", 1);
+    // A version is only ever read, never made: borrow a real row's.
+    let real = Step::new(j.id, "task", "Written", 1);
+    repo.add_step(&real).await.unwrap();
+    let (_, version) = repo.get_step_versioned(&real.id).await.unwrap().unwrap();
+    let mut ghost = Step::new(j.id, "task", "Never written", 2);
     ghost.id = StepId::new();
     let answer = repo
-        .update_step_if_unchanged_at(&ghost, &serde_json::json!({}), chrono::Utc::now(), &[])
+        .update_step_if_unchanged_at(&ghost, version, chrono::Utc::now(), &[])
         .await;
     assert!(
         matches!(answer, Err(JobsError::StepNotFound(id)) if id == ghost.id),

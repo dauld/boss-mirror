@@ -103,6 +103,64 @@ async fn the_stamps_persist_and_a_terminal_row_keeps_them() {
     assert_eq!(frozen.completed_at, Some(at), "and when");
 }
 
+/// A terminal row keeps what was completed — its title, its holder and
+/// its notes — through a whole-row write, as it keeps the stamps above
+/// (backlog 42e7c6b9). The UPDATE wrote all three with no terminal CASE,
+/// so a bare PUT retitled a completed presence step after its ceremony.
+/// A skipped row is terminal too and takes the same freeze.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_row_keeps_its_title_holder_and_notes() {
+    let db = TestDb::new().await;
+    let repo = PgJobs::new(db.pool.clone());
+    let j = job("00000000-0000-0000-0000-000000000013");
+    repo.create_job(&j).await.unwrap();
+
+    for terminal in [StepStatus::Completed, StepStatus::Skipped] {
+        let mut step = Step::new(j.id, "task", "Approve the plan", 0).with_assignee("emp-1");
+        step.status = StepStatus::Ready;
+        step.notes = Some("as planned".into());
+        repo.add_step(&step).await.unwrap();
+
+        let at = Utc.with_ymd_and_hms(2026, 9, 25, 9, 0, 0).unwrap();
+        let mut done = step.clone();
+        done.status = terminal;
+        repo.update_step_at(&done, at, &[]).await.unwrap();
+
+        let mut stale = done.clone();
+        stale.title = "Run rm -rf on the forge".into();
+        stale.assignee_id = Some("emp-someone-else".into());
+        stale.notes = Some("written after the fact".into());
+        repo.update_step_at(&stale, at, &[]).await.unwrap();
+
+        let frozen = repo.get_step(&step.id).await.unwrap().unwrap();
+        assert_eq!(frozen.title, "Approve the plan", "{terminal:?}: the title");
+        assert_eq!(
+            frozen.assignee_id.as_deref(),
+            Some("emp-1"),
+            "{terminal:?}: the holder"
+        );
+        assert_eq!(
+            frozen.notes.as_deref(),
+            Some("as planned"),
+            "{terminal:?}: the notes"
+        );
+    }
+
+    // A live row still takes all three.
+    let mut live = Step::new(j.id, "task", "Draft", 1).with_assignee("emp-1");
+    live.status = StepStatus::Ready;
+    repo.add_step(&live).await.unwrap();
+    let mut edited = live.clone();
+    edited.title = "Draft, revised".into();
+    edited.assignee_id = Some("emp-2".into());
+    edited.notes = Some("a live note".into());
+    repo.update_step_at(&edited, Utc::now(), &[]).await.unwrap();
+    let after = repo.get_step(&live.id).await.unwrap().unwrap();
+    assert_eq!(after.title, "Draft, revised");
+    assert_eq!(after.assignee_id.as_deref(), Some("emp-2"));
+    assert_eq!(after.notes.as_deref(), Some("a live note"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_machine_actor_round_trips_in_its_wire_form() {
     let db = TestDb::new().await;

@@ -674,14 +674,34 @@ spec:
           #
           # EPHEMERAL STORAGE, because a request of none made this pod the
           # kubelet's first eviction under disk pressure (see the
-          # boss-dev-session PriorityClass above). 100Gi is the cold
+          # boss-dev-session PriorityClass above). The first figure,
+          # 100Gi (train #587, 2026-09-23), was the cold
           # `cargo test --all-features` target (~74G, measured above) plus
           # this container's writable layer (~10G at the 2026-09-23
           # eviction) and pgdata. A request, not a limit: exceeding it
           # evicts nothing on its own; it only decides the order under
           # pressure. Beside three gate slots at 90Gi each it fits w-1.
+          #
+          # 150Gi, RE-MEASURED 2026-09-25 (backlog 80f083bc) with the
+          # 100Gi in force: /scratch held 99.5 GB over NINE per-worktree
+          # targets (du, the walk the kubelet does — each reflinked target
+          # counts at full size, the largest 22.7 GB), not the one 74G
+          # target the figure above assumed; this container's writable
+          # layer read 6.2 GB (/tmp) and 11.8 GiB at its largest eviction.
+          # That is ~104 GiB for this container, so the pod stood in the
+          # "exceeds its request" class the day it was measured. 150Gi is
+          # that plus two more full builder targets. It does NOT cover
+          # the ~430 GiB /scratch of the 09-24 eviction: /scratch has no
+          # bound of its own short of the node-level floor, so no fixed
+          # request tracks it, and the scratch floor is what holds that
+          # (the_dev_pod_is_not_the_first_evicted.rs).
+          # Every tree-declared request on w-1 then sums to 424Gi (this
+          # pod 154, three gates 270) of ~790Gi allocatable (929 GiB
+          # nodefs less the kubelet's 15% line). No disk LIMIT, here or
+          # on either sidecar: the kubelet sums the containers' limits
+          # into the POD's ceiling and measures /scratch against it.
           resources:
-            requests: {cpu: "4", memory: 8Gi, ephemeral-storage: 100Gi}
+            requests: {cpu: "4", memory: 8Gi, ephemeral-storage: 150Gi}
             limits: {cpu: "16", memory: 32Gi}
           volumeMounts:
             - {name: work, mountPath: /work}
@@ -742,8 +762,16 @@ spec:
             # cause surfaced. Memory-backed and capped at 1Gi, counted
             # against this container's 4Gi limit.
             - {name: pg-shm, mountPath: /dev/shm}
+          # DISK: the pgdata emptyDir is this container's writing, so its
+          # request carries it — measured 2026-09-25, 2.94 GB in 191
+          # databases plus 80 MiB of WAL (pg_database_size, pg_ls_waldir),
+          # beside a writable layer of 1.5-10.5 MiB across seven eviction
+          # messages. 4Gi is that, rounded up. The messages that named
+          # this container "request is 0" were not naming a cause: the
+          # kubelet lists every container over its own request there, and
+          # at 3400Ki this one changed nothing about the pod's rank.
           resources:
-            requests: {cpu: 250m, memory: 512Mi}
+            requests: {cpu: 250m, memory: 512Mi, ephemeral-storage: 4Gi}
             limits: {cpu: "2", memory: 4Gi}
         # THE RECLAIM ACTUATOR. `scratch` is a node-local emptyDir with
         # no sizeLimit and nothing that reclaims it; measured 2026-09-06,
@@ -807,8 +835,13 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: ["ALL"]}
+          # DISK: it writes nothing but its log — the script's scratch is
+          # the two mounts it cleans. Its writable layer read 32Ki-18.4MiB
+          # across seven eviction messages, and the kubelet's default
+          # rotation keeps up to five 10Mi files of a container's log,
+          # which count against it too, so 64Mi covers both.
           resources:
-            requests: {cpu: 50m, memory: 64Mi}
+            requests: {cpu: 50m, memory: 64Mi, ephemeral-storage: 64Mi}
             limits: {cpu: 500m, memory: 256Mi}
           volumeMounts:
             - {name: work, mountPath: /work}

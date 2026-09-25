@@ -178,7 +178,7 @@ async fn an_assignment_put_racing_a_merge_is_refused_and_the_merged_key_stands()
 async fn the_port_refuses_a_write_whose_read_the_row_no_longer_holds() {
     let jobs = InMemoryJobs::new();
     let (_job, step) = briefed(&jobs, "00000000-0000-0000-0000-00000000e382").await;
-    let read = jobs.get_step(&step.id).await.unwrap().unwrap();
+    let (read, version) = jobs.get_step_versioned(&step.id).await.unwrap().unwrap();
     jobs.merge_step_metadata_at(
         &step.id,
         &map(serde_json::json!({ "prompt_bytes": "36127" })),
@@ -193,7 +193,7 @@ async fn the_port_refuses_a_write_whose_read_the_row_no_longer_holds() {
     let mut stale = read.clone();
     stale.assignee_id = Some("agent-claude".into());
     let answer = jobs
-        .update_step_if_unchanged_at(&stale, &read.metadata, chrono::Utc::now(), &[])
+        .update_step_if_unchanged_at(&stale, version, chrono::Utc::now(), &[])
         .await;
     assert!(
         matches!(answer, Err(JobsError::StepChanged { id }) if id == step.id),
@@ -208,11 +208,11 @@ async fn the_port_refuses_a_write_whose_read_the_row_no_longer_holds() {
 async fn the_port_writes_when_the_row_still_holds_the_read() {
     let jobs = InMemoryJobs::new();
     let (_job, step) = briefed(&jobs, "00000000-0000-0000-0000-00000000e383").await;
-    let read = jobs.get_step(&step.id).await.unwrap().unwrap();
+    let (read, version) = jobs.get_step_versioned(&step.id).await.unwrap().unwrap();
     let mut next = read.clone();
     next.assignee_id = Some("agent-claude".into());
     next.metadata["note"] = serde_json::json!("written");
-    jobs.update_step_if_unchanged_at(&next, &read.metadata, chrono::Utc::now(), &[])
+    jobs.update_step_if_unchanged_at(&next, version, chrono::Utc::now(), &[])
         .await
         .unwrap();
     let stored = jobs.get_step(&step.id).await.unwrap().unwrap();
@@ -221,12 +221,17 @@ async fn the_port_writes_when_the_row_still_holds_the_read() {
 }
 
 #[tokio::test]
-async fn the_port_does_not_judge_a_terminal_row() {
-    // A terminal row's metadata is frozen whatever the write carries,
-    // so a stale copy cannot reach it — the idempotent re-send the
-    // dispatcher's redeliveries rely on still lands as the no-op it is.
+async fn the_port_refuses_a_stale_write_over_a_row_that_went_terminal() {
+    // This was `the_port_does_not_judge_a_terminal_row` until backlog
+    // 6ec22d71: the write answered Ok, the row kept its frozen values,
+    // and the event the caller passed was recorded carrying the stale
+    // ones — which the rebuild replays. A row read before it finished is
+    // now refused like any other moved row; the idempotent re-send the
+    // dispatcher's redeliveries rely on reads afresh and still lands
+    // (`a_stale_step_write_is_judged_on_the_whole_row.rs`).
     let jobs = InMemoryJobs::new();
     let (_job, step) = briefed(&jobs, "00000000-0000-0000-0000-00000000e384").await;
+    let (_, version) = jobs.get_step_versioned(&step.id).await.unwrap().unwrap();
     let mut done = jobs.get_step(&step.id).await.unwrap().unwrap();
     done.status = StepStatus::Completed;
     done.metadata["prompt_bytes"] = serde_json::json!("36128");
@@ -234,9 +239,13 @@ async fn the_port_does_not_judge_a_terminal_row() {
 
     let mut stale = step.clone();
     stale.status = StepStatus::Completed;
-    jobs.update_step_if_unchanged_at(&stale, &step.metadata, chrono::Utc::now(), &[])
-        .await
-        .unwrap();
+    let answer = jobs
+        .update_step_if_unchanged_at(&stale, version, chrono::Utc::now(), &[])
+        .await;
+    assert!(
+        matches!(answer, Err(JobsError::StepChanged { id }) if id == step.id),
+        "got {answer:?}"
+    );
     let stored = jobs.get_step(&step.id).await.unwrap().unwrap();
     assert_eq!(stored.metadata["prompt_bytes"], "36128", "frozen");
 }
