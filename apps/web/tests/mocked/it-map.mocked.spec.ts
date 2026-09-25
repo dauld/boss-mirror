@@ -232,31 +232,39 @@ test('a state that is not clear says how long it has held and names the band tha
 // ONE DOOR PER REGION (backlog 594ffe96): the world map sent its
 // publish territory to /it/yard — the TRACK's page — because its link
 // function knew nine regions, while the transit map linked the same
-// region to /it/yard/publish. Every territory, as rendered, links its
-// own region page, and publish's lands on publish's map.
-test('every territory links its own region page, and publish opens publish — not the track', async ({ page }) => {
+// region to /it/yard/publish. Every territory, as rendered, selects
+// its own region (design e765b3fc, car N1: `/it?at=<name>`), and
+// publish's selection opens publish's floor — not the track's.
+test('every territory selects its own region, and publish opens publish — not the track', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');
   const svg = page.locator('section.yard svg');
   await expect(svg.locator('.territory')).toHaveCount(TERRITORIES.length);
   for (const t of TERRITORIES) {
-    await expect(svg.locator(`.territory[data-region="${t.name}"]`)).toHaveAttribute('href', `/it/yard/${t.name}`);
+    await expect(svg.locator(`.territory[data-region="${t.name}"]`)).toHaveAttribute('href', `/it?at=${t.name}`);
   }
   await svg.locator('.territory[data-region="publish"]').click();
+  await expect(page).toHaveURL(/\/it\?at=publish$/);
+  await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-selection', 'publish');
+  await page.locator('section[data-map-panel] a[data-floor]').click();
   await expect(page).toHaveURL(/\/it\/yard\/publish$/);
   await expect(page.locator('section[aria-label="the publish region map"]')).toHaveCount(1);
   await expect(page.locator('section[aria-label="the track region map"]')).toHaveCount(0);
 });
 
-test('a territory click opens its floor, and the floor opens with the region\'s state and why at the head of its panel', async ({ page }) => {
+test('a territory click selects it, and its floor opens with the region\'s state and why at the head of its panel', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');
   const svg = page.locator('section.yard svg');
   await expect(svg.locator('.territory')).toHaveCount(TERRITORIES.length);
 
-  // A troubled yard region: the Train Yard on the gates' panel, headed
-  // by the map's own verdict — the floor cannot contradict the map.
+  // A troubled yard region: selected on the map, its panel carries the
+  // map's own state, and its floor opens on the gates' panel headed by
+  // the same verdict — the floor cannot contradict the map.
   await svg.locator('.territory[data-region="gates"]').click();
+  await expect(page).toHaveURL(/\/it\?at=gates$/);
+  await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-state', 'troubled');
+  await page.locator('section[data-map-panel] a[data-floor]').click();
   await expect(page).toHaveURL(/\/it\/yard\/gates$/);
   await expect(page.locator('.yard-panel-h', { hasText: 'Entity · approach' })).toBeVisible();
   const head = page.locator('.yard-region-head');
@@ -265,22 +273,26 @@ test('a territory click opens its floor, and the floor opens with the region\'s 
   await expect(head).toContainText('1 bay holds a corpse');
   await expect(head.locator('.yard-lamp-dot.err')).toHaveCount(1);
 
-  // Back returns to the world.
+  // Back returns to the map, the selection still made.
   await page.goBack();
-  await expect(page).toHaveURL(/\/it$/);
+  await expect(page).toHaveURL(/\/it\?at=gates$/);
   await expect(page.locator('section.yard svg .territory')).toHaveCount(TERRITORIES.length);
 
   // A clear region's floor says so at its head, too.
   await page.locator('section.yard svg .territory[data-region="dock"]').click();
+  await expect(page).toHaveURL(/\/it\?at=dock$/);
+  await page.locator('section[data-map-panel] a[data-floor]').click();
   await expect(page).toHaveURL(/\/it\/yard\/dock$/);
   await expect(page.locator('.yard-panel-h', { hasText: 'Entity · loading dock' })).toBeVisible();
   await expect(page.locator('.yard-region-head')).toContainText('dock · clear — 3 cars parked');
 
   // A region whose floor is a QUEUE BOARD. Its page retired on car 4
-  // of design d2154293: the click is a zoom into the region like every
-  // other, and the board mounts under it.
+  // of design d2154293: its selection opens its floor like every other,
+  // and the board mounts under it.
   await page.goto('/it');
   await page.locator('section.yard svg .territory[data-region="receiving"]').click();
+  await expect(page).toHaveURL(/\/it\?at=receiving$/);
+  await page.locator('section[data-map-panel] a[data-floor]').click();
   await expect(page).toHaveURL(/\/it\/yard\/receiving$/);
 });
 
@@ -336,8 +348,12 @@ test('the HUD frame stands above the map, one row per third, each figure the ser
   await expect(line).toContainText('unjudged of');
   await expect(machines.locator('a[data-machine]')).toHaveCount(2);
   await machines.locator('a[data-machine="station:design-review"]').click();
+  await expect(page).toHaveURL(/\/it\?at=marshalling$/);
+  await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-selection', 'marshalling');
+  // The same frame stands over the selection, and over the floor too.
+  await expect(page.locator('[data-hud] .hud-row')).toHaveCount(3);
+  await page.locator('section[data-map-panel] a[data-floor]').click();
   await expect(page).toHaveURL(/\/it\/yard\/marshalling$/);
-  // It does not follow the zoom: the same frame stands over the region.
   await expect(page.locator('[data-hud] .hud-row')).toHaveCount(3);
   await expect(page.locator('[data-hud] [data-strip]')).toHaveCount(1);
 });

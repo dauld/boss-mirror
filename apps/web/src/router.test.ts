@@ -511,3 +511,22 @@ describe('full-page step route', () => {
     expect(r.kind).toBe('jobDetail');
   });
 });
+
+// THE DEPARTMENT MAP'S SELECTION (design e765b3fc, car N1). /it is the
+// map on top and the selection's detail below it, and the selection is
+// kept in the query — `/it?at=gates` — so a link names what it selects.
+// State on the page, not a second route: the map stays mounted across a
+// selection, which is the whole point of putting it on top.
+describe('/it?at= — the Department Map carries its selection in the query', () => {
+  test('a station named in `at` is the selection, and the bare landing selects nothing', () => {
+    expect(parseRoute('/it', '?at=gates')).toEqual({ kind: 'systemYard', at: 'gates' });
+    expect(parseRoute('/dashboard/it/', '?at=shop-floor')).toEqual({ kind: 'systemYard', at: 'shop-floor' });
+    expect(parseRoute('/it')).toEqual({ kind: 'systemYard' });
+    // An empty `at` selects nothing rather than a station named "".
+    expect(parseRoute('/it', '?at=')).toEqual({ kind: 'systemYard' });
+  });
+
+  test('`at` is read on the landing only — another IT page ignores it', () => {
+    expect(parseRoute('/it/estate', '?at=gates')).toEqual({ kind: 'systemEstate' });
+  });
+});

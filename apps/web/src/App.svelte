@@ -421,10 +421,12 @@
            this car removed. Measured: the mocked spec holds a handle to
            the SVG node across the click and it came back detached.
            MapPage keys the floor's panels itself. -->
-      <MapPage region={route.kind === 'systemYardFloor' ? route.region : null} />
+      <MapPage
+        region={route.kind === 'systemYardFloor' ? route.region : null}
+        at={route.kind === 'systemYard' ? route.at : undefined} />
     {:else if route.kind === 'systemCrew'}
-      <!-- No ItTabs: the Crew Board is its own sidebar row, not a tab on
-           an existing family (backlog 04c5bbc0, David 2026-09-11). -->
+      <!-- No ItTabs: the Crew Board is the shop floor's board, lit under
+           the Department Map row (design e765b3fc, car N1). -->
       <CrewBoardPage />
     {:else if route.kind === 'systemEstate'}
       <EstatePage />

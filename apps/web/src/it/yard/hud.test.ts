@@ -202,7 +202,8 @@ describe('what the frame retires (decision 10)', () => {
 describe('a listed machine opens where it is drawn', () => {
   it('a region machine opens its region, a plant machine the world', () => {
     const at = (region: string) => ({ region, id: 'x', name: 'x', state: 'failed' as const, why: '' });
-    expect(machineHref(at('marshalling'))).toBe('/it/yard/marshalling');
+    // A selection on the Department Map (design e765b3fc, car N1).
+    expect(machineHref(at('marshalling'))).toBe('/it?at=marshalling');
     expect(machineHref(at('plant'))).toBe('/it');
   });
 });

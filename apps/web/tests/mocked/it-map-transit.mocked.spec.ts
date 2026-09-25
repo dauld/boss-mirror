@@ -123,8 +123,14 @@ test('flight ON: the same reads drawn as a transit monitor', async ({ page }) =>
   await expect(alarms.nth(1)).toHaveAttribute('data-alarm', 'receiving');
   await expect(alarms.nth(1)).toContainText('80 packets standing, the oldest 5 days');
 
-  // A station opens its region page.
+  // A station selects itself (design e765b3fc, car N1): the transit map
+  // stays on top, the dock's panel opens under it, and the panel is the
+  // door to the dock's floor.
   await transit.locator('[data-station="dock"]').click();
+  await expect(page).toHaveURL(/\/it\?at=dock$/);
+  await expect(transit).toBeVisible();
+  await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-selection', 'dock');
+  await page.locator('section[data-map-panel] a[data-floor]').click();
   await expect(page).toHaveURL(/\/it\/yard\/dock$/);
   await expect(page.locator('nav.crumbs[data-region="dock"]')).toBeVisible();
 });

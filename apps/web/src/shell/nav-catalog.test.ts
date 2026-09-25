@@ -132,12 +132,12 @@ describe('nav catalog — app assignment', () => {
     // Beside Flow deliberately: Flow is throughput, Fleet is where
     // the work is piling up (queue-visibility Q4's depth signal).
     'system-fleet',
-    // The Crew Board — the middle third of the operator surface: who is
-    // building what, right now. New surface, and a new SIDEBAR ROW,
-    // which the test below was written to forbid: David's decision on
-    // backlog 04c5bbc0 (2026-09-11) read the proposal to make it a tab
-    // in an existing family and overrode it.
-    'system-crew',
+    // The Crew Board, the Receiving Yard and the Marshalling Yard were
+    // rows here (04c5bbc0, 92921c2f) and LEFT the catalog with car N1
+    // of design e765b3fc (2026-09-25): each is a station on the
+    // Department Map, selected there — `/it?at=shop-floor`,
+    // `?at=receiving`, `?at=marshalling` — and a catalog row existed
+    // only to be a sidebar row.
     // The train yard — the departure board over the pipeline's queues
     // and the IT app's guest-visible landing (departure-board.md Q1).
     // Its car landed without this line; added when the map arrived.
@@ -160,15 +160,6 @@ describe('nav catalog — app assignment', () => {
     // packet rendered (4ae9969e, car 2 of 8f4e9cc0). A TAB, not a row:
     // it gates under `workflows` like the registry it is a view of.
     'system-registry-drift',
-    // The Receiving Yard and the Marshalling Yard — SIDEBAR ROWS onto
-    // the two Operate tabs that already answered /it/operate/receiving
-    // and /it/operate/marshalling. David's feedback 92921c2f
-    // (2026-09-18): "graduate Receiving Yard and Marshalling Yard to
-    // the left navbar ... the three yards plus the Crew Board as the
-    // top 4"; design 55417146 decided the order. The routes did not
-    // move; the rows are a second door onto the same pages.
-    'system-receiving',
-    'system-marshalling',
   ];
 
   it('the IT app contains the System Model set plus what we added deliberately', () => {
@@ -189,7 +180,7 @@ describe('nav catalog — app assignment', () => {
   // Source-level because the groups live inside a component. Crude,
   // but it fails when someone adds an IT surface and forgets the
   // sidebar, which is exactly the mistake it exists for.
-  it('the IT sidebar holds exactly ten rows, and every other IT surface is a tab or a documented door', () => {
+  it('the IT sidebar holds exactly seven rows, and every other IT surface is a tab or a documented door', () => {
     // The 2026-08-31 consolidation (packet 1f6d55e0): David — "we do
     // have too many IT pages though. We should consolidate." The
     // sidebar is EXACTLY seven rows; every remaining IT catalog entry
@@ -206,10 +197,7 @@ describe('nav catalog — app assignment', () => {
       shell.indexOf('// Home —'),
     );
     const SIDEBAR_ROWS: ReadonlyArray<string> = [
-      'system-receiving',   // Receiving Yard — see below
-      'system-marshalling', // Marshalling Yard — see below
-      'system-yard',        // /it — the landing
-      'system-crew',        // Crew Board — see below
+      'system-yard',        // /it — the Department Map, the landing
       'system-incidents',   // Operate
       'workflows',          // Registry
       'system-design',      // Design
@@ -225,28 +213,19 @@ describe('nav catalog — app assignment', () => {
     }
     // No EIGHTH row: count the catalog references inside IT_GROUPS.
     //
-    // This was six until 2026-09-11. The seventh is the Crew Board, and
-    // the bar for adding it was a decision, not a convenience: the
-    // proposal on backlog 04c5bbc0 was a tab inside an existing family,
-    // citing this very count, and David answered "Port the Crew Board as
-    // a new sidebar page in IT" with `accepted_as_proposed: false`. The
-    // count still exists and still bites — the consolidation's point was
-    // that a family belongs behind one row — so a new row needs the same
-    // kind of answer, not an edit to this line.
-    //
-    // The eighth is the Codebase, and it has one: David's feedback
-    // 9827c699 (2026-09-14), "Let's add a page to the IT department
-    // showing the Code base stats", filed while the trend was a tab on
-    // Design. The tab is gone; the row is the page.
-    //
-    // The ninth and tenth are the Receiving Yard and the Marshalling
-    // Yard, and they have one too: David's feedback 92921c2f
-    // (2026-09-18), "Let's graduate Receiving Yard and Marshalling Yard
-    // to the left navbar. We can have the three yards plus the Crew
-    // Board as the top 4." Design 55417146 settled the order (the test
-    // below). The tabs STAY: the row is a second door onto the same page.
+    // The count still exists and still bites — the consolidation's point
+    // was that a family belongs behind one row — so a new row needs a
+    // decision of David's, not an edit to this line. Each change so far
+    // had one: the Crew Board (04c5bbc0, 2026-09-11), the Codebase
+    // (9827c699, 2026-09-14), and the Receiving and Marshalling Yards
+    // (92921c2f, 2026-09-18) took it from six to ten; and then the map
+    // took it back to seven (design e765b3fc, car N1, decided
+    // 2026-09-25): "remove the left nav bar items associated with
+    // navigating to different areas on the map and consolidate to maybe
+    // just Department Map" — the three yards and the Crew Board are
+    // stations on the one map, selected there.
     const rowRefs = (groups.match(/ROUTE_CATALOG(\.\w[\w-]*|\['[^']+'\])/g) ?? []).length;
-    expect(rowRefs, 'the IT sidebar must hold exactly ten rows').toBe(10);
+    expect(rowRefs, 'the IT sidebar must hold exactly seven rows').toBe(7);
 
     const tabs = readFileSync(
       new URL('../it/ItTabs.svelte', import.meta.url),
@@ -270,27 +249,21 @@ describe('nav catalog — app assignment', () => {
     ).toEqual([]);
   });
 
-  it('the IT sidebar leads with the three yards and the Crew Board, and the IT tab still lands on the Train Yard', () => {
-    // Design 55417146 (answers feedback 92921c2f, David 2026-09-18):
-    // flow order, upstream to downstream — Receiving Yard, Marshalling
-    // Yard, Train Yard, Crew Board — then the department's desk work.
-    // The sidebar order is AppShell's IT_GROUPS list; the landing is a
-    // DIFFERENT mechanism (the first `app: 'it'` entry in catalog
-    // order, `departmentHref`), which is why the Train Yard can be the
-    // third row and still the page the IT tab opens on: "the departure
-    // board is what an operator opens the department to see".
+  it('the IT sidebar leads with the Department Map, which is also where the IT tab lands', () => {
+    // Design e765b3fc, car N1 (David, 2026-09-25): the map at the top of
+    // the page, and ONE sidebar row for it — "Department Map" — where
+    // Receiving Yard, Marshalling Yard, Train Yard and Crew Board stood
+    // (design 55417146's flow-ordered four). The desk work follows in
+    // its old order. The sidebar order is AppShell's IT_GROUPS list; the
+    // landing is the first `app: 'it'` entry in catalog order
+    // (`departmentHref`), and both now name the same row.
     const shell = readFileSync(new URL('./AppShell.svelte', import.meta.url), 'utf8');
     const groups = shell.slice(shell.indexOf('const IT_GROUPS'), shell.indexOf('// Home —'));
     const rows = [...groups.matchAll(/ROUTE_CATALOG(?:\.(\w[\w-]*)|\['([^']+)'\])/g)].map(
       (m) => m[1] ?? m[2],
     );
-    expect(rows.slice(0, 4)).toEqual([
-      'system-receiving',
-      'system-marshalling',
+    expect(rows).toEqual([
       'system-yard',
-      'system-crew',
-    ]);
-    expect(rows.slice(4)).toEqual([
       'system-incidents',
       'workflows',
       'system-design',
@@ -298,21 +271,15 @@ describe('nav catalog — app assignment', () => {
       'system-estate',
       'system-kb',
     ]);
-    // The labels David used, on the rows he asked for.
-    expect(ROUTE_CATALOG['system-receiving'].label).toBe('Receiving Yard');
-    expect(ROUTE_CATALOG['system-marshalling'].label).toBe('Marshalling Yard');
-    // Since car 4 of design d2154293 both rows are ZOOM LINKS: the
-    // yards are regions of the world, and their board mounts under
-    // the zoomed territory. The old /it/operate paths still resolve
-    // to the same route — one surface, two spellings.
-    expect(ROUTE_CATALOG['system-receiving'].path).toBe('/it/yard/receiving');
-    expect(ROUTE_CATALOG['system-marshalling'].path).toBe('/it/yard/marshalling');
-    expect(parseRoute('/it/yard/receiving')).toEqual({ kind: 'systemYardFloor', region: 'receiving' });
-    expect(parseRoute('/it/operate/receiving')).toEqual({ kind: 'systemYardFloor', region: 'receiving' });
-    expect(parseRoute('/it/operate/marshalling')).toEqual({ kind: 'systemYardFloor', region: 'marshalling' });
-    // And the IT tab still opens on the Train Yard at /it.
-    expect(APPS.find((a) => a.id === 'it')?.href).toBe(ROUTE_CATALOG['system-yard'].path);
+    expect(ROUTE_CATALOG['system-yard'].label).toBe('Department Map');
     expect(ROUTE_CATALOG['system-yard'].path).toBe('/it');
+    expect(APPS.find((a) => a.id === 'it')?.href).toBe(ROUTE_CATALOG['system-yard'].path);
+    // The four rows the map replaced are gone from the catalog too — no
+    // row is left pointing at a floor page (no shims before 1.0.0).
+    const catalog = ROUTE_CATALOG as Readonly<Record<string, NavItem | undefined>>;
+    for (const gone of ['system-receiving', 'system-marshalling', 'system-crew']) {
+      expect(catalog[gone], gone).toBeUndefined();
+    }
   });
 
   // A row a fixed-perspective group lists must be one that perspective

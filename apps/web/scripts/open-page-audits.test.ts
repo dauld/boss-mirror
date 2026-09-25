@@ -33,8 +33,11 @@ describe('the roster is the catalog', () => {
     // backlog 3071e235 (2026-09-24): the dispatcher rule editor stopped
     // sharing the rules list's path. 47 since design 2ea444f5
     // (2026-09-24): /ux/calendar left the catalog with the
-    // second example tenant, so its audit (0ceeffa6) is withdrawn.
-    expect(paths.length).toBe(47);
+    // second example tenant, so its audit (0ceeffa6) is withdrawn. 44
+    // since car N1 of design e765b3fc (2026-09-25): the Receiving Yard,
+    // the Marshalling Yard and the Crew Board left the catalog for the
+    // one Department Map row — each is a station selected on /it.
+    expect(paths.length).toBe(44);
   });
 
   it('a parameterised catalog path is a page the march audits', () => {

@@ -66,19 +66,6 @@ export function appForRoute(route: Route): AppId {
   return appForSection(sectionForRoute(route));
 }
 
-/// The two yards that kept rows of their own (feedback 92921c2f,
-/// 2026-09-18) are REGIONS of the world since car 4 of design
-/// d2154293, so their route is a yard floor like any other. The kind
-/// alone can no longer say which row to light: the region does, and
-/// this is the one place that reads it. Without it both would light
-/// the Train Yard's row, and a sidebar row that never highlights is
-/// a row an operator stops trusting. Private for the reason
-/// SECTION_FOR_KIND is: `sectionForRoute` is the one reader.
-const REGION_SECTIONS: Readonly<Record<string, string>> = {
-  receiving: 'system-receiving',
-  marshalling: 'system-marshalling',
-};
-
 /// Which tenant module a route needs, and the label to say it with —
 /// or null when the surface is always-on.
 ///
@@ -102,14 +89,13 @@ export function moduleForRoute(route: Route): { id: string; label: string } | nu
 
 /// Which sidebar row a route lights — the ONE answer, and the only
 /// one this module exports. Most rows are named by the route's kind
-/// (SECTION_FOR_KIND); a few depend on a route PARAMETER, which a
-/// kind-keyed map cannot express (REGION_SECTIONS, a yard floor's
-/// region). A route whose row depends on a parameter gets its branch
-/// HERE, never a second exported lookup.
+/// (SECTION_FOR_KIND); a row that depends on a route PARAMETER, which
+/// a kind-keyed map cannot express, gets its branch HERE, never a
+/// second exported lookup. A yard floor's region was one until car N1
+/// of design e765b3fc (2026-09-25): the two yards with rows of their
+/// own lost them to the one Department Map row, so every region lights
+/// that row and the region map that answered for them is gone.
 export function sectionForRoute(route: Route): string {
-  if (route.kind === 'systemYardFloor') {
-    return REGION_SECTIONS[route.region] ?? SECTION_FOR_KIND.systemYardFloor!;
-  }
   // An unmatched path lights the row of the page its one back link
   // opens, so it renders in the department it was under: /it/<typo> in
   // the IT chrome, anything else in Home (design ee3a3a2f Q4). The /it
@@ -127,8 +113,9 @@ export function sectionForRoute(route: Route): string {
 /// /it/operate/marshalling as pages: both are yard floors now, and
 /// read off this map both light the Train Yard's row — a plausible
 /// wrong answer with no error, which is the failure a reader cannot
-/// see (backlog c6f91515, 2026-09-20). Its companion is
-/// REGION_SECTIONS; its reader is `sectionForRoute`.
+/// see (backlog c6f91515, 2026-09-20). Its reader is
+/// `sectionForRoute`, which answers first for any route whose row a
+/// parameter decides.
 const SECTION_FOR_KIND: Readonly<Record<Route['kind'], string>> = {
   // Renders outside AppShell (or has no sidebar row) — see
   // HOME_CHROME_SECTIONS for the reasons.
@@ -214,13 +201,12 @@ const SECTION_FOR_KIND: Readonly<Record<Route['kind'], string>> = {
   systemRegistryDrift: 'system-registry-drift',
   systemFeedback: 'system-feedback',
   systemBacklog: 'system-backlog',
+  // The Department Map (design e765b3fc, car N1): the landing, every
+  // region's floor, and the crew board — the shop floor's own board —
+  // all light its one row.
   systemYard: 'system-yard',
-  // A yard floor is the Train Yard opened on one panel (0524fc95 car
-  // 2): it highlights the yard's own row — except for the two floors
-  // that are queue boards with sidebar rows of their own, which
-  // `sectionForRoute` answers for.
   systemYardFloor: 'system-yard',
-  systemCrew: 'system-crew',
+  systemCrew: 'system-yard',
   systemEstate: 'system-estate',
   incidents: 'system-incidents',
   systemKb: 'system-kb',
@@ -247,10 +233,7 @@ export const ROUTE_KINDS: ReadonlyArray<Route['kind']> = Object.keys(
   SECTION_FOR_KIND,
 ) as ReadonlyArray<Route['kind']>;
 
-/// Every section a route can light: the kind's own and each one a
-/// parameter answers for. Derived here, beside both halves, so no
-/// caller has to know there are two (backlog c6f91515).
-export const SECTIONS_PRODUCED: ReadonlySet<string> = new Set([
-  ...Object.values(SECTION_FOR_KIND),
-  ...Object.values(REGION_SECTIONS),
-]);
+/// Every section a route can light. Derived here, beside the map, so no
+/// caller has to know how many answers there are (backlog c6f91515);
+/// a parameter-decided row, when one returns, is added here too.
+export const SECTIONS_PRODUCED: ReadonlySet<string> = new Set(Object.values(SECTION_FOR_KIND));

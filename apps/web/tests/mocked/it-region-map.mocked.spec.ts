@@ -75,6 +75,9 @@ const WORLD_SVG = 'section[aria-label="the IT world map"] svg';
 /** A region's own map — the surface that REPLACES the world. */
 const regionMap = (name: string) => `section[aria-label="the ${name} region map"]`;
 const regionSvg = (name: string) => `${regionMap(name)} svg`;
+/** The selection panel's door to the selected region's floor page
+ *  (design e765b3fc, car N1) — a territory selects, it no longer swaps. */
+const FLOOR_DOOR = 'section[data-map-panel] a[data-floor]';
 
 test('/it/yard/dock REPLACES the world with the dock\'s own map — not the world drawn nearer', async ({ page }) => {
   await mocks(page);
@@ -88,7 +91,12 @@ test('/it/yard/dock REPLACES the world with the dock\'s own map — not the worl
   const node = await svg.elementHandle();
   expect(node).not.toBeNull();
 
+  // The territory SELECTS the dock (design e765b3fc, car N1) — the world
+  // stays — and the selection's panel is the door to the dock's floor.
   await svg.locator('.territory[data-region="dock"]').click();
+  await expect(page).toHaveURL(/\/it\?at=dock$/);
+  expect(await node!.evaluate((el) => el.isConnected)).toBe(true);
+  await page.locator(FLOOR_DOOR).click();
   await expect(page).toHaveURL(/\/it\/yard\/dock$/);
 
   // THE WORLD IS GONE. Replaced, not zoomed — and the old SVG node is
@@ -149,6 +157,7 @@ test('Escape goes back to the world, and so does the way-out control', async ({ 
   await expect(svg.locator('.territory')).toHaveCount(TERRITORIES.length);
 
   await svg.locator('.territory[data-region="dock"]').click();
+  await page.locator(FLOOR_DOOR).click();
   await expect(page).toHaveURL(/\/it\/yard\/dock$/);
   await expect(page.locator(regionMap('dock'))).toHaveCount(1);
 
@@ -160,6 +169,7 @@ test('Escape goes back to the world, and so does the way-out control', async ({ 
 
   // The way out is SAID, not only bound to a key.
   await page.locator(`${WORLD_SVG} .territory[data-region="dock"]`).click();
+  await page.locator(FLOOR_DOOR).click();
   await expect(page).toHaveURL(/\/it\/yard\/dock$/);
   await page.locator(`${regionMap('dock')} button.leave`).click();
   await expect(page).toHaveURL(/\/it$/);
@@ -568,9 +578,9 @@ test('a region page is headed by the region, with the way back and its own rails
   await page.goto('/it/yard/dock');
 
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('IT · Dock');
-  await expect(page.getByRole('heading', { name: 'The IT world' })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Department Map' })).toHaveCount(0);
   const crumbs = page.locator('nav.crumbs');
-  await expect(crumbs).toContainText('The IT world');
+  await expect(crumbs).toContainText('Department Map');
   await expect(crumbs.locator('[aria-current="page"]')).toContainText('Dock');
 
   // The dock's rails, in then out — not the world's crossings total.
@@ -587,9 +597,9 @@ test('a region page is headed by the region, with the way back and its own rails
   await expect(board).toContainText('2 in flight · 0 landed');
 
   // The breadcrumb is the way back, as a link.
-  await crumbs.getByRole('link', { name: 'The IT world' }).click();
+  await crumbs.getByRole('link', { name: 'Department Map' }).click();
   await expect(page).toHaveURL(/\/it$/);
-  await expect(page.getByRole('heading', { level: 1 })).toHaveText('The IT world');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Department Map');
 });
 
 test("a quiet alerts strip under a troubled region does not call the region's machines fine", async ({ page }) => {

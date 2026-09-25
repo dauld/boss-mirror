@@ -155,31 +155,24 @@
     items: [ROUTE_CATALOG.jobs],
   };
 
-  // The IT department — seven rows. Six came from the 2026-08-31
-  // consolidation (packet 1f6d55e0), which established that families
-  // live as tabs on their surface rather than as sidebar rows;
-  // auth-admin stays reachable but unlisted, and the old Run / Define /
-  // Evolve / Platform grouping died with the /system prefix.
+  // The IT department — seven rows. The 2026-08-31 consolidation
+  // (packet 1f6d55e0) established that families live as tabs on their
+  // surface rather than as sidebar rows; auth-admin stays reachable but
+  // unlisted, and the old Run / Define / Evolve / Platform grouping died
+  // with the /system prefix.
   //
-  // The seventh is the Crew Board, and it is a deliberate exception to
-  // that rule rather than a drift back from it: David's decision on
-  // backlog 04c5bbc0 (2026-09-11) read the proposal to make it a tab in
-  // an existing family and overrode it — "Port the Crew Board as a new
-  // sidebar page in IT." The middle third of the operator surface is its
-  // own question, not a sub-view of Operate's incidents.
+  // The map leads, as ONE row: "Department Map" (design e765b3fc, car
+  // N1, David 2026-09-25 — "remove the left nav bar items associated
+  // with navigating to different areas on the map and consolidate to
+  // maybe just Department Map"). Receiving Yard, Marshalling Yard, Train
+  // Yard and Crew Board stood here in flow order (55417146, 04c5bbc0);
+  // each is a station on the map now, selected there. Then the desk
+  // work.
   const IT_GROUPS: ReadonlyArray<NavGroup> = [
     {
       label: 'IT',
       items: [
-        // The three yards and the Crew Board lead, in flow order —
-        // receiving, marshalling, train yard, crew — then the desk
-        // work (design 55417146 on feedback 92921c2f, 2026-09-18).
-        // The Train Yard is third here and still the /it landing:
-        // the landing is catalog order, not this list.
-        ROUTE_CATALOG['system-receiving'],
-        ROUTE_CATALOG['system-marshalling'],
         ROUTE_CATALOG['system-yard'],
-        ROUTE_CATALOG['system-crew'],
         ROUTE_CATALOG['system-incidents'],
         ROUTE_CATALOG.workflows,
         ROUTE_CATALOG['system-design'],

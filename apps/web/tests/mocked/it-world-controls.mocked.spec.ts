@@ -16,7 +16,10 @@
 // measure step read a9028721; since then the plant strip landed with
 // car E, and publish's door with 594ffe96):
 //   links     10 territory doors (WorldMap `a.territory`), plus one HUD
-//                link per failed-or-unjudged machine (`a[data-machine]`)
+//                link per failed-or-unjudged machine (`a[data-machine]`);
+//                since car N1 of design e765b3fc each SELECTS its region
+//                (`/it?at=<name>`), and the selection's panel adds two:
+//                `close` and the door to the region's floor page
 //   buttons   10 crossing toggles (`g.crossing[role=button]`: click,
 //                Enter, Space, Escape), 1 panel `close`
 //   forms     0, inputs 0 (the motion bar's are behind it-map-motion)
@@ -39,12 +42,14 @@
 //                   payload (regions.rs shop-floor); nothing on this
 //                   page can draw what the server does not send, so it
 //                   is pinned in boss_jobs by the car that sends it
-//   gap 4 f9850601  one surface, three names — CURRENT, below
+//   gap 4 f9850601  one surface, three names — ANSWERED by car N1 of
+//                   design e765b3fc: "Department Map", below
 //   gap 5 b5b921ce  18 dead style rules in WorldMap.svelte — no
 //                   behaviour a browser can see; the deletion is its car
 //   gap 6 909adf3b  the 10 s poll has no in-flight guard — CURRENT, below
-//   gap 7 cf7ad2f2  8 of the 10 doors land off the catalog — CURRENT,
-//                   below
+//   gap 7 cf7ad2f2  8 of the 10 doors land off the catalog — ANSWERED
+//                   by car N1 of design e765b3fc: each door selects its
+//                   region on /it, below
 //   gap 8 8c7c2f4b  the world and the HUD render inside no boundary —
 //                   CURRENT, below
 
@@ -123,21 +128,21 @@ const CATALOGUED = new Set(Object.values(ROUTE_CATALOG).map((e) => e.path));
 // THE PAGE'S WORDS
 // ---------------------------------------------------------------------
 
-test('CURRENT, gap 4 (f9850601): the page says its words — and is named three ways, "Train Yard", "The IT world" and "IT · Forge line"', async ({ page }) => {
+test('gap 4 (f9850601) answered: the page says its words, and is named one way — "Department Map", as its row is', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');
   await expect(page.locator(`${SVG} .territory`)).toHaveCount(TERRITORIES.length);
 
-  // The header, verbatim. The eyebrow names nothing drawn on the page,
-  // and the catalog row the sidebar prints for this same path says a
-  // third thing: gap 4 decides "IT world" for the row and "IT" for the
-  // eyebrow, and its car flips these three lines.
-  await expect(page.locator('.exec-eyebrow')).toHaveText('IT · Forge line');
-  await expect(page.locator('h1.exec-title')).toHaveText('The IT world');
+  // The header, verbatim. It answered to "Train Yard" (the row), "The IT
+  // world" (the title) and "IT · Forge line" (the eyebrow) until car N1
+  // of design e765b3fc named the row and the title "Department Map" and
+  // the eyebrow "IT", the department it is the map of.
+  await expect(page.locator('.exec-eyebrow')).toHaveText('IT');
+  await expect(page.locator('h1.exec-title')).toHaveText('Department Map');
   expect(ROUTE_CATALOG['system-yard'].path).toBe('/it');
-  expect(ROUTE_CATALOG['system-yard'].label).toBe('Train Yard');
+  expect(ROUTE_CATALOG['system-yard'].label).toBe('Department Map');
   await expect(page.locator('.exec-header p')).toHaveText(
-    'The territories along the packet flow, each a door to its floor, and the borders between them carrying what crosses, what waits and the machine that moves it',
+    'The territories along the packet flow, and the borders between them carrying what crosses, what waits and the machine that moves it. Select a territory to open its detail below the map.',
   );
 
   // The HUD's words: its title, its age, its three rows, its keys.
@@ -161,7 +166,7 @@ test('CURRENT, gap 4 (f9850601): the page says its words — and is named three 
 // THE LINKS — ten doors and the HUD's machine links
 // ---------------------------------------------------------------------
 
-test('every territory door opens its own region page, and back returns to the world', async ({ page }) => {
+test('every territory door selects its own region under the map, and back returns to the bare map', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');
   const territories = page.locator(`${SVG} .territory`);
@@ -169,38 +174,39 @@ test('every territory door opens its own region page, and back returns to the wo
 
   for (const { name } of TERRITORIES) {
     const door = page.locator(`${SVG} .territory[data-region="${name}"]`);
-    await expect(door).toHaveAttribute('href', `/it/yard/${name}`);
+    await expect(door).toHaveAttribute('href', `/it?at=${name}`);
     await door.click();
-    await expect(page).toHaveURL(new RegExp(`/it/yard/${name}$`));
-    // Its own region's map and heading — publish included (gap 1,
-    // fixed by 594ffe96): a door that lands on a neighbour's page is
-    // the wrong target answering.
-    await expect(page.locator(`section[aria-label="the ${name} region map"]`)).toHaveCount(1);
-    await expect(page.locator('.crumbs')).toHaveAttribute('data-region', name);
+    await expect(page).toHaveURL(new RegExp(`/it\\?at=${name}$`));
+    // Its own region's panel, under the map that stays — publish
+    // included (gap 1, fixed by 594ffe96): a door that lands on a
+    // neighbour is the wrong target answering.
+    await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-selection', name);
+    await expect(territories).toHaveCount(TERRITORIES.length);
     await page.goBack();
     await expect(page).toHaveURL(/\/it$/);
-    await expect(territories).toHaveCount(TERRITORIES.length);
-    await expect(page.locator('h1.exec-title')).toHaveText('The IT world');
+    await expect(page.locator('section[data-map-panel]')).toHaveCount(0);
+    await expect(page.locator('h1.exec-title')).toHaveText('Department Map');
   }
 });
 
-test('CURRENT, gap 7 (cf7ad2f2): two of the ten doors land on a catalogued route, and eight land on pages no catalog row names', async ({ page }) => {
+test('gap 7 (cf7ad2f2) answered: every one of the ten doors lands on the catalogued Department Map, selecting its region', async ({ page }) => {
+  // Two of the ten landed on a catalogued route and eight on floor pages
+  // no catalog row named, until car N1 of design e765b3fc made each door
+  // a selection on the one catalogued page, /it.
   await mocks(page);
   await page.goto('/it');
   const hrefs = await page
     .locator(`${SVG} .territory`)
     .evaluateAll((els) => els.map((el) => el.getAttribute('href') ?? ''));
   expect(hrefs).toHaveLength(TERRITORIES.length);
-  // Gap 7 adds eight non-sidebar catalog rows; its car makes this
-  // every door, and the uncatalogued list empty.
-  expect(hrefs.filter((h) => CATALOGUED.has(h)).sort()).toEqual(['/it/yard/marshalling', '/it/yard/receiving']);
-  expect(hrefs.filter((h) => !CATALOGUED.has(h)).sort()).toEqual([
-    '/it/yard/arrivals', '/it/yard/dock', '/it/yard/garage', '/it/yard/gates',
-    '/it/yard/publish', '/it/yard/shed', '/it/yard/shop-floor', '/it/yard/track',
-  ]);
+  const paths = hrefs.map((h) => new URL(h, 'http://boss.test').pathname);
+  expect(paths.filter((p) => !CATALOGUED.has(p))).toEqual([]);
+  expect(hrefs.map((h) => new URL(h, 'http://boss.test').searchParams.get('at')).sort()).toEqual(
+    TERRITORIES.map((t) => t.name).sort(),
+  );
 });
 
-test('every listed machine in the HUD is a link to its own region page, and back returns to the world', async ({ page }) => {
+test('every listed machine in the HUD selects its own region on the map, and back returns to the bare map', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');
   const links = page.locator(`${HUD} a[data-machine]`);
@@ -216,18 +222,17 @@ test('every listed machine in the HUD is a link to its own region page, and back
 
   for (const [id, region] of [['bay:2', 'gates'], ['station:design-review', 'marshalling'], ['desk:triage', 'receiving']] as const) {
     const link = page.locator(`${HUD} a[data-machine="${id}"]`);
-    await expect(link).toHaveAttribute('href', `/it/yard/${region}`);
+    await expect(link).toHaveAttribute('href', `/it?at=${region}`);
     await link.click();
-    await expect(page).toHaveURL(new RegExp(`/it/yard/${region}$`));
-    await expect(page.locator(`section[aria-label="the ${region} region map"]`)).toHaveCount(1);
-    // The frame does not follow the zoom: the same links stand over the region.
+    await expect(page).toHaveURL(new RegExp(`/it\\?at=${region}$`));
+    await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-selection', region);
+    // The frame stands over the selection: the same links, the map whole.
     await expect(page.locator(`${HUD} a[data-machine]`)).toHaveCount(3);
+    await expect(page.locator(`${SVG} .territory`)).toHaveCount(TERRITORIES.length);
     await page.goBack();
     await expect(page).toHaveURL(/\/it$/);
     await expect(page.locator(`${SVG} .territory`)).toHaveCount(TERRITORIES.length);
   }
-  // The gates link lands off the catalog, like its territory (gap 7).
-  expect(CATALOGUED.has('/it/yard/gates')).toBe(false);
 });
 
 test('a machine block with nothing failed or unjudged lists no link and prints its zeros as zeros', async ({ page }) => {
@@ -539,6 +544,11 @@ test('the page writes nothing: every control on it is a read or a view change', 
   await page.keyboard.press('Enter');
   await page.keyboard.press('Escape');
   await page.locator(`${SVG} .territory[data-region="shed"]`).click();
+  await expect(page).toHaveURL(/\/it\?at=shed$/);
+  await page.locator('section[data-map-panel] a[data-close]').click();
+  await expect(page).toHaveURL(/\/it$/);
+  await page.locator(`${SVG} .territory[data-region="shed"]`).click();
+  await page.locator('section[data-map-panel] a[data-floor]').click();
   await expect(page).toHaveURL(/\/it\/yard\/shed$/);
   await page.goBack();
   await expect(page.locator(`${SVG} .territory`)).toHaveCount(TERRITORIES.length);

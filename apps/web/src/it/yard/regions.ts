@@ -392,18 +392,31 @@ const YARD_SELECTION: Readonly<Record<string, string>> = {
   garage: 'garage',
 };
 
-/** Where a link to a region leads — its region page, `/it/yard/<name>`
- *  (MapPage with `region` set), for every region the server serves.
- *  THE ONE DOOR (backlog 594ffe96, 2026-09-25): the world map's
- *  `floorHref` listed the six yard regions and the three boards and
+const isRegion = (name: string): boolean => (REGION_NAMES as ReadonlyArray<string>).includes(name);
+
+/** Where a link to a region leads — its SELECTION on the Department
+ *  Map, `/it?at=<name>`, for every region the server serves: the map
+ *  stays on top and the station's detail opens below it (design
+ *  e765b3fc, car N1). Until that car it opened the region's own page,
+ *  which swapped the map away.
+ *  THE ONE DOOR (backlog 594ffe96, 2026-09-25): the world map's old
+ *  floor link listed the six yard regions and the three boards and
  *  sent anything else to /it/yard, which the router reads as the
  *  TRACK — so the publish territory opened the track's page — while
  *  the transit map's `regionHref` and the HUD's `machineHref` each
  *  built the path themselves. A name that is not a region (the plant,
- *  or a newer server's eleventh) opens the world: somewhere, and never
- *  another region's page. */
+ *  or a newer server's eleventh) opens the map with nothing selected:
+ *  somewhere, and never another region. */
 export function regionHref(name: string): string {
-  return (REGION_NAMES as ReadonlyArray<string>).includes(name) ? `/it/yard/${name}` : '/it';
+  return isRegion(name) ? `/it?at=${encodeURIComponent(name)}` : '/it';
+}
+
+/** A region's floor page, `/it/yard/<name>` — opened from its
+ *  selection's detail, until the panel carries the floor itself and the
+ *  page retires (design e765b3fc, cars N2 and N3). Not a region: the
+ *  map, because /it/yard alone is the TRACK's floor. */
+export function floorHref(name: string): string {
+  return isRegion(name) ? `/it/yard/${name}` : '/it';
 }
 
 /** The selection a `/it/yard/<region>` floor opens the yard on; the

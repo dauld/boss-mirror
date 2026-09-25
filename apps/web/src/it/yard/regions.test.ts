@@ -6,6 +6,7 @@ import {
   bandText,
   compactCountText,
   countText,
+  floorHref,
   floorSelection,
   kpiText,
   lampOf,
@@ -176,35 +177,55 @@ describe('the names are the server\'s, in map order', () => {
 // every name the SERVER serves — not the client's copy — through the
 // link, the router and the layout, so the page a link opens is the
 // region it names.
-describe('regionHref — every region the server serves links its own region page', () => {
-  it('each name opens /it/yard/<name>, the router reads that as the same region, and the world has its territory', () => {
+//
+// A SELECTION, NOT A PAGE (design e765b3fc, car N1). The door no longer
+// swaps the map for the region's: the Department Map stays on top and
+// the station is SELECTED, its detail opening below it — `/it?at=<name>`.
+// The region's floor page is reached from that detail (`floorHref`)
+// until the panel carries the floor itself (cars N2 and N3).
+describe('regionHref — every region the server serves is a selection on the Department Map', () => {
+  it('each name opens /it?at=<name>, the router reads it as that selection, and the map has its territory', () => {
     const { names } = serverRegions();
     expect(names).toContain('publish');
     for (const name of names) {
       const href = regionHref(name);
-      expect(href, name).toBe(`/it/yard/${name}`);
-      expect(parseRoute(href), name).toEqual({ kind: 'systemYardFloor', region: name });
-      // MapPage renders the region's map only for a name the layout
-      // knows; a name it does not leaves the world on screen.
+      expect(href, name).toBe(`/it?at=${name}`);
+      const url = new URL(href, 'http://boss.test');
+      expect(parseRoute(url.pathname, url.search), name).toEqual({ kind: 'systemYard', at: name });
       const territory: string | undefined = territoryOf(name)?.name;
       expect(territory, name).toBe(name);
     }
   });
 
-  it('a name that is not a region — the plant, a newer server\'s eleventh — opens the world, never another region\'s page', () => {
-    // /it/yard alone is the TRACK's page (router.ts), which is the
-    // page the publish link used to land on.
+  it('a name that is not a region — the plant, a newer server\'s eleventh — opens the map with nothing selected', () => {
     expect(regionHref('siding')).toBe('/it');
     expect(regionHref('plant')).toBe('/it');
     expect(regionHref('')).toBe('/it');
   });
 
-  it('is the only place a region link is built — no surface under src/ spells /it/yard/${…} itself', () => {
+  it('is the only place a region link is built — no surface under src/ spells /it/yard/${…} or ?at=${…} itself', () => {
     const root = join(import.meta.dir, '..', '..');
     const spelled = [...new Bun.Glob('**/*.{ts,svelte}').scanSync(root)]
       .filter((f) => !f.endsWith('.test.ts') && f !== join('it', 'yard', 'regions.ts'))
-      .filter((f) => readFileSync(join(root, f), 'utf8').includes('/it/yard/${'));
+      .filter((f) => {
+        const src = readFileSync(join(root, f), 'utf8');
+        return src.includes('/it/yard/${') || src.includes('?at=${');
+      });
     expect(spelled).toEqual([]);
+  });
+});
+
+describe('floorHref — a region\'s floor page, opened from its selection', () => {
+  it('each name the server serves opens /it/yard/<name>, which the router reads as that region\'s floor', () => {
+    for (const name of serverRegions().names) {
+      expect(floorHref(name), name).toBe(`/it/yard/${name}`);
+      expect(parseRoute(floorHref(name)), name).toEqual({ kind: 'systemYardFloor', region: name });
+    }
+  });
+
+  it('a name that is not a region opens the map — /it/yard alone would be the TRACK\'s floor', () => {
+    expect(floorHref('plant')).toBe('/it');
+    expect(floorHref('')).toBe('/it');
   });
 });
 

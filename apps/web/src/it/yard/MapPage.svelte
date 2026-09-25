@@ -54,19 +54,30 @@
   // the region's own rails in and out (region-page.ts), from the same
   // borders read. The deck scopes its board and alerts the same way.
   //
+  // THE DEPARTMENT MAP (design e765b3fc, car N1; David 2026-09-25):
+  // "the operating map sits at the top always and clicking stations or
+  // lines pulls up detail below". At /it a click SELECTS — `/it?at=<name>`
+  // (regions.ts `regionHref`) — and the selection's panel opens under
+  // the map, which is not torn down: the route is the same one with a
+  // query, and App.svelte mounts this page once for both. The panel is a
+  // shell on this car (the station's one number, its state and the door
+  // to its floor page); car N2 fills it and car N3 retires the floor
+  // pages, the `region` view below with them.
+  //
   // NO NEW STYLING (the visual redesign reskins): the world is drawn in
   // the yard's own strokes and tokens.
   //
   // Polling stays as the yard's: a 10s tick. Reads go through
   // fetchRemote, so an outage renders a failure line (`load-failed`),
   // never an empty map that reads as a calm one.
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
   import { navigate } from '@boss/web-kit/nav';
   import { railLines, regionTitle } from './region-page';
   import type { Remote } from '../../data/remote';
-  import { fetchRegions, type Regions } from './regions';
+  import { countText, fetchRegions, floorHref, lampOf, stateText, type Regions } from './regions';
+  import { selectionOf, type MapSelection } from './selection';
   import { territoryOf } from './world';
   import { hasInterior } from './region-contents';
   import RegionMap from './RegionMap.svelte';
@@ -91,8 +102,11 @@
     /** The territory the camera is in — the `/it/yard/<region>` route.
      *  Absent at `/it`, which is the whole world. */
     region?: string | null;
+    /** The Department Map's selection — `/it?at=<name>`. Read only on
+     *  the map itself; a region's own view selects nothing. */
+    at?: string;
   }>;
-  let { region = null }: Props = $props();
+  let { region = null, at = undefined }: Props = $props();
 
   /** A region the layout does not know leaves the WORLD on screen
    *  rather than swapping to a map of nothing. */
@@ -164,6 +178,29 @@
 
   const clock = (ms: number) =>
     new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  /** What `?at=` selects, against the regions the server served — none
+   *  while the read is out, and none on a region's own view. */
+  const picked = $derived<MapSelection>(
+    shown === null && regions.kind === 'ready' ? selectionOf(at, regions.data) : { kind: 'none' },
+  );
+
+  /** The panel sits under the map, so on a short screen it can open
+   *  below the fold and a click would look like it did nothing. Brought
+   *  into view when the SELECTION changes — keyed on `at`, not on the
+   *  10 s poll, which must never pull the page back down. */
+  let panel = $state<HTMLElement | null>(null);
+  $effect(() => {
+    const key = at;
+    const el = panel;
+    if (key !== undefined && el !== null) untrack(() => el.scrollIntoView({ block: 'nearest' }));
+  });
+
+  function go(e: MouseEvent, href: string): void {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    navigate(href);
+  }
 </script>
 
 <div class="theme-exec yard-root">
@@ -171,17 +208,20 @@
     <!-- The region's own heading, under the way back to the world it
          was opened from — the page says where you are. -->
     <nav class="crumbs" aria-label="breadcrumb" data-region={shown}>
-      <Breadcrumb to="/it">The IT world</Breadcrumb>
+      <Breadcrumb to="/it">Department Map</Breadcrumb>
       <span class="crumb-here" aria-current="page">› {regionTitle(shown)}</span>
     </nav>
     <PageHeader title={`IT · ${regionTitle(shown)}`} />
   {:else}
+    <!-- Named what its sidebar row is named (design e765b3fc, car N1):
+         it answered to "Train Yard", "The IT world" and "IT · Forge
+         line" at once (page audit gap f9850601). -->
     <PageHeader
-      eyebrow="IT · Forge line"
-      title="The IT world"
+      eyebrow="IT"
+      title="Department Map"
       subtitle={transit
-        ? 'The network as a transit monitor: each region a station on its line, each border a section of track with what waits on it and its headway, and the alarms board beside it'
-        : 'The territories along the packet flow, each a door to its floor, and the borders between them carrying what crosses, what waits and the machine that moves it'}
+        ? 'The network as a transit monitor: each region a station on its line, each border a section of track with what waits on it and its headway, and the alarms board beside it. Select a station to open its detail below the map.'
+        : 'The territories along the packet flow, and the borders between them carrying what crosses, what waits and the machine that moves it. Select a territory to open its detail below the map.'}
     />
   {/if}
 
@@ -245,6 +285,41 @@
            11): the host runners serve every region, so they stand under
            the territories rather than in one of them. -->
       <PlantStrip machines={regions.data.plant} />
+    {/if}
+    {#if picked.kind !== 'none'}
+      <!-- THE SELECTION'S PANEL, under the map (design e765b3fc, car N1).
+           A shell on this car: the station's one number and its state,
+           and the door to the floor page that still holds its detail.
+           A name the read did not carry is said, never drawn as a quiet
+           empty panel. -->
+      {@const name = picked.kind === 'station' ? picked.name : picked.at}
+      <section
+        class="map-panel"
+        bind:this={panel}
+        data-map-panel
+        data-selection={name}
+        data-state={picked.kind === 'station' ? picked.region.state : 'unknown'}
+        aria-label="the {name} selection">
+        <header class="panel-head">
+          {#if picked.kind === 'station'}
+            <span class="panel-lamp {lampOf(picked.region.state)}" aria-hidden="true"></span>
+          {/if}
+          <span class="panel-kind">{picked.kind === 'station' ? 'Station' : 'Selection'}</span>
+          <h2 class="panel-title">{picked.kind === 'station' ? picked.title : name}</h2>
+          <a class="panel-close" data-close href="/it" aria-label="close the {name} selection"
+            onclick={(e) => go(e, '/it')}>close</a>
+        </header>
+        {#if picked.kind === 'station'}
+          <div class="panel-reading">
+            <span class="panel-figure" data-figure>{countText(picked.region)}</span>
+            <span class="panel-state">{stateText(picked.region)}</span>
+          </div>
+          <a class="panel-floor" data-floor href={floorHref(picked.name)}
+            onclick={(e) => go(e, floorHref(picked.name))}>open the page for {picked.title} →</a>
+        {:else}
+          <p class="panel-none">Nothing on this map is named “{name}”.</p>
+        {/if}
+      </section>
     {/if}
     <!-- A failed rails read is SAID — the territories are still drawn,
          but a map whose rails could not be read must not look like a
@@ -317,4 +392,31 @@
   .region-rails .rail-line + .rail-line { margin-top: 4px; }
   .crumbs { font-size: 13px; color: var(--map-muted); padding-top: 16px; }
   .crumb-here { margin-left: 4px; color: var(--map-ink); }
+  /* The selection's panel — a departure-board plate under the map, in the
+     crossing panel's grammar (WorldMap.svelte): a hairline frame, a mono
+     uppercase head with the state's lamp, the figure large beneath. */
+  .map-panel { margin-top: var(--s3); border: 1px solid var(--map-rule-strong);
+    border-top-width: 3px; background: var(--map-surface); padding: var(--s2) var(--s3) var(--s3);
+    color: var(--map-ink); }
+  .map-panel[data-state='attention'] { border-top-color: var(--map-warn-edge); }
+  .map-panel[data-state='troubled'], .map-panel[data-state='unknown'] { border-top-color: var(--map-bad-edge); }
+  .panel-head { display: flex; align-items: center; gap: var(--s2); font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .panel-kind { color: var(--map-muted); }
+  .panel-title { margin: 0; font: inherit; font-weight: 600; color: var(--map-ink); }
+  .panel-lamp { width: 8px; height: 8px; border-radius: 50%; background: var(--map-rule-strong); }
+  .panel-lamp.ok { background: var(--map-ok-edge); }
+  .panel-lamp.warn { background: var(--map-warn-edge); }
+  .panel-lamp.err { background: var(--map-bad-edge); }
+  .panel-close { margin-left: auto; color: var(--map-muted); border: 1px solid var(--map-rule);
+    padding: 2px 8px; text-decoration: none; }
+  .panel-close:hover, .panel-close:focus-visible { color: var(--map-ink); border-color: var(--map-ink); }
+  .panel-reading { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s2) var(--s3);
+    margin: var(--s2) 0; }
+  .panel-figure { font-family: var(--font-mono); font-size: 22px; font-variant-numeric: tabular-nums; }
+  .panel-state { font-family: var(--font-mono); font-size: 12px; color: var(--map-muted); }
+  .map-panel[data-state='attention'] .panel-state { color: var(--map-warn-ink); }
+  .map-panel[data-state='troubled'] .panel-state { color: var(--map-bad-ink); }
+  .panel-floor { font-size: 13px; color: var(--map-link); }
+  .panel-none { margin: var(--s2) 0 0; font-size: 13px; color: var(--map-bad-ink); overflow-wrap: anywhere; }
 </style>

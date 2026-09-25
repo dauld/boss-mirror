@@ -140,9 +140,9 @@ describe('a station', () => {
     expect(stationLabel('dock')).toBe('dock');
   });
 
-  it('opens its region page — every station, through the one regionHref the world map uses too', () => {
-    for (const s of STATIONS) expect(regionHref(s.name), s.name).toBe(`/it/yard/${s.name}`);
-    expect(regionHref('publish')).toBe('/it/yard/publish');
+  it('selects itself on the Department Map — every station, through the one regionHref the world map uses too', () => {
+    for (const s of STATIONS) expect(regionHref(s.name), s.name).toBe(`/it?at=${s.name}`);
+    expect(regionHref('publish')).toBe('/it?at=publish');
   });
 
   it('prints its count in its unit, against a capacity where it has one, and never 0 for an unread count', () => {

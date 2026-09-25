@@ -242,7 +242,8 @@ export function hudOf(
   return { header, read: 'ok', failed: false, rows, machines };
 }
 
-/** Where a listed machine's link goes: its region's map — or, for a
+/** Where a listed machine's link goes: its region, selected on the
+ *  Department Map (design e765b3fc, car N1) — or, for a
  *  machine of the PLANT (design 62de32ae decision 11; the server's
  *  `thirds::PLANT`), the world, because the plant strip stands under the
  *  world map and serves every region rather than one. The plant is not

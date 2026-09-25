@@ -201,9 +201,19 @@ test('on a phone the world is a strip: one row per region in flow order, under t
     'from track · nothing waiting · 2 /day',
   ]);
 
-  // A row is a door: the tap swaps the view to the region's map.
+  // A row is a door: the tap selects the region (design e765b3fc, car
+  // N1), the strip stays, and the dock's panel opens under it — inside
+  // the 16px gutters, with no side scroll.
   await strip.locator('.strip-row[data-region="dock"]').click();
-  await expect(page).toHaveURL(/\/it\/yard\/dock$/);
+  await expect(page).toHaveURL(/\/it\?at=dock$/);
+  await expect(strip).toBeVisible();
+  const panel = page.locator('section[data-map-panel]');
+  await expect(panel).toHaveAttribute('data-selection', 'dock');
+  const box = (await panel.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(16);
+  expect(box.x + box.width).toBeLessThanOrEqual(PHONE.width - 16);
+  const after = await noSideScroll(page);
+  expect(after.scroll).toBeLessThanOrEqual(after.client);
 });
 
 test('a borders read that fails leaves every row’s rail unread, never empty', async ({ page }) => {

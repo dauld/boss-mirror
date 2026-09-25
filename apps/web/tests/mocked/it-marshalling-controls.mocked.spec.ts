@@ -2,12 +2,13 @@
 // (page audit 7c228914, step `test`).
 //
 // The route is an ALIAS: router.ts resolves it to the same
-// `systemYardFloor` route as the catalogued /it/yard/marshalling
-// (nav-catalog `system-marshalling`), kept on purpose because packets
-// and briefs name it (backlog c6f91515). So this spec mounts the alias
-// and asserts it IS the catalogued surface, then pins the surface.
+// `systemYardFloor` route as the floor page /it/yard/marshalling (the
+// Marshalling Yard sidebar row until car N1 of design e765b3fc folded
+// it into the Department Map row; the alias and the floor retire with
+// car N3). So this spec mounts the alias and asserts it IS the floor,
+// then pins the surface.
 // it-region-map.mocked.spec.ts pins the region MAP's platforms, the
-// overlap line and the waits count at the catalogued path; this spec
+// overlap line and the waits count at the floor's path; this spec
 // pins what nothing did — every control, each read's own failure line,
 // the empty leg, and the words the page says.
 //
@@ -15,11 +16,11 @@
 // measure step read 25f5e8b8 on 2026-09-23; since then the page gained
 // a breadcrumb, the HUD frame and the region's own rails, and its
 // overlap line and waits count):
-//   links     3 kinds — the breadcrumb "The IT world" (→ /it); one per
+//   links     3 kinds — the breadcrumb "Department Map" (→ /it); one per
 //                        row of the waits table, up to 12 (→ the job
 //                        detail surface); one per failed or unjudged
 //                        machine in the HUD frame (→ that machine's
-//                        region, /it/yard/<region>)
+//                        region, selected on the map: /it?at=<region>)
 //   buttons   4         — "← the world" (→ /it); the window 24 h / 3 d / 7 d
 //   keys      1         — Escape (→ /it)
 //   forms     0, inputs 0
@@ -59,9 +60,14 @@ import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 import { parseRoute } from '../../src/router';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 import { TERRITORIES } from '../../src/it/yard/world';
+import { floorHref, regionHref } from '../../src/it/yard/regions';
 
 const PATH = '/it/operate/marshalling';
-const CATALOGUED = ROUTE_CATALOG['system-marshalling'].path;
+// The region's floor page. It was catalogued as the Marshalling Yard
+// sidebar row until car N1 of design e765b3fc (2026-09-25), which folded
+// the row into the one Department Map row; the floor still answers here
+// until car N3 retires it.
+const FLOOR = floorHref('marshalling');
 const TITLE = { titleMatch: /IT · Marshalling/ };
 
 const json = (r: Route, body: unknown, status = 200): Promise<void> =>
@@ -228,19 +234,19 @@ const svgWhy = (page: Page) =>
 // ---------------------------------------------------------------------
 
 test.describe('/it/operate/marshalling — the alias, and the words it says', () => {
-  test('the alias IS the catalogued Marshalling Yard region, headed by the region under its way back', async ({ page }) => {
-    expect(parseRoute(PATH)).toEqual(parseRoute(CATALOGUED));
+  test('the alias IS the Marshalling region floor, headed by the region under its way back', async ({ page }) => {
+    expect(parseRoute(PATH)).toEqual(parseRoute(FLOOR));
     expect(parseRoute(PATH)).toEqual({ kind: 'systemYardFloor', region: 'marshalling' });
     await install(page);
     await mountPage(page, PATH, TITLE);
 
     await expect(page).toHaveURL(new RegExp(`${PATH}$`));
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('IT · Marshalling');
-    await expect(page.getByRole('heading', { name: 'The IT world' })).toHaveCount(0);
+    await expect(page.getByRole('heading', { name: 'Department Map' })).toHaveCount(0);
     // The board's own page header is dropped: the region heads the page.
     await expect(page.getByRole('heading', { name: 'Marshalling Yard' })).toHaveCount(0);
     const crumbs = page.locator('nav.crumbs[data-region="marshalling"]');
-    await expect(crumbs).toHaveText('The IT world › Marshalling');
+    await expect(crumbs).toHaveText('Department Map › Marshalling');
     await expect(crumbs.locator('[aria-current="page"]')).toHaveText('› Marshalling');
 
     // The region's head, off the regions read.
@@ -390,16 +396,16 @@ test.describe('/it/operate/marshalling — the alias, and the words it says', ()
 // ---------------------------------------------------------------------
 
 test.describe('/it/operate/marshalling — every control', () => {
-  test('the breadcrumb lands on the catalogued IT world, and back returns to the alias', async ({ page }) => {
+  test('the breadcrumb lands on the catalogued Department Map, and back returns to the alias', async ({ page }) => {
     await install(page);
     await mountPage(page, PATH, TITLE);
-    const crumb = page.locator('nav.crumbs').getByRole('link', { name: 'The IT world' });
+    const crumb = page.locator('nav.crumbs').getByRole('link', { name: 'Department Map' });
     await expect(crumb).toHaveAttribute('href', ROUTE_CATALOG['system-yard'].path);
     expect(parseRoute(ROUTE_CATALOG['system-yard'].path)).toEqual({ kind: 'systemYard' });
 
     await crumb.click();
     await expect(page).toHaveURL(/\/it$/);
-    await expect(page.getByRole('heading', { level: 1 })).toHaveText('The IT world');
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText('Department Map');
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`${PATH}$`));
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('IT · Marshalling');
@@ -454,17 +460,21 @@ test.describe('/it/operate/marshalling — every control', () => {
     await expect(waitsTable(page).getByRole('link', { name: 'Teach the dock to breathe' })).toBeVisible();
   });
 
-  test("the HUD's machine link lands on the machine's region — this same catalogued surface", async ({ page }) => {
+  test("the HUD's machine link selects the machine's region on the Department Map", async ({ page }) => {
+    // A selection since car N1 of design e765b3fc: the map comes back on
+    // top with marshalling's panel under it, where the link used to open
+    // this floor again.
     await install(page);
     await mountPage(page, PATH, TITLE);
     const link = page.locator('section[data-hud] .hud-listed a');
     await expect(link).toHaveCount(1);
     await expect(link).toHaveText('failed · marshalling · sign-off station');
-    await expect(link).toHaveAttribute('href', CATALOGUED);
+    await expect(link).toHaveAttribute('href', regionHref('marshalling'));
     await expect(link).toHaveAttribute('title', 'over its bound');
     await link.click();
-    await expect(page).toHaveURL(new RegExp(`${CATALOGUED}$`));
-    await expect(page.getByRole('heading', { level: 1 })).toHaveText('IT · Marshalling');
+    await expect(page).toHaveURL(/\/it\?at=marshalling$/);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText('Department Map');
+    await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-selection', 'marshalling');
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`${PATH}$`));
   });

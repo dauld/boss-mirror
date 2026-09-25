@@ -109,7 +109,10 @@ export type Route =
   | { kind: 'systemStepPlugins' }
   | { kind: 'systemStepPluginDetail'; pluginSlug: string }
   | { kind: 'systemDesign' }
-  | { kind: 'systemYard' }
+  /** The Department Map — the IT landing (design e765b3fc, car N1): the
+   *  map on top, and below it the detail of `at`, the station the query
+   *  selects (`/it?at=gates`). Absent, nothing is selected. */
+  | { kind: 'systemYard'; at?: string }
   /** One of the yard's floors — the Train Yard focused on a region's
    *  panel (design 0524fc95, car 2). `region` is the map's name for it
    *  (dock, gates, track, shed, arrivals, garage); the page maps it to
@@ -220,7 +223,16 @@ export function parseRoute(pathname: string, search = ''): Route {
     //    0524fc95 (car 2) the landing is the yard's MAP: eight region
     //    cards, each a door to a floor. The floors are the yard page
     //    itself, opened on a region's panel, at /it/yard[/<region>].
-    if (p === '/') return { kind: 'systemYard' };
+    //    Since design e765b3fc (car N1) it is the DEPARTMENT MAP: the map
+    //    stays on top and a selection opens its detail below, named in
+    //    the query so a link says what it selects. A query, not a path:
+    //    the map is not torn down and rebuilt by a selection.
+    if (p === '/') {
+      const r: Route = { kind: 'systemYard' };
+      const at = new URLSearchParams(search).get('at');
+      if (at) (r as { at?: string }).at = at;
+      return r;
+    }
     if (p === '/yard') return { kind: 'systemYardFloor', region: 'track' };
     const floorM = p.match(/^\/yard\/([a-z-]+)$/);
     if (floorM) return { kind: 'systemYardFloor', region: floorM[1]! };
@@ -269,10 +281,11 @@ export function parseRoute(pathname: string, search = ''): Route {
     // answers so a bookmark or a packet link keeps working.
     if (p === '/codebase' || p === '/design/codebase') return { kind: 'systemCodebase' };
     // 5. Estate. 6. KB. Plus the unlisted auth door.
-    // 5a. The Crew Board — a sidebar row of its own, not an Operate tab.
-    // David's decision on 04c5bbc0 (2026-09-11) overrode the proposal to
-    // make it a tab inside an existing family: "Port the Crew Board as a
-    // new sidebar page in IT."
+    // 5a. The Crew Board — a sidebar row of its own from 04c5bbc0
+    // (2026-09-11) until car N1 of design e765b3fc (2026-09-25) folded
+    // it into the Department Map row: it is the shop floor's board, the
+    // detail of that station. The page itself goes with the station
+    // pages (design e765b3fc, car N3).
     if (p === '/crew') return { kind: 'systemCrew' };
     if (p === '/estate') return { kind: 'systemEstate' };
     if (p === '/kb') return { kind: 'systemKb' };

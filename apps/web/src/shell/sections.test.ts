@@ -27,10 +27,8 @@ import { ROUTE_CATALOG, appForSection } from './nav-catalog';
 import type { Route } from '../router';
 
 const catalogKeys = new Set(Object.keys(ROUTE_CATALOG));
-// Every section a route can light — the kind's own, plus the ones a
-// PARAMETER answers for (a yard floor's region, car 4 of design
-// d2154293). sections.ts derives it, so this file no longer knows how
-// many answers there are.
+// Every section a route can light. sections.ts derives it, so this file
+// does not know how many answers there are.
 const sections = SECTIONS_PRODUCED;
 
 describe('one reader answers which row a route lights', () => {
@@ -51,11 +49,7 @@ describe('one reader answers which row a route lights', () => {
     // SECTIONS_PRODUCED is derived, not listed: each entry must be
     // reachable through the reader, or it is a ghost the pins below
     // would count as covered.
-    const lit = new Set([
-      ...ROUTE_KINDS.map((kind) => sectionForRoute({ kind } as Route)),
-      sectionForRoute({ kind: 'systemYardFloor', region: 'receiving' }),
-      sectionForRoute({ kind: 'systemYardFloor', region: 'marshalling' }),
-    ]);
+    const lit = new Set(ROUTE_KINDS.map((kind) => sectionForRoute({ kind } as Route)));
     expect([...sections].filter((s) => !lit.has(s)).sort()).toEqual([]);
   });
 });
@@ -108,22 +102,18 @@ describe('sections resolve in the nav catalog', () => {
     expect(appForRoute({ kind: 'notFound', path: '/items' })).toBe('home');
   });
 
-  test('a yard with its own sidebar row highlights that row, not Operate', () => {
-    // Feedback 92921c2f / design 55417146 (2026-09-18): the Receiving
-    // Yard and the Marshalling Yard are sidebar rows now. The row that
-    // highlights is `activeSection === item.id`, so their route kinds
-    // must resolve to their own catalog keys — left on
-    // 'system-incidents' they would light the Operate row while the
-    // operator stands in a yard that has a row of its own.
-    // Car 4 of design d2154293 retired the two PAGES: each yard is a
-    // region of the world now, so the route is a yard floor and the
-    // REGION decides the row — `sectionForRoute`, not the kind alone.
-    // Read off the kind, both would light the Train Yard's row.
-    expect(sectionForRoute({ kind: 'systemYardFloor', region: 'receiving' })).toBe('system-receiving');
-    expect(sectionForRoute({ kind: 'systemYardFloor', region: 'marshalling' })).toBe('system-marshalling');
-    expect(sectionForRoute({ kind: 'systemYardFloor', region: 'dock' })).toBe('system-yard');
-    expect(appForRoute({ kind: 'systemYardFloor', region: 'receiving' })).toBe('it');
-    expect(appForRoute({ kind: 'systemYardFloor', region: 'marshalling' })).toBe('it');
+  test('every station on the map lights the one Department Map row, not Operate', () => {
+    // Design e765b3fc, car N1 (2026-09-25): the Receiving Yard, the
+    // Marshalling Yard and the Crew Board lost their sidebar rows to the
+    // one "Department Map" row, so every place on the map — a selection,
+    // any region's floor, the crew board — lights that row. They had
+    // rows of their own from 92921c2f and 04c5bbc0 until then.
+    expect(sectionForRoute({ kind: 'systemYard', at: 'gates' })).toBe('system-yard');
+    for (const region of ['receiving', 'marshalling', 'dock', 'shop-floor']) {
+      expect(sectionForRoute({ kind: 'systemYardFloor', region }), region).toBe('system-yard');
+      expect(appForRoute({ kind: 'systemYardFloor', region }), region).toBe('it');
+    }
+    expect(sectionForRoute({ kind: 'systemCrew' })).toBe('system-yard');
   });
 
   test('no exception names a section no longer produced', () => {
