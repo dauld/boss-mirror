@@ -471,12 +471,6 @@ const PRESENCE_CONTENT_HINT: &str = "write the content first through the merge d
      complete with {\"status\":\"completed\"} alone and the ticket that ceremony issued. \
      A presence-assured step is not skipped: leave it open, or cancel the packet.";
 
-/// The way to move an active step to another holder, named in the
-/// refusal that stops a PUT doing it in one write (backlog 650ebd0c).
-const ACTIVE_HOLDER_HINT: &str = "an active step changes hands in two writes: free it with \
-     {\"status\":\"ready\",\"assignee_id\":null}, then the next holder claims it through \
-     POST .../claim. A nominator that finds the step already held has nothing to do.";
-
 pub(super) fn judge_assurance(
     floor: boss_core::job::Assurance,
     step: &boss_core::job::Step,
@@ -861,21 +855,28 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // the record. Exact spelling: an alias of the holder is refused
     // too, which is harmless, since the claim door already rewrote the
     // holder to the registered id (d7fef617).
-    if old.status == StepStatus::Active
-        && let Some(holder) = old.assignee_id.as_deref().filter(|h| !h.trim().is_empty())
-        && let Some(next) = step.assignee_id.as_deref().filter(|n| !n.trim().is_empty())
-        && next != holder
-    {
+    //
+    // AND A CLEAR IS A RELEASE ONLY WITH THE STATUS BESIDE IT (backlog
+    // 0f42efa0, the review of car fb3e9424). A bare `{assignee_id:
+    // null}` — or `""`, which this guard read as nobody — answered 204
+    // and left the step Active with no holder, so the next PUT naming
+    // anyone met no holder to keep and installed them: this refusal's
+    // defect in two writes. A null/blank holder now passes only when the
+    // same body moves the step out of Active. The rule and the refusal
+    // body live in `crate::active_holder`, which the dispatcher's test
+    // reads as well.
+    if crate::active_holder::refuses(
+        old.status,
+        old.assignee_id.as_deref(),
+        step.status,
+        step.assignee_id.as_deref(),
+    ) {
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({
-                "error": "step is active and held — a PUT does not replace its holder",
-                "step_id": step_id.to_string(),
-                "step_status": status_word(old.status),
-                "holder": holder,
-                "refused_fields": ["assignee_id"],
-                "hint": ACTIVE_HOLDER_HINT,
-            })),
+            Json(crate::active_holder::refusal_body(
+                &step_id.to_string(),
+                old.assignee_id.as_deref().unwrap_or_default(),
+            )),
         )
             .into_response();
     }

@@ -141,29 +141,25 @@ test('a step switched mid-gesture: the completion lands on the step clicked, nev
   ]);
 });
 
-test('a presence step switched mid-gesture: the stamp, the tap and the completion all name the step clicked', async ({ page }) => {
+// Design f623e425 D3 (backlog 6c9183de, 2026-09-25) tightened the presence
+// half of this: the passkey signs only what is on screen. Once the rail
+// shows s2, s1's plan is no longer in front of the approver, so the
+// gesture that was aimed at s1 refuses its ceremony and signs nothing —
+// where it used to sign s1 unseen. d82b5f60's claim stands unchanged:
+// no write of the gesture reaches s2.
+test('a presence step switched mid-gesture: nothing is signed, and nothing reaches the step now shown', async ({ page }) => {
   const seen = await twoApprovals(page, true);
   await approveThenSwitch(page, seen);
 
-  await expect
-    .poll(() => seen.writes.filter((w) => w.method === 'PUT').length)
-    .toBe(1);
+  const surface = page.locator('.sg-detail');
+  await expect(surface.locator('.step-write-error')).toContainText('Nothing was signed');
   expect(seen.writes.filter((w) => w.step === 's2')).toEqual([]);
+  // The decision landed on s1 (the write the test held); the stamp that
+  // asked for presence was refused, and no ceremony, second stamp or
+  // completion followed.
   expect(seen.writes.map((w) => `${w.method} ${w.step}${w.path}`)).toEqual([
     'PATCH s1/metadata',
     'POST s1/sign-offs',
-    'POST s1/sign-offs',
-    'PUT s1',
   ]);
-  // The passkey signs the step the approver was looking at when they
-  // clicked — its title and plan, with the decision folded in.
-  const shown = (seen.begins[0] as {
-    step_id: string;
-    shown: { title: string; metadata: Record<string, unknown> };
-  });
-  expect(seen.begins.length).toBe(1);
-  expect(shown.step_id).toBe('s1');
-  expect(shown.shown.title).toBe('Approve the budget');
-  expect(shown.shown.metadata.plan).toBe('PLAN budget');
-  expect(shown.shown.metadata.decision).toBe('approved');
+  expect(seen.begins).toEqual([]);
 });

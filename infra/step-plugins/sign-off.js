@@ -28,6 +28,16 @@
 //   4. THE CEREMONY — v1's roster, verbatim in behavior: stamps are
 //      collected per role, the step cannot complete while one is
 //      outstanding, and a 409 surfaces the server's stale-roles text.
+//   5. WHAT THE PASSKEY SIGNS — on a presence step, the title and EVERY
+//      metadata key, drawn from the step's own keys (design f623e425
+//      D3; backlog 6c9183de extends b and c, 2026-09-25). The passkey
+//      binds step_shape_hash(title, metadata), and this surface drew
+//      only the declared fields, so an ops-request's verb, host, args,
+//      rendered_plan_sha256 or a planted decision was signed by the
+//      per-role button unseen. A ceremony on a step whose block is not
+//      drawn — a kind whose floor demands presence the step never
+//      declared — signs nothing: it draws the block and asks for the
+//      tap again.
 //
 // Order on Approve/Reject (v3, feedback 221b4b5c): metadata lands
 // first (a stamp attests the step's current shape, so the decision
@@ -88,6 +98,48 @@
     return typeof v === 'string' && v.trim().length > 0 ? v : null;
   }
 
+  // A signed value as text: a string byte for byte, anything else as its
+  // indented JSON. The app's copy is signedText in
+  // apps/web/src/steps/presence.ts; signOffPlugin.test.ts pins the two
+  // equal (a bundle cannot import it).
+  function signedText(v) {
+    if (typeof v === 'string') return v;
+    const s = JSON.stringify(v, null, 2);
+    return s === undefined ? String(v) : s;
+  }
+
+  function canonical(v) {
+    if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+    if (v !== null && typeof v === 'object') {
+      return `{${Object.keys(v)
+        .sort()
+        .map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`)
+        .join(',')}}`;
+    }
+    const s = JSON.stringify(v);
+    return s === undefined ? 'null' : s;
+  }
+
+  // What a passkey would sign in `shown` that `screen` (the step as this
+  // surface last drew it, or null when it drew no signed content) does
+  // not show as signed: 'title', then each metadata key missing or drawn
+  // with another value. The app's copy is notShown in presence.ts, pinned
+  // equal by signOffPlugin.test.ts.
+  function notShown(shown, screen) {
+    const keys = Object.keys(shown.metadata).sort();
+    if (!screen) return ['title', ...keys];
+    const out = shown.title === screen.title ? [] : ['title'];
+    keys.forEach((k) => {
+      if (
+        !Object.prototype.hasOwnProperty.call(screen.metadata, k) ||
+        canonical(screen.metadata[k]) !== canonical(shown.metadata[k])
+      ) {
+        out.push(k);
+      }
+    });
+    return out;
+  }
+
   function mount(container, { step, jobId, onUpdate }) {
     const required = Array.isArray(step.sign_offs_required) ? step.sign_offs_required : [];
     let stamps = Array.isArray(step.sign_offs) ? step.sign_offs.slice() : [];
@@ -113,6 +165,14 @@
     // two-minute expiry on the PUT exactly as on the stamp, and a step
     // edited since the ceremony refuses it. Nothing here mints one.
     let presenceTicketHeld = null;
+    // What the passkey signs, as last drawn: {title, metadata} copied at
+    // the render, so a later write to the local cache is not mistaken for
+    // what is on screen. null while no signed content is drawn.
+    let onScreen = null;
+    // Set when a ceremony was asked of a step that never declared
+    // presence: from then on its signed content is drawn too.
+    let revealed = false;
+    const signedVisible = () => !isDone && (step.assurance_required === 'presence' || revealed);
 
     const declared = (Array.isArray(step.fields) ? step.fields : []).filter(
       (f) => f && f.name && !TRIO.includes(f.name),
@@ -158,6 +218,7 @@
 
     const contextDiv = h('div', { className: 'step-signoff-context' });
     const fieldsDiv = h('div', { className: 'step-signoff-fields' });
+    const signedDiv = h('div', { className: 'step-signed-keys' });
     const rolesDiv = h('div', { className: 'step-signoff-roles' });
     const actionsDiv = h('div', { className: 'step-actions' });
     const errorDiv = h('div', { className: 'step-signoff-error' });
@@ -206,6 +267,9 @@
       declared.forEach((f) => {
         const id = `signoff-field-${step.id}-${f.name}`;
         const type = String(f.field_type || 'string');
+        // Drawn once: while the signed block is up it carries this field,
+        // byte for byte, with every other key the passkey signs.
+        if (signedDoc.has(f.name) && signedVisible()) return;
         if (signedDoc.has(f.name)) {
           fieldsDiv.appendChild(
             h(
@@ -248,6 +312,42 @@
           ),
         );
       });
+    }
+
+    // Every key the passkey signs, from the step's own keys — never an
+    // allow-list, so a key nobody wrote a renderer for is drawn as its
+    // JSON rather than skipped — and the copy presenceTicket() compares
+    // against is taken HERE, from what was just drawn.
+    function renderSigned() {
+      signedDiv.replaceChildren();
+      onScreen = null;
+      if (!signedVisible()) return;
+      const md = step.metadata || {};
+      signedDiv.appendChild(
+        h('div', { className: 'step-signed-keys-head' }, 'What your passkey signs'),
+      );
+      signedDiv.appendChild(
+        h(
+          'p',
+          { className: 'step-signed-keys-note' },
+          'The step ',
+          h('strong', { className: 'step-signed-title' }, step.title),
+          ' and every key below, exactly as shown. Your decision, its time and your comment join them when you press a button.',
+        ),
+      );
+      Object.keys(md)
+        .sort()
+        .forEach((k) => {
+          signedDiv.appendChild(
+            h(
+              'div',
+              { className: 'step-signed-row' },
+              h('div', { className: 'step-signed-key' }, k),
+              h('pre', { className: 'step-signed-value' }, signedText(md[k])),
+            ),
+          );
+        });
+      onScreen = { title: step.title, metadata: JSON.parse(JSON.stringify(md)) };
     }
 
     function renderRoles() {
@@ -361,6 +461,7 @@
 
     function renderAll() {
       renderFields();
+      renderSigned();
       renderRoles();
       renderActions();
       renderProgress();
@@ -399,6 +500,20 @@
     // is the whole point — so the snapshot is named for what it is.
     async function presenceTicket() {
       const renderedMetadata = step.metadata || {};
+      // THE PASSKEY SIGNS ONLY WHAT WAS DRAWN (design f623e425 D3): a key
+      // of what the begin would name that the signed block did not draw
+      // as it would be signed refuses here, before any request. The only
+      // way this surface reaches it is a step that never declared
+      // presence: the block is drawn now and the tap asked for again, so
+      // the approver reads before signing.
+      const unseen = notShown({ title: step.title, metadata: renderedMetadata }, onScreen);
+      if (unseen.length > 0) {
+        revealed = true;
+        renderAll();
+        throw new Error(
+          `nothing was signed: your passkey would sign ${unseen.join(', ')}, which this page had not shown — it is shown now; read it and press again`,
+        );
+      }
       const begin = await fetch('/api/auth/passkey/assert/begin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -712,6 +827,7 @@
       { className: 'step-signoff' },
       contextDiv,
       fieldsDiv,
+      signedDiv,
       h('div', { className: 'step-signoff-head' }, 'Signatures'),
       rolesDiv,
       h('div', { className: 'step-field' }, commentTa),

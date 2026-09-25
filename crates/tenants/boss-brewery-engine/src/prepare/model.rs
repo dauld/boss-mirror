@@ -125,7 +125,6 @@ pub fn prepare_model(gateway_base: Option<&str>, seeds_dir: &Path) -> Result<()>
         &policy_base,
         &seeds_dir.join("policy_rules.toml"),
         false,
-        "brewery-policy-bootstrap",
         None,
     )?;
 

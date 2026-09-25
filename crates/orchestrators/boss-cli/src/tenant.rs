@@ -192,10 +192,11 @@ How it lands.
   Class edit door is used, policy's `force` is set and a workflow is
   superseded only under the matching `--take`.
 - **`boss tenant publish --take <registry>[,<registry>]` is the only
-  overwrite.** It names `classes`, `calendars`, `company`, `policy`,
-  `employees`, `agents` or `workflows`; every other door stays
-  insert-if-absent on that run, and a name no door can take is refused
-  with the list. Every take prints the overwritten rows field by field:
+  overwrite.** It names `classes`, `departments`, `calendars`,
+  `company`, `policy`, `employees`, `agents` or `workflows`; every
+  other door stays insert-if-absent on that run, and a name no door
+  can take is refused with the list. Every take prints the
+  overwritten rows field by field:
   `updated 1: <id> (location loc-hq → loc-algedonic-hq)`.
 - **Every registry's line names its kept-but-differing rows**, in one
   shape: `kept: <id> differs on <fields> (the instance is the truth;
@@ -212,7 +213,10 @@ How it lands.
   declaration. `agents`: the declaration is the whole row (an omitted
   cap declares it unset); a declared alias another agent holds moves.
   `calendars`: header and closed-day set are replaced wholesale.
-  `company`: the label. `classes`: each differing row is PUT through
+  `company`: the label. `departments`: the declaration is the whole
+  row, and a row is withdrawn by declaring `retired = true` (it stays,
+  since packets carry its code, and leaves the list; backlog
+  7edf0e97). `classes`: each differing row is PUT through
   `PUT /api/classes/{kind}/{code}`. `policy`: each rule whose `scope`
   or `active` differs is re-POSTed. `workflows`: each kind whose file
   differs on a facet the drift lint compares (label, description,
@@ -321,6 +325,26 @@ pub const CONTRACT: &[Entry] = &[
                 parent_code?, member_attribute?, metadata?, sort_order?}",
         parse: parse_classes,
         scaffold: Some(scaffold_classes),
+    },
+    Entry {
+        paths: &["seeds/departments.toml"],
+        required: false,
+        read_by: "POST /api/departments/batch (boss-jobs, insert-if-absent by code; one \
+                  `department.declared` fact per inserted row) — sent by `boss tenant publish` \
+                  AFTER the classes, because a row's `function` is a Class under (department, \
+                  function); a held row that differs is kept and named — the instance is the \
+                  truth; `--take departments` applies the declaration, `retired = true` \
+                  included, one `department.updated` per changed row. GET /api/departments reads \
+                  the live rows back: the chrome bar's tabs and the weekly retro rule (backlog \
+                  7edf0e97; until 2026-09-25 the roster was the 13 rows a migration seeded into \
+                  every instance, and nothing could change them)",
+        shape: "`[[department]]` rows: code (a lowercase slug — the department's URL root \
+                segment, never one of crates/core/boss-jobs/src/department/reserved-root-\
+                segments.txt), display_name, function (a Class code under (department, \
+                function)), sort_order? (0), retired? (false) — validated by \
+                `boss_jobs::department::declare::load_departments_toml`",
+        parse: parse_departments,
+        scaffold: None,
     },
     Entry {
         paths: &["seeds/chart_of_accounts.toml"],
@@ -916,6 +940,25 @@ fn parse_projection_rules(path: &Path, _: &Ctx) -> Result<String, String> {
                         .unwrap_or_default(),
                     r.fact_kind
                 ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    })
+}
+
+fn parse_departments(path: &Path, _: &Ctx) -> Result<String, String> {
+    let rows = boss_jobs::department::declare::load_departments_toml(path)?;
+    refuse_if_stray(&read(path)?, "department", rows.len())?;
+    Ok(match rows.len() {
+        0 => "0 departments".to_string(),
+        n => format!(
+            "{n} departments: {}",
+            rows.iter()
+                .map(|d| if d.retired {
+                    format!("{} (retired)", d.code)
+                } else {
+                    d.code.clone()
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         ),

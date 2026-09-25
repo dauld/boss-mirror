@@ -9,9 +9,11 @@
   // The full calendar conflict view is overkill for the surface;
   // the Calendar KB page in the sidebar handles that.
 
+  import { untrack } from 'svelte';
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
   import type { Employee } from '../people/types';
   import { saveStep } from './stepWrite';
+  import { HOLDER_LOCKED_NOTE, assigneeToSend, holderLocked } from './holder';
 
   type StepData = {
     id: string;
@@ -52,6 +54,15 @@
     void step.id;
     writeError = null;
   });
+  /// The picker follows the step it shows, and an active step's holder
+  /// is not offered for change — GenericSurface says why (backlogs
+  /// 848477c3, 650ebd0c, 0f42efa0).
+  let holderKey = $derived(`${step.id}\u0000${step.assignee_id ?? ''}`);
+  $effect(() => {
+    void holderKey;
+    assigneeId = untrack(() => step.assignee_id ?? '');
+  });
+  let locked = $derived(holderLocked(step));
   let terminal = $derived(_isTerminal(step.status));
 
   let employees = $state<Employee[]>([]);
@@ -101,7 +112,7 @@
       const body = {
         notes: notes || undefined,
         status: status ?? step.status,
-        assignee_id: assigneeId || null,
+        assignee_id: assigneeToSend(step, assigneeId),
         metadata: {
           location: location || undefined,
           scheduled_at: scheduledAt || undefined,
@@ -172,13 +183,16 @@
     <select
       id={`assignee-${step.id}`}
       bind:value={assigneeId}
-      disabled={terminal || saving}
+      disabled={terminal || saving || locked}
     >
       <option value="">— unassigned —</option>
       {#each employees as e (e.id)}
         <option value={e.id}>{e.name} · {e.role}</option>
       {/each}
     </select>
+    {#if locked}
+      <span class="step-meta-row small step-holder-locked">{HOLDER_LOCKED_NOTE}</span>
+    {/if}
   </div>
 
   <div class="step-field">

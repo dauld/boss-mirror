@@ -283,10 +283,17 @@ async fn handle_event(
     // (or any newly-unblocked) step lands here as `ready`. We assign
     // those to a role-matched Employee so the workforce, which only
     // drives ASSIGNED steps, has something to pull. `active` is kept
-    // only as a defensive net: a claimed step always carries an
-    // assignee, so the assignee_id-already-set check below
-    // short-circuits it; were some path ever to emit an unassigned
-    // active step we'd still route it. Idempotency is that assignee
+    // as a net: a claimed step always carries an assignee, so the
+    // assignee_id-already-set check below short-circuits it, and since
+    // backlog 0f42efa0 the jobs API refuses a PUT that clears the
+    // holder of an active step without releasing it. One path still
+    // makes an unheld active step, measured on the in-memory API
+    // 2026-09-25: `PUT {status: active}` with no assignee on an
+    // unassigned ready step answers 204 (a surface's Start button with
+    // the picker on "unassigned", the sim) — the PUT-as-claim path, a
+    // separate item. Until that path claims or refuses, dropping
+    // `active` here would strand such a step with nobody to pull it,
+    // so the net stays. Idempotency is that assignee
     // check — an assigned step never re-routes through the dispatcher,
     // no matter how many status flips fire (the assignment PUT itself
     // emits a `jobs.step.updated`).
@@ -1307,17 +1314,27 @@ mod tests {
     }
 
     /// The jobs API's refusal of a holder change on an ACTIVE step
-    /// someone holds (backlog 650ebd0c; its shape is pinned on the jobs
-    /// side by `a_nomination_after_a_claim_does_not_replace_the_claimant`).
+    /// someone holds (backlog 650ebd0c). Built by the jobs API's own
+    /// builder, never a hand copy of its shape: the jobs side's tests
+    /// assert the wire body equals the same builder's output, so a
+    /// change to the shape reaches this reader's test the same day
+    /// (backlog 0f42efa0, CLAUDE.md §9a). The variants below mutate
+    /// that body, one field at a time.
     fn held_refusal(step_status: &str, fields: &[&str]) -> String {
-        serde_json::json!({
-            "error": "step is active and held — a PUT does not replace its holder",
-            "step_id": "00000000-0000-0000-0000-000000000001",
-            "step_status": step_status,
-            "holder": "emp-claimant",
-            "refused_fields": fields,
-        })
-        .to_string()
+        let mut body = boss_jobs::active_holder::refusal_body(
+            "00000000-0000-0000-0000-000000000001",
+            "emp-claimant",
+        );
+        body["step_status"] = serde_json::json!(step_status);
+        body["refused_fields"] = serde_json::json!(fields);
+        body.to_string()
+    }
+
+    /// The builder's body, untouched, is the one this reader acks.
+    #[test]
+    fn the_jobs_apis_own_held_refusal_is_read_as_held() {
+        let body = boss_jobs::active_holder::refusal_body("s", "emp-claimant");
+        assert!(held_before_assignment(409, &body.to_string()));
     }
 
     /// A redelivered nomination that finds the step claimed is done:

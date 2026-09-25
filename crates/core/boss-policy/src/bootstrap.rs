@@ -96,16 +96,18 @@ pub fn rule_changes(live: &Value, declared: &PolicyRule) -> Vec<FieldChange> {
 /// URL), idempotently.
 ///
 /// `force` overwrites existing rules that differ instead of keeping
-/// them (the `--take policy` of `boss tenant publish`). `changed_by` is
-/// attributed to rows this run upserts (convention:
-/// `"<tenant>-policy-bootstrap"`). `x_boss_user` overrides the default
-/// platform-bootstrap header when `Some`. Hard-fails on any non-2xx
-/// response.
+/// them (the `--take policy` of `boss tenant publish`). `x_boss_user`
+/// overrides the default platform-bootstrap header when `Some`. That
+/// header is both the authority the service checks each write against
+/// and the `changed_by` it records: the service attributes a write to
+/// the caller it authorized, never to a name in the body (backlog
+/// 42c25542 — this took a `changed_by` argument until then, and the
+/// body field it filled was how any caller signed any name). Hard-fails
+/// on any non-2xx response.
 pub fn publish_policy_rules(
     api_base: &str,
     seeds: &Path,
     force: bool,
-    changed_by: &str,
     x_boss_user: Option<&str>,
 ) -> Result<PolicyPublishOutcome> {
     let user_header = x_boss_user.map(|s| s.to_string()).unwrap_or_else(|| {
@@ -176,10 +178,7 @@ pub fn publish_policy_rules(
             _ => {}
         }
         let post_url = policy_url(api_base, "/api/policy/rules");
-        let body = json!({
-            "rule": rule,
-            "changed_by": changed_by,
-        });
+        let body = json!({ "rule": rule });
         let resp = client
             .post(&post_url)
             .headers(headers.clone())

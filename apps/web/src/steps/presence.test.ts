@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { completeWithPresence, performPresenceCeremony, shownAfter } from './presence';
+import {
+  completeWithPresence,
+  NotShownRefusal,
+  notShown,
+  performPresenceCeremony,
+  shownAfter,
+  signedRows,
+} from './presence';
 
 // Backlog 2e893e27 (2026-09-21): performPresenceCeremony caught
 // navigator.credentials.get with a bare `catch {` and threw one
@@ -62,9 +69,12 @@ const SHOWN = {
   metadata: { plan: 'PLAN wipe target-a\n', args: ['target-a'] },
 } as const;
 
+/** The surface's answer to "what is on screen now": exactly SHOWN. */
+const ON_SCREEN = () => SHOWN;
+
 const failureOf = async (): Promise<string> => {
   try {
-    await performPresenceCeremony('job-1', 'step-1', SHOWN);
+    await performPresenceCeremony('job-1', 'step-1', SHOWN, ON_SCREEN);
   } catch (e) {
     return e instanceof Error ? e.message : String(e);
   }
@@ -203,7 +213,7 @@ describe('completeWithPresence answers a presence refusal once', () => {
 
   test('a held ticket the server honours completes with no ceremony', async () => {
     const seen = server((t) => t === 'held');
-    const res = await completeWithPresence('job-1', 'step-1', SHOWN, 'held');
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, ON_SCREEN, 'held');
     expect(res.kind).toBe('ok');
     expect(seen.puts).toEqual(['held']);
     expect(seen.begins).toEqual([]);
@@ -213,7 +223,7 @@ describe('completeWithPresence answers a presence refusal once', () => {
   test('no ticket held (a reload after the stamp): one ceremony on the shown step, one retry', async () => {
     withPasskey();
     const seen = server((t) => t === 'fresh-1');
-    const res = await completeWithPresence('job-1', 'step-1', SHOWN);
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, ON_SCREEN);
     expect(res.kind).toBe('ok');
     expect(seen.puts).toEqual([null, 'fresh-1']);
     expect(seen.begins).toEqual([{ job_id: 'job-1', step_id: 'step-1', shown: SHOWN }]);
@@ -222,7 +232,7 @@ describe('completeWithPresence answers a presence refusal once', () => {
   test('a held ticket past its life: one fresh ceremony, and the retry carries the fresh ticket', async () => {
     withPasskey();
     const seen = server((t) => t === 'fresh-1');
-    const res = await completeWithPresence('job-1', 'step-1', SHOWN, 'expired');
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, ON_SCREEN, 'expired');
     expect(res.kind).toBe('ok');
     expect(seen.puts).toEqual(['expired', 'fresh-1']);
     expect(seen.begins.length).toBe(1);
@@ -231,7 +241,7 @@ describe('completeWithPresence answers a presence refusal once', () => {
   test('refused again after the fresh tap: failed, named, and never a second ceremony', async () => {
     withPasskey();
     const seen = server(() => false);
-    const res = await completeWithPresence('job-1', 'step-1', SHOWN);
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, ON_SCREEN);
     expect(res.kind).toBe('failed');
     if (res.kind === 'failed') {
       expect(res.error).toContain('refused again after a fresh passkey tap');
@@ -256,14 +266,14 @@ describe('completeWithPresence answers a presence refusal once', () => {
         ? new Response(REFUSAL, { status: 422 })
         : new Response(JSON.stringify({ missing_or_stale_roles: ['ceo'] }), { status: 409 });
     }) as unknown as typeof fetch;
-    const res = await completeWithPresence('job-1', 'step-1', SHOWN);
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, ON_SCREEN);
     expect(res).toEqual({ kind: 'failed', error: 'sign-offs outstanding: ceo' });
     expect(puts).toBe(2);
   });
 
   test('a ceremony that fails is named, and the completion is not re-sent', async () => {
     const seen = server(() => false, { status: 409, body: 'no passkey' });
-    const res = await completeWithPresence('job-1', 'step-1', SHOWN);
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, ON_SCREEN);
     expect(res.kind).toBe('failed');
     if (res.kind === 'failed') expect(res.error).toContain('No passkey enrolled');
     expect(seen.puts).toEqual([null]);
@@ -276,7 +286,7 @@ describe('completeWithPresence answers a presence refusal once', () => {
       else seen.puts += 1;
       return new Response(JSON.stringify({ missing_or_stale_roles: ['ceo'] }), { status: 409 });
     }) as unknown as typeof fetch;
-    const res = await completeWithPresence('job-1', 'step-1', SHOWN);
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, ON_SCREEN);
     expect(res).toEqual({ kind: 'failed', error: 'sign-offs outstanding: ceo' });
     expect(seen).toEqual({ begins: 0, puts: 1 });
   });
@@ -293,5 +303,111 @@ describe('shownAfter folds a surface’s own write the way the merge door does',
     const rendered = { a: 1 };
     shownAfter(rendered, { a: 2 });
     expect(rendered).toEqual({ a: 1 });
+  });
+});
+
+// Design f623e425 D3 (backlog 6c9183de, extends b and c, 2026-09-25): the
+// passkey binds step_shape_hash(title, metadata) — EVERY metadata key —
+// and ApprovalSurface rendered only `decision` and `comment`. A planted
+// plan, verb, host, args, rendered_plan_sha256 or decision was signed on
+// one tap, unseen. The rows a surface renders are now derived from the
+// very object the begin names, and the ceremony refuses, before any
+// request, a key that is not on screen as it would be signed.
+describe('a passkey signs only what the surface put on screen', () => {
+  const OPS_APPROVE = {
+    title: 'Approve the plan: wipe on forge',
+    metadata: {
+      plan: 'PLAN wipe target-a\n  /dev/sdb  by-id/ata-X\n',
+      verb: 'wipe',
+      host: 'forge',
+      args: ['target-a'],
+      rendered_plan_sha256: 'ab'.repeat(32),
+      decision: 'approved',
+      decided_at: '2026-09-25T15:00:00Z',
+      planted_by_someone_else: { anything: true },
+    },
+  } as const;
+
+  test('the rows are every key the shape hash covers, and nothing else', () => {
+    const rows = signedRows(OPS_APPROVE);
+    expect(rows.map((r) => r.key)).toEqual(Object.keys(OPS_APPROVE.metadata).sort());
+    for (const k of ['plan', 'verb', 'host', 'args', 'rendered_plan_sha256', 'decision']) {
+      expect(rows.some((r) => r.key === k)).toBe(true);
+    }
+  });
+
+  test('a string renders byte for byte; anything else renders as its JSON', () => {
+    const rows = new Map(signedRows(OPS_APPROVE).map((r) => [r.key, r.text]));
+    expect(rows.get('plan')).toBe(OPS_APPROVE.metadata.plan);
+    expect(rows.get('args')).toBe(JSON.stringify(['target-a'], null, 2));
+    expect(rows.get('planted_by_someone_else')).toContain('"anything": true');
+  });
+
+  test('nothing is unshown when the screen holds exactly what is signed', () => {
+    expect(notShown(OPS_APPROVE, { ...OPS_APPROVE })).toEqual([]);
+  });
+
+  test('a key planted after the render is named, and so is a value that moved', () => {
+    const onScreen = {
+      title: OPS_APPROVE.title,
+      metadata: { ...OPS_APPROVE.metadata, host: 'boss-gcp' } as Record<string, unknown>,
+    };
+    delete onScreen.metadata.planted_by_someone_else;
+    expect(notShown(OPS_APPROVE, onScreen)).toEqual(['host', 'planted_by_someone_else']);
+  });
+
+  test('another title on screen is named; nothing on screen names every key', () => {
+    expect(notShown(OPS_APPROVE, { ...OPS_APPROVE, title: 'Approve the hire' })).toEqual([
+      'title',
+    ]);
+    expect(notShown(OPS_APPROVE, null)).toEqual([
+      'title',
+      ...Object.keys(OPS_APPROVE.metadata).sort(),
+    ]);
+  });
+
+  test('a key shown and not signed is not a refusal — only an unshown signed one is', () => {
+    const onScreen = {
+      title: OPS_APPROVE.title,
+      metadata: { ...OPS_APPROVE.metadata, extra_on_screen: 1 },
+    };
+    expect(notShown(OPS_APPROVE, onScreen)).toEqual([]);
+  });
+
+  test('the ceremony refuses an unshown key before any request, naming it', async () => {
+    let fetched = 0;
+    globalThis.fetch = (async () => {
+      fetched += 1;
+      return new Response(JSON.stringify(BEGIN), { status: 200 });
+    }) as unknown as typeof fetch;
+    const onScreen = { title: SHOWN.title, metadata: { plan: SHOWN.metadata.plan } };
+    let refusal: unknown = null;
+    try {
+      await performPresenceCeremony('job-1', 'step-1', SHOWN, () => onScreen);
+    } catch (e) {
+      refusal = e;
+    }
+    expect(refusal).toBeInstanceOf(NotShownRefusal);
+    expect((refusal as NotShownRefusal).keys).toEqual(['args']);
+    expect((refusal as Error).message).toContain('args');
+    expect(fetched).toBe(0);
+  });
+
+  test('a completion whose recovery tap would sign an unshown key is failed, not re-sent', async () => {
+    const puts: (string | null)[] = [];
+    let begins = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/assert/')) {
+        begins += 1;
+        return new Response(JSON.stringify(BEGIN), { status: 200 });
+      }
+      puts.push(new Headers(init?.headers).get('x-presence-ticket'));
+      return new Response(JSON.stringify({ required: 'presence' }), { status: 422 });
+    }) as unknown as typeof fetch;
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, () => null);
+    expect(res.kind).toBe('failed');
+    if (res.kind === 'failed') expect(res.error).toContain('does not show');
+    expect(begins).toBe(0);
+    expect(puts).toEqual([null]);
   });
 });

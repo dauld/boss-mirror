@@ -7,6 +7,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { notShown, signedText } from './presence';
 
 const BUNDLE = new URL('../../../../infra/step-plugins/sign-off.js', import.meta.url);
 
@@ -57,6 +58,19 @@ const buttonNamed = (root: FakeNode, label: string) =>
         .map((x) => x.textContent)
         .join('')
         .trim() === label,
+  );
+
+/** The "what your passkey signs" block as drawn: key -> the text on screen. */
+const signedBlock = (root: FakeNode): Map<string, string> =>
+  new Map(
+    byClass(root, 'step-signed-row').map((row) => {
+      const text = (cls: string) =>
+        byClass(row, cls)
+          .flatMap((n) => walk(n))
+          .map((n) => n.textContent)
+          .join('');
+      return [text('step-signed-key'), text('step-signed-value')] as const;
+    }),
   );
 
 type FetchCall = { url: string; method: string; body: unknown };
@@ -399,7 +413,14 @@ const bypassStep = () => {
   return step;
 };
 
-const methods = (calls: FetchCall[]) => calls.map((c) => c.method);
+// The same step DECLARING presence, as a passkey-gated sign-off does.
+// Since design f623e425 D3 a surface draws the signed content for a
+// presence step up front, and refuses a ceremony on a step whose content
+// it has not drawn — so the suites below, whose server demands presence,
+// declare it the way ops-request's approve step does.
+const presenceStep = () => Object.assign(bypassStep(), { assurance_required: 'presence' });
+
+const methods =(calls: FetchCall[]) => calls.map((c) => c.method);
 
 describe('sign-off v3 — the signature follows the decision', () => {
   test('the stub refuses the measured sequence and accepts the corrected one', () => {
@@ -591,7 +612,7 @@ describe('sign-off — a presence step completes with its own ticket', () => {
   };
 
   test('Approve: one ceremony, the stamp and the completion both carry its ticket, and it completes', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     delete (step.metadata as Record<string, unknown>).decision;
     delete (step.metadata as Record<string, unknown>).decided_at;
     const { srv, routes, ceremonies, completionTickets } = presenceServer(step);
@@ -611,7 +632,7 @@ describe('sign-off — a presence step completes with its own ticket', () => {
   });
 
   test('Reject: the same — a rejection is a completion and needs the same ticket', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     const { srv, routes, ceremonies, completionTickets } = presenceServer(step);
     const { mount } = loadBundle(routes);
     withPasskey();
@@ -629,7 +650,7 @@ describe('sign-off — a presence step completes with its own ticket', () => {
   });
 
   test('signed by the role button, then Approve: the completion carries the ticket that signature minted', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     const { srv, routes, ceremonies, completionTickets } = presenceServer(step);
     const { mount } = loadBundle(routes);
     withPasskey();
@@ -651,7 +672,7 @@ describe('sign-off — a presence step completes with its own ticket', () => {
   });
 
   test('no ceremony ran, so no ticket rides the completion', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     delete (step.metadata as Record<string, unknown>).decision;
     const srv = signingServer(step);
     const tickets: (string | undefined)[] = [];
@@ -763,7 +784,7 @@ describe('sign-off — a completion refused for presence gets one tap and one re
   };
 
   test('after a reload with the stamp already recorded: one tap on the current content, retried, completed', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     const server = presenceServer(step);
     // Signed before the reload: the stamp pins the step as it stands, and
     // this mount holds no ticket of its own.
@@ -790,7 +811,7 @@ describe('sign-off — a completion refused for presence gets one tap and one re
   });
 
   test('a held ticket past its life: the completion is refused, one fresh tap, retried with the fresh ticket', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     const server = presenceServer(step);
     const { mount } = loadBundle(server.routes);
     withPasskey();
@@ -813,7 +834,7 @@ describe('sign-off — a completion refused for presence gets one tap and one re
   });
 
   test('a presence step this user signs no role on: the completion alone asks for the tap', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     step.sign_offs_required = [];
     const server = presenceServer(step);
     const { mount } = loadBundle(server.routes);
@@ -830,7 +851,7 @@ describe('sign-off — a completion refused for presence gets one tap and one re
   });
 
   test('refused again after the fresh tap: no second ceremony, no third write, and the refusal says so', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     const server = presenceServer(step);
     server.srv.stampAs('platform-admin');
     (step as { sign_offs: Stamp[] }).sign_offs = server.srv.stamps.slice();
@@ -851,7 +872,7 @@ describe('sign-off — a completion refused for presence gets one tap and one re
   });
 
   test('a recovery ceremony that fails is named, and the completion is not re-sent', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     const server = presenceServer(step);
     server.srv.stampAs('platform-admin');
     (step as { sign_offs: Stamp[] }).sign_offs = server.srv.stamps.slice();
@@ -869,7 +890,7 @@ describe('sign-off — a completion refused for presence gets one tap and one re
   });
 
   test('the held ticket is spent on the completion it rode: a later attempt does not carry it', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     const server = presenceServer(step);
     let first = true;
     // The first completion is refused for a reason that is not presence.
@@ -904,7 +925,7 @@ describe('sign-off — a completion refused for presence gets one tap and one re
   // there without asking the host to refresh, and kept "Decision saved:
   // rejected" on screen as if that were what the step now holds.
   test('a recovery ceremony refused 412 asks the host to refresh and leaves no stale "Decision saved"', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     step.sign_offs_required = [];
     const server = presenceServer(step);
     const { mount } = loadBundle((url, init) =>
@@ -934,7 +955,7 @@ describe('sign-off — a completion refused for presence gets one tap and one re
   });
 
   test('a stamp ceremony refused 412 after the decision landed does the same', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     delete (step.metadata as Record<string, unknown>).decision;
     const server = presenceServer(step);
     const { mount } = loadBundle((url, init) =>
@@ -965,7 +986,7 @@ describe('sign-off — a completion refused for presence gets one tap and one re
   // The held ticket was cleared only after the completion RESOLVED, so a
   // completion whose fetch threw kept it, and the next attempt re-sent it.
   test('a completion whose request threw still spends the held ticket', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     const server = presenceServer(step);
     let throwNext = false;
     const { mount } = loadBundle((url, init) => {
@@ -998,7 +1019,7 @@ describe('sign-off — a completion refused for presence gets one tap and one re
   // "Refused again after a fresh passkey tap" named ANY refusal of the
   // retry, so a 409 for stale stamps read as a presence failure.
   test('a retry refused 409 after the tap is labelled by its own reason', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     const server = presenceServer(step);
     server.srv.stampAs('platform-admin');
     (step as { sign_offs: Stamp[] }).sign_offs = server.srv.stamps.slice();
@@ -1066,7 +1087,7 @@ describe('sign-off — the presence ceremony names what failed', () => {
         presenceGated(url, init) ?? (url === BEGIN ? { __status: 502, __text: refusal } : undefined),
     );
     const c = new FakeNode();
-    mount(c, { step: bypassStep(), jobId: 'job-1', onUpdate() {} });
+    mount(c, { step: presenceStep(), jobId: 'job-1', onUpdate() {} });
     buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
     await settled();
     expect(allText(c)).toContain(`presence ceremony unavailable (502): ${refusal}`);
@@ -1083,7 +1104,7 @@ describe('sign-off — the presence ceremony names what failed', () => {
       credentials: { get: async () => credential },
     };
     const c = new FakeNode();
-    mount(c, { step: bypassStep(), jobId: 'job-1', onUpdate() {} });
+    mount(c, { step: presenceStep(), jobId: 'job-1', onUpdate() {} });
     buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
     await settled();
     expect(calls.map((x) => x.url)).toContain(FINISH);
@@ -1145,7 +1166,7 @@ describe('sign-off — the begin names the step as this surface rendered it', ()
     (calls.find((x) => x.url === BEGIN)?.body as { shown?: unknown } | undefined)?.shown;
 
   test('the begin names the step as rendered, with this gesture’s decision folded in', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     delete (step.metadata as Record<string, unknown>).decision;
     delete (step.metadata as Record<string, unknown>).decided_at;
     const title = step.title;
@@ -1165,7 +1186,7 @@ describe('sign-off — the begin names the step as this surface rendered it', ()
   });
 
   test('a plan swapped on the server after the render is not what the begin names', async () => {
-    const step = bypassStep();
+    const step = presenceStep();
     const rendered = JSON.parse(JSON.stringify(step.metadata)) as Record<string, unknown>;
     const { routes, current } = presenceServer(step);
     const { mount, calls } = loadBundle(routes);
@@ -1214,13 +1235,11 @@ describe('sign-off — a presence step shows the signed document as it is', () =
     const c = new FakeNode();
     mount(c, { step: planStep(), jobId: 'job-1', onUpdate() {} });
     expect(byClass(c, 'step-signoff-input').length).toBe(0);
-    const signed = byClass(c, 'step-signoff-signed');
-    expect(signed.length).toBe(1);
-    expect(
-      walk(signed[0]!)
-        .map((n) => n.textContent)
-        .join(''),
-    ).toBe(PLAN);
+    // Since design f623e425 D3 the plan is drawn in the block of every
+    // signed key, byte for byte — and once: the declared field is not
+    // drawn a second time beside it.
+    expect(signedBlock(c).get('plan')).toBe(PLAN);
+    expect(walk(c).filter((n) => n.textContent === PLAN).length).toBe(1);
     expect(buttonNamed(c, 'Approve')?.disabled).toBe(false);
   });
 
@@ -1238,5 +1257,185 @@ describe('sign-off — a presence step shows the signed document as it is', () =
     >;
     expect(patch.decision).toBe('rejected');
     expect('plan' in patch).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------
+// EVERY KEY THE PASSKEY SIGNS IS ON SCREEN (design f623e425 D3; backlog
+// 6c9183de extends b and c, 2026-09-25). The passkey binds
+// step_shape_hash(title, metadata) — every metadata key — and this
+// surface drew only the declared fields: an ops-request approve step's
+// verb, host, args and rendered_plan_sha256, a planted decision, or any
+// key someone added, were signed by the per-role button on one tap and
+// never seen. The block below is drawn from the step's own keys, and the
+// ceremony refuses, before any request, a step whose block is not drawn.
+//
+// The plugin cannot import presence.ts (a bundle is self-contained), so
+// its copy of the rendering and of the refusal is pinned HERE to the
+// app's: the same text per value (signedText) and the same keys refused
+// (notShown) — CLAUDE.md §9a, a fact that lives twice gets an equality
+// test.
+
+describe('sign-off — the passkey signs only what this surface drew', () => {
+  const BEGIN = '/api/auth/passkey/assert/begin';
+  const FINISH = '/api/auth/passkey/assert/finish';
+  const beginOptions = {
+    challenge_id: 'chal-1',
+    publicKey: {
+      challenge: 'AAAA',
+      rpId: 'boss.test',
+      allowCredentials: [{ type: 'public-key', id: 'AAAA' }],
+      userVerification: 'required',
+      timeout: 60000,
+    },
+  };
+  const buf = () => new Uint8Array([1, 2, 3]).buffer;
+  const withPasskey = () => {
+    (globalThis as unknown as Record<string, unknown>).navigator = {
+      credentials: {
+        get: async () => ({
+          id: 'cred',
+          rawId: buf(),
+          type: 'public-key',
+          response: {
+            authenticatorData: buf(),
+            clientDataJSON: buf(),
+            signature: buf(),
+            userHandle: null,
+          },
+        }),
+      },
+    };
+  };
+  const PLAN = 'PLAN wipe target-a on forge\n  /dev/sdb  by-id/ata-X  1.8T\nargv: wipe target-a\n';
+  // The ops-request approve step as the runner leaves it, plus a planted
+  // key the runner never writes.
+  const opsStep = (declared = true) => {
+    const step = publishStep();
+    step.title = 'Approve the plan: wipe on forge';
+    step.sign_offs_required = ['platform-admin'];
+    step.fields = [{ name: 'plan', field_type: 'string', required: true }];
+    Object.assign(step.metadata, {
+      plan: PLAN,
+      verb: 'wipe',
+      host: 'forge',
+      args: ['target-a'],
+      rendered_plan_sha256: 'ab'.repeat(32),
+      planted: { by: 'someone else' },
+    });
+    return declared ? Object.assign(step, { assurance_required: 'presence' }) : step;
+  };
+  type Shown = { title: string; metadata: Record<string, unknown> };
+  /** Presence-gated stamp door; records each begin's `shown` beside the
+   *  block that was on screen at that instant. */
+  const presenceServer = (step: ReturnType<typeof publishStep>, screen: () => FakeNode) => {
+    const srv = signingServer(step);
+    const begins: { shown: Shown; onScreen: Map<string, string> }[] = [];
+    const routes = (url: string, init?: RequestInit) => {
+      const ticket = (init?.headers as Record<string, string> | undefined)?.['x-presence-ticket'];
+      if (url === SIGN && init?.method === 'POST' && !ticket) {
+        return { __status: 422, required: 'presence' };
+      }
+      if (url === BEGIN) {
+        begins.push({
+          shown: (JSON.parse(String(init?.body)) as { shown: Shown }).shown,
+          onScreen: signedBlock(screen()),
+        });
+        return beginOptions;
+      }
+      if (url === FINISH) return { ticket: 'ticket-1' };
+      return srv.routes(url, init);
+    };
+    return { srv, routes, begins };
+  };
+  const drawn = (shown: Shown) =>
+    new Map(
+      Object.keys(shown.metadata)
+        .sort()
+        .map((k) => [k, signedText(shown.metadata[k])]),
+    );
+
+  test('a presence step draws every key its passkey would sign, as the app renders each value', () => {
+    const step = opsStep();
+    const { mount } = loadBundle(() => undefined);
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    const block = signedBlock(c);
+    expect([...block.keys()]).toEqual(Object.keys(step.metadata).sort());
+    for (const k of ['plan', 'verb', 'host', 'args', 'rendered_plan_sha256', 'planted']) {
+      expect(block.get(k)).toBe(signedText((step.metadata as Record<string, unknown>)[k]));
+    }
+    expect(allText(c)).toContain(step.title);
+  });
+
+  test('Approve: the block on screen when the passkey is asked is exactly what it signs', async () => {
+    const step = opsStep();
+    const c = new FakeNode();
+    const server = presenceServer(step, () => c);
+    const { mount } = loadBundle(server.routes);
+    withPasskey();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    expect(server.begins.length).toBe(1);
+    const { shown, onScreen } = server.begins[0]!;
+    expect(onScreen).toEqual(drawn(shown));
+    // The gesture's own decision and time were drawn before the tap.
+    expect(onScreen.get('decision')).toBe('approved');
+    expect(onScreen.has('decided_at')).toBe(true);
+    expect(server.srv.stamps.length).toBe(1);
+  });
+
+  test('the per-role button alone: a planted decision is on screen when the passkey signs it', async () => {
+    const step = opsStep();
+    (step.metadata as Record<string, unknown>).decision = 'approved';
+    const c = new FakeNode();
+    const server = presenceServer(step, () => c);
+    const { mount } = loadBundle(server.routes);
+    withPasskey();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
+    await settled();
+
+    expect(server.begins.length).toBe(1);
+    const { shown, onScreen } = server.begins[0]!;
+    expect(onScreen).toEqual(drawn(shown));
+    expect(onScreen.get('decision')).toBe('approved');
+  });
+
+  test('a step that never declared presence: the first tap signs nothing and draws the block; the next signs what it drew', async () => {
+    const step = opsStep(false);
+    const c = new FakeNode();
+    const server = presenceServer(step, () => c);
+    const { mount, calls } = loadBundle(server.routes);
+    withPasskey();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    expect(signedBlock(c).size).toBe(0);
+
+    buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
+    await settled();
+    expect(calls.some((x) => x.url === BEGIN)).toBe(false);
+    expect(server.srv.stamps.length).toBe(0);
+    // It names what the passkey would have signed unseen — the same keys
+    // the app's own check names for a surface that drew nothing.
+    const unseen = notShown({ title: step.title, metadata: step.metadata }, null);
+    expect(allText(c)).toContain(`nothing was signed: your passkey would sign ${unseen.join(', ')}`);
+    expect([...signedBlock(c).keys()]).toEqual(Object.keys(step.metadata).sort());
+
+    buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
+    await settled();
+    expect(server.begins.length).toBe(1);
+    const { shown, onScreen } = server.begins[0]!;
+    expect(onScreen).toEqual(drawn(shown));
+    expect(server.srv.stamps.length).toBe(1);
+  });
+
+  test('a completed step draws no signing block — nothing is asked of a passkey there', () => {
+    const step = Object.assign(opsStep(), { status: 'completed' });
+    const { mount } = loadBundle(() => undefined);
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    expect(signedBlock(c).size).toBe(0);
   });
 });

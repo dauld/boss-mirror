@@ -1,0 +1,51 @@
+# The URL root segments a department code may not take.
+#
+# A department's pages live at /<code> (design 8c3e9599 §5, approved by
+# David 2026-09-25), so a code equal to a path the platform already owns
+# at the root would either shadow that path or be shadowed by it. The
+# departments write door (POST /api/departments/batch, backlog 7edf0e97)
+# refuses such a code by name.
+#
+# ONE COPY (CLAUDE.md §9a). The door reads this file through
+# include_str! (crates/core/boss-jobs/src/department/declare.rs), and
+# car 1 of the same plan (backlog 163fdf7b) pins it against the nav
+# catalog and the gateway router from THIS file — so there is no second
+# list to fall out of step with it. One segment per line; `#` starts a
+# comment.
+#
+# THE SPA'S STATIC ROOT ENTRIES ARE NOT LISTED, BECAUSE THE CODE SHAPE
+# ALREADY REFUSES THEM. Every entry the web build writes at the dist
+# root carries a file extension (index.html, chunk-*.js, *.css, *.svg;
+# measured on the dev pod's apps/web/dist, 2026-09-25), and a code may
+# hold only [a-z0-9-], so no code can equal one.
+
+# Home — the personal and cross-cutting pages at the root (design §6),
+# the `home` app itself (Home is not a department; the department
+# migration says so and has no row for it), the sign-in page, and `ux`,
+# the prefix every page is moving off and whose legacy paths must keep
+# resolving (design §8).
+home
+me
+inbox
+views
+schedule
+jobs
+search
+manual
+system-model
+login
+ux
+
+# The gateway's own root prefixes (crates/core/boss-gateway/src/main.rs,
+# static_files.rs `is_public_path`), each answered before the SPA
+# fallback ever sees the path.
+api
+auth
+plugins
+simulator
+dashboard
+break-glass
+probe
+ics
+health
+site

@@ -39,8 +39,10 @@
 //! off that kind set. `GET /api/departments` lists what the DEPARTMENTS
 //! registry holds (`registry` — it was the employee Class drawer
 //! until backlog 80a77466), which is what the weekly retro rule
-//! iterates.
+//! iterates. Its one write, `POST /api/departments/batch`, lands a
+//! tenant's declared roster (`declare`; backlog 7edf0e97).
 
+pub mod declare;
 pub mod http;
 pub mod readiness;
 pub mod registry;

@@ -10,9 +10,11 @@
   // order-composer here — that's what the SPA's Sales surface is
   // for. Intake is the "yes, this is what we're brewing" gate.
 
+  import { untrack } from 'svelte';
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
   import type { Employee } from '../people/types';
   import { putStep } from './stepWrite';
+  import { HOLDER_LOCKED_NOTE, assigneeToSend, holderLocked } from './holder';
   import { formatMoney } from '@boss/web-kit/ui/money';
 
   type LineItem = {
@@ -66,6 +68,15 @@
     void step.id;
     writeError = null;
   });
+  /// The picker follows the step it shows, and an active step's holder
+  /// is not offered for change — GenericSurface says why (backlogs
+  /// 848477c3, 650ebd0c, 0f42efa0).
+  let holderKey = $derived(`${step.id}\u0000${step.assignee_id ?? ''}`);
+  $effect(() => {
+    void holderKey;
+    assigneeId = untrack(() => step.assignee_id ?? '');
+  });
+  let locked = $derived(holderLocked(step));
   let terminal = $derived(_isTerminal(step.status));
 
   let employees = $state<Employee[]>([]);
@@ -97,7 +108,7 @@
         job_id: jobId,
         notes: notes || undefined,
         status: status ?? step.status,
-        assignee_id: assigneeId || null,
+        assignee_id: assigneeToSend(step, assigneeId),
         metadata: {
           ...step.metadata,
           delivery_window: deliveryWindow,
@@ -173,13 +184,16 @@
     <select
       id={`assignee-${step.id}`}
       bind:value={assigneeId}
-      disabled={terminal || saving}
+      disabled={terminal || saving || locked}
     >
       <option value="">— unassigned —</option>
       {#each employees as e (e.id)}
         <option value={e.id}>{e.name} · {e.role}</option>
       {/each}
     </select>
+    {#if locked}
+      <span class="step-meta-row small step-holder-locked">{HOLDER_LOCKED_NOTE}</span>
+    {/if}
   </div>
 
   <div class="step-field">

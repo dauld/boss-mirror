@@ -21,7 +21,8 @@
 //!
 //! THE PLAN IS THE CONTRACT, IN DEPENDENCY ORDER. [`plan`] walks the
 //! directory the way the engines' prepare does: classes (employee and
-//! account writes validate against them) → the chart of accounts (the
+//! account writes validate against them) → departments (a row's
+//! function is a Class; backlog 7edf0e97) → the chart of accounts (the
 //! ledger's rows, after the classes; backlog 41af5195) → the tax
 //! regime (its kinds name accounts of the chart; backlog 7f163e58) →
 //! locations (an
@@ -109,14 +110,16 @@ use tracing::{info, warn};
 use crate::tenant::{self, Status};
 
 /// The registries `--take` may name, in the plan's order — each one a
-/// door with an overwrite of its own: the calendar and agents batches'
-/// `?mode=take`, the company mint's, the employee overlay PUT, the
+/// door with an overwrite of its own: the departments, calendar and
+/// agents batches' `?mode=take`, the company mint's, the employee
+/// overlay PUT, the
 /// Class edit door (`PUT /api/classes/{kind}/{code}`), policy's
 /// `force`, the workflows' supersede. A registry not here has no
 /// overwrite (sensors, credentials, locations, the chart, the tax
 /// regime, the ledger's rules, the reactors) and its line says so.
 pub const TAKEABLE: &[&str] = &[
     "classes",
+    "departments",
     "calendars",
     "company",
     "policy",
@@ -398,6 +401,12 @@ pub enum Door {
     Classes {
         rows: Vec<Value>,
     },
+    /// The tenant's departments (backlog 7edf0e97, 2026-09-25): its
+    /// declared roster. After the classes — a row's `function` is a
+    /// Class under (department, function).
+    Departments {
+        rows: Vec<boss_jobs::department::declare::DepartmentInput>,
+    },
     /// The tenant's chart of accounts (backlog 41af5195, 2026-09-17),
     /// as the ledger door's own rows. After the classes; a code the
     /// starter chart holds is kept and the line names the difference.
@@ -486,6 +495,7 @@ impl Door {
     pub fn label(&self) -> &'static str {
         match self {
             Door::Classes { .. } => "POST /api/classes/batch",
+            Door::Departments { .. } => "POST /api/departments/batch",
             Door::Chart { .. } => "POST /api/ledger/accounts/batch",
             Door::Tax { .. } => "POST /api/ledger/tax/batch",
             Door::Locations { .. } => "POST /api/locations/batch",
@@ -513,6 +523,14 @@ impl Door {
             Door::Classes { rows } => format!(
                 "{} classes (insert-if-absent; a held row that differs is named; --take classes edits it)",
                 rows.len()
+            ),
+            Door::Departments { rows } => format!(
+                "{} departments (insert-if-absent by code: {}; a held row that differs is named; --take departments applies the declaration, retired = true included)",
+                rows.len(),
+                rows.iter()
+                    .map(|d| d.code.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             Door::Chart { rows } => format!(
                 "{} accounts (insert-if-absent by code: {}; a code the starter chart holds is kept and a differing field is named)",
@@ -877,6 +895,16 @@ pub fn plan(dir: &Path) -> Result<Plan> {
             })
         },
     )?;
+    // 1a. Departments (backlog 7edf0e97) — the tenant's roster, after
+    //    the classes because a row's `function` is one. Insert-if-
+    //    absent by code; a retirement is `retired = true` under
+    //    `--take departments`.
+    door(present(dir, &["seeds/departments.toml"]), &|p| {
+        Ok(Door::Departments {
+            rows: boss_jobs::department::declare::load_departments_toml(p)
+                .map_err(anyhow::Error::msg)?,
+        })
+    })?;
     // 1b. The chart of accounts (backlog 41af5195) — the ledger's
     //    rows, after the classes (the design's order; nothing here
     //    FKs into them yet) and before anything that could post.
@@ -1416,13 +1444,24 @@ fn send(client: &Client, bases: &Bases, door: &Door, take: &Take) -> Result<Stri
                 &bases.policy,
                 path,
                 take.has("policy"),
-                "tenant-seed",
                 Some(SEED_USER),
             )?;
             Ok(out.summary())
         }
         Door::People { roster } => {
             seed_people(client, &bases.people, roster, take.has("employees"))
+        }
+        Door::Departments { rows } => {
+            let u = moded(
+                &bases.jobs,
+                "/api/departments/batch",
+                take.mode("departments"),
+            );
+            let resp = refuse(client.post(&u).json(rows).send()?, &format!("POST {u}"))?;
+            let out: BatchAnswer = resp
+                .json()
+                .with_context(|| format!("POST {u}: the outcome did not parse"))?;
+            Ok(out.line(Some("departments")))
         }
         Door::Agents { rows } => {
             let u = moded(&bases.jobs, "/api/agents/batch", take.mode("agents"));
@@ -1791,6 +1830,17 @@ terminal = { outcome = "sponsored" }
   {"subject_kind": "employee", "code": "founder", "display_name": "Founder", "member_attribute": "role", "sort_order": 1}
 ]"#,
         );
+        // The roster the real tenant declares (backlog 7edf0e97): a
+        // department the migration never seeded, and one of its rows
+        // withdrawn on this instance.
+        put(
+            &dir,
+            "seeds/departments.toml",
+            "[[department]]\ncode = \"product\"\ndisplay_name = \"Product\"\n\
+             function = \"operations\"\nsort_order = 5\n\n\
+             [[department]]\ncode = \"warehouse\"\ndisplay_name = \"Warehouse\"\n\
+             function = \"operations\"\nsort_order = 100\nretired = true\n",
+        );
         put(
             &dir,
             "seeds/employees.json",
@@ -1938,6 +1988,9 @@ terminal = { outcome = "sponsored" }
         /// Published classes, "kind/code" -> the row (insert-if-absent;
         /// `PUT /api/classes/{kind}/{code}` edits one).
         pub(crate) classes: BTreeMap<String, Value>,
+        /// Declared departments, code -> the row (insert-if-absent;
+        /// `?mode=take` overwrites, a retirement included).
+        pub(crate) departments: BTreeMap<String, Value>,
         /// Declared credentials, id -> the row (insert-if-absent, like
         /// the door).
         pub(crate) credentials: BTreeMap<String, Value>,
@@ -1986,6 +2039,7 @@ terminal = { outcome = "sponsored" }
                 + self.rules.len()
                 + self.calendars.len()
                 + self.classes.len()
+                + self.departments.len()
                 + usize::from(self.company.is_some())
         }
 
@@ -2187,6 +2241,14 @@ terminal = { outcome = "sponsored" }
                 let mut out = batch_into(&mut st.classes, &rows, key, false);
                 out.as_object_mut().unwrap().remove("updated");
                 (200, out.to_string())
+            }
+            ("POST", "/api/departments/batch") => {
+                let rows = serde_json::from_str::<Vec<Value>>(body).unwrap_or_default();
+                let key = |r: &Value| r["code"].as_str().unwrap_or("").to_string();
+                (
+                    200,
+                    batch_into(&mut st.departments, &rows, key, take).to_string(),
+                )
             }
             ("GET", p) if p.starts_with("/api/classes/") => {
                 let key = format!("{}/{}", seg(3), seg(4));
@@ -2825,6 +2887,7 @@ mod tests {
             writes,
             [
                 "seeds/classes.json",
+                "seeds/departments.toml",
                 "seeds/chart_of_accounts.toml",
                 "seeds/tax.toml",
                 "seeds/locations.toml",
@@ -2840,7 +2903,7 @@ mod tests {
                 "seeds/fact_projection_rules.toml",
                 "seeds/rules.toml",
             ],
-            "classes → chart of accounts → tax → locations → calendars → company → policy → people → agents → workflows → credentials → sensors → posting rules → projections → rules LAST"
+            "classes → departments → chart of accounts → tax → locations → calendars → company → policy → people → agents → workflows → credentials → sensors → posting rules → projections → rules LAST"
         );
         // The tax door (backlog 7f163e58): the seed as the ledger
         // door's own type, after the chart its kinds would name.
@@ -3196,6 +3259,30 @@ mod tests {
                 .count()
         };
         assert_eq!(hit("POST", "/api/classes/batch"), 1);
+        assert_eq!(
+            hit("POST", "/api/departments/batch"),
+            1,
+            "one batch for the departments file (backlog 7edf0e97)"
+        );
+        assert_eq!(
+            st.departments.keys().collect::<Vec<_>>(),
+            ["product", "warehouse"]
+        );
+        assert_eq!(
+            st.departments["warehouse"]["retired"],
+            json!(true),
+            "a declared retirement rides the batch"
+        );
+        let pos = |path: &str| {
+            st.log
+                .iter()
+                .position(|(m, pp, _, _)| m == "POST" && pp == path)
+                .unwrap()
+        };
+        assert!(
+            pos("/api/classes/batch") < pos("/api/departments/batch"),
+            "a department's function is a Class, so the classes go first"
+        );
         assert_eq!(
             hit("POST", "/api/locations/batch"),
             1,
@@ -3559,6 +3646,14 @@ mod tests {
             agents_line.contains("received 1, inserted 0, 1 already as declared"),
             "{agents_line}"
         );
+        let departments_line = lines
+            .iter()
+            .find(|l| l.contains("seeds/departments.toml"))
+            .unwrap();
+        assert!(
+            departments_line.contains("received 2, inserted 0, 2 already as declared"),
+            "{departments_line}"
+        );
         // An unchanged rule version is a no-op, and the line says so:
         // validated and read, no draft, no publish.
         assert_eq!(posts("/api/dispatcher/rules"), 0, "no second draft");
@@ -3573,6 +3668,65 @@ mod tests {
         assert!(
             rules_line.contains("complete-site-live-on-converge-closed v2: present (active)"),
             "{rules_line}"
+        );
+    }
+
+    /// A RETIREMENT IS A TAKE (backlog 7edf0e97). The instance holds
+    /// `warehouse` live, the way migration 20260919181324 seeds every
+    /// instance; a plain publish keeps it and names `retired` as the
+    /// field the repo says differently, and only `--take departments`
+    /// withdraws it — the change named from → to on the line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_department_is_retired_only_by_a_take() {
+        let dir = real_shape("departments-take");
+        let st = stub_for(&dir);
+        st.lock().unwrap().departments.insert(
+            "warehouse".into(),
+            json!({"code": "warehouse", "display_name": "Warehouse",
+                   "function": "operations", "sort_order": 100, "retired": false}),
+        );
+        let base = spawn_stub(st.clone()).await;
+
+        let lines = run_publish(plan(&dir).unwrap(), base.clone())
+            .await
+            .unwrap();
+        let line = lines
+            .iter()
+            .find(|l| l.contains("seeds/departments.toml"))
+            .unwrap();
+        assert!(
+            line.contains("inserted 1")
+                && line.contains("kept: warehouse differs on retired")
+                && line.contains("--take departments overwrites"),
+            "{line}"
+        );
+        assert_eq!(
+            st.lock().unwrap().departments["warehouse"]["retired"],
+            json!(false)
+        );
+
+        let lines = run_publish_taking(
+            plan(&dir).unwrap(),
+            base,
+            Take::parse(Some("departments")).unwrap(),
+        )
+        .await
+        .unwrap();
+        let line = lines
+            .iter()
+            .find(|l| l.contains("seeds/departments.toml"))
+            .unwrap();
+        assert!(
+            line.contains("updated 1: warehouse (retired false → true)"),
+            "{line}"
+        );
+        let st = st.lock().unwrap();
+        assert_eq!(st.departments["warehouse"]["retired"], json!(true));
+        assert!(
+            st.log
+                .iter()
+                .any(|(m, p, _, _)| m == "POST" && p == "/api/departments/batch?mode=take"),
+            "the take rides the query string"
         );
     }
 
@@ -3952,7 +4106,7 @@ mod tests {
                 "the launcher keys on the word, and it leads: {err}"
             );
             assert!(
-                err.contains(bad) && err.contains("classes, calendars"),
+                err.contains(bad) && err.contains("classes, departments, calendars"),
                 "{err}"
             );
         }

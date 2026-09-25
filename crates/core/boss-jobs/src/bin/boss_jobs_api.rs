@@ -473,6 +473,7 @@ async fn run_server<R: JobsRepository + 'static>(
         class_checked = agent_classes.is_some(),
         "agents mounted at /api/agents (+ /batch)"
     );
+    let department_classes = agent_classes.clone();
     app = app.merge(boss_jobs::agents::http::router(
         boss_jobs::agents::http::AgentsApiState {
             registry: agents.clone(),
@@ -503,6 +504,11 @@ async fn run_server<R: JobsRepository + 'static>(
             jobs: department_jobs,
             sensors: department_sensors,
             rules: Some(department_rules),
+            // A declared department's `function` is a Class under
+            // (department, function), checked at the batch door
+            // against the same registry the agents door reads
+            // (backlog 7edf0e97).
+            classes: department_classes,
         },
     ));
     // Sim-origin middleware: extract x-sim-origin header and set the

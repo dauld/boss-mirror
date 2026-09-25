@@ -2717,6 +2717,24 @@ button.manual-tree-node {
 .step-approval-changes-requested { background: var(--warn-wash); color: var(--warn); border: 1px solid var(--warn); }
 .step-approval-comment { margin-top: 6px; font-size: 13px; color: var(--text-dim); }
 
+/* What a passkey signs — every key of the signed shape, shown before the
+   tap (design f623e425 D3). Shared by ApprovalSurface and sign-off.js.
+   A long value scrolls inside its box; it is never clipped away. */
+.step-signed-keys {
+  margin: 8px 0; padding: 10px 12px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+}
+.step-signed-keys-head { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
+.step-signed-keys-note { margin: 4px 0 8px; font-size: 12px; color: var(--text-dim); }
+.step-signed-keys dl { margin: 0; }
+.step-signed-key { font-family: var(--mono, monospace); font-size: 12px; font-weight: 600; margin-top: 6px; }
+.step-signed-keys dd { margin: 2px 0 0; }
+.step-signed-value {
+  margin: 0; padding: 6px 8px; max-height: 18em; overflow: auto;
+  font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: var(--bg); border-radius: var(--radius);
+}
+
 /* Checklist */
 .step-checklist-items { display: flex; flex-direction: column; gap: 4px; }
 .step-checklist-item {

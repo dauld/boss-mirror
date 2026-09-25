@@ -2,6 +2,7 @@
   // Approval / sign-off surface — port of
   // apps/web-legacy/src/steps/ApprovalSurface.tsx.
 
+  import { tick } from 'svelte';
   import { session } from '@boss/web-kit/session/session.svelte';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
   import {
@@ -9,6 +10,8 @@
     needsPresence,
     performPresenceCeremony,
     shownAfter,
+    signedRows,
+    type ShownStep,
   } from './presence';
   import { describeWriteFailure, saveStep } from './stepWrite';
 
@@ -47,11 +50,41 @@
   // refusal it had just rendered (measured by the mocked spec for
   // backlog 3ce3c15f, 2026-09-25).
   let stepId = $derived(step.id);
+
+  // WHAT THE PASSKEY SIGNS IS ON SCREEN (design f623e425 D3; backlog
+  // 6c9183de extends b and c, 2026-09-25). A presence stamp binds
+  // step_shape_hash(title, metadata) — every metadata key — and this
+  // surface used to render `decision` and `comment` alone: an
+  // ops-request's plan, verb, host, args and rendered_plan_sha256, or a
+  // key someone planted, were signed on one tap and never seen. Now the
+  // step's title (the header) and EVERY metadata key are rendered, with
+  // the gesture's own write folded in while it is in flight (`pending`),
+  // from the one object `onScreen` — and the ceremony is handed that same
+  // object as its answer to "what is on screen", refusing any key it
+  // would sign that is not there (presence.ts notShown). The rows are
+  // derived from the keys, never from an allow-list, so they cannot fall
+  // behind the hash.
+  let pending = $state<Readonly<Record<string, unknown>> | null>(null);
+  let onScreen = $derived<ShownStep>({
+    title: step.title,
+    metadata: shownAfter(step.metadata, pending ?? {}),
+  });
+  let signedVisible = $derived(
+    pending !== null || (step.status !== 'completed' && step.status !== 'skipped'),
+  );
+  let signed = $derived(signedRows(onScreen));
+  // Read at the instant a ceremony begins — never a copy taken earlier.
+  const shownNow = (): ShownStep | null => (signedVisible ? onScreen : null);
+
   $effect(() => {
     // The surface instance is reused when the rail switches steps —
-    // an error from step A must not render under step B.
+    // an error from step A must not render under step B, nor A's
+    // in-flight decision be drawn into B's signed content. A gesture
+    // still running for A then finds A's content off screen, and its
+    // ceremony refuses rather than sign what is no longer shown.
     void stepId;
     signError = '';
+    pending = null;
   });
 
   async function decide(d: string): Promise<void> {
@@ -86,6 +119,11 @@
           comment: comment || undefined,
         },
       };
+      // The decision, its time and the comment join the signed content
+      // on screen BEFORE anything is written or signed (D3): the passkey
+      // below signs them, so they are drawn first.
+      pending = body.metadata;
+      await tick();
       // Sign-off contract: a stamp attests the step's current shape, so the
       // decision lands first, then the stamp, then the completion.
       // Each leg is checked: a refused decision aborts the chain —
@@ -117,10 +155,12 @@
           try {
             // The step as this surface showed it, with the decision it
             // just saved folded in — what the passkey may sign (fd7090cc).
-            const ticket = await performPresenceCeremony(job, target.id, {
-              title: target.title,
-              metadata: shownAfter(target.metadata, body.metadata),
-            });
+            const ticket = await performPresenceCeremony(
+              job,
+              target.id,
+              { title: target.title, metadata: shownAfter(target.metadata, body.metadata) },
+              shownNow,
+            );
             stamp = await fetch(`/api/jobs/${job}/steps/${target.id}/sign-offs`, {
               method: 'POST',
               headers: {
@@ -156,6 +196,7 @@
           job,
           target.id,
           { title: target.title, metadata: shownAfter(target.metadata, body.metadata) },
+          shownNow,
           presenceTicket,
         );
         // 409 (stamps missing or stale) renders as the same
@@ -166,6 +207,7 @@
       onUpdate();
     } finally {
       saving = false;
+      pending = null;
     }
   }
 </script>
@@ -178,6 +220,21 @@
 
   {#if signError}
     <p class="step-write-error" role="alert">{signError}</p>
+  {/if}
+  {#if signedVisible}
+    <section class="step-signed-keys" aria-label="What your passkey signs">
+      <div class="step-signed-keys-head">What your passkey signs</div>
+      <p class="step-signed-keys-note">
+        The title above and every key below, exactly as shown. Your decision,
+        its time and your comment join them when you press a button.
+      </p>
+      <dl>
+        {#each signed as row (row.key)}
+          <dt class="step-signed-key">{row.key}</dt>
+          <dd><pre class="step-signed-value">{row.text}</pre></dd>
+        {/each}
+      </dl>
+    </section>
   {/if}
   {#if decision !== 'pending' && decision !== ''}
     <div class="step-approval-result step-approval-{decision}">

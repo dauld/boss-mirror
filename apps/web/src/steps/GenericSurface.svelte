@@ -4,7 +4,7 @@
   // every service Job's steps pick up implicitly. Port of
   // apps/web-legacy/src/steps/GenericSurface.tsx.
 
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
   import {
     isPending,
     isTerminal as _isTerminal,
@@ -15,6 +15,7 @@
   import type { Employee } from '../people/types';
   import { saveStep } from './stepWrite';
   import { PROCEDURE_KEY } from './procedure';
+  import { HOLDER_LOCKED_NOTE, assigneeToSend, holderLocked } from './holder';
   import {
     askRoutes,
     completeLabel,
@@ -154,6 +155,19 @@
     void step.id;
     writeError = null;
   });
+  /// The picker follows the step it shows (backlog 848477c3): the same
+  /// reuse carried step A's pick onto step B, and every Save, Start and
+  /// Complete sends it. Re-read when the step or its stored holder
+  /// changes — the key is a string, so a re-fetch of the same values
+  /// does not wipe a pick in progress.
+  let holderKey = $derived(`${step.id}\u0000${step.assignee_id ?? ''}`);
+  $effect(() => {
+    void holderKey;
+    assigneeId = untrack(() => step.assignee_id ?? '');
+  });
+  /// An active step's holder is fixed until it is released (backlogs
+  /// 650ebd0c, 0f42efa0), so the picker is not offered there.
+  let locked = $derived(holderLocked(step));
   let terminal = $derived(_isTerminal(step.status));
 
   let employees = $state<Employee[]>([]);
@@ -211,7 +225,7 @@
         assignee_id:
           overrides.assignee_id !== undefined
             ? overrides.assignee_id
-            : assigneeId || null,
+            : assigneeToSend(step, assigneeId),
         metadata: {
           ...(dueOnDirty ? { due_on: dueOn || null } : {}),
           // Only send fields the operator actually filled — an
@@ -363,7 +377,7 @@
     <select
       id={`assignee-${step.id}`}
       bind:value={assigneeId}
-      disabled={terminal || saving}
+      disabled={terminal || saving || locked}
     >
       <option value="">— unassigned —</option>
       {#each activeEmployees as e (e.id)}
@@ -374,6 +388,9 @@
       <span class="step-meta-row small">
         ({empNames.get(step.assignee_id) ?? step.assignee_id})
       </span>
+    {/if}
+    {#if locked}
+      <span class="step-meta-row small step-holder-locked">{HOLDER_LOCKED_NOTE}</span>
     {/if}
   </div>
 

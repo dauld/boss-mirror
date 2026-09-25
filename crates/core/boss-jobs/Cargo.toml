@@ -205,6 +205,10 @@ name = "a_stale_step_write_erases_nothing_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "an_active_step_keeps_its_holder_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "a_stale_step_write_is_judged_on_the_whole_row_pg"
 required-features = ["postgres"]
 
@@ -290,6 +294,10 @@ required-features = ["postgres"]
 
 [[test]]
 name = "department_readiness_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "departments_are_published_pg"
 required-features = ["postgres"]
 
 [[test]]

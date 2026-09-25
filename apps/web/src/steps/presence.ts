@@ -78,16 +78,105 @@ export function shownAfter(
 }
 
 /**
+ * One key the passkey signs, as a surface puts it on screen.
+ */
+export type SignedRow = Readonly<{ key: string; text: string }>;
+
+/**
+ * A signed value as text: a string byte for byte (a plan keeps its
+ * newlines), anything else as its indented JSON — so a value the surface
+ * has no renderer for is still shown, never skipped.
+ */
+export function signedText(v: unknown): string {
+  if (typeof v === 'string') return v;
+  return JSON.stringify(v, null, 2) ?? String(v);
+}
+
+/**
+ * EVERY KEY THE PASSKEY SIGNS, AS ROWS TO RENDER (design f623e425 D3;
+ * backlog 6c9183de extends b and c, 2026-09-25). The gateway binds the
+ * challenge to `step_shape_hash(title, metadata)` of the step as shown
+ * (crates/core/boss-core/src/job.rs), and that hash covers EVERY
+ * metadata key — so the rows are every key of `shown.metadata`, sorted
+ * the way the hash sorts them, with no allow-list and no filter.
+ * ApprovalSurface rendered only `decision` and `comment` while its
+ * passkey signed `plan`, `verb`, `host`, `args` and
+ * `rendered_plan_sha256` too; a planted plan was approved on one tap,
+ * unseen. A surface renders these rows from the SAME object it hands the
+ * ceremony, so the two key lists cannot drift; {@link notShown} is the
+ * check that refuses if they ever do.
+ */
+export function signedRows(shown: ShownStep): SignedRow[] {
+  return Object.keys(shown.metadata)
+    .sort()
+    .map((key) => ({ key, text: signedText(shown.metadata[key]) }));
+}
+
+/** A value's JSON with object keys sorted, so equality is order-free. */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v) ?? 'null';
+}
+
+/**
+ * What a passkey would sign in `shown` that is NOT on screen as it would
+ * be signed: `title` when the title on screen is another, and each
+ * metadata key the screen lacks or shows with another value, sorted. A
+ * key on screen and not signed is not a finding — only an unseen signed
+ * one is. `onScreen` null means the surface shows no signed content, so
+ * everything is unseen. Empty means the passkey may sign.
+ */
+export function notShown(shown: ShownStep, onScreen: ShownStep | null): string[] {
+  const keys = Object.keys(shown.metadata).sort();
+  if (onScreen === null) return ['title', ...keys];
+  const title = shown.title === onScreen.title ? [] : ['title'];
+  const moved = keys.filter(
+    (k) =>
+      !Object.prototype.hasOwnProperty.call(onScreen.metadata, k) ||
+      canonical(onScreen.metadata[k]) !== canonical(shown.metadata[k]),
+  );
+  return [...title, ...moved];
+}
+
+/** The ceremony refused because the passkey would sign unseen content. */
+export class NotShownRefusal extends Error {
+  readonly keys: readonly string[];
+  constructor(keys: readonly string[]) {
+    super(
+      `Nothing was signed: your passkey would sign ${keys.join(', ')}, which this page does not show as it stands. Read the step as shown and press again.`,
+    );
+    this.name = 'NotShownRefusal';
+    this.keys = [...keys];
+  }
+}
+
+/**
  * Run the full ceremony for one step. Resolves to the ticket value for
  * the `x-presence-ticket` header. Rejects with a human-readable Error
  * when the actor has no enrolled passkey, declines the prompt, the step
  * changed since it was shown, or the gateway refuses the assertion.
+ *
+ * `onScreen` answers what the surface shows NOW (null: no signed content
+ * at all). It is required, so no caller can run a ceremony without
+ * saying what is on screen, and it is read at the instant before the
+ * begin: a key of `shown` it does not show as signed is refused with a
+ * {@link NotShownRefusal} and no request is made (design f623e425 D3).
  */
 export async function performPresenceCeremony(
   jobId: string,
   stepId: string,
   shown: ShownStep,
+  onScreen: () => ShownStep | null,
 ): Promise<string> {
+  const unseen = notShown(shown, onScreen());
+  if (unseen.length > 0) throw new NotShownRefusal(unseen);
   const begin = await fetch('/api/auth/passkey/assert/begin', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -195,6 +284,7 @@ export async function completeWithPresence(
   jobId: string,
   stepId: string,
   shown: ShownStep,
+  onScreen: () => ShownStep | null,
   heldTicket?: string,
 ): Promise<StepWriteResult> {
   const body = { status: 'completed' };
@@ -202,7 +292,7 @@ export async function completeWithPresence(
   if (first.kind === 'ok' || !first.presenceRequired) return first;
   let ticket: string;
   try {
-    ticket = await performPresenceCeremony(jobId, stepId, shown);
+    ticket = await performPresenceCeremony(jobId, stepId, shown, onScreen);
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
     return { kind: 'failed', error: `Completing needs your passkey, and the ceremony failed: ${why}` };

@@ -30,6 +30,11 @@
 //!   the explicit way to take an active step off its holder: free it,
 //!   and the next holder claims it through the CAS, two writes, each on
 //!   the record.
+//!
+//! AND THE WAY ROUND IT (backlog 0f42efa0, the review of this car): a
+//! bare clear — `{"assignee_id":null}` or `""` with the step left Active
+//! — answered 204 and left nobody holding it, so the next PUT installed
+//! anyone. A clear passes only beside a status that leaves Active.
 
 use std::sync::Arc;
 
@@ -218,6 +223,13 @@ async fn a_nomination_after_a_claim_does_not_replace_the_claimant() {
             .is_some_and(|f| f.iter().any(|x| x == "assignee_id")),
         "names the refused field, in the terminal freeze's shape: {body}"
     );
+    // The wire body IS the builder's output, which the dispatcher's test
+    // feeds its reader — one shape, read by both ends (CLAUDE.md §9a).
+    assert_eq!(
+        v,
+        boss_jobs::active_holder::refusal_body(STEP, CLAIMANT),
+        "the refusal on the wire is the one the dispatcher's test reads"
+    );
 
     let after = stored(&jobs).await;
     assert_eq!(
@@ -281,6 +293,119 @@ async fn a_release_still_frees_an_active_step() {
     // ...and the next holder takes it through the claim door.
     claim(&app, "emp-next").await;
     assert_eq!(stored(&jobs).await.assignee_id.as_deref(), Some("emp-next"));
+}
+
+/// THE WAY AROUND THE RULE ABOVE, in one write (backlog 0f42efa0, the
+/// review of car fb3e9424): a bare clear left the step Active with no
+/// holder, answered 204. An active step nobody holds is a step nobody
+/// can be asked about, and the dispatcher's defensive net routes it.
+/// `""` and a blank are the same clear — the guard reads them as no
+/// holder, so they must be refused as one.
+#[tokio::test]
+async fn a_bare_clear_does_not_leave_an_active_step_without_its_holder() {
+    for cleared in ["null", r#""""#, r#""   ""#] {
+        let (app, jobs) = seed(StepStatus::Ready, None).await;
+        claim(&app, CLAIMANT).await;
+
+        let (status, body) =
+            put_step(&app, "emp-op", &format!(r#"{{"assignee_id":{cleared}}}"#)).await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "assignee_id {cleared} on an ACTIVE, held step that stays Active must be \
+             refused — it answered 204 and left nobody holding it (0f42efa0).\nbody: {body}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&body).expect("the refusal is JSON");
+        assert_eq!(
+            v,
+            boss_jobs::active_holder::refusal_body(STEP, CLAIMANT),
+            "the same refusal as a replacement, so the same readers read it: {body}"
+        );
+
+        let after = stored(&jobs).await;
+        assert_eq!(after.assignee_id.as_deref(), Some(CLAIMANT), "{cleared}");
+        assert_eq!(after.status, StepStatus::Active, "{cleared}");
+    }
+}
+
+/// The probed sequence whole: clear, then install. With the first write
+/// refused the second meets a held step and is refused too, so nobody
+/// ends up holding an active step they never claimed.
+#[tokio::test]
+async fn the_two_write_install_does_not_hand_over_an_active_step() {
+    let (app, jobs) = seed(StepStatus::Ready, None).await;
+    claim(&app, CLAIMANT).await;
+
+    let (first, body) = put_step(&app, "emp-op", r#"{"assignee_id":null}"#).await;
+    assert_eq!(first, StatusCode::CONFLICT, "the clear: {body}");
+    let (second, body) = put_step(&app, "emp-op", r#"{"assignee_id":"emp-other"}"#).await;
+    assert_eq!(second, StatusCode::CONFLICT, "the install: {body}");
+
+    let after = stored(&jobs).await;
+    assert_eq!(after.assignee_id.as_deref(), Some(CLAIMANT));
+    assert_eq!(after.status, StepStatus::Active);
+}
+
+/// The status in the SAME body decides. Naming `active` is not moving
+/// out of it, so a clear beside it is still refused; `""` beside
+/// `ready` is a release exactly as `null` is; and a release names
+/// nobody — handing the step to someone in the releasing write is the
+/// one-write reassignment the claim door exists to refuse.
+#[tokio::test]
+async fn the_status_in_the_same_body_decides_whether_a_clear_is_a_release() {
+    let (app, jobs) = seed(StepStatus::Ready, None).await;
+    claim(&app, CLAIMANT).await;
+
+    let (status, body) =
+        put_step(&app, "emp-op", r#"{"status":"active","assignee_id":null}"#).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "active is not a release: {body}"
+    );
+    assert_eq!(stored(&jobs).await.assignee_id.as_deref(), Some(CLAIMANT));
+
+    let (status, body) = put_step(
+        &app,
+        "emp-op",
+        r#"{"status":"ready","assignee_id":"emp-other"}"#,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a release that names a holder: {body}"
+    );
+    assert_eq!(stored(&jobs).await.assignee_id.as_deref(), Some(CLAIMANT));
+
+    let (status, body) = put_step(&app, "emp-op", r#"{"status":"ready","assignee_id":""}"#).await;
+    assert_eq!(
+        status,
+        StatusCode::NO_CONTENT,
+        "\"\" releases like null: {body}"
+    );
+    let after = stored(&jobs).await;
+    assert_eq!(after.status, StepStatus::Ready);
+    assert!(
+        after
+            .assignee_id
+            .as_deref()
+            .is_none_or(|a| a.trim().is_empty()),
+        "released: {:?}",
+        after.assignee_id
+    );
+}
+
+/// An active step that already has no holder (a row from before the
+/// rule, or an unassigned `PUT {status: active}`) has nothing to keep:
+/// a clear there changes nothing and is not refused.
+#[tokio::test]
+async fn an_unheld_active_step_is_not_judged() {
+    let (app, jobs) = seed(StepStatus::Active, None).await;
+
+    let (status, body) = put_step(&app, "emp-op", r#"{"assignee_id":null}"#).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(stored(&jobs).await.status, StepStatus::Active);
 }
 
 /// The holder completing its own step is untouched.

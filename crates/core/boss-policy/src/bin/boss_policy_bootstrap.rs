@@ -57,12 +57,9 @@ struct Cli {
     /// new grants applied to the live registry.
     #[arg(long)]
     force: bool,
-
-    /// `changed_by` value attributed to rows this run upserts.
-    /// Convention: `"<tenant>-policy-bootstrap"`. Surfaces in the
-    /// `policy_rules.updated_by` column for audit.
-    #[arg(long, default_value = "policy-bootstrap")]
-    changed_by: String,
+    // No `--changed-by`: the service records the id in the
+    // `x-boss-user` it authorized, not a name the caller supplies
+    // (backlog 42c25542).
 }
 
 fn main() -> Result<()> {
@@ -83,7 +80,6 @@ fn main() -> Result<()> {
         &api_base,
         &cli.seeds,
         cli.force,
-        &cli.changed_by,
         cli.x_boss_user.as_deref(),
     )?;
     // What landed, what was kept and differs, what force overwrote —

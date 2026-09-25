@@ -22,26 +22,41 @@
 //! LIST asks no tier: it is the org chart the chrome bar renders for
 //! every signed-in user (backlog dc5788ba), the posture `/api/classes`
 //! it took those tabs over from already had.
+//!
+//! `POST /api/departments/batch[?mode=insert-if-absent|take]` is the
+//! registry's one write (backlog 7edf0e97): a bare JSON array of
+//! `declare::DepartmentInput`, the agents batch's shape and posture.
+//! It admits `crate::trust::is_trusted` — the tier `boss tenant
+//! publish` signs with. Every row runs `declare::validate_batch` (a
+//! slug, never a reserved root segment, no twin) and every `function`
+//! must be an active Class under `(department, function)`; either
+//! refusal is a 422 naming the row, and the whole batch lands or none
+//! of it does. The answer is the platform's publish grammar —
+//! inserted, updated (from → to), kept (the fields named), unchanged.
 
 use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
+use boss_classes_client::ClassesClient;
 use boss_core::job::JobStatus;
+use boss_core::primitives::ClassRef;
+use boss_core::publish::ModeQuery;
 use boss_policy_client::CurrentUser;
 use serde_json::{Value, json};
 
+use super::declare::{DepartmentInput, validate_batch};
 use super::readiness::{self, KindReadiness, NewestRetro, NewestTerminal, Part, Readiness};
 use super::registry::{Department, DepartmentRegistry};
 use super::rules::DispatcherRules;
 use crate::port::{JobFilter, JobsRepository};
 use crate::registry::WorkflowRegistry;
 use crate::sensors::Sensors;
-use crate::trust::can_read;
+use crate::trust::{can_read, is_trusted};
 
 /// The workflow kind the retro part reads — the platform bundle's
 /// `department-retro`, one packet per department per ISO week, whose
@@ -62,14 +77,84 @@ pub struct DepartmentsApiState {
     pub sensors: Option<Arc<dyn Sensors>>,
     /// `None` → the rules part is undetermined, with the reason.
     pub rules: Option<Arc<dyn DispatcherRules>>,
+    /// The Class registry a declared `function` is checked against
+    /// (`(department, function)`). `None` skips the check — the agents
+    /// door's posture for in-memory and test paths; the service binary
+    /// wires it whenever it knows the classes URL.
+    pub classes: Option<Arc<dyn ClassesClient>>,
 }
 
 pub fn router(state: DepartmentsApiState) -> Router {
     let shared = Arc::new(state);
     Router::new()
         .route("/api/departments", get(list))
+        .route("/api/departments/batch", post(publish))
         .route("/api/departments/{code}/readiness", get(readiness))
         .with_state(shared)
+}
+
+/// The first declared `function` that is not an active Class under
+/// `(department, function)`, as the refusal's words. `Err` is the
+/// registry not answering — a different fact from "not held".
+async fn undeclared_function(
+    classes: &dyn ClassesClient,
+    rows: &[DepartmentInput],
+) -> Result<Option<String>, String> {
+    for d in rows {
+        let held = classes
+            .class_exists_on(
+                &ClassRef::new("department", d.function.as_str()),
+                "function",
+            )
+            .await
+            .map_err(|e| format!("classes registry: {e}"))?;
+        if !held {
+            return Ok(Some(format!(
+                "department {}: function `{}` is not an active Class in the registry \
+                 (subject_kind department, member_attribute function) — declare it in \
+                 seeds/classes.json first",
+                d.code, d.function
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// The tenant batch — see the module doc.
+async fn publish(
+    State(state): State<Arc<DepartmentsApiState>>,
+    CurrentUser(user): CurrentUser,
+    Query(ModeQuery { mode }): Query<ModeQuery>,
+    Json(rows): Json<Vec<DepartmentInput>>,
+) -> Response {
+    if !is_trusted(&user) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(registry) = state.departments.as_ref() else {
+        return unavailable("departments registry");
+    };
+    if let Err(why) = validate_batch(&rows) {
+        return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response();
+    }
+    if let Some(classes) = &state.classes {
+        match undeclared_function(classes.as_ref(), &rows).await {
+            Ok(None) => {}
+            Ok(Some(why)) => return (StatusCode::UNPROCESSABLE_ENTITY, why).into_response(),
+            Err(why) => return (StatusCode::BAD_GATEWAY, why).into_response(),
+        }
+    }
+    // The agents door's stamp: the actor the request signed with rides
+    // as `_actor` and again as `declared_by` / `updated_by`; the source
+    // is `jobs`, the service recording. A trusted sibling with no
+    // identity is the platform.
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let stamp = boss_core::publisher::EventStamp::new("jobs", actor);
+    match registry.publish(&rows, mode, &stamp).await {
+        Ok(out) => Json(out).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 fn unavailable(what: &str) -> Response {
@@ -275,4 +360,284 @@ async fn newest_retro(
     };
     let (rows, _) = jobs.list_jobs(&filter, 1, 0).await?;
     Ok(rows.first().map(NewestRetro::of))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use boss_classes_client::FakeClassesClient;
+    use boss_core::primitives::Class;
+    use boss_policy_client::{AccessTier, User};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use crate::department::registry::{
+        DEPARTMENT_DECLARED, DEPARTMENT_UPDATED, InMemoryDepartments,
+    };
+
+    fn header(id: &str, role: &str, tier: AccessTier) -> String {
+        serde_json::to_string(&User {
+            id: id.into(),
+            role: role.into(),
+            access_tier: tier,
+            territory_account_ids: Vec::new(),
+            direct_report_ids: Vec::new(),
+            department: None,
+        })
+        .expect("the user header serializes")
+    }
+
+    fn seed() -> Option<String> {
+        Some(header(
+            "automation:tenant-seed",
+            "platform-admin",
+            AccessTier::Operator,
+        ))
+    }
+
+    /// The four function Classes the department migration seeds, on
+    /// their own axis — the shape the live registry serves.
+    fn functions() -> Arc<dyn ClassesClient> {
+        let on = |code: &str| Class {
+            subject_kind: "department".into(),
+            code: code.into(),
+            display_name: code.into(),
+            parent_code: None,
+            member_attribute: Some("function".into()),
+            metadata: Value::Null,
+            sort_order: 0,
+            retired_at: None,
+        };
+        Arc::new(FakeClassesClient::with_classes(vec![
+            on("operations"),
+            on("revenue"),
+            on("support"),
+            on("governance"),
+        ]))
+    }
+
+    fn row(code: &str, function: &str, sort_order: i32) -> DepartmentInput {
+        DepartmentInput {
+            code: code.into(),
+            display_name: code.to_uppercase(),
+            function: function.into(),
+            sort_order,
+            retired: false,
+        }
+    }
+
+    /// The registry as migration 20260919181324 leaves an instance:
+    /// three of the thirteen, one of them a demo-tenant row.
+    fn seeded() -> Arc<InMemoryDepartments> {
+        Arc::new(
+            InMemoryDepartments::new()
+                .with(&row("it", "operations", 1))
+                .with(&row("sales", "revenue", 40))
+                .with(&row("warehouse", "operations", 100)),
+        )
+    }
+
+    fn app(registry: &Arc<InMemoryDepartments>) -> Router {
+        router(DepartmentsApiState {
+            departments: Some(registry.clone() as Arc<dyn DepartmentRegistry>),
+            kinds: None,
+            jobs: Arc::new(crate::in_memory::InMemoryJobs::new()) as Arc<dyn JobsRepository>,
+            sensors: None,
+            rules: None,
+            classes: Some(functions()),
+        })
+    }
+
+    async fn send(
+        app: Router,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        user: Option<String>,
+    ) -> (StatusCode, String) {
+        let mut req = Request::builder().method(method).uri(path);
+        if body.is_some() {
+            req = req.header("content-type", "application/json");
+        }
+        if let Some(u) = user {
+            req = req.header("x-boss-user", u);
+        }
+        let body = body.map(|b| Body::from(b.to_string())).unwrap_or_default();
+        let resp = app
+            .oneshot(req.body(body).expect("request builds"))
+            .await
+            .expect("the router answers");
+        let status = resp.status();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn codes(registry: &Arc<InMemoryDepartments>) -> Vec<String> {
+        let (status, body) = send(app(registry), "GET", "/api/departments", None, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let v: Value = serde_json::from_str(&body).expect("json");
+        v["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .map(|d| d["code"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// THE DEFECT (backlog 7edf0e97): the seeded roster could not be
+    /// changed. A tenant's declaration now lands its new rows, keeps a
+    /// held row that differs under the default (named, the instance is
+    /// the truth), and a take retires a row — which then leaves the
+    /// list the retro rule and the chrome bar read — each change on the
+    /// log as a fact.
+    #[tokio::test]
+    async fn a_tenant_declares_its_roster_and_a_take_retires_a_row() {
+        let registry = seeded();
+        let mut retired = row("warehouse", "operations", 100);
+        retired.retired = true;
+        let declared = json!([
+            row("it", "operations", 1),
+            row("product", "operations", 5),
+            row("design", "operations", 6),
+            retired,
+        ]);
+
+        let (status, body) = send(
+            app(&registry),
+            "POST",
+            "/api/departments/batch",
+            Some(declared.clone()),
+            seed(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let out: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(out["received"], 4);
+        assert_eq!(out["inserted"], 2, "product and design are new: {out}");
+        assert_eq!(out["unchanged"], 1, "it is as declared: {out}");
+        assert_eq!(
+            out["kept"],
+            json!([{ "id": "warehouse", "differs": ["retired"] }]),
+            "a plain publish never retires a live row: {out}"
+        );
+        assert_eq!(
+            codes(&registry).await,
+            ["it", "product", "design", "sales", "warehouse"]
+        );
+
+        let (status, body) = send(
+            app(&registry),
+            "POST",
+            "/api/departments/batch?mode=take",
+            Some(declared.clone()),
+            seed(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let out: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(out["inserted"], 0);
+        assert_eq!(
+            out["updated"],
+            json!([{ "id": "warehouse",
+                     "changes": [{ "field": "retired", "from": false, "to": true }] }]),
+            "{out}"
+        );
+        assert_eq!(
+            codes(&registry).await,
+            ["it", "product", "design", "sales"],
+            "a retired department leaves the list; one the tenant did not declare stays"
+        );
+
+        // A second take is a no-op: nothing updated, nothing recorded.
+        let before = registry.recorded_events().len();
+        let (_, body) = send(
+            app(&registry),
+            "POST",
+            "/api/departments/batch?mode=take",
+            Some(declared),
+            seed(),
+        )
+        .await;
+        let out: Value = serde_json::from_str(&body).expect("json");
+        assert_eq!(
+            (out["inserted"].clone(), out["unchanged"].clone()),
+            (json!(0), json!(4))
+        );
+        assert_eq!(registry.recorded_events().len(), before);
+
+        let events = registry.recorded_events();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            [DEPARTMENT_DECLARED, DEPARTMENT_DECLARED, DEPARTMENT_UPDATED],
+            "one fact per inserted row and one per row a take changed"
+        );
+        assert_eq!(events[0].payload["code"], "product");
+        assert_eq!(events[0].payload["declared_by"], "automation:tenant-seed");
+        assert_eq!(events[2].payload["code"], "warehouse");
+        assert_eq!(events[2].payload["retired"], true);
+        assert_eq!(events[2].payload["updated_by"], "automation:tenant-seed");
+    }
+
+    /// Every refusal is the whole batch, a 422 naming the row: a
+    /// reserved root segment, a code that is no slug, a twin, and a
+    /// function the Class registry does not hold on its axis. Nothing
+    /// lands from a refused batch, and only a trusted writer may send
+    /// one.
+    #[tokio::test]
+    async fn a_bad_row_refuses_the_whole_batch_by_name() {
+        for (bad, says) in [
+            (row("api", "operations", 1), "reserved root segment"),
+            (row("jobs", "operations", 1), "reserved root segment"),
+            (row("Product", "operations", 1), "lowercase slug"),
+            (row("product", "engineering", 1), "function `engineering`"),
+        ] {
+            let registry = seeded();
+            let (status, body) = send(
+                app(&registry),
+                "POST",
+                "/api/departments/batch",
+                Some(json!([row("design", "operations", 6), bad])),
+                seed(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert!(body.contains(says), "{says}: {body}");
+            assert_eq!(codes(&registry).await, ["it", "sales", "warehouse"]);
+            assert!(registry.recorded_events().is_empty());
+        }
+        let registry = seeded();
+        let (status, body) = send(
+            app(&registry),
+            "POST",
+            "/api/departments/batch",
+            Some(json!([
+                row("design", "operations", 6),
+                row("design", "support", 7)
+            ])),
+            seed(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        assert!(body.contains("declared twice"), "{body}");
+
+        let reader = Some(header("emp-someone", "employee", AccessTier::User));
+        let (status, _) = send(
+            app(&registry),
+            "POST",
+            "/api/departments/batch",
+            Some(json!([row("design", "operations", 6)])),
+            reader,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(codes(&registry).await, ["it", "sales", "warehouse"]);
+    }
 }
