@@ -245,6 +245,14 @@ async fn upsert_job(
 
 /// The row's stamps as the replay has built them so far, or `None`
 /// when the replay has not written the row yet.
+///
+/// FAILS CLOSED on stamps it cannot read (backlog 4174c4a9, the review
+/// of car e1a62aa5). It answered an empty list, and both readers then
+/// carried no void: the upsert let a dead stamp in its payload revive,
+/// and an invalidation voided nothing — a rebuild that differs from the
+/// live row, silently. The replay wrote this row itself from a payload
+/// that parsed, so an unreadable one is a defect to stop on, and the
+/// rebuild's transaction rolls back rather than keep a guess.
 async fn stored_stamps(
     conn: &mut sqlx::PgConnection,
     id: &str,
@@ -255,7 +263,14 @@ async fn stored_stamps(
             .fetch_optional(&mut *conn)
             .await
             .map_err(|e| RebuildError::Storage(e.to_string()))?;
-    Ok(row.map(|(sign_offs,)| serde_json::from_value(sign_offs).unwrap_or_default()))
+    row.map(|(sign_offs,)| {
+        serde_json::from_value(sign_offs).map_err(|e| {
+            RebuildError::Storage(format!(
+                "step {id}: the replayed sign_offs do not parse as stamps: {e}"
+            ))
+        })
+    })
+    .transpose()
 }
 
 /// A VOID IS PERMANENT (design 87329a13), in the replay as at the live
@@ -304,10 +319,25 @@ async fn apply_invalidation(
         return Ok(0);
     };
     let before = stamps.clone();
-    match ev.payload.get("voided") {
+    // A list that does not parse is read as no list (backlog 4174c4a9):
+    // it used to void NOTHING, leaving alive a stamp the live edit had
+    // killed. Every live-side void kills every stamp alive on the row at
+    // that write (`Step::void_stamps_if_moved`), so the legacy reading
+    // reproduces it, and a stamp is never left alive by a bad payload.
+    let listed = ev.payload.get("voided").and_then(|listed| {
+        serde_json::from_value::<Vec<SignOffStamp>>(listed.clone())
+            .map_err(|e| {
+                warn!(
+                    event_id = ev.audit_id,
+                    step_id,
+                    error = %e,
+                    "stamps_invalidated lists stamps that do not parse; voiding every stamp alive on the row"
+                );
+            })
+            .ok()
+    });
+    match listed {
         Some(listed) => {
-            let listed: Vec<SignOffStamp> =
-                serde_json::from_value(listed.clone()).unwrap_or_default();
             boss_core::job::apply_voids(&mut stamps, &listed);
         }
         None => {
@@ -323,9 +353,11 @@ async fn apply_invalidation(
         .filter(|(now, was)| now.voided_at.is_some() && was.voided_at.is_none())
         .count() as u64;
     if voided > 0 {
+        let written =
+            serde_json::to_value(&stamps).map_err(|e| RebuildError::Storage(e.to_string()))?;
         sqlx::query("UPDATE steps SET sign_offs = $2 WHERE id = $1::uuid")
             .bind(step_id)
-            .bind(serde_json::to_value(&stamps).unwrap_or_default())
+            .bind(written)
             .execute(&mut *conn)
             .await
             .map_err(|e| RebuildError::Storage(e.to_string()))?;

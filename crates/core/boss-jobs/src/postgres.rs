@@ -1891,7 +1891,7 @@ impl JobsRepository for PgJobs {
         &self,
         step_id: &StepId,
         actor: &str,
-        now: chrono::DateTime<chrono::Utc>,
+        stamp: &boss_core::publisher::EventStamp,
         events: &[boss_core::event::Event],
     ) -> Result<Step, JobsError> {
         let mut tx = self
@@ -1899,6 +1899,11 @@ impl JobsRepository for PgJobs {
             .begin()
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
+        // The shape the stamps were attesting, under the lock the CAS
+        // below then writes through: dropping the run edge moves it, and
+        // the stamps it moved off die in this transaction (backlog
+        // 4174c4a9). A missing row reads None and is named below.
+        let shape_before = shape_under_lock(&mut tx, step_id).await?;
         // The compare half of the CAS lives in the WHERE clause, so
         // two racing claims serialize on the row lock and exactly one
         // sees a matching predicate. Idempotent re-claim by the
@@ -1927,7 +1932,7 @@ impl JobsRepository for PgJobs {
         // re-claim is idempotent. Same rule as
         // `agent_runs::claim_changes_holder`, which the route uses for
         // the event it records.
-        let row = sqlx::query(
+        let row = sqlx::query_as::<_, StepRow>(
             r#"
             WITH me AS (
                 SELECT $2::text AS id
@@ -1948,18 +1953,21 @@ impl JobsRepository for PgJobs {
                     (status = 'ready' AND (assignee_id IS NULL OR assignee_id IN (SELECT id FROM me)))
                  OR (status = 'active' AND assignee_id IN (SELECT id FROM me))
               )
-            RETURNING id
+            RETURNING id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
+                      blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
+                      completed_on, metadata, notes, step_plugin_version, embedded_job,
+                      completed_by, completed_at
             "#,
         )
         .bind(*step_id.inner().as_uuid())
         .bind(actor)
-        .bind(now)
+        .bind(stamp.timestamp)
         .bind(crate::agent_runs::EDGE_KEY)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
 
-        if row.is_none() {
+        let Some(row) = row else {
             // Lost the race (or the step was never claimable). Read
             // the row in the same tx so the conflict names the truth
             // the claimant collided with.
@@ -1973,9 +1981,23 @@ impl JobsRepository for PgJobs {
                 None => Err(JobsError::StepNotFound(*step_id)),
                 Some((holder, status)) => Err(JobsError::ClaimConflict { holder, status }),
             };
+        };
+        // A STAMP DIES WHEN THE SHAPE IT SIGNED LEAVES THE STEP (design
+        // 87329a13), and the run edge is inside the shape: a claim that
+        // dropped it voids every live stamp here, and the invalidation
+        // records after the caller's events, as the merge door's does
+        // after its STEP_UPDATED (backlog 4174c4a9). A re-claim by the
+        // holder moves nothing and voids nothing.
+        let mut claimed = row_to_step(row)?;
+        let invalidated = match &shape_before {
+            Some(before) => crate::events::void_stamps_if_moved(stamp, before, &mut claimed),
+            None => None,
+        };
+        if invalidated.is_some() {
+            write_sign_offs(&mut tx, &claimed).await?;
         }
 
-        for event in events {
+        for event in events.iter().chain(invalidated.as_ref()) {
             boss_events::outbox::record_event_in_tx(&mut tx, event)
                 .await
                 .map_err(JobsError::Storage)?;
@@ -2000,6 +2022,23 @@ impl JobsRepository for PgJobs {
             .begin()
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
+        // THE STAMP LANDS ONLY ON THE SHAPE IT SIGNS (backlog 4174c4a9).
+        // The sign-off door built it from a read taken before its policy
+        // and presence checks; a write in that gap moved the row, and an
+        // append that did not look would leave the stamp alive on a
+        // shape it never signed — past the edit that should have voided
+        // it — for a later write back to the signed shape to make count.
+        // Judged under the row lock the append writes through.
+        let Some(current) = shape_under_lock(&mut tx, step_id).await? else {
+            return Err(JobsError::StepNotFound(*step_id));
+        };
+        if current != stamp.shape_hash {
+            return Err(JobsError::StampOffShape {
+                id: *step_id,
+                signed: stamp.shape_hash.clone(),
+                current,
+            });
+        }
         let result = sqlx::query(
             "UPDATE steps SET sign_offs = sign_offs || $2::jsonb, updated_at = $3 \
              WHERE id = $1",

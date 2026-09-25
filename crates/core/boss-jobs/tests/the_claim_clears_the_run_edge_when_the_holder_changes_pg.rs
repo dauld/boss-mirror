@@ -18,7 +18,7 @@ use boss_core::job::{Job, JobId, JobStatus, Priority, Step, StepId, StepStatus, 
 use boss_jobs::JobsRepository;
 use boss_jobs::agent_runs::EDGE_KEY;
 use boss_testing::TestDb;
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use uuid::Uuid;
 
 /// The one live alias pair, seeded by the migration that opened the
@@ -64,7 +64,15 @@ async fn a_claim_by_a_new_holder_clears_the_previous_runs_edge() {
     let step_id = seeded_step(&repo, StepStatus::Ready, None).await;
 
     let won = repo
-        .claim_step_at(&step_id, "emp-person", Utc::now(), &[])
+        .claim_step_at(
+            &step_id,
+            "emp-person",
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
         .await
         .expect("an unassigned ready step is claimable");
     assert_eq!(won.assignee_id.as_deref(), Some("emp-person"));
@@ -83,7 +91,15 @@ async fn a_reclaim_by_the_holder_keeps_its_run_edge() {
     for status in [StepStatus::Active, StepStatus::Ready] {
         let step_id = seeded_step(&repo, status, Some(AGENT)).await;
         let again = repo
-            .claim_step_at(&step_id, AGENT, Utc::now(), &[])
+            .claim_step_at(
+                &step_id,
+                AGENT,
+                &boss_core::publisher::EventStamp::new(
+                    "jobs",
+                    boss_core::actor::ActorId::automation("test"),
+                ),
+                &[],
+            )
             .await
             .expect("re-claim by the holder");
         assert_eq!(
@@ -103,7 +119,15 @@ async fn a_claim_that_only_respells_the_holder_keeps_its_run_edge() {
     let step_id = seeded_step(&repo, StepStatus::Ready, Some(ALIAS)).await;
 
     let won = repo
-        .claim_step_at(&step_id, AGENT, Utc::now(), &[])
+        .claim_step_at(
+            &step_id,
+            AGENT,
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
         .await
         .expect("the holder, spelled by its registered id, claims its own step");
     assert_eq!(won.assignee_id.as_deref(), Some(AGENT));
