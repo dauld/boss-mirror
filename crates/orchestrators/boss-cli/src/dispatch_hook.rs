@@ -677,7 +677,13 @@ mod wire_tests {
                             None => ("404 Not Found", "no such job".into()),
                         }
                     }
-                    ("PUT", _) | ("PATCH", _) => ("204 No Content", String::new()),
+                    // The merge door stores what it is sent: dispatch
+                    // reads `briefed`'s field back (backlog e381689d).
+                    ("PATCH", p) => {
+                        crate::dispatch::stub_merge(&run, RUN, p, &body);
+                        ("204 No Content", String::new())
+                    }
+                    ("PUT", _) => ("204 No Content", String::new()),
                     _ => ("404 Not Found", format!("unstubbed {method} {target}")),
                 };
                 let out = format!(
