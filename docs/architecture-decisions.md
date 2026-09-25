@@ -955,9 +955,61 @@ M cannot board" and stays busy rather than claiming a train is due.
 Built (7), 2026-09-24: `boss_jobs::car::boards_after_outcome` is the
 one judgement, the regions read fetches each parked car's declared
 predecessor by id, and the dock says "N parked, M cannot board (waiting
-behind X)" — busy, or troubled when the edge can never clear. Not yet
-built: the regions read carries no `stuck` block (6), and the HUD and
-`boss orient` do not read one.
+behind X)" — busy, or troubled when the edge can never clear. Built
+(6) too: `GET /api/yard/regions` carries the `stuck` block
+(`boss_jobs::regions::stuck`, `ThirdStuck`), and the HUD frame below and
+`boss orient` read it through the `thirds` rows.
+
+**The HUD frame answers about the whole system, one fixed row per third;
+the map answers about the parts** (design `00774ca8`, David 2026-09-24,
+recorded as decisions with no open questions; answers backlog
+`c1253e50`, the frame design `17567423` left open). Measured that
+morning: the only whole-system figure on `/it` was
+`borders.ts::summaryLine`, a client sum of border rows that
+double-counted about 260 backlog items, and marshalling's own trend
+(68/day) disagreed with its border (237/day) — two per-place numbers
+under similar names. Decided: (1) **the thirds are a partition held by
+the server** — queue management = receiving, marshalling; actors
+building = shop floor, gates, garage; delivery = dock, track, arrivals,
+shed, publish — so `THIRDS` holds every region once and the web
+hardcodes no row; (2) **each row carries two figures no territory can
+answer**: a **balance** (net per day, then its in and out rates in ONE
+unit per third, each packet counted once, closes inside the third
+counted as out) and **stuck · waiting** exactly as `ThirdStuck` gives
+them, never summed; (3) **machines are one whole-system cell** beside
+the rows — failed and unjudged against a total, each listed machine
+linking to its map — not split by third, since the plant strip serves
+every region; (4) **arrivals per day is the one stated exception** to
+"no territory number in the HUD", read from the same `arrivals.trend`
+field the arrivals territory reads, so one field rendered twice cannot
+drift; (5) **unknown keeps its three pictures** — `≥ n ?` for a floor,
+`?` in a dashed housing for an unread input, a plain `0` only for a true
+zero — and a failed read turns every cell `?` under "read failed HH:MMZ
+· last good HH:MMZ", never leaving the last values on screen as current;
+(6) **the frame is fixed**, does not follow the zoom, carries the read's
+age and window, and reserves the height of one contextual strip for the
+current selection (a clicked border or machine at `/it`, the region's
+in and out rails at `/it/yard/<region>`); (7) **a band above the map**
+on desktop, Enamel plates on tokens, *troubled* only for a stuck count
+above zero or a failed machine, no colour on balance until a band is
+declared, **no lamp for a row as a whole** (a worst-of hides which
+figure moved); on a phone each row becomes a group header of the strip
+map; (8) it supersedes the CONTENT of `62de32ae` decision 10's one-line
+summary, not its place; (9) **one server read**: a `thirds` block and a
+`machines` summary on `/api/yard/regions`, printed by `boss orient`, and
+no client adds anything up; (10) it retires `summaryLine` and adds no
+route. Built in one car (train #632, 2026-09-24): `boss_jobs::thirds`
+(`BALANCE`, `MachineSummary`, pinned by
+`every_region_stands_in_exactly_one_third` and
+`a_thirds_two_edges_count_one_unit`), `boss orient`'s THIRDS and
+MACHINES lines, and `HudFrame.svelte` over `hud.ts`, mounted on every
+map page, whose `hud.test.ts` pins the payload's row order,
+`arrivals.trend`, the four pictures and the retired border sum. Not
+built: the contextual strip is reserved but empty, because `MapPage`
+passes it nothing — a region's rails still render under its map — and
+on a phone the frame stacks its rows above the strip map, which groups
+under the server's thirds but does not yet use the HUD rows as its
+headers.
 
 ## Step types are property bundles; the alphabet is the mechanisms
 
@@ -2659,6 +2711,50 @@ registry read / manifest apply, not the image roll, so those trains
 arrive in minutes. Built in three cars: the sidings by the stamped
 channel first (`953aaf30`), the train's channel second, per-channel
 landing evidence third.
+
+**Migrated is a reading on the health answer, not an assumption**
+(design `a5323701`, David 2026-09-24, its one question accepted as
+proposed; backlog `7c298c34`, landed in train #643). `commit` on a
+service's health says which build is RUNNING, never whether that
+build's migrations have RUN, so a reader comparing it to a sha got YES
+the moment the binary rolled — the false green in the header of
+`boss-cli/src/running.rs`. In the cluster the `boss-init` initContainer
+runs `migrate.sh` before a pod serves, so on our instance the two
+usually agree; that is an argument, not a record, and it does not hold
+for a database repointed or restored after the pod started, an
+instance migrated `--without` a module, or any instance whose schema we
+do not converge (the OSS quickstart, a hosted customer's). Decided and
+built: (1) **`/api/jobs/health` carries `capabilities.schema = {head,
+pending, first_pending}`** — `head` the full file name of the highest
+applied migration (the legacy 2- and 3-digit prefixes are not unique,
+and `schema_migrations.id` already holds the name); `pending` the
+migrations in the running build's OWN tree the ledger lacks, so any
+reader gets "migrated to my own build" without a checkout; and
+`first_pending` naming the first of them. A bare count of applied rows
+was rejected because it compares to nothing, and a `--without`
+instance reading `pending > 0` is true, not a false alarm. The build's
+list is generated by `boss-jobs/build.rs` from the one ordering,
+boss-testing's `schema_order.rs`, which it `include!`s rather than
+restates (§9a). (2) **Read on every request, never cached at startup**
+— a startup read is a belief about the past, and a repointed database
+is exactly what it would miss — bounded at two seconds
+(`schema_level::READ_TIMEOUT`). The field has three states that must
+not collapse: absent (this service does not report one), `null` (it
+tried and could not read — never zero, never a pass) and an object.
+(3) **The jobs API only** (`boss-jobs/src/schema_level.rs`: the pure
+`judge`, the `SchemaLedger` port, the Postgres adapter); another
+service adds the field when a reader needs it. (4) **The health read
+stays behind authentication at the front door**: the gateway's public
+`/health` stays a bare `ok`, because build sha and schema head are
+version disclosure that helps an attacker aim at a known-vulnerable
+build on a hosted instance. Our own reader, `cluster-watchdog.sh`,
+reads the jobs port on the LAN; an off-LAN monitor authenticates like
+any other reader, and a public read would be a new `PUBLIC_BY_DESIGN`
+row with its own why. **Not built yet:** `boss running` judging a
+MIGRATED layer by `schema.pending == 0` waits on its DEPLOYED layer
+reading the cluster instead of the retired bare-metal release symlink
+(backlog `004bdb2b`), because a fourth row on a verb whose other layers
+answer UNREADABLE would be one more row nobody can read.
 
 **A builder is a pod, not a process in the operator's shell** (design
 `90a14acc`, David 2026-09-15, all three questions accepted as
