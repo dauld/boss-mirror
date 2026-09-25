@@ -53,6 +53,10 @@ fn job_owned_by(id: &str, owner: &str) -> Job {
     }
 }
 
+/// The key the test "gateway" signs presence tickets with; the API
+/// under test verifies with the same one (backlog 72fe3640).
+const PRESENCE_KEY: &[u8] = b"policy-gated-presence-key-0123456789";
+
 fn build_app(policy: Arc<dyn PolicyClient>) -> (Router, Arc<InMemoryJobs>) {
     let jobs = Arc::new(InMemoryJobs::new());
     let bus = RecordingEventBus::new();
@@ -61,6 +65,9 @@ fn build_app(policy: Arc<dyn PolicyClient>) -> (Router, Arc<InMemoryJobs>) {
     let step_registry = Arc::new(StepRegistry::v1());
     let state = JobsApiState {
         step_registry,
+        presence_key: Some(Arc::new(boss_jobs::http::PresenceKey::fixed(
+            PRESENCE_KEY.to_vec(),
+        ))),
         ..JobsApiState::minimal(
             jobs.clone(),
             bus,
@@ -839,8 +846,8 @@ async fn an_ordinary_step_still_stamps_and_records_session_assurance() {
 ///
 /// This is the test that would catch a bypass being added later: if
 /// someone makes the endpoint honour a caller-supplied assurance (the
-/// body, a query param — anything other than the gateway-vouched
-/// `x-boss-presence` header), this starts returning 200 and the
+/// body, a query param — anything other than a gateway-SIGNED ticket
+/// in `x-boss-presence`), this starts returning 200 and the
 /// control becomes decoration.
 #[tokio::test]
 async fn a_step_requiring_presence_refuses_without_a_ceremony_ticket() {
@@ -870,18 +877,20 @@ async fn a_step_requiring_presence_refuses_without_a_ceremony_ticket() {
     );
 }
 
-/// The sign-off request with the gateway's presence header attached.
-/// In production the edge strips every inbound `x-boss-*` header and
-/// re-injects this one only after verifying a passkey ticket, so its
-/// presence at this service means the gateway vouched. See
-/// role_headers.rs; the machine token guards the service port itself.
+/// The sign-off request with the gateway's presence header attached:
+/// the ticket signed with the gateway's key, which this service verifies
+/// itself before believing a word of it — the machine door is reachable
+/// without the gateway, so a header it merely carries proves nothing
+/// (backlog 72fe3640; the forgeries are pinned in
+/// a_forged_presence_header_is_refused_at_the_machine_door.rs).
 async fn post_sign_off_with_presence(
     app: Router,
     user: &User,
     step: &Step,
     role: &str,
-    presence: &serde_json::Value,
+    ticket: &boss_core::presence::PresenceTicket,
 ) -> axum::http::Response<Body> {
+    let signed = ticket.encode(PRESENCE_KEY).expect("a ticket signs");
     app.oneshot(
         Request::builder()
             .method("POST")
@@ -891,7 +900,7 @@ async fn post_sign_off_with_presence(
             ))
             .header("content-type", "application/json")
             .header("x-boss-user", user_header(user))
-            .header("x-boss-presence", presence.to_string())
+            .header("x-boss-presence", signed)
             .body(Body::from(format!("{{\"role\":\"{role}\"}}")))
             .unwrap(),
     )
@@ -899,7 +908,23 @@ async fn post_sign_off_with_presence(
     .unwrap()
 }
 
-/// The ceremony's happy path: a gateway-vouched presence header whose
+/// A ticket as the gateway's `assert_finish` mints it, unexpired.
+fn presence_ticket(
+    user: &User,
+    step: &Step,
+    shape_hash: String,
+    nonce: &str,
+) -> boss_core::presence::PresenceTicket {
+    boss_core::presence::PresenceTicket {
+        i: user.id.clone(),
+        s: step.id.to_string(),
+        h: shape_hash,
+        n: nonce.to_string(),
+        e: boss_core::presence::now_epoch() + 60,
+    }
+}
+
+/// The ceremony's happy path: a gateway-signed presence ticket whose
 /// binding matches the step's CURRENT shape produces a Presence stamp
 /// carrying the challenge nonce — the audit trail from stamp back to
 /// the exact single-use ceremony that produced it.
@@ -914,12 +939,7 @@ async fn a_matching_presence_header_produces_a_presence_stamp_with_its_nonce() {
     jobs.add_step(&step).await.unwrap();
 
     let shape = boss_core::job::step_shape_hash(&step.title, &step.metadata);
-    let presence = serde_json::json!({
-        "employee_id": user.id,
-        "step_id": step.id.to_string(),
-        "shape_hash": shape,
-        "nonce": "ceremony-nonce-1",
-    });
+    let presence = presence_ticket(&user, &step, shape, "ceremony-nonce-1");
     let resp = post_sign_off_with_presence(app, &user, &step, "qa-lead", &presence).await;
     assert_eq!(resp.status(), StatusCode::OK);
 
@@ -947,12 +967,12 @@ async fn a_stale_presence_header_downgrades_to_session_and_refuses() {
     step.assurance_required = Some(boss_core::job::Assurance::Presence);
     jobs.add_step(&step).await.unwrap();
 
-    let presence = serde_json::json!({
-        "employee_id": user.id,
-        "step_id": step.id.to_string(),
-        "shape_hash": "a-hash-from-before-the-step-was-edited",
-        "nonce": "ceremony-nonce-2",
-    });
+    let presence = presence_ticket(
+        &user,
+        &step,
+        "a-hash-from-before-the-step-was-edited".into(),
+        "ceremony-nonce-2",
+    );
     let resp = post_sign_off_with_presence(app, &user, &step, "qa-lead", &presence).await;
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();

@@ -24,11 +24,13 @@
 //! challenge ledger. boss-jobs consumes the OUTCOME: a verified
 //! assertion becomes a short-lived HMAC ticket (`x-presence-ticket`),
 //! which the role_headers middleware — after stripping every inbound
-//! `x-boss-*` so a client cannot forge it — swaps for a trusted
-//! `x-boss-presence` header that the sign-off endpoint reads as
-//! `produced = Presence`. No fallback path exists anywhere in the
-//! chain, per Q3: an assurance level with a bypass is a comment, not a
-//! control.
+//! `x-boss-*` so a client cannot forge it — verifies and forwards, still
+//! signed, as `x-boss-presence`. The jobs API verifies that signature
+//! AGAIN before it reads `produced = Presence`, because its machine door
+//! is reachable without this gateway (backlog 72fe3640); the ticket type
+//! and its check are `boss_core::presence`, one definition for both. No
+//! fallback path exists anywhere in the chain, per Q3: an assurance
+//! level with a bypass is a comment, not a control.
 
 use std::sync::Arc;
 
@@ -39,19 +41,15 @@ use axum::routing::post;
 use axum::{Json, Router};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use hmac::{Hmac, KeyInit, Mac};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 use webauthn_rs::prelude::{
     CreationChallengeResponse, PasskeyRegistration, PublicKeyCredential,
     RegisterPublicKeyCredential, Url, Uuid, Webauthn, WebauthnBuilder,
 };
 
 use crate::session::{self, Session};
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// How long a verified assertion is redeemable as a ticket. Long
 /// enough for the SPA to attach it to the very next sign-off POST,
@@ -263,74 +261,34 @@ pub fn presence_challenge(shape_hash: &str, nonce: &str) -> Vec<u8> {
 // The presence ticket — a verified assertion, portable for two minutes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub struct PresenceTicket {
-    /// employee id the assertion verified for
-    pub i: String,
-    /// step id the challenge was minted for
-    pub s: String,
-    /// shape hash at mint time
-    pub h: String,
-    /// server nonce — recorded on the stamp for single-use audit
-    pub n: String,
-    /// absolute expiry, seconds since epoch
-    pub e: u64,
-}
+/// The ticket type and its HMAC check live in `boss_core::presence`,
+/// because the jobs API verifies the same ticket and must do it with
+/// the same function (backlog 72fe3640; CLAUDE.md §9a).
+pub use boss_core::presence::PresenceTicket;
+use boss_core::presence::now_epoch;
 
-impl PresenceTicket {
-    pub fn encode(&self, key: &[u8]) -> String {
-        let payload = serde_json::to_vec(self).expect("serialize PresenceTicket");
-        let payload_b64 = URL_SAFE_NO_PAD.encode(&payload);
-        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
-        mac.update(payload_b64.as_bytes());
-        let sig_b64 = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-        format!("{payload_b64}.{sig_b64}")
-    }
-
-    pub fn decode(value: &str, key: &[u8], now_epoch: u64) -> Option<Self> {
-        let (payload_b64, sig_b64) = value.split_once('.')?;
-        let sig = URL_SAFE_NO_PAD.decode(sig_b64).ok()?;
-        let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
-        mac.update(payload_b64.as_bytes());
-        let expected = mac.finalize().into_bytes();
-        if expected.ct_eq(&sig).unwrap_u8() != 1 {
-            return None;
-        }
-        let ticket: PresenceTicket =
-            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload_b64).ok()?).ok()?;
-        (ticket.e > now_epoch).then_some(ticket)
-    }
-}
-
-/// The trusted header injected by role_headers after a valid ticket,
-/// and read by boss-jobs' sign-off endpoint as `produced`.
-pub const PRESENCE_HEADER: &str = "x-boss-presence";
+/// The header role_headers forwards a verified ticket in, and the jobs
+/// API reads (and verifies again) as `produced`.
+pub const PRESENCE_HEADER: &str = boss_core::presence::HEADER;
 /// The client-supplied ticket header. Deliberately NOT `x-boss-*`:
 /// the edge strip removes that whole prefix from inbound traffic, and
 /// the ticket must survive to be verified (forgery is caught by the
 /// HMAC, not the strip).
 pub const TICKET_HEADER: &str = "x-presence-ticket";
 
-/// Verify a ticket header value and produce the trusted header's JSON.
+/// Verify a ticket header value and produce the header to forward.
 /// Called from role_headers inside the session branch.
+///
+/// The value forwarded is the SIGNED TICKET ITSELF, not its fields as
+/// JSON. Until backlog 72fe3640 (2026-09-24) this returned
+/// `{"employee_id","step_id","shape_hash","nonce"}` in the clear, and the
+/// jobs API granted presence on that JSON — so anyone reaching the jobs
+/// API's machine door without this gateway could write the JSON by hand.
+/// Forwarding the signature lets the jobs API verify it where it grants;
+/// checking it here as well keeps a bad ticket from travelling at all.
 pub fn presence_header_from_ticket(value: &str, key: &[u8]) -> Option<String> {
-    let t = PresenceTicket::decode(value, key, now_epoch())?;
-    Some(
-        json!({
-            "employee_id": t.i,
-            "step_id": t.s,
-            "shape_hash": t.h,
-            "nonce": t.n,
-        })
-        .to_string(),
-    )
-}
-
-fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    PresenceTicket::decode(value, key, now_epoch())?;
+    Some(value.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -966,14 +924,17 @@ pub async fn assert_finish(
         .send()
         .await;
 
-    let ticket = PresenceTicket {
-        i: employee_id,
+    let Some(ticket) = (PresenceTicket {
+        i: employee_id.clone(),
         s: step_id.to_string(),
         h: shape_hash.to_string(),
         n: nonce.to_string(),
         e: now_epoch() + TICKET_TTL_SECONDS,
-    }
-    .encode(&state.session_key);
+    })
+    .encode(&state.session_key) else {
+        let reason = "the verified assertion could not be signed as a ticket";
+        return refused(reason, err(StatusCode::INTERNAL_SERVER_ERROR, reason));
+    };
     Json(json!({
         "ticket": ticket,
         "expires_in": TICKET_TTL_SECONDS,
@@ -1023,30 +984,13 @@ mod tests {
 
     const KEY: &[u8] = b"test-session-key";
 
+    /// The forwarded header is the signed ticket, so the jobs API can
+    /// verify it with the same key and read the same binding back out
+    /// (backlog 72fe3640). The ticket's own round-trip, expiry, wrong-key
+    /// and tamper cases are pinned beside its definition in
+    /// `boss_core::presence`.
     #[test]
-    fn ticket_round_trips_and_expires() {
-        let t = PresenceTicket {
-            i: "emp-1".into(),
-            s: "step-1".into(),
-            h: "hash".into(),
-            n: "nonce".into(),
-            e: now_epoch() + 60,
-        };
-        let enc = t.encode(KEY);
-        let dec = PresenceTicket::decode(&enc, KEY, now_epoch()).expect("valid ticket decodes");
-        assert_eq!(dec, t);
-        // Expired by clock: decode refuses.
-        assert!(PresenceTicket::decode(&enc, KEY, t.e + 1).is_none());
-        // Wrong key: decode refuses.
-        assert!(PresenceTicket::decode(&enc, b"other-key", now_epoch()).is_none());
-        // Tampered payload: decode refuses.
-        let mut forged = enc.clone();
-        forged.replace_range(0..1, if enc.starts_with('A') { "B" } else { "A" });
-        assert!(PresenceTicket::decode(&forged, KEY, now_epoch()).is_none());
-    }
-
-    #[test]
-    fn trusted_header_carries_the_binding() {
+    fn the_forwarded_header_is_the_signed_ticket() {
         let t = PresenceTicket {
             i: "emp-9".into(),
             s: "step-9".into(),
@@ -1054,12 +998,13 @@ mod tests {
             n: "def".into(),
             e: now_epoch() + 60,
         };
-        let hdr = presence_header_from_ticket(&t.encode(KEY), KEY).expect("valid");
-        let v: Value = serde_json::from_str(&hdr).unwrap();
-        assert_eq!(v["employee_id"], "emp-9");
-        assert_eq!(v["step_id"], "step-9");
-        assert_eq!(v["shape_hash"], "abc");
-        assert_eq!(v["nonce"], "def");
+        let enc = t.encode(KEY).unwrap();
+        let hdr = presence_header_from_ticket(&enc, KEY).expect("valid");
+        let back = PresenceTicket::decode(&hdr, KEY, now_epoch()).expect("still verifies");
+        assert_eq!(back, t);
+        // An unsigned value is never forwarded at all.
+        assert!(presence_header_from_ticket(&enc, b"other-key").is_none());
+        assert!(presence_header_from_ticket(r#"{"employee_id":"emp-9"}"#, KEY).is_none());
     }
 
     #[test]

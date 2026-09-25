@@ -94,12 +94,14 @@ pub async fn inject_role_headers(
         }
         // Presence ticket swap (docs/design/presence.md): a verified
         // assertion travels as `x-presence-ticket` — a name outside
-        // the x-boss-* prefix so the edge strip above doesn't eat it,
-        // because the strip is exactly what makes the SWAPPED header
-        // unforgeable. A valid ticket (HMAC over the session key,
-        // unexpired) becomes `x-boss-presence`, which boss-jobs reads
-        // as produced-assurance; an invalid one is dropped silently —
-        // the sign-off then fails 422 as a Session stamp would.
+        // the x-boss-* prefix so the edge strip above doesn't eat it.
+        // A valid ticket (HMAC over the session key, unexpired) is
+        // forwarded, STILL SIGNED, as `x-boss-presence`; an invalid one
+        // is dropped here — the sign-off then fails 422 as a Session
+        // stamp would. The strip is NOT what makes the forwarded header
+        // unforgeable: the jobs API's machine door is reachable without
+        // this gateway, so boss-jobs verifies the same signature itself
+        // before it grants presence (backlog 72fe3640, 2026-09-24).
         let ticket = req
             .headers()
             .get(boss_gateway::passkey::TICKET_HEADER)

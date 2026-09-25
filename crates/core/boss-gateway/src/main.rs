@@ -104,9 +104,10 @@ async fn main() -> Result<()> {
     // 240e03f3); loopback stays the default, the manifest widens it.
     let listen = std::env::var("BOSS_LISTEN")
         .unwrap_or_else(|_| format!("127.0.0.1:{}", boss_ports::prod("gateway")));
-    let session_key_path: std::path::PathBuf = std::env::var("BOSS_SESSION_KEY")
-        .unwrap_or_else(|_| "/var/lib/boss-gateway/session.key".into())
-        .into();
+    // Resolved by boss-core because the jobs API reads the same file to
+    // verify presence tickets (backlog 72fe3640): one path rule, one
+    // format, for the minter and the verifier.
+    let session_key_path = boss_core::presence::session_key_path();
     let session_key = load_or_create_session_key(&session_key_path)
         .with_context(|| format!("loading session key from {}", session_key_path.display()))?;
 
@@ -921,12 +922,7 @@ fn load_or_create_session_key(path: &Path) -> Result<Vec<u8>> {
     use std::io::Write;
     if path.exists() {
         let hex = std::fs::read_to_string(path)?;
-        let bytes = hex_decode(hex.trim())
-            .ok_or_else(|| anyhow::anyhow!("session key file is not valid hex"))?;
-        if bytes.len() < 32 {
-            anyhow::bail!("session key must be at least 32 bytes");
-        }
-        return Ok(bytes);
+        return Ok(boss_core::presence::parse_session_key(&hex)?);
     }
 
     tracing::info!(path = %path.display(), "generating new session key");
@@ -960,36 +956,19 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// What this gateway writes, the shared reader reads back — the jobs
+    /// API verifies presence tickets with the key through that reader
+    /// (backlog 72fe3640). Its reject cases live beside it in boss-core.
     #[test]
-    fn hex_roundtrip() {
-        let bytes = [0x00, 0x01, 0xaf, 0xff, 0x7e];
+    fn a_written_key_reads_back_through_the_shared_parser() {
+        let bytes: Vec<u8> = (0u8..32).map(|b| b.wrapping_mul(37)).collect();
         let hex = hex_encode(&bytes);
-        assert_eq!(hex, "0001afff7e");
-        assert_eq!(hex_decode(&hex), Some(bytes.to_vec()));
-    }
-
-    #[test]
-    fn hex_decode_rejects_odd_length() {
-        assert_eq!(hex_decode("abc"), None);
-    }
-
-    #[test]
-    fn hex_decode_rejects_non_hex() {
-        assert_eq!(hex_decode("zz"), None);
+        assert_eq!(&hex[..6], "00254a");
+        assert_eq!(boss_core::presence::parse_session_key(&hex), Ok(bytes));
     }
 
     #[test]

@@ -35,6 +35,7 @@ mod flights;
 mod jobs;
 mod kinds;
 mod plugins;
+mod presence;
 mod queue_age;
 mod refusals;
 mod regions;
@@ -61,6 +62,8 @@ use stations::*;
 use steps::*;
 use terminal_report::*;
 use yard::*;
+
+pub use presence::PresenceKey;
 
 const DEFAULT_LIMIT: i64 = 100;
 const MAX_LIMIT: i64 = 1000;
@@ -150,6 +153,12 @@ pub struct JobsApiState<R: JobsRepository, B: EventBus> {
     /// `None` is a wiring without a database, where health reports no
     /// schema at all — absent, not `null`: nothing was tried.
     pub schema_ledger: Option<Arc<dyn crate::schema_level::SchemaLedger>>,
+    /// The key presence tickets are verified with — the gateway's
+    /// session key, read from the file it signs with (backlog 72fe3640).
+    /// `None` grants presence to nothing: an `x-boss-presence` header is
+    /// then refused, never read on trust, because the machine door lets
+    /// any token holder write one by hand.
+    pub presence_key: Option<Arc<PresenceKey>>,
 }
 
 impl<R: JobsRepository, B: EventBus> JobsApiState<R, B> {
@@ -205,6 +214,7 @@ impl<R: JobsRepository, B: EventBus> JobsApiState<R, B> {
             delivery: None,
             agent_budget: None,
             schema_ledger: None,
+            presence_key: None,
         }
     }
 }

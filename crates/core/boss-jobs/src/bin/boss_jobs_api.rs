@@ -391,6 +391,11 @@ async fn run_server<R: JobsRepository + 'static>(
         // every claim is admitted as before.
         dispatcher_firings,
         schema_ledger,
+        // Presence tickets verify HERE, with the gateway's own key read
+        // from the file the gateway signs with (backlog 72fe3640): this
+        // door is reachable without the gateway, so a header it did not
+        // check is a header anyone with the machine token could write.
+        presence_key: Some(Arc::new(boss_jobs::http::PresenceKey::from_env())),
         agent_budget: agent_runs.as_ref().map(|log| {
             Arc::new(boss_jobs::agent_budget::BudgetDoor {
                 agents: agents.clone(),

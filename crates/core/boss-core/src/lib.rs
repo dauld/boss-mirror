@@ -15,6 +15,7 @@ pub mod money;
 pub mod partition;
 pub mod platform_owner;
 pub mod port;
+pub mod presence;
 pub mod primitives;
 pub mod publish;
 pub mod publisher;

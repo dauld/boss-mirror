@@ -294,27 +294,50 @@ async fn dispatch_workflow_publish(
 ///
 /// `Presence` is producible exactly one way — the gateway verified a
 /// WebAuthn assertion over `sha256(shape_hash || ":" || nonce)` and
-/// swapped the ticket for an `x-boss-presence` header, which the edge
-/// strips from every inbound request, so its presence here means the
-/// gateway itself vouched. The binding is re-checked against the
-/// step's CURRENT shape: a stale hash means the content moved after
-/// the ceremony, and an approval must not survive an edit it never saw.
+/// signed a ticket for it, and THIS SERVICE verifies that ticket's
+/// signature (`boss_core::presence::PresenceTicket::decode`, the same
+/// function the gateway checks it with) before reading a word of it.
+/// Until backlog 72fe3640 (2026-09-24) the header held the ticket's
+/// fields as plain JSON and was trusted because the gateway's edge strip
+/// removes inbound `x-boss-*` — but the machine door (:7900) is
+/// reachable without the gateway, so every machine-token holder could
+/// stamp presence on any step as any person. The binding is then
+/// re-checked against the step's CURRENT shape: a stale hash means the
+/// content moved after the ceremony, and an approval must not survive
+/// an edit it never saw.
 pub(super) struct Assured {
     pub required: boss_core::job::Assurance,
     pub produced: boss_core::job::Assurance,
     pub presence_nonce: Option<String>,
     /// What to tell a caller that fell short, or "" when it did not.
     pub detail: &'static str,
+    /// A presence claim was made and did not verify. Refused on every
+    /// judged write, whatever the step requires: a claim this service
+    /// cannot check is a forgery or a fault, and either one said aloud
+    /// beats a stamp quietly downgraded to Session.
+    pub unverified: bool,
 }
 
 impl Assured {
     pub fn falls_short(&self) -> bool {
-        self.required > self.produced
+        self.unverified || self.required > self.produced
     }
 
     /// The refusal both doors return, in one shape so a caller cannot
     /// tell which door it knocked on.
     pub fn refusal(&self) -> Response {
+        if self.unverified {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "the presence claim on this request did not verify",
+                    "required": self.required,
+                    "produced": self.produced,
+                    "detail": self.detail,
+                })),
+            )
+                .into_response();
+        }
         (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
@@ -338,33 +361,48 @@ pub(super) fn judge_assurance(
     step_id_str: &str,
     user_id: &str,
     headers: &axum::http::HeaderMap,
+    // The gateway's key, or `None` when this service has none — and then
+    // nothing verifies (http/presence.rs).
+    key: Option<&[u8]>,
 ) -> Assured {
+    use boss_core::presence::{HEADER, PresenceTicket, now_epoch};
     // The step's own requirement wins when it is stronger than the
     // kind's floor; a Workflow may raise, never lower.
     let required = step.assurance_required.unwrap_or_default().max(floor);
     let shape = boss_core::job::step_shape_hash(&step.title, &step.metadata);
-    let claim = headers
-        .get("x-boss-presence")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-    let (produced, presence_nonce, detail) = match &claim {
-        Some(p)
-            if p["step_id"] == step_id_str
-                && p["shape_hash"] == shape.as_str()
-                && p["employee_id"] == user_id =>
-        {
-            (
-                boss_core::job::Assurance::Presence,
-                p["nonce"].as_str().map(String::from),
-                "",
-            )
-        }
-        Some(_) => (
+    // Absent → no claim. Present → it verifies against the key, or it is
+    // refused; there is no third reading of a header anyone at the
+    // machine door can write.
+    let claim = headers.get(HEADER).map(|v| {
+        v.to_str()
+            .ok()
+            .zip(key)
+            .and_then(|(value, key)| PresenceTicket::decode(value, key, now_epoch()))
+    });
+    let (produced, presence_nonce, detail, unverified) = match &claim {
+        Some(Some(t)) if t.s == step_id_str && t.h == shape && t.i == user_id => (
+            boss_core::job::Assurance::Presence,
+            Some(t.n.clone()),
+            "",
+            false,
+        ),
+        Some(Some(_)) => (
             boss_core::job::Assurance::Session,
             None,
             " A presence ticket WAS presented but did not match: either the step's \
              content changed after the ceremony (stale shape hash — re-run it against \
              the current content) or it was minted for a different step or actor.",
+            false,
+        ),
+        Some(None) => (
+            boss_core::job::Assurance::Session,
+            None,
+            "An x-boss-presence header was presented and did not verify: it is not a \
+             ticket the gateway signed, it has expired, or this service holds no key to \
+             check it with. Presence is granted only on a signed ticket, verified here \
+             (backlog 72fe3640) — run the passkey ceremony through the gateway and \
+             present the ticket it issues.",
+            true,
         ),
         None => (
             boss_core::job::Assurance::Session,
@@ -372,6 +410,7 @@ pub(super) fn judge_assurance(
             " Complete the passkey ceremony for this step \
              (POST /api/auth/passkey/assert/begin, then .../finish) and retry with \
              the issued ticket.",
+            false,
         ),
     };
     Assured {
@@ -379,6 +418,7 @@ pub(super) fn judge_assurance(
         produced,
         presence_nonce,
         detail,
+        unverified,
     }
 }
 
@@ -387,9 +427,9 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     Path((id, step_id_str)): Path<(String, String)>,
     CurrentUser(user): CurrentUser,
     // The presence claim rides here, exactly as it does on the sign-off
-    // door: `x-boss-presence`, stamped by the gateway and stripped from
-    // every inbound request, so this handler can judge the same way
-    // (backlog 148549c5).
+    // door: `x-boss-presence`, the gateway's signed ticket, verified by
+    // `judge_assurance` before it is believed, so this handler judges
+    // the same way (backlog 148549c5; verification 72fe3640).
     headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
@@ -777,7 +817,8 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             .get(&step.kind)
             .map(|t| t.assurance_floor)
             .unwrap_or_default();
-        let assured = judge_assurance(floor, &old, &step_id_str, &user.id, &headers);
+        let key = super::presence::key_for(state.presence_key.as_deref(), &headers).await;
+        let assured = judge_assurance(floor, &old, &step_id_str, &user.id, &headers, key);
         if assured.falls_short() {
             return assured.refusal();
         }
@@ -2388,7 +2429,8 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
         .get(&step.kind)
         .map(|t| t.assurance_floor)
         .unwrap_or_default();
-    let assured = judge_assurance(floor, &step, &step_id_str, &user.id, &headers);
+    let key = super::presence::key_for(state.presence_key.as_deref(), &headers).await;
+    let assured = judge_assurance(floor, &step, &step_id_str, &user.id, &headers, key);
     let produced = assured.produced;
     let presence_nonce = assured.presence_nonce.clone();
     if assured.falls_short() {
