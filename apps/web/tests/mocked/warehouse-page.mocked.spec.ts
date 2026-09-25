@@ -98,8 +98,17 @@ const STATUS_BODY = {
     total_open: 3, draft_count: 1, submitted_count: 1, acknowledged_count: 0, in_transit_count: 1,
     late_count: 1, arriving_this_week_count: 2, recent: [],
   },
-  outbound_shipments: { label_created: 4, picked_up: 2, in_transit: 6, exception: 1, delivered_7d: 9, recent: [] },
+  outbound_shipments: {
+    kind: 'ok',
+    summary: { label_created: 4, picked_up: 2, in_transit: 6, exception: 1, delivered_7d: 9, recent: [] },
+  },
   as_of: '2026-09-23T22:00:00Z',
+};
+/// Shipping down: the server still answers 200, the shipping leg
+/// carries its reason, and inventory's own two summaries stand.
+const STATUS_SHIPPING_DOWN = {
+  ...STATUS_BODY,
+  outbound_shipments: { kind: 'unavailable', reason: 'shipping service unreachable: connection refused' },
 };
 /// Nothing below reorder — the below-reorder table gives way to a sentence.
 const STATUS_STOCKED = {
@@ -852,13 +861,41 @@ test.describe('/ux/warehouse — State B: empty, loading, and a failed read', ()
     await expect(firstColumn(page)).toHaveText(DEFAULT_SKUS);
   });
 
+  // Gap 9 (89cf07d8), fixed: a shipping outage — distribution's
+  // service, off on the live instance — answered 502 for the whole
+  // read and blanked parts stock and inbound POs, both inventory's own.
+  // The server now answers 200 with the shipping leg unavailable, and
+  // only that section says so.
+  test('shipping down: parts stock and inbound POs stand, and only the Outbound shipments section names why', async ({ page }) => {
+    await installWarehouse(page);
+    await page.route(STATUS, (r) => json(r, STATUS_SHIPPING_DOWN));
+    await mountWarehouse(page);
+
+    await expect(subtitle(page)).toHaveText('3 below reorder · 3 open POs');
+    await expect(body(page).locator('section.tab-section h3')).toHaveText([
+      'Parts stock', 'Inbound POs', 'Outbound shipments',
+      'Below reorder · showing 2 of 3',
+    ]);
+    const section = (name: string) =>
+      body(page).locator('section.tab-section', { has: page.locator('h3', { hasText: name }) });
+    await expect(section('Parts stock').locator('dl.kv dd')).toHaveText(['5', '482', '107', '375', '3']);
+    await expect(section('Inbound POs').locator('dl.kv dd')).toHaveText(['3', '1', '1', '1', '1', '2']);
+    await expect(section('Outbound shipments').locator('dl.kv')).toHaveCount(0);
+    await expect(page.locator(`${FAILURE_MARKER}[role=alert]`)).toHaveText(
+      'Outbound shipments unavailable — shipping service unreachable: connection refused',
+    );
+    await expect(section('Below reorder').locator('tbody tr')).toHaveCount(2);
+  });
+
   // Gap 8 (0dcb0200), fixed: the line carries the server's status and
-  // reason, so "not configured" (503) and a named leg down (502) read
-  // differently. Gap 3 (c3e4edcc, the cross-page marker sweep), fixed:
-  // the status failure is on the shared marker, as an alert.
+  // reason, so two refusals read differently. Since gap 9 (89cf07d8)
+  // the server refuses only when inventory's OWN read fails (500); a
+  // 502 is what a gateway says when it cannot reach inventory at all.
+  // Gap 3 (c3e4edcc, the cross-page marker sweep), fixed: the status
+  // failure is on the shared marker, as an alert.
   for (const [code, reason] of [
-    [503, 'warehouse-status requires jobs/assets/shipping clients — not configured'],
-    [502, 'shipping: connection refused'],
+    [500, 'inventory store unavailable'],
+    [502, 'inventory: connection refused'],
   ] as const) {
     test(`a failed warehouse-status read (${code}) names its status and reason, and the header falls back to items`, async ({ page }) => {
       await installWarehouse(page);

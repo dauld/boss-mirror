@@ -119,7 +119,11 @@ No ssh from the pod. Three doors, all read-only:
   about a minute with the output on the packet's `execute` step. Verbs:
   `df`, `uptime`, `timer-list`, `unit-status <unit>`, `journal-tail
   <unit> [n]`, `disk-report` (what is consuming disk — both daemons,
-  Forgejo's data, the checkout), `reach <ipv4> <port>` (one TCP
+  Forgejo's data, the checkout), `forge-log <since> <until> [lines]`
+  (Forgejo's own server log off the system daemon, at most 15 minutes
+  and 2000 lines, query-string values redacted, plus the reflog of
+  `refs/heads/main` over the same window — who pushed what, and from
+  where), `reach <ipv4> <port>` (one TCP
   connect from this host's vantage — the WireGuard overlay and the
   LAN the pod cannot route to; nothing sent), and the mutating verbs, each
   authorized by name in `infra/ops/verbs/reclaim-disk.json`: `reclaim-disk <floor>` (the

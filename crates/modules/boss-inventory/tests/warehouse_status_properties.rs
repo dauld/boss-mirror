@@ -30,13 +30,13 @@
 //!    `INBOUND_PO_PREVIEW_LIMIT`.
 //!
 //! 6. `prop_build_warehouse_status_passes_through` — the cross-service
-//!    summary (`outbound_shipments`) is returned byte-identical to the
+//!    read (`outbound_shipments`) is returned byte-identical to the
 //!    caller — no silent dropping or reshuffling.
 
 use boss_inventory::types::{InventoryItem, PoStatus, PurchaseOrder, PurchaseOrderLine};
 use boss_inventory::warehouse_status::{
     INBOUND_PO_PREVIEW_LIMIT, LOW_STOCK_PREVIEW_LIMIT, OutboundShipmentSummary,
-    build_warehouse_status,
+    OutboundShipmentsRead, build_warehouse_status,
 };
 use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use proptest::prelude::*;
@@ -126,6 +126,11 @@ fn arb_pos(n: usize, today: NaiveDate) -> impl Strategy<Value = Vec<PurchaseOrde
     prop::collection::vec(arb_po(today), 0..=n)
 }
 
+/// The shipping leg as it reads when shipping answered.
+fn ok(summary: OutboundShipmentSummary) -> OutboundShipmentsRead {
+    OutboundShipmentsRead::Ok { summary }
+}
+
 fn empty_outbound() -> OutboundShipmentSummary {
     OutboundShipmentSummary {
         label_created: 0,
@@ -157,7 +162,7 @@ proptest! {
         let status = build_warehouse_status(
             &items,
             &[],
-            empty_outbound(),
+            ok(empty_outbound()),
             as_of(),
         );
         let ps = &status.parts_stock;
@@ -182,7 +187,7 @@ proptest! {
         let status = build_warehouse_status(
             &items,
             &[],
-            empty_outbound(),
+            ok(empty_outbound()),
             as_of(),
         );
         let ps = &status.parts_stock;
@@ -202,7 +207,7 @@ proptest! {
         let status = build_warehouse_status(
             &items,
             &[],
-            empty_outbound(),
+            ok(empty_outbound()),
             as_of(),
         );
         let preview = &status.parts_stock.below_reorder_items;
@@ -228,7 +233,7 @@ proptest! {
         let status = build_warehouse_status(
             &[],
             &pos,
-            empty_outbound(),
+            ok(empty_outbound()),
             as_of(),
         );
         let ipo = &status.inbound_pos;
@@ -260,7 +265,7 @@ proptest! {
         let status = build_warehouse_status(
             &[],
             &pos,
-            empty_outbound(),
+            ok(empty_outbound()),
             as_of(),
         );
         let recent = &status.inbound_pos.recent;
@@ -292,9 +297,9 @@ proptest! {
         let status = build_warehouse_status(
             &[],
             &[],
-            outbound.clone(),
+            ok(outbound.clone()),
             as_of(),
         );
-        prop_assert_eq!(status.outbound_shipments, outbound);
+        prop_assert_eq!(status.outbound_shipments, ok(outbound));
     }
 }

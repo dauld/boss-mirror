@@ -60,9 +60,10 @@ export function readStateOfResponse(
 
 /// A non-2xx whose body says why, keeping the why. Some servers answer a
 /// refusal with its reason as text — boss-inventory's warehouse-status
-/// says 503 "… not configured" or 502 naming the failing leg — and a
+/// said 503 "… not configured" or 502 naming the failing leg — and a
 /// status alone cannot tell "not configured" from "shipping is down"
-/// (backlog 0dcb0200). The caller reads the body (`await r.text()`);
+/// (backlog 0dcb0200; since 89cf07d8 a shipping outage is one leg of a
+/// 200, not a refusal). The caller reads the body (`await r.text()`);
 /// this stays pure so it has one test.
 export function failedWithReason(status: number, body: string): ReadState {
   const reason = body.trim();

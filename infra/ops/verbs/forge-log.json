@@ -1,0 +1,29 @@
+{
+  "about": "READ-ONLY: the Forgejo container's own server log over a bounded window, and the bare repository's reflog of refs/heads/main over the same window (infra/forge/forge-log.sh) — forge-log <since> <until> [lines 1..2000, default 2000], since/until RFC 3339 UTC to the second, until after since, a window of at most 15 minutes. Backlog 620bb69e, car 2 of design d812f1b7 (D4), approved by David 2026-09-25: between 20:10:41Z and 20:11:14Z that day something wrote the forge's refs/heads/main back from c85941b4 to 777a5888, and the one record that names who — a receive-pack line with user, source address and time — is this container's log, which no door read (pod-logs reads cluster pods, journal-tail systemd units); David: 'I actually want you to be able to do this operationally'. Reads `docker logs --timestamps --since --until forgejo` on the SYSTEM daemon, pinned on the argv as --host unix:///var/run/docker.sock and reached through sudo -n docker the way disk-report is, because the rootless daemon answers 'no such container' about a container that is running (forge-backup.sh); the container is inspected first and its creation time and log driver lead the output, so an empty window says whether the container was recreated since. The reflog is read inside the container (docker exec -u git forgejo, /data/git/repositories/david/boss.git, which the compose file binds from /opt/forgejo/data), HEAD first as the control; its entries in the window print before the server log so the runner's 100 KB cut takes the log's tail, never them. Bounded: at most 15 minutes, at most 2000 lines printed with the count of all of them always said; query-string values and URL credentials are redacted before printing, keys kept. But a log line is what the process printed: the caller reads it before quoting it anywhere wider than this packet. Exit 2 is a refused bound with no docker call; exit 4 is 'cannot answer' with docker's or sudo's own words and nothing on stdout (a missing container is exit 4, never '0 lines'); an unreadable reflog is also 4, with the log still printed. Nothing is mutated — no restart, no log-driver switch, which would recreate the container and destroy the evidence. Timeout 60.",
+  "hosts": [
+    "forge"
+  ],
+  "argv": [
+    "infra/forge/forge-log.sh",
+    "{1}",
+    "{2}",
+    "{3}"
+  ],
+  "params": [
+    {
+      "name": "since",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    {
+      "name": "until",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    {
+      "name": "lines",
+      "pattern": "^[0-9]{1,4}$",
+      "default": "2000",
+      "max": 2000
+    }
+  ],
+  "timeout": 60
+}
