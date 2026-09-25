@@ -451,6 +451,8 @@ async fn changing_the_steps_shape_invalidates_stamps_loudly() {
         shape_hash: boss_core::job::step_shape_hash(&step.title, &step.metadata),
         assurance: boss_core::job::Assurance::Session,
         presence_nonce: None,
+        voided_at: None,
+        voided_by_event: None,
     });
     jobs.add_step(&step).await.unwrap();
 

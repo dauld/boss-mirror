@@ -281,6 +281,10 @@ name = "rebuild_reproduces_the_partition_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "a_stamp_dies_when_the_shape_it_signed_leaves_the_step_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "no_orphan_steps_pg"
 required-features = ["postgres"]
 

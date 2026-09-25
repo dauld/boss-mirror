@@ -61,21 +61,27 @@ impl PgJobs {
         // replays the event. Compared on the parsed row — the same
         // parse the caller's copy came from — so no value the parse
         // cannot hold exactly reads as a change.
+        //
+        // The row is read under its lock on BOTH doors now, because the
+        // write carries the caller's voids onto the row's own stamps
+        // below (design 87329a13) and must do so against the stamps as
+        // they stand, not as the caller read them.
+        let row = sqlx::query_as::<_, VersionedStepRow>(&format!(
+            "{VERSIONED_STEP_SELECT} WHERE id = $1 FOR UPDATE"
+        ))
+        .bind(*step.id.inner().as_uuid())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        let Some(row) = row else {
+            return Err(JobsError::StepNotFound(step.id));
+        };
+        let row_version = row.row_version;
+        let current = row_to_step(row.step)?;
         if let Some(read) = read {
-            let row = sqlx::query_as::<_, VersionedStepRow>(&format!(
-                "{VERSIONED_STEP_SELECT} WHERE id = $1 FOR UPDATE"
-            ))
-            .bind(*step.id.inner().as_uuid())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| JobsError::Storage(e.to_string()))?;
-            let Some(row) = row else {
-                return Err(JobsError::StepNotFound(step.id));
-            };
-            if StepVersion::new(row.row_version) != read {
+            if StepVersion::new(row_version) != read {
                 return Err(JobsError::StepChanged { id: step.id });
             }
-            let current = row_to_step(row.step)?;
             if matches!(current.status, StepStatus::Completed | StepStatus::Skipped)
                 && crate::port::terminal_write_moves_frozen(&current, step)
             {
@@ -187,6 +193,22 @@ impl PgJobs {
         if result.rows_affected() == 0 {
             return Err(JobsError::StepNotFound(step.id));
         }
+        // THE VOIDS (design 87329a13). The UPDATE above never names
+        // `sign_offs` — stamps are appended by `append_sign_off` alone,
+        // so a read-modify-write cannot clobber one — but a PUT that
+        // moved the step's shape killed its live stamps on its copy,
+        // and the row must record that in this same transaction, beside
+        // the STEP_UPDATED and the invalidation event that say so. Only
+        // a void crosses (`apply_voids`): nothing is added, dropped or
+        // revived, whatever copy of the stamps the caller holds. A
+        // terminal row keeps what it completed with.
+        if !matches!(current.status, StepStatus::Completed | StepStatus::Skipped) {
+            let mut kept = current.clone();
+            kept.apply_voids(&step.sign_offs);
+            if kept.sign_offs != current.sign_offs {
+                write_sign_offs(&mut tx, &kept).await?;
+            }
+        }
         // OUTBOX (phase 2): the caller's events (STEP_UPDATED +
         // completion/ready/done markers) record with the row.
         for event in events {
@@ -295,6 +317,38 @@ const VERSIONED_STEP_SELECT: &str = "SELECT id, job_id, kind, title, spec_slug, 
      status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, \
      completed_on, metadata, notes, step_plugin_version, embedded_job, completed_by, \
      completed_at, xmin::text::bigint AS row_version FROM steps";
+
+/// A step's `step_shape_hash` as the row stands, read under the row's
+/// lock — the "before" a content write compares its result to, so the
+/// stamps it leaves behind are judged against what they were attesting
+/// at the write, not at some earlier read (design 87329a13). `None`
+/// when there is no such row; the caller's own statement says why.
+async fn shape_under_lock(
+    conn: &mut sqlx::PgConnection,
+    id: &StepId,
+) -> Result<Option<String>, JobsError> {
+    let row: Option<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT title, metadata FROM steps WHERE id = $1 FOR UPDATE")
+            .bind(*id.inner().as_uuid())
+            .fetch_optional(conn)
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+    Ok(row.map(|(title, metadata)| boss_core::job::step_shape_hash(&title, &metadata)))
+}
+
+/// Write back a step's stamps after a void — the one statement besides
+/// `append_sign_off` that names `sign_offs`, and every caller hands it
+/// the row's own stamps with voids landed on them and nothing else
+/// changed (design 87329a13).
+async fn write_sign_offs(conn: &mut sqlx::PgConnection, step: &Step) -> Result<(), JobsError> {
+    sqlx::query("UPDATE steps SET sign_offs = $2 WHERE id = $1")
+        .bind(*step.id.inner().as_uuid())
+        .bind(serde_json::to_value(&step.sign_offs).map_err(|e| JobsError::Storage(e.to_string()))?)
+        .execute(conn)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+    Ok(())
+}
 
 /// Joined row backing [`PgJobs::list_assignments`] — a `StepRow`
 /// (flattened) plus the minimum Job context the pull surface needs.
@@ -1321,6 +1375,12 @@ impl JobsRepository for PgJobs {
         // must carry.
         for r in &plan.reprojected {
             let s = &r.step;
+            // The re-projection moves an open step's text, so it moves
+            // its shape; the stamps it leaves behind die as at any edit
+            // (design 87329a13), or a move to another version and back
+            // would revive them. A terminal row keeps its text under the
+            // CASEs below, so its shape does not move and nothing dies.
+            let shape_before = shape_under_lock(&mut tx, &s.id).await?;
             let row = sqlx::query_as::<_, StepRow>(
                 r#"
                 UPDATE steps SET
@@ -1367,11 +1427,19 @@ impl JobsRepository for PgJobs {
             let Some(row) = row else {
                 return Err(JobsError::StepNotFound(s.id));
             };
-            let written = row_to_step(row)?;
+            let mut written = row_to_step(row)?;
+            let invalidated = match &shape_before {
+                Some(before) => crate::events::void_stamps_if_moved(stamp, before, &mut written),
+                None => None,
+            };
+            if invalidated.is_some() {
+                write_sign_offs(&mut tx, &written).await?;
+            }
             events.push(stamp.event(
                 crate::events::STEP_UPDATED,
                 crate::events::step_state_payload(&written),
             ));
+            events.extend(invalidated);
         }
 
         // Each inserted row is stamped with its plugin version HERE, in
@@ -1719,6 +1787,10 @@ impl JobsRepository for PgJobs {
             .begin()
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
+        // The shape the stamps were attesting, under the lock the merge
+        // below then writes through (design 87329a13). A missing row
+        // reads None here and is named by the disambiguation below.
+        let shape_before = shape_under_lock(&mut tx, id).await?;
         // ONE statement is the atomicity, and the terminal freeze
         // rides its WHERE clause: a step that completed between the
         // caller's read and this write matches no row, instead of
@@ -1761,7 +1833,20 @@ impl JobsRepository for PgJobs {
                 None => JobsError::StepNotFound(*id),
             });
         };
-        let step = row_to_step(row)?;
+        let mut step = row_to_step(row)?;
+        // A STAMP DIES WHEN THE SHAPE IT SIGNED LEAVES THE STEP (design
+        // 87329a13, backlog c085256d). A merge that moved the shape
+        // voids every live stamp on the row here, in this transaction,
+        // and the invalidation event listing them records beside the
+        // STEP_UPDATED — the void is part of the edit, not a note about
+        // it that a failed second write could lose.
+        let invalidated = match &shape_before {
+            Some(before) => crate::events::void_stamps_if_moved(stamp, before, &mut step),
+            None => None,
+        };
+        if invalidated.is_some() {
+            write_sign_offs(&mut tx, &step).await?;
+        }
         // OUTBOX (phase 2): the STEP_UPDATED state event is built from
         // the POST-merge row this transaction just produced and
         // records with it — same rule as the job merge.
@@ -1772,6 +1857,11 @@ impl JobsRepository for PgJobs {
         boss_events::outbox::record_event_in_tx(&mut tx, &event)
             .await
             .map_err(JobsError::Storage)?;
+        if let Some(event) = &invalidated {
+            boss_events::outbox::record_event_in_tx(&mut tx, event)
+                .await
+                .map_err(JobsError::Storage)?;
+        }
         tx.commit()
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;

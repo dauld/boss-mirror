@@ -214,6 +214,15 @@ impl InMemoryJobs {
         // merged against a stale pre-completion fetch cannot demote.
         let mut next = step.clone();
         next.sign_offs = existing.sign_offs.clone();
+        // ...except a VOID, which the write carries onto the row's own
+        // stamps (design 87329a13): the PUT that moves a step's shape
+        // kills its live stamps on its copy, and the row must record
+        // that. `apply_voids` only lands a void, never lifts one, adds
+        // or drops a stamp — the Pg adapter's `write_step`, as Rust. A
+        // terminal row keeps what it completed with.
+        if !matches!(existing.status, StepStatus::Completed | StepStatus::Skipped) {
+            next.apply_voids(&step.sign_offs);
+        }
         next.sign_offs_required = existing.sign_offs_required.clone();
         // The SQL UPDATE never names `spec_slug`, and writes `fields`
         // on a live row while freezing them on a terminal one (a07cfddd).
@@ -931,7 +940,7 @@ impl JobsRepository for InMemoryJobs {
         // The whole move under one lock — the Pg adapter's transaction,
         // as Rust — and every event built from the rows as they stand
         // afterwards.
-        let (repinned, rewritten, inserted) = {
+        let (repinned, rewritten, inserted, invalidated) = {
             let mut state = self.inner.lock().expect("poisoned");
             let Some(job) = state.jobs.get_mut(&job_key(id)) else {
                 return Err(JobsError::NotFound(*id));
@@ -940,6 +949,7 @@ impl JobsRepository for InMemoryJobs {
             job.metadata = crate::repin::appended(&job.metadata, record);
             let repinned = job.clone();
             let mut rewritten = Vec::new();
+            let mut invalidated = Vec::new();
             for r in &plan.reprojected {
                 let key = step_key(&r.step.id);
                 let Some(stored) = state.steps.get(&key) else {
@@ -953,11 +963,20 @@ impl JobsRepository for InMemoryJobs {
                         ..stored.clone()
                     }
                 } else {
-                    Step {
+                    // A re-projection that moves an open step's text moves
+                    // its shape, and kills its live stamps like any edit
+                    // (design 87329a13) — or a move to another version
+                    // and back would revive them.
+                    let mut next = Step {
                         status: stored.status,
                         sign_offs: stored.sign_offs.clone(),
                         ..r.step.clone()
-                    }
+                    };
+                    let before = stored.shape_hash();
+                    invalidated.extend(crate::events::void_stamps_if_moved(
+                        stamp, &before, &mut next,
+                    ));
+                    next
                 };
                 touch_step(&mut state, key.clone(), stamp.timestamp);
                 state.steps.insert(key, next.clone());
@@ -969,7 +988,7 @@ impl JobsRepository for InMemoryJobs {
                 .filter(|s| insert_step_locked(&mut state, s, stamp.timestamp))
                 .cloned()
                 .collect();
-            (repinned, rewritten, inserted)
+            (repinned, rewritten, inserted, invalidated)
         };
         let mut events = vec![stamp.event(
             crate::events::JOB_UPDATED,
@@ -981,6 +1000,7 @@ impl JobsRepository for InMemoryJobs {
                 crate::events::step_state_payload(s),
             )
         }));
+        events.extend(invalidated);
         events.extend(inserted.iter().map(|s| {
             stamp.event(
                 crate::events::STEP_CREATED,
@@ -1111,8 +1131,10 @@ impl JobsRepository for InMemoryJobs {
         // Mirror the Pg adapter: merge under the lock against the row
         // as it stands, null removes, no other field moves, a terminal
         // row refuses rather than silently freezing, and the
-        // STEP_UPDATED event is built from the post-merge row.
-        let merged = {
+        // STEP_UPDATED event is built from the post-merge row — with
+        // the stamps a moved shape killed voided on it, and their
+        // invalidation event recorded after it (design 87329a13).
+        let (merged, invalidated) = {
             let mut state = self.inner.lock().expect("poisoned");
             let key = step_key(id);
             let Some(step) = state.steps.get_mut(&key) else {
@@ -1135,17 +1157,20 @@ impl JobsRepository for InMemoryJobs {
                     md.insert(k.clone(), v.clone());
                 }
             }
+            let shape_before = step.shape_hash();
             step.metadata = serde_json::Value::Object(md);
+            let invalidated = crate::events::void_stamps_if_moved(stamp, &shape_before, step);
             let merged = step.clone();
             // Mirrors the SQL's `updated_at = stamp.timestamp`.
             touch_step(&mut state, key, stamp.timestamp);
-            merged
+            (merged, invalidated)
         };
         let event = stamp.event(
             crate::events::STEP_UPDATED,
             crate::events::step_state_payload(&merged),
         );
         self.record_all(&[event]);
+        self.record_all(invalidated.as_slice());
         Ok(merged)
     }
 

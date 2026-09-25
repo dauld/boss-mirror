@@ -626,11 +626,32 @@ verify_approval() {
                                   and ((.presence_nonce // "") | type) == "string" and (.presence_nonce // "") != ""
                                   and ((.authority_id // "") | type) == "string" and (.authority_id // "") != "")] as $pres
               | [$pres[] | select(.authority_id as $who | any($approvers[]; . == $who))] as $named
-              | [$named[] | select(.shape_hash == $shape)] as $bound
+              | [$named[] | select(.shape_hash == $shape)] as $onshape
+              # A STAMP DIES WHEN THE SHAPE IT SIGNED LEAVES THE STEP
+              # (backlog c085256d, design 87329a13). The server marks it
+              # voided_at at the edit that moved the shape, and a dead
+              # stamp is no approval even on the shape it signed: content
+              # put back byte for byte (A-B-A) must not revive a withdrawn
+              # one. Only a stamp with no void at all counts — a
+              # voided_at of any value, false included, is dead.
+              | [$onshape[] | select(.voided_at == null)] as $bound
+              # AND THE NEWEST WORD OF AN APPROVER IS THE ONE THAT COUNTS: each
+              # named approver, the last stamp for the role, in the order the
+              # server appended them and of any assurance, must be on the
+              # shape being run. A rejection is signed too, so on a record
+              # that carries no void (written before the server voided
+              # anything) the newer stamp on another shape is what says
+              # the older one was withdrawn. Read, as everything here is,
+              # only from fields the server minted.
+              | [$approvers[] as $who | [$mine[] | select(.authority_id == $who)]
+                 | select(length > 0) | .[-1]] as $newest
+              | [$newest[] | select(.shape_hash != $shape)] as $withdrawn
               | if ($mine | length) == 0 then {err: "no \($r) sign-off is stamped on its approve step"}
                 elif ($pres | length) == 0 then {err: "the \($r) sign-off is \($mine[-1].assurance // "session")-assured, not presence: no passkey signed it"}
                 elif ($named | length) == 0 then {err: "the \($r) presence sign-off is by \([$pres[] | .authority_id] | unique | join(", ")), who is not among the approvers infra/ops/verbs/\($v).json names (\($approvers | join(", "))): who may approve is a named list, never a role (design 03451237 q2)"}
-                elif ($bound | length) == 0 then {err: "the \($r) presence sign-off is bound to shape \($named[-1].shape_hash), and the approve step now hashes to \($shape): the plan on the step is not the plan that was signed"}
+                elif ($onshape | length) == 0 then {err: "the \($r) presence sign-off is bound to shape \($named[-1].shape_hash), and the approve step now hashes to \($shape): the plan on the step is not the plan that was signed"}
+                elif ($withdrawn | length) > 0 then {err: "the newest \($r) sign-off by \($withdrawn[0].authority_id) is bound to shape \($withdrawn[0].shape_hash), and the approve step now hashes to \($shape): an approver'"'"'s newest word on the step is the one that counts, so an older stamp on this shape was withdrawn (design 87329a13)"}
+                elif ($bound | length) == 0 then {err: "the \($r) presence sign-off bound to this shape was voided at \($onshape[-1].voided_at | tostring), when the content it signed left the approve step: a stamp dies when the shape it signed leaves the step, and putting the content back does not revive it (design 87329a13). Approve the plan again"}
                 else ([$bound[] | .stamped_at | ts]) as $t
                   | if any($t[]; . == null) then {err: "the \($r) sign-off carries a stamped_at this runner cannot read: \([$bound[] | .stamped_at | tostring] | join(", "))"}
                     else {at: ($t | max)} end

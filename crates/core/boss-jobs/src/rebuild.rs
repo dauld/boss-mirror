@@ -14,6 +14,13 @@
 //!   audit slices)
 //! - `jobs.step.created` — full Step row → INSERT
 //! - `jobs.step.updated` — full Step row → UPSERT
+//! - `jobs.step.stamps_invalidated` — the stamps an edit voided
+//!   (design 87329a13): each listed stamp on the row marked dead; an
+//!   event from before the list existed voids every stamp alive on the
+//!   row at that point, which is what the edit that emitted it left
+//!   stale. And a void is permanent: a later state event whose payload
+//!   carries a dead stamp alive (every payload written before voids
+//!   existed) does not revive it — the upsert keeps the row's voids.
 //!
 //! Schema columns `created_at` / `updated_at` get filled from the
 //! audit_log row's own `timestamp` field — the event-time recorded
@@ -21,7 +28,7 @@
 //! immutable-audit-log: events are the canonical clock, projections
 //! follow.
 
-use boss_core::job::{Job, Step};
+use boss_core::job::{Job, SignOffStamp, Step};
 use boss_core::partition::Partition;
 use boss_events::replay::{Applied, replay_projection};
 use chrono::{DateTime, Utc};
@@ -50,6 +57,8 @@ pub struct RebuildReport {
     pub jobs_updated: u64,
     pub steps_inserted: u64,
     pub steps_updated: u64,
+    /// Stamps a `jobs.step.stamps_invalidated` event voided.
+    pub stamps_voided: u64,
 }
 
 /// Drop every row in `steps` and `jobs` and replay every
@@ -113,6 +122,10 @@ pub async fn rebuild_jobs_and_steps(pool: &PgPool) -> Result<RebuildReport, Rebu
                             return Ok(Applied::Skipped);
                         }
                     };
+                    let mut step = step;
+                    keep_the_voids(&mut *conn, &mut step)
+                        .await
+                        .map_err(|e| e.to_string())?;
                     let inserted_now = upsert_step(&mut *conn, &step, ev.ts)
                         .await
                         .map_err(|e| e.to_string())?;
@@ -121,6 +134,13 @@ pub async fn rebuild_jobs_and_steps(pool: &PgPool) -> Result<RebuildReport, Rebu
                     } else {
                         report.steps_updated += 1;
                     }
+                    Ok(Applied::Yes)
+                }
+                crate::events::STEP_STAMPS_INVALIDATED => {
+                    let voided = apply_invalidation(&mut *conn, &ev)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    report.stamps_voided += voided;
                     Ok(Applied::Yes)
                 }
                 // Marker events — the sibling state event already carried
@@ -221,6 +241,96 @@ async fn upsert_job(
     .map_err(|e| RebuildError::Storage(e.to_string()))?;
     use sqlx::Row;
     Ok(result.get::<bool, _>("inserted"))
+}
+
+/// The row's stamps as the replay has built them so far, or `None`
+/// when the replay has not written the row yet.
+async fn stored_stamps(
+    conn: &mut sqlx::PgConnection,
+    id: &str,
+) -> Result<Option<Vec<SignOffStamp>>, RebuildError> {
+    let row: Option<(serde_json::Value,)> =
+        sqlx::query_as("SELECT sign_offs FROM steps WHERE id = $1::uuid")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| RebuildError::Storage(e.to_string()))?;
+    Ok(row.map(|(sign_offs,)| serde_json::from_value(sign_offs).unwrap_or_default()))
+}
+
+/// A VOID IS PERMANENT (design 87329a13), in the replay as at the live
+/// write. A state event carries the whole Step, stamps included, and
+/// every one written before voids existed carries a dead stamp alive;
+/// replayed verbatim after the invalidation that killed it, it would
+/// bring the stamp back. The row's voids land on the payload's copies
+/// of the same stamps before the upsert — only a void crosses.
+async fn keep_the_voids(
+    conn: &mut sqlx::PgConnection,
+    step: &mut Step,
+) -> Result<(), RebuildError> {
+    if step.sign_offs.is_empty() {
+        return Ok(());
+    }
+    if let Some(stored) = stored_stamps(conn, &step.id.to_string()).await? {
+        step.apply_voids(&stored);
+    }
+    Ok(())
+}
+
+/// Apply one `jobs.step.stamps_invalidated` to the row it names, and
+/// answer how many stamps it voided. The event lists the stamps it
+/// voided (`voided`), and exactly those are marked dead, as the edit
+/// marked them. An event written before the list existed says only that
+/// the step's shape moved; every stamp alive on the row at that point
+/// was left stale by that edit, so every one dies, dated by the event
+/// and naming it — the same derivation the backfill migration
+/// (20260925145943) applies to the rows already written.
+async fn apply_invalidation(
+    conn: &mut sqlx::PgConnection,
+    ev: &boss_events::replay::ReplayEvent,
+) -> Result<u64, RebuildError> {
+    let Some(step_id) = ev.payload.get("step_id").and_then(|v| v.as_str()) else {
+        warn!(
+            event_id = ev.audit_id,
+            "stamps_invalidated without a step_id; skipping"
+        );
+        return Ok(0);
+    };
+    let Some(mut stamps) = stored_stamps(conn, step_id).await? else {
+        warn!(
+            event_id = ev.audit_id,
+            step_id, "stamps_invalidated for a step the replay has not written; skipping"
+        );
+        return Ok(0);
+    };
+    let before = stamps.clone();
+    match ev.payload.get("voided") {
+        Some(listed) => {
+            let listed: Vec<SignOffStamp> =
+                serde_json::from_value(listed.clone()).unwrap_or_default();
+            boss_core::job::apply_voids(&mut stamps, &listed);
+        }
+        None => {
+            for st in stamps.iter_mut().filter(|st| st.voided_at.is_none()) {
+                st.voided_at = Some(ev.ts);
+                st.voided_by_event = Some(ev.event_id);
+            }
+        }
+    }
+    let voided = stamps
+        .iter()
+        .zip(&before)
+        .filter(|(now, was)| now.voided_at.is_some() && was.voided_at.is_none())
+        .count() as u64;
+    if voided > 0 {
+        sqlx::query("UPDATE steps SET sign_offs = $2 WHERE id = $1::uuid")
+            .bind(step_id)
+            .bind(serde_json::to_value(&stamps).unwrap_or_default())
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| RebuildError::Storage(e.to_string()))?;
+    }
+    Ok(voided)
 }
 
 /// Upsert a Step row. Same timestamp-stamping shape as `upsert_job`.

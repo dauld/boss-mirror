@@ -19,6 +19,20 @@ pub const JOB_CREATED: &str = "jobs.job.created";
 pub const JOB_UPDATED: &str = "jobs.job.updated";
 pub const STEP_CREATED: &str = "jobs.step.created";
 pub const STEP_UPDATED: &str = "jobs.step.updated";
+/// A STAMP DIED (design 87329a13, option C decided 2026-09-25): an edit
+/// moved a stamped step's completion-relevant shape, and every stamp
+/// still alive on it was voided — kept on the step, marked `voided_at` /
+/// `voided_by_event`, never to count again. Payload `{job_id, step_id,
+/// stale_roles, required_roles, voided}`, `voided` being the stamps as
+/// voided. Recorded in the SAME transaction as the edit, and APPLIED by
+/// the rebuild, which voids exactly the listed stamps — or, for an
+/// event written before `voided` existed, every stamp alive on the row
+/// at that point, which is what the edit that emitted it left stale.
+/// It was a marker the rebuild ignored, and the merge door wrote it
+/// best-effort in a transaction of its own, so nothing on the step said
+/// a stamp had died and an A-B-A edit revived a withdrawn approval
+/// (backlog c085256d).
+pub const STEP_STAMPS_INVALIDATED: &str = "jobs.step.stamps_invalidated";
 /// A WorkflowSpec version went live: an author's publish, a
 /// `workflow-publish` Step's `publish_authored` dispatch, or a
 /// bootstrap reconcile inserting/republishing a platform default.
@@ -75,11 +89,6 @@ pub const CADENCE_RETIRED: &str = "jobs.cadence.retired";
 pub const JOB_STATUS_CHANGED: &str = "jobs.job.status_changed";
 pub const STEP_COMPLETED: &str = "jobs.step.completed";
 pub const STEP_SIGNED_OFF: &str = "jobs.step.signed_off";
-/// Loud stamp invalidation (architecture-decisions.md §Step types
-/// are property bundles): a stamped step's completion-relevant shape changed;
-/// the listed stamps no longer attest the current content and the
-/// named roles must re-sign before the step can complete.
-pub const STEP_STAMPS_INVALIDATED: &str = "jobs.step.stamps_invalidated";
 /// A correction was appended beside a completed or skipped step
 /// (`corrections`, design 4105b020): payload `{job_id, step_id, index,
 /// correction}`. The fact of the correction; the job's row state rides
@@ -141,6 +150,57 @@ pub const ESTATE_COMPARED: &str = "jobs.estate.compared";
 /// queue-drain metric joining creation to completion silently read
 /// zero rows. One payload key ends the schism going forward;
 /// historical rows stay as they were written.
+/// The [`STEP_STAMPS_INVALIDATED`] event for stamps already voided on
+/// `step` by [`boss_core::job::Step::void_stamps_if_moved`] under
+/// `event_id` — built with that id, so every voided stamp's
+/// `voided_by_event` names the event that lists it. `None` when nothing
+/// was voided: the event means "these stamps died", not "someone wrote".
+pub fn stamps_invalidated(
+    stamp: &boss_core::publisher::EventStamp,
+    event_id: uuid::Uuid,
+    step: &boss_core::job::Step,
+    voided: &[boss_core::job::SignOffStamp],
+) -> Option<boss_core::event::Event> {
+    if voided.is_empty() {
+        return None;
+    }
+    let mut stale_roles: Vec<&str> = Vec::new();
+    for st in voided {
+        if !stale_roles.contains(&st.role.as_str()) {
+            stale_roles.push(&st.role);
+        }
+    }
+    let mut event = stamp.event(
+        STEP_STAMPS_INVALIDATED,
+        serde_json::json!({
+            "job_id": step.job_id.to_string(),
+            "step_id": step.id.to_string(),
+            "stale_roles": stale_roles,
+            "required_roles": step.sign_offs_required,
+            "voided": voided,
+        }),
+    );
+    event.id = event_id;
+    Some(event)
+}
+
+/// Void the stamps an edit left behind and build the event that records
+/// it, in one call — for a write that has its [`EventStamp`] in hand
+/// when it learns the shape moved (the merge door and the re-pin, both
+/// inside their adapter's transaction). The void is dated with the
+/// stamp's instant, the instant of the edit's own state event.
+///
+/// [`EventStamp`]: boss_core::publisher::EventStamp
+pub fn void_stamps_if_moved(
+    stamp: &boss_core::publisher::EventStamp,
+    shape_before: &str,
+    step: &mut boss_core::job::Step,
+) -> Option<boss_core::event::Event> {
+    let id = uuid::Uuid::new_v4();
+    let voided = step.void_stamps_if_moved(shape_before, stamp.timestamp, id);
+    stamps_invalidated(stamp, id, step, &voided)
+}
+
 pub fn step_state_payload(step: &boss_core::job::Step) -> serde_json::Value {
     let mut v = serde_json::to_value(step).unwrap_or_default();
     if let Some(obj) = v.as_object_mut() {

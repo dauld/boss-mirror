@@ -23,6 +23,10 @@ pub struct ReplayEvent {
     /// `audit_log.id` — the monotonic sequence the replay walks in
     /// order. Carried so the apply step can log which event it skipped.
     pub audit_id: i64,
+    /// `audit_log.event_id` — the event's own id, which a record can
+    /// name as its cause (a sign-off stamp's `voided_by_event`, design
+    /// 87329a13) and a replay must reproduce exactly.
+    pub event_id: uuid::Uuid,
     pub kind: String,
     /// `audit_log.timestamp` — the recorded event time. Apply steps that
     /// stamp a projection column from it read it here; those that don't
@@ -98,18 +102,21 @@ where
             .map_err(|e| e.to_string())?;
     }
 
-    let rows: Vec<(i64, String, DateTime<Utc>, serde_json::Value)> = sqlx::query_as(&format!(
-        "SELECT id, kind, timestamp, payload FROM audit_log WHERE {kind_filter} ORDER BY id"
-    ))
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
+    let rows: Vec<(i64, uuid::Uuid, String, DateTime<Utc>, serde_json::Value)> =
+        sqlx::query_as(&format!(
+            "SELECT id, event_id, kind, timestamp, payload FROM audit_log \
+             WHERE {kind_filter} ORDER BY id"
+        ))
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let mut stats = ReplayStats::default();
-    for (audit_id, kind, ts, payload) in rows {
+    for (audit_id, event_id, kind, ts, payload) in rows {
         stats.processed += 1;
         let event = ReplayEvent {
             audit_id,
+            event_id,
             kind,
             ts,
             payload,

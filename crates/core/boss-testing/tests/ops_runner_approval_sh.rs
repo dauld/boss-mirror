@@ -882,6 +882,84 @@ fn a_rejected_approval_runs_nothing() {
     }
 }
 
+/// A WITHDRAWN APPROVAL DOES NOT COME BACK (backlog c085256d, design
+/// 87329a13, option C). The approver signs X (S1), withdraws — Reject
+/// saves `rejected` and stamps it (S2 on Y); Request changes saves its
+/// decision and stamps nothing — and anyone who can write step metadata
+/// PATCHes X back through the merge door. Byte for byte, S1 matches
+/// the step again, and before this line the write RAN on it, inside
+/// S1's ten-minute window, once a passkey holder completed the step.
+///
+/// The runner judges the record itself, independently of the server
+/// (design 17835005), on two rules. A stamp the server VOIDED — the
+/// edit that took its shape off the step marks it `voided_at` — is not
+/// an approval, even on the shape it signed; that alone covers Request
+/// changes, which leaves no second stamp to compare with. And a named
+/// approver's NEWEST stamp for the role must be on the shape being run,
+/// which covers a record written before the server voided anything.
+#[test]
+fn an_approval_withdrawn_and_restored_runs_nothing() {
+    needs_tools!();
+    let meta = approve_meta(Some(PLAN));
+    let x = shape_of(&meta);
+    let mut rejected = approve_meta(Some(PLAN));
+    rejected["decision"] = json!("rejected");
+    let y = shape_of(&rejected);
+    let voided = |mut s: Value, secs: i64| {
+        s["voided_at"] = json!(iso_ago(secs));
+        s["voided_by_event"] = json!("0e1d2c3b-0000-4000-8000-00000000c085");
+        s
+    };
+
+    // Request changes, as the server records it now: S1 on X, voided by
+    // the edit that took X off the step, and X restored after.
+    let f = Fixture::new("withdrawn-voided");
+    f.packet(job(
+        "completed",
+        meta.clone(),
+        json!([voided(stamp("platform-admin", "presence", &x, 60), 40)]),
+        "ready",
+    ));
+    let (out, writes) = f.run(&[]);
+    assert_refused(&f, &out, &writes, &["platform-admin", "voided"]);
+
+    // Reject, on a record that carries no void (written before the
+    // server voided anything): S1 on X, then the signed rejection S2 on
+    // Y, and X restored. The approver's newest word is the rejection.
+    let f = Fixture::new("withdrawn-by-a-newer-stamp");
+    f.packet(job(
+        "completed",
+        meta.clone(),
+        json!([
+            stamp("platform-admin", "presence", &x, 90),
+            stamp("platform-admin", "presence", &y, 30)
+        ]),
+        "ready",
+    ));
+    let (out, writes) = f.run(&[]);
+    assert_refused(&f, &out, &writes, &[APPROVER, "newest", &y]);
+
+    // The control: after the restore the approver signs X AGAIN, so the
+    // newest stamp is a live one on the shape being run — and it runs.
+    let f = Fixture::new("withdrawn-then-signed-again");
+    f.packet(job(
+        "completed",
+        meta,
+        json!([
+            voided(stamp("platform-admin", "presence", &x, 90), 50),
+            voided(stamp("platform-admin", "presence", &y, 50), 30),
+            stamp("platform-admin", "presence", &x, 20)
+        ]),
+        "ready",
+    ));
+    let (out, _) = f.run(&[]);
+    assert_eq!(
+        f.applied(),
+        Some(vec!["target-a".to_string(), sha256_hex(PLAN.as_bytes())]),
+        "a fresh signature on the restored plan is an approval: {out}"
+    );
+}
+
 /// A session-assured stamp is someone logged in; it is not a passkey.
 #[test]
 fn a_session_assured_stamp_is_refused() {

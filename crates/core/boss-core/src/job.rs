@@ -458,6 +458,46 @@ pub struct SignOffStamp {
     /// stamps and on every stamp written before presence existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_nonce: Option<String>,
+    /// When the stamp DIED: the instant of the edit that took the shape
+    /// it signed off the step (design 87329a13, option C decided
+    /// 2026-09-25). A dead stamp stays on the step — it is the record of
+    /// what was signed — and never counts again, even if the content
+    /// comes back byte for byte: that A-B-A revived a withdrawn passkey
+    /// approval (backlog c085256d). Written by the server in the edit's
+    /// own write, never by a caller; absent on a live stamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voided_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The `jobs.step.stamps_invalidated` event that voided it — the
+    /// event lists this stamp, and the rebuild applies the void from it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voided_by_event: Option<uuid::Uuid>,
+}
+
+impl SignOffStamp {
+    /// Whether `other` is this same stamp — the same act of signing,
+    /// told apart by everything the stamp recorded when it was made. A
+    /// void is carried from one copy of a stamp to another by this.
+    pub fn same_stamp(&self, other: &SignOffStamp) -> bool {
+        self.authority_id == other.authority_id
+            && self.role == other.role
+            && self.stamped_at == other.stamped_at
+            && self.shape_hash == other.shape_hash
+            && self.presence_nonce == other.presence_nonce
+    }
+}
+
+/// [`Step::apply_voids`] over a bare list of stamps — for a reader that
+/// holds a row's stamps without the rest of its step (the rebuild).
+pub fn apply_voids(stamps: &mut [SignOffStamp], from: &[SignOffStamp]) {
+    for st in stamps.iter_mut().filter(|st| st.voided_at.is_none()) {
+        if let Some(dead) = from
+            .iter()
+            .find(|d| d.voided_at.is_some() && d.same_stamp(st))
+        {
+            st.voided_at = dead.voided_at;
+            st.voided_by_event = dead.voided_by_event;
+        }
+    }
 }
 
 /// Hash of a step's completion-relevant content — what a sign-off
@@ -566,8 +606,10 @@ pub struct Step {
     pub fields: Vec<StepField>,
     /// Stamps collected so far. A stamp attests the step *in the
     /// shape it had when stamped* (`shape_hash`); completion counts
-    /// only stamps whose hash matches the current shape. Stale stamps
-    /// stay recorded — they are provenance, not validity.
+    /// only [`Step::live_stamps`] — never voided, on the current shape.
+    /// The edit that moves the shape voids every live stamp for good
+    /// (design 87329a13). Dead stamps stay recorded — they are
+    /// provenance, not validity.
     #[serde(default)]
     pub sign_offs: Vec<SignOffStamp>,
     #[serde(default)]
@@ -665,19 +707,85 @@ impl Step {
         self
     }
 
-    /// True when every required role has a stamp attesting the step's
-    /// *current* shape. Stale stamps (collected before a
-    /// later edit) don't count.
+    /// [`step_shape_hash`] of this step as it stands.
+    pub fn shape_hash(&self) -> String {
+        step_shape_hash(&self.title, &self.metadata)
+    }
+
+    /// THE ONE RULE for which stamps count (design 87329a13): a stamp is
+    /// live when it was never voided AND it attests the step's current
+    /// shape. The completion's sign-off contract, the 409 that names the
+    /// roles still owed, and the sign-off door's idempotent re-stamp all
+    /// read this, and nothing else decides it — one fact read in three
+    /// places was three chances to disagree (CLAUDE.md §9a).
+    ///
+    /// The void is what the shape compare alone could not say. Until
+    /// 2026-09-25 a stamp counted whenever its hash matched, so content
+    /// taken off the step and put back (A-B-A) revived a withdrawn
+    /// approval (backlog c085256d).
+    pub fn live_stamps(&self) -> impl Iterator<Item = &SignOffStamp> {
+        let current = self.shape_hash();
+        self.sign_offs
+            .iter()
+            .filter(move |st| st.voided_at.is_none() && st.shape_hash == current)
+    }
+
+    /// Every required role that holds no live stamp, in the order the
+    /// step requires them — the 409's `missing_or_stale_roles`.
+    pub fn roles_without_a_live_stamp(&self) -> Vec<&str> {
+        self.sign_offs_required
+            .iter()
+            .filter(|role| !self.live_stamps().any(|st| &st.role == *role))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// True when every required role holds a live stamp.
     pub fn sign_offs_satisfied(&self) -> bool {
-        if self.sign_offs_required.is_empty() {
-            return true;
+        self.roles_without_a_live_stamp().is_empty()
+    }
+
+    /// A STAMP DIES WHEN THE SHAPE IT SIGNED LEAVES THE STEP (design
+    /// 87329a13, option C). Called by every write that can move a
+    /// step's content, with the shape the step had before it: when the
+    /// shape moved, every stamp not already dead is voided — marked
+    /// `voided_at` / `voided_by_event`, never removed — and copies of
+    /// the stamps it voided are returned for the event that records it.
+    /// An unmoved shape voids nothing.
+    ///
+    /// EVERY stamp still alive, not only those on `shape_before`. Under
+    /// this rule a live stamp is always on the current shape, so the two
+    /// are the same set — except for a stamp written before the rule,
+    /// which a past edit left stale without killing. Voiding it too is
+    /// what that edit would have done, and leaving it alive would let a
+    /// later edit back to its shape revive it.
+    pub fn void_stamps_if_moved(
+        &mut self,
+        shape_before: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        by_event: uuid::Uuid,
+    ) -> Vec<SignOffStamp> {
+        if self.shape_hash() == shape_before {
+            return Vec::new();
         }
-        let current = step_shape_hash(&self.title, &self.metadata);
-        self.sign_offs_required.iter().all(|role| {
-            self.sign_offs
-                .iter()
-                .any(|st| &st.role == role && st.shape_hash == current)
-        })
+        self.sign_offs
+            .iter_mut()
+            .filter(|st| st.voided_at.is_none())
+            .map(|st| {
+                st.voided_at = Some(at);
+                st.voided_by_event = Some(by_event);
+                st.clone()
+            })
+            .collect()
+    }
+
+    /// Carry the voids `from` records onto this step's copies of the same
+    /// stamps. A void only ever lands; one this step already records is
+    /// kept as it is, and nothing is added, removed or revived — so a
+    /// write carrying a stale copy of the stamps cannot bring a dead one
+    /// back, and a replayed event cannot move a void it did not make.
+    pub fn apply_voids(&mut self, from: &[SignOffStamp]) {
+        apply_voids(&mut self.sign_offs, from);
     }
 
     pub fn with_blocked_by(mut self, blocked_by: Vec<StepId>) -> Self {
@@ -993,6 +1101,129 @@ mod tests {
         let back: StepField =
             serde_json::from_value(serde_json::to_value(&stated).unwrap()).unwrap();
         assert_eq!(back, stated);
+    }
+
+    fn stamped_step(meta: serde_json::Value) -> Step {
+        let mut s = Step::new(JobId::new(), "sign-off", "Approve", 0)
+            .with_sign_offs_required(vec!["cto".into()]);
+        s.metadata = meta;
+        s.sign_offs.push(SignOffStamp {
+            authority_id: "emp-a".into(),
+            role: "cto".into(),
+            stamped_at: chrono::Utc::now(),
+            shape_hash: s.shape_hash(),
+            assurance: Assurance::Presence,
+            presence_nonce: Some("n1".into()),
+            voided_at: None,
+            voided_by_event: None,
+        });
+        s
+    }
+
+    /// A-B-A (backlog c085256d, design 87329a13): the stamp dies when X
+    /// leaves the step and stays dead when X comes back — the shape
+    /// compare alone said it counted again.
+    #[test]
+    fn a_stamp_voided_by_a_shape_change_stays_dead_when_the_shape_returns() {
+        let x = serde_json::json!({"decision": "approved"});
+        let mut s = stamped_step(x.clone());
+        assert!(s.sign_offs_satisfied());
+        let before = s.shape_hash();
+        s.metadata = serde_json::json!({"decision": "changes-requested"});
+        let event = uuid::Uuid::new_v4();
+        let at = chrono::Utc::now();
+        let voided = s.void_stamps_if_moved(&before, at, event);
+        assert_eq!(voided.len(), 1);
+        assert_eq!(voided[0].voided_by_event, Some(event));
+        assert_eq!(s.sign_offs[0].voided_at, Some(at));
+        s.metadata = x;
+        assert_eq!(s.shape_hash(), before, "back on the signed shape");
+        assert!(!s.sign_offs_satisfied(), "a dead stamp does not count");
+        assert_eq!(s.roles_without_a_live_stamp(), vec!["cto"]);
+        assert_eq!(s.live_stamps().count(), 0);
+    }
+
+    /// An unmoved shape voids nothing, and a second move re-voids nothing
+    /// already dead — the first void is the one on record.
+    #[test]
+    fn only_a_moved_shape_voids_and_a_void_is_written_once() {
+        let mut s = stamped_step(serde_json::json!({"k": 1}));
+        let same = s.shape_hash();
+        assert!(
+            s.void_stamps_if_moved(&same, chrono::Utc::now(), uuid::Uuid::new_v4())
+                .is_empty()
+        );
+        let first = uuid::Uuid::new_v4();
+        s.metadata = serde_json::json!({"k": 2});
+        assert_eq!(
+            s.void_stamps_if_moved(&same, chrono::Utc::now(), first)
+                .len(),
+            1
+        );
+        let moved = s.shape_hash();
+        s.metadata = serde_json::json!({"k": 3});
+        assert!(
+            s.void_stamps_if_moved(&moved, chrono::Utc::now(), uuid::Uuid::new_v4())
+                .is_empty(),
+            "nothing left alive to void"
+        );
+        assert_eq!(s.sign_offs[0].voided_by_event, Some(first));
+    }
+
+    /// A stamp written before the rule, stale but never voided (its shape
+    /// is neither the old nor the new one), dies at the next move too —
+    /// otherwise an edit back to ITS shape would revive it.
+    #[test]
+    fn a_stale_stamp_from_before_the_rule_dies_at_the_next_move() {
+        let mut s = stamped_step(serde_json::json!({"k": 1}));
+        s.metadata = serde_json::json!({"k": 2});
+        let before = s.shape_hash();
+        s.metadata = serde_json::json!({"k": 3});
+        let voided = s.void_stamps_if_moved(&before, chrono::Utc::now(), uuid::Uuid::new_v4());
+        assert_eq!(voided.len(), 1, "{voided:?}");
+        s.metadata = serde_json::json!({"k": 1});
+        assert!(!s.sign_offs_satisfied());
+    }
+
+    /// Voids carry by identity and only ever land: a copy of the stamps
+    /// that predates the void cannot lift it, and an unrelated stamp is
+    /// untouched.
+    #[test]
+    fn apply_voids_lands_a_void_and_never_lifts_one() {
+        let mut row = stamped_step(serde_json::json!({"k": 1}));
+        let mut other = row.sign_offs[0].clone();
+        other.authority_id = "emp-b".into();
+        row.sign_offs.push(other);
+        let stale_copy = row.sign_offs.clone();
+
+        let mut dead = row.sign_offs[0].clone();
+        dead.voided_at = Some(chrono::Utc::now());
+        dead.voided_by_event = Some(uuid::Uuid::new_v4());
+        row.apply_voids(std::slice::from_ref(&dead));
+        assert_eq!(row.sign_offs[0].voided_at, dead.voided_at);
+        assert!(
+            row.sign_offs[1].voided_at.is_none(),
+            "another signer's stamp"
+        );
+
+        row.apply_voids(&stale_copy);
+        assert_eq!(
+            row.sign_offs[0].voided_at, dead.voided_at,
+            "a live copy lifts nothing"
+        );
+    }
+
+    /// A stamp written before the fields existed reads as live.
+    #[test]
+    fn a_stamp_without_void_fields_reads_as_live_and_serializes_without_them() {
+        let st: SignOffStamp = serde_json::from_value(serde_json::json!({
+            "authority_id": "emp-a", "role": "cto",
+            "stamped_at": "2026-09-25T07:00:00Z", "shape_hash": "h"
+        }))
+        .unwrap();
+        assert!(st.voided_at.is_none() && st.voided_by_event.is_none());
+        let back = serde_json::to_value(&st).unwrap();
+        assert!(back.get("voided_at").is_none() && back.get("voided_by_event").is_none());
     }
 
     #[test]

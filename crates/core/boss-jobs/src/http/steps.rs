@@ -1165,22 +1165,29 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         step.completed_on = Some(boss_clock_client::now_from(&state.clock).await.date_naive());
     }
 
-    // Sign-off contract: a step completes only when every required role has
-    // stamped its *current* shape. Stale stamps (edits after stamping)
-    // don't count.
+    // A STAMP DIES WHEN THE SHAPE IT SIGNED LEAVES THE STEP (design
+    // 87329a13, backlog c085256d). This write's content is final for the
+    // hash from here on — the server keys stamped below it (the decision
+    // record, `aborted_from`) come after, and are not edits — so if it
+    // moves the shape, every stamp still alive dies now: on this copy,
+    // which the write persists and the STEP_UPDATED below carries, and on
+    // the record through the invalidation event listing them, recorded in
+    // the same transaction. Before the sign-off contract, so a write that
+    // both moves the content and completes is judged on the dead stamps.
+    // Nothing is written if this PUT is refused, and a refused PUT moves
+    // no shape either.
+    let void_event_id = uuid::Uuid::new_v4();
+    let voided = step.void_stamps_if_moved(
+        &old.shape_hash(),
+        boss_clock_client::wall_now(),
+        void_event_id,
+    );
+
+    // Sign-off contract: a step completes only when every required role
+    // holds a LIVE stamp — never voided, on the current shape
+    // (`Step::live_stamps`, the one rule).
     if is_flipping_to_done && !step.sign_offs_satisfied() {
-        let current = boss_core::job::step_shape_hash(&step.title, &step.metadata);
-        let missing: Vec<&str> = step
-            .sign_offs_required
-            .iter()
-            .filter(|role| {
-                !step
-                    .sign_offs
-                    .iter()
-                    .any(|st| &&st.role == role && st.shape_hash == current)
-            })
-            .map(|r| r.as_str())
-            .collect();
+        let missing = step.roles_without_a_live_stamp();
         return (
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -1487,15 +1494,6 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         }
     }
 
-    // Loud invalidation: an edit that changes the step's
-    // completion-relevant shape makes existing stamps stale — they
-    // attested different content. Stamps stay recorded (provenance);
-    // the event tells the surface who must re-sign. Stamping itself
-    // moved to POST .../sign-offs.
-    let stamps_invalidated = !old.sign_offs.is_empty()
-        && boss_core::job::step_shape_hash(&old.title, &old.metadata)
-            != boss_core::job::step_shape_hash(&step.title, &step.metadata);
-
     // HOW an answer-question was decided (c17871fe): at the flip the
     // server compares the answer to the packet's `proposed` text and
     // stamps `accepted_as_proposed`; off the flip the stored value
@@ -1794,17 +1792,11 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         ));
     }
 
-    if stamps_invalidated {
-        let stale_roles: Vec<String> = step.sign_offs.iter().map(|st| st.role.clone()).collect();
-        step_events.push(stamp.event(
-            events::STEP_STAMPS_INVALIDATED,
-            serde_json::json!({
-                "job_id": job_id.to_string(),
-                "step_id": step_id.to_string(),
-                "stale_roles": stale_roles,
-                "required_roles": step.sign_offs_required,
-            }),
-        ));
+    // The stamps this write killed, recorded with it — after its
+    // STEP_UPDATED, which already carries them dead, so a replay lands
+    // the row and then applies the void to it (a no-op by then).
+    if let Some(event) = events::stamps_invalidated(&stamp, void_event_id, &step, &voided) {
+        step_events.push(event);
     }
 
     // Refuse, out loud, what the row would silently drop.
@@ -2297,12 +2289,18 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
     }
     let stamp = stamp;
 
-    let merged = match state
+    // A merge that moves the shape voids the stamps it leaves behind
+    // INSIDE the adapter's transaction, judged against the row under its
+    // lock, and records the invalidation event with the row (design
+    // 87329a13). It was judged here, against `old` — a read taken before
+    // the write — and recorded best-effort in a transaction of its own:
+    // a void the log could lose, which the rebuild now depends on.
+    match state
         .jobs
         .merge_step_metadata_at(&step_id, &patch, &stamp)
         .await
     {
-        Ok(step) => step,
+        Ok(_) => {}
         // The adapter's row-riding check wins over our `old` fetch —
         // it saw the step at write time — so both the pre-known and
         // the raced terminal case land here, in the PUT's 409 shape.
@@ -2337,31 +2335,6 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
             return (StatusCode::NOT_FOUND, "step not found").into_response();
         }
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-
-    // Loud invalidation, same contract as the PUT: a merge that
-    // changed the step's completion-relevant shape makes existing
-    // stamps stale. Computed from the ACTUAL post-merge row and
-    // recorded through the outbox's standalone path (the marker is
-    // informational — the rebuild ignores it — so it rides its own
-    // small transaction, like the post-materialization ready pass).
-    if !old.sign_offs.is_empty()
-        && boss_core::job::step_shape_hash(&old.title, &old.metadata)
-            != boss_core::job::step_shape_hash(&merged.title, &merged.metadata)
-    {
-        let stale_roles: Vec<String> = merged.sign_offs.iter().map(|st| st.role.clone()).collect();
-        let event = stamp.event(
-            events::STEP_STAMPS_INVALIDATED,
-            serde_json::json!({
-                "job_id": job_id.to_string(),
-                "step_id": step_id.to_string(),
-                "stale_roles": stale_roles,
-                "required_roles": merged.sign_offs_required,
-            }),
-        );
-        if let Err(e) = state.jobs.record_events(std::slice::from_ref(&event)).await {
-            tracing::warn!(step_id = %step_id, error = %e, "metadata merge: failed to record stamps-invalidated marker");
-        }
     }
 
     // Same wake as the job metadata patch: a step-metadata write can
@@ -3005,12 +2978,12 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
     if assured.falls_short() {
         return assured.refusal();
     }
-    let shape = boss_core::job::step_shape_hash(&step.title, &step.metadata);
-    if step
-        .sign_offs
-        .iter()
-        .any(|st| st.role == role && st.shape_hash == shape)
-    {
+    let shape = step.shape_hash();
+    // Idempotent only over a LIVE stamp (`Step::live_stamps`, design
+    // 87329a13): a dead stamp on this same shape — the content left and
+    // came back — is not a signature of it, and answering "already
+    // signed" would leave the approver no way to sign it at all.
+    if step.live_stamps().any(|st| st.role == role) {
         return Json(step).into_response(); // idempotent re-stamp
     }
     let now = boss_clock_client::now_from(&state.clock).await;
@@ -3021,6 +2994,8 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
         shape_hash: shape.clone(),
         assurance: produced,
         presence_nonce: presence_nonce.clone(),
+        voided_at: None,
+        voided_by_event: None,
     };
     // OUTBOX (phase 2): the signed-off marker records in the SAME
     // transaction as the stamp append.
