@@ -47,7 +47,9 @@
 //   10 67825067  FIXED   — a malformed 200 from any board read is its
 //                         failure line (c3e4edcc's sweep had closed
 //                         without reaching this page)
-//   11 8dcd28ce  open    — a denied scope (server) paints as a clear yard
+//   11 8dcd28ce  FIXED   — server (stations.rs readable_predicate: a
+//                         denied scope is a 403, train #600); the refusal
+//                         is the load's failure line here
 //   12 371aa184  open    — the failure lines are pinned HERE (that half is
 //                         this car's); the envelope's window_hours and
 //                         unsequenced window reads are still current
@@ -536,11 +538,26 @@ test.describe('the marshalling station — the empty leg and every failure line'
     await expectClearPaint(page);
   });
 
-  test('CURRENT, gap 11 (8dcd28ce): a denied scope answers the empty envelope, so it paints exactly as clear', async ({ page }) => {
-    // stations_load's answer to a caller whose scope predicate is None.
-    await install(page, { ...EMPTY, load: (r) => json(r, { data: [], total: 0 }) });
+  // Gap 11, FIXED on the server by train #600 (de8e1c3b, 2026-09-24):
+  // stations.rs `readable_predicate` refuses a caller whose job scope
+  // translates to None with a 403 naming them, where stations_load used
+  // to answer the empty envelope an idle network sends. This spec was
+  // written a day later and pinned that retired empty 200 as CURRENT,
+  // so it asserted a clear yard for an answer the server no longer
+  // gives. The mock is now the server's own refusal (its body is the
+  // server's words for an intern), and the paint is the failure line.
+  test('gap 11 (8dcd28ce): a denied scope is refused 403, and the refusal is the failure line, never a clear yard', async ({ page }) => {
+    await install(page, {
+      ...EMPTY,
+      load: (r) => json(r, 'emp-x (role intern) may read no packets, so no station can be evaluated for them', 403),
+    });
     await mountPage(page, PATH, TITLE);
-    await expectClearPaint(page);
+    await expect(board(page).locator('.my-fail.load-failed')).toHaveText(
+      'The station load did not answer: /api/stations/load: HTTP 403. An unreachable read is not an empty yard, so this page shows nothing rather than a clear one.',
+    );
+    await expect(board(page)).not.toContainText('Every watched station is clear.');
+    await expect(board(page).locator('.my-quiet')).toHaveCount(0);
+    await expect(board(page).locator('.my-section')).toHaveCount(0);
   });
 
   // Gap 10, FIXED by 67825067: each board read's parse goes through the

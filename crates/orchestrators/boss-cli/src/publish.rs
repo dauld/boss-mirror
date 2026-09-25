@@ -105,6 +105,22 @@ pub(crate) fn check_branch(branch: &str) -> Result<()> {
     if branch.starts_with('-') {
         bail!("branch name {branch:?} would be read as a flag by git");
     }
+    // THE TRUNK IS NOT A BRANCH THIS DOOR WRITES (backlog f9256445,
+    // design d812f1b7 D3). `boss publish`'s second hop is `git push -f
+    // origin <tmp>:refs/heads/<branch>`, so `boss publish main` from any
+    // clone holding an older main force-writes the trunk back: on
+    // 2026-09-25 forge main moved off train 20:04's merge within 32
+    // seconds, and this was the one path in the tree that could have
+    // done it. `HEAD` resolves to whatever the remote calls its default,
+    // and a full `refs/…` name reaches a ref outside `refs/heads/`. The
+    // publish-request runner reads this same check, so neither door can.
+    if branch == "main" || branch == "HEAD" || branch.starts_with("refs/") {
+        bail!(
+            "branch name {branch:?} is the trunk or a full ref, and this door force-pushes \
+             refs/heads/<branch>. Main is written by one path only: a car rides a train, and \
+             the conductor merges the train's PR."
+        );
+    }
     Ok(())
 }
 
@@ -298,6 +314,39 @@ mod tests {
     #[test]
     fn a_branch_name_that_looks_like_a_flag_is_refused() {
         assert!(check_branch("--force").is_err());
+    }
+
+    /// THE TRUNK IS NOT A BRANCH THIS DOOR WRITES (backlog f9256445,
+    /// design d812f1b7 D3). Hop 2 is `git push -f origin
+    /// <tmp>:refs/heads/<branch>` from the conductor clone, so `boss
+    /// publish main` from any clone holding an older main force-writes
+    /// the trunk back — the shape of 2026-09-25, when forge main moved
+    /// off train 20:04's merge within 32 seconds. Each name that reaches
+    /// the trunk or a ref outside `refs/heads/<branch>` is planted here,
+    /// and the refusal names the path main is written by.
+    #[test]
+    fn the_trunk_head_and_a_full_ref_are_refused_naming_the_merge_path() {
+        for trunk in [
+            "main",
+            "HEAD",
+            "refs/heads/main",
+            "refs/tags/v1",
+            "refs/tmp/x",
+        ] {
+            let e = check_branch(trunk)
+                .expect_err(&format!("{trunk:?} must be refused"))
+                .to_string();
+            assert!(e.contains("a car rides a train"), "{trunk}: {e}");
+        }
+        // A branch that merely NAMES main is an ordinary branch.
+        for fine in [
+            "fix/main-lost",
+            "feat/refs-and-heads",
+            "mainline",
+            "fix/HEAD-read",
+        ] {
+            assert!(check_branch(fine).is_ok(), "{fine:?} is an ordinary branch");
+        }
     }
 
     /// The verification the by-hand version skipped.
