@@ -359,3 +359,52 @@ required = true
 name = "completed_at"
 field_type = "date-time"
 required = false
+
+# UNLANDED (backlog f9256445, design d812f1b7 Q1, answered 2026-09-25).
+# A car the conductor landed whose merge forge MAIN THEN LOST. Train
+# 2026-09-25 20:04 merged car dec3136a as c85941b4 at 20:10:41Z; by
+# 20:11:14Z main was back at 777a5888 and the next train was built on
+# that. The record said "landed on main" and `proven` stood ready for a
+# change main does not carry. `merged` needs a proof no probe can give;
+# `disproved` would record a claim measured false that was never
+# measured; `abandoned` says the work was given up while it must ride
+# again; `settled` and `landed-twin` say it needed no merge or landed
+# elsewhere.
+#
+# `boss car unland <car> --merge-ref <sha>` is the one writer, and the
+# conductor's merge-lost arm calls it for every car of a train that
+# ends `merge-lost`. It reads the ancestry ITSELF (the merge is NOT an
+# ancestor of the forge's main; a git failure refuses), corrects the
+# landing note through the corrections door, opens a SUCCESSOR car for
+# the same branch with `supersedes` naming this one — its first open
+# work is `gate`, on current main — and records the merge, the reading
+# and the successor in the three REQUIRED fields before the marker
+# readies this step. `aborted`: the delivery did not complete, and an
+# aborted terminal completes from any open state, so the required
+# fields are its gate. Never a reopen: the log keeps both facts, and
+# `merged` stays "true" beside `unlanded`. The item edge is not
+# followed — the arrival rule fires on `merged` only, and the successor
+# carries the same item, which closes when the work really lands.
+[[workflow.step]]
+title = "unlanded"
+kind = "outcome"
+ready_when = "steps.review.done AND job.metadata.merged = \"true\" AND job.metadata.unlanded = \"true\""
+title_template = "Unlanded — main lost its merge; a successor rides again"
+terminal = { outcome = "unlanded" }
+metadata_defaults = { outcome_kind = "aborted" }
+[[workflow.step.fields]]
+name = "merge_ref"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "evidence"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "superseded_by"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "completed_at"
+field_type = "date-time"
+required = false

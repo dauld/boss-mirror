@@ -723,7 +723,58 @@ fn evidence_of(r: &Retirement) -> &str {
 }
 
 pub(crate) async fn read(http: &reqwest::Client, id: &str) -> Result<Value> {
-    crate::gate::api(http, reqwest::Method::GET, &format!("/api/jobs/{id}"), None)
+    read_via(&Http(http), id).await
+}
+
+/// The jobs API as a car writer speaks to it: one call. The operator's
+/// verbs answer it with their signed client ([`Http`], or the signed
+/// [`crate::steps::Wire`]); the train conductor answers it with its own
+/// blip-guarded client, signed as itself — which is how `boss car
+/// unland`'s writer runs unchanged under the conductor's merge-lost arm
+/// (backlog f9256445) rather than as a second copy of these writes.
+#[async_trait::async_trait]
+pub(crate) trait Door: Send + Sync {
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Option<Value>>;
+}
+
+/// The operator's door: `crate::gate::api`, signed as the actor running
+/// the verb.
+pub(crate) struct Http<'a>(pub(crate) &'a reqwest::Client);
+
+#[async_trait::async_trait]
+impl Door for Http<'_> {
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Option<Value>> {
+        crate::gate::api(self.0, method, path, body).await
+    }
+}
+
+/// The signed wire — the same actor rule as [`Http`], at an explicit
+/// base, which is what lets a test drive the writer against a real
+/// router on a local socket.
+#[async_trait::async_trait]
+impl Door for crate::steps::Wire {
+    async fn send(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<Option<Value>> {
+        self.call(method, path, body).await
+    }
+}
+
+pub(crate) async fn read_via(door: &dyn Door, id: &str) -> Result<Value> {
+    door.send(reqwest::Method::GET, &format!("/api/jobs/{id}"), None)
         .await?
         .with_context(|| format!("car {id} read back empty"))
 }
@@ -740,9 +791,22 @@ pub(crate) async fn apply(
     slug: &str,
     verb: &str,
 ) -> Result<()> {
+    apply_via(&Http(http), id, car_json, w, slug, verb).await
+}
+
+/// [`apply`] through any [`Door`] — `boss car unland` and the
+/// conductor's merge-lost arm close a car through `unlanded` with these
+/// same writes (backlog f9256445).
+pub(crate) async fn apply_via(
+    door: &dyn Door,
+    id: &str,
+    car_json: &Value,
+    w: &car_retire::RetireWrites,
+    slug: &str,
+    verb: &str,
+) -> Result<()> {
     use reqwest::Method;
-    crate::gate::api(
-        http,
+    door.send(
         Method::PATCH,
         &w.outcome.merge_path(id),
         Some(w.outcome.metadata.clone()),
@@ -751,8 +815,7 @@ pub(crate) async fn apply(
     .context("recording the evidence on the terminal")?;
     let held = w.held_review.as_deref();
     if let Some(review) = held {
-        crate::gate::api(
-            http,
+        door.send(
             Method::PATCH,
             &format!("/api/jobs/{id}/steps/{review}/metadata"),
             Some(crate::steps::release_patch_body()),
@@ -760,13 +823,13 @@ pub(crate) async fn apply(
         .await
         .context("releasing the hold")?;
     }
-    if let Err(e) = crate::gate::api(
-        http,
-        Method::PATCH,
-        &format!("/api/jobs/{id}/metadata"),
-        Some(w.marker.clone()),
-    )
-    .await
+    if let Err(e) = door
+        .send(
+            Method::PATCH,
+            &format!("/api/jobs/{id}/metadata"),
+            Some(w.marker.clone()),
+        )
+        .await
     {
         // Put the brake back on: a released duplicate with no terminal
         // would board the next train and red it on an empty diff.
@@ -776,20 +839,20 @@ pub(crate) async fn apply(
                 .and_then(|s| s.pointer("/metadata/hold"))
                 .and_then(Value::as_str),
         ) {
-            let _ = crate::gate::api(
-                http,
-                Method::PATCH,
-                &format!("/api/jobs/{id}/steps/{review}/metadata"),
-                Some(crate::steps::hold_patch(reason)),
-            )
-            .await;
+            let _ = door
+                .send(
+                    Method::PATCH,
+                    &format!("/api/jobs/{id}/steps/{review}/metadata"),
+                    Some(crate::steps::hold_patch(reason)),
+                )
+                .await;
         }
         return Err(e.context("setting the terminal's marker (the hold was put back)"));
     }
     // The marker readied the terminal; the dispatcher completes a ready
     // outcome on its own, so it may already be done. Complete it here
     // only if it is not — and judge by the read-back either way.
-    let marked = read(http, id).await?;
+    let marked = read_via(door, id).await?;
     let done = |c: &Value| {
         car::find_step(c, slug, "")
             .and_then(|s| s.get("status"))
@@ -797,17 +860,17 @@ pub(crate) async fn apply(
             == Some("completed")
     };
     if !done(&marked)
-        && let Err(e) = crate::gate::api(
-            http,
-            Method::PUT,
-            &w.outcome.status_path(id),
-            Some(w.outcome.status_body.clone()),
-        )
-        .await
+        && let Err(e) = door
+            .send(
+                Method::PUT,
+                &w.outcome.status_path(id),
+                Some(w.outcome.status_body.clone()),
+            )
+            .await
     {
         println!("  completing `{slug}` answered {e} — reading the car to see who did");
     }
-    let after = read(http, id).await?;
+    let after = read_via(door, id).await?;
     let outcome = after.pointer("/metadata/outcome").and_then(Value::as_str);
     if after.get("status").and_then(Value::as_str) != Some("closed") || outcome != Some(slug) {
         bail!(

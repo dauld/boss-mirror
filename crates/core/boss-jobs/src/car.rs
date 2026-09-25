@@ -1154,18 +1154,29 @@ pub fn open_car_for<'a>(cars: &'a [Value], branch: &str) -> Option<&'a Value> {
 /// marker v3 ship-a-change gates its `merged` step on — the dispatcher
 /// closes the Job from it, so a car can be marked before it is closed).
 /// An abandoned or cancelled car is spent, not landed.
+///
+/// And a car whose landing main LOST is not landed either (backlog
+/// f9256445): it keeps `merged` — the forge did merge it, and the record
+/// keeps that — and carries the `unlanded` marker `boss car unland`
+/// writes (`car_unland::UNLANDED_MARKER`). Read as landed, its
+/// successor's re-gate would be skipped as landed content, and the work
+/// could never ride again.
 pub fn is_landed(car: &Value) -> bool {
     let md = car.get("metadata");
-    let closed_merged = car.get("status").and_then(Value::as_str) == Some("closed")
-        && md.and_then(|m| m.get("outcome")).and_then(Value::as_str) == Some("merged");
-    // The conductor writes the marker as the STRING "true"; a bool is
-    // accepted for the same meaning, and an explicit false is neither.
-    let marked = match md.and_then(|m| m.get("merged")) {
+    let flag = |k: &str| match md.and_then(|m| m.get(k)) {
+        // The conductor writes the marker as the STRING "true"; a bool
+        // is accepted for the same meaning, and an explicit false is
+        // neither.
         Some(Value::Bool(b)) => *b,
         Some(Value::String(s)) => s == "true",
         _ => false,
     };
-    closed_merged || marked
+    if flag(crate::car_unland::UNLANDED_MARKER) {
+        return false;
+    }
+    let closed_merged = car.get("status").and_then(Value::as_str) == Some("closed")
+        && md.and_then(|m| m.get("outcome")).and_then(Value::as_str) == Some("merged");
+    closed_merged || flag("merged")
 }
 
 /// The car that already landed `branch`, if one has — the question both
@@ -2009,6 +2020,29 @@ mod landed_tests {
         assert!(is_landed(&marked));
         marked["metadata"]["merged"] = json!("false");
         assert!(!is_landed(&marked), "an explicit false is not a landing");
+    }
+
+    /// A LANDING MAIN LOST IS NOT A LANDING (backlog f9256445). Car
+    /// dec3136a kept `merged: "true"` — the forge did merge it — and
+    /// closed through `unlanded` when main moved back off the merge. Read
+    /// as landed, its successor's re-gate would be skipped as "landed
+    /// content" by the auto-park handler and refused by `boss gate`, and
+    /// the work could never ride again.
+    #[test]
+    fn a_car_whose_landing_main_lost_is_not_the_landing() {
+        let mut unlanded = landed();
+        unlanded["metadata"]["outcome"] = json!("unlanded");
+        unlanded["metadata"]["merged"] = json!("true");
+        unlanded["metadata"]["unlanded"] = json!("true");
+        assert!(!is_landed(&unlanded));
+        assert!(landed_car_for(&[unlanded.clone()], BRANCH).is_none());
+        // Open, marked, and unlanded before the dispatcher closed it.
+        unlanded["status"] = json!("open");
+        unlanded["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("outcome");
+        assert!(!is_landed(&unlanded));
     }
 
     #[test]
