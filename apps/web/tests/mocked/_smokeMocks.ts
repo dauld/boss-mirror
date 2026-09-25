@@ -203,6 +203,60 @@ export const RISK_SCORES = /\/api\/people\/accounts\/risk-scores(\?|$)/;
 /// JSON `[]` is not an event stream, so the EventSource fails and the
 /// page says the stream is down, on the failure marker (sweep c3e4edcc).
 export const EVENTS_STREAM = /\/api\/events\/stream(\?|$)/;
+/// The /ux/finance statements (page audit 3f964c57, backlog e0732f75):
+/// the fixtures the route sat in DEFERRED waiting for ("statements
+/// .reduce needs object-shaped fixtures"). Each is a single object the
+/// page reads fields off — under the `[]` catch-all the commerce
+/// summary's `ar_aging.reduce`, AP aging's `total_invoice_count
+/// .toLocaleString()` and every statement's `revenue.length` throw.
+export const COMMERCE_SUMMARY = /\/api\/commerce\/summary$/;
+export const AP_AGING = /\/api\/inventory\/ap-aging$/;
+export const LEDGER_STATEMENTS =
+  /\/api\/ledger\/(income-statement|balance-sheet|cash-flow|trial-balance|deferred-revenue-runoff|tax-liability)(\?|$)/;
+export const EMPTY_COMMERCE_SUMMARY = {
+  revenue_ttm: [], total_revenue_ttm_cents: 0, total_cogs_ttm_cents: 0,
+  total_gross_margin_ttm_cents: 0, ar_aging: [], total_outstanding_cents: 0,
+  total_invoice_count: 0, revenue_by_month: [], currency: 'USD',
+} as const;
+export const EMPTY_AP_AGING = {
+  buckets: [], total_outstanding_cents: 0, total_invoice_count: 0, currency: 'USD',
+} as const;
+/// The empty-but-valid body of each ledger statement (apps/web/src/finance
+/// ledger.ts's types), keyed by the path LEDGER_STATEMENTS matched. The
+/// cash-flow path answers two shapes, told apart by `?method=direct`.
+export function emptyLedgerStatement(url: string): unknown {
+  const u = new URL(url);
+  const period = { from: '2026-01-01', to: '2026-09-03' };
+  switch (u.pathname.split('/').pop()) {
+    case 'income-statement':
+      return { ...period, revenue: [], total_revenue_cents: 0, cogs: [], total_cogs_cents: 0,
+        gross_profit_cents: 0, operating_expenses: [], total_operating_expenses_cents: 0,
+        net_income_cents: 0, currency: 'USD' };
+    case 'balance-sheet':
+      return { as_of: '2026-09-03', assets: [], total_assets_cents: 0, liabilities: [],
+        total_liabilities_cents: 0, equity: [], total_equity_cents: 0, imbalance_cents: 0,
+        balanced: true, currency: 'USD' };
+    case 'cash-flow':
+      return u.searchParams.get('method') === 'direct'
+        ? { ...period, method: 'direct', cash_in_from_customers_cents: 0, cash_out_to_vendors_cents: 0,
+            cash_out_to_employees_cents: 0, cash_out_to_authorities_cents: 0, net_change_in_cash_cents: 0,
+            gl_cash_pool_delta_cents: 0, gl_cash_1000_delta_cents: 0, reconciliation_gap_cents: 0,
+            reconciled: true, currency: 'USD' }
+        : { ...period, net_income_cents: 0, operating_activities: [], working_capital_adjustments: [],
+            non_cash_adjustments: [], cash_from_operations_cents: 0, investing_activities: [],
+            cash_from_investing_cents: 0, financing_activities: [], cash_from_financing_cents: 0,
+            net_change_in_cash_cents: 0, cash_start_cents: 0, cash_end_cents: 0,
+            reconciliation_gap_cents: 0, reconciled: true, currency: 'USD' };
+    case 'trial-balance':
+      return { as_of: '2026-09-03', rows: [], total_debits_cents: 0, total_credits_cents: 0,
+        balanced: true, currency: 'USD' };
+    case 'deferred-revenue-runoff':
+      return { as_of: '2026-09-03', horizon_months: 12, deferred_account_balance_cents: 0,
+        schedules_remaining_cents: 0, drift_cents: 0, months: [], beyond_horizon_cents: 0, currency: 'USD' };
+    default:
+      return { as_of: '2026-09-03', liabilities: [], accrued_filings: [], next_due: null, currency: 'USD' };
+  }
+}
 /// The live read's figures on 2026-09-23 21:44Z (the audit's controls_md,
 /// read 1), trimmed to two days and three kinds.
 export const AUDIT_STATS = {
@@ -225,6 +279,7 @@ export const AUDIT_STATS = {
 export const OBJECT_ENDPOINTS: ReadonlyArray<RegExp> = [
   JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, YARD_REGIONS, YARD_BORDERS, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
   MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL, EVENTS_STATS, RISK_SCORES, EVENTS_STREAM,
+  COMMERCE_SUMMARY, AP_AGING, LEDGER_STATEMENTS,
   // `{data, total}`, not a list: a bare `[]` here is the shape a wrong
   // endpoint answers, and the bar reads it as a failed roster rather
   // than an empty one — deliberately, so the org chart cannot go
@@ -350,6 +405,9 @@ export async function installApiFloor(page: Page): Promise<void> {
     total_rows: 0, table_bytes: 0, oldest_at: null, newest_at: null,
     rows_last_24h: 0, rows_last_7d: 0, per_day: [], top_kinds: [],
   }));
+  await page.route(COMMERCE_SUMMARY, (r) => json(r, EMPTY_COMMERCE_SUMMARY));
+  await page.route(AP_AGING, (r) => json(r, EMPTY_AP_AGING));
+  await page.route(LEDGER_STATEMENTS, (r) => json(r, emptyLedgerStatement(r.request().url())));
   for (const detail of [WORKFLOW_DETAIL, MARKETING_ASSET_DETAIL, SHIPMENT_DETAIL, VIEW_RESULTS]) {
     await page.route(detail, (r) => json(r, 'not found', 404));
   }

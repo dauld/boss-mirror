@@ -29,6 +29,12 @@ export const ROUTES: ReadonlyArray<string> = [
   '/ux/marketing-assets', '/ux/marketing-assets/ma-1', '/ux/calendar/me',
   '/ux/support', '/ux/service', '/ux/qa', '/ux/hr', '/ux/sales',
   '/ux/shop', '/ux/manual',
+  // Finance — DEFERRED until 2026-09-25 for want of object-shaped
+  // statement fixtures, which _smokeMocks.ts now carries (page audit
+  // 3f964c57, backlog e0732f75). Under the empty leg every statement
+  // answers its well-formed empty body; under the outage, Overview's
+  // two failure lines wear the marker.
+  '/ux/finance',
   // The IT department — six surfaces, families as tabs (1f6d55e0).
   // /system is GONE (David's Q1/Q4: no legacy users, no redirects), so
   // this list crawls exactly what the catalog declares and nothing
@@ -187,7 +193,10 @@ export const DEFERRED: ReadonlyMap<string, string> = new Map([
   // '/it/operate/audit' left on 2026-09-23 (page audit 65a273d5, gap
   // 0398c4d0): the fixture it waited for is EVENTS_STATS in
   // _smokeMocks.ts, and audit-log-page.mocked.spec.ts pins the page.
-  ['/ux/finance', 'statements .reduce needs object-shaped fixtures'],
+  // '/ux/finance' left on 2026-09-25 (page audit 3f964c57, backlog
+  // e0732f75): its statements' object-shaped fixtures are in
+  // _smokeMocks.ts (COMMERCE_SUMMARY, AP_AGING, LEDGER_STATEMENTS), and
+  // finance-page.mocked.spec.ts pins the page's own controls.
   ['/ux/warehouse', 'summary.below_reorder_count needs a faithful fixture'],
   ['/ux/exec', '.find/.length over object-shaped summaries'],
   // '/system/os-map' deferral dropped: the page retired with the

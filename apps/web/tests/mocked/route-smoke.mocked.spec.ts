@@ -24,8 +24,11 @@ import { DEFERRED, ROUTES } from './_routes';
 // responses (statements, snapshots, summaries) the generic `[]` catch-all
 // can't fake; they need faithful per-endpoint fixtures before they can be
 // gated without false positives:
-//   /ux/finance (statements .reduce) · /ux/warehouse (summary.below_reorder_count)
-//   /ux/exec (.find/.length)
+//   /ux/warehouse (summary.below_reorder_count) · /ux/exec (.find/.length)
+//
+// /ux/finance LEFT THIS GROUP on 2026-09-25 (page audit 3f964c57): its
+// statements have faithful fixtures in _smokeMocks.ts (COMMERCE_SUMMARY,
+// AP_AGING, LEDGER_STATEMENTS), so it is crawled from ROUTES.
 //
 // /it/operate/audit LEFT THIS GROUP on 2026-09-23 (page audit 65a273d5):
 // its stats read now has a faithful fixture, EVENTS_STATS in

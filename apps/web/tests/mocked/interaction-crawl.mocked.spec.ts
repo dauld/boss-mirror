@@ -63,8 +63,8 @@
 //   3. a 250 ms race for a navigation (SETTLE_MS), the record read once
 //      more for a request opened during it, and the page is read.
 //
-// It RESPONDED if it navigated, raised a native dialog or a new
-// alert/status/dialog, left its form invalid, is the selected control
+// It RESPONDED if it navigated, raised a native dialog (window.print()
+// included — countPrintDialogs) or a new alert/status/dialog, left its form invalid, is the selected control
 // (an idempotent click), ISSUED a request, or changed what is painted
 // between the snapshot in 1 and the read in 3. A request is the click's
 // unless the page's own clock opened it: a timer callback the click did
@@ -355,10 +355,31 @@ const EMPTIED: ReadonlyArray<readonly [RegExp, unknown]> = [
   [VIEW_RESULTS, { view_id: 'view-1', source: 'jobs', layout: 'table', rows: [], matched: 0, truncated: false }],
 ];
 
+/// window.print() opens the browser's print dialog — a native dialog the
+/// user sees, so a response under THE JUDGING RULE — but Playwright's
+/// `dialog` event covers alert, confirm, prompt and beforeunload only,
+/// and headless Chromium shows nothing, so /ux/finance's Print / PDF
+/// read "no observable response" the day the route left DEFERRED (page
+/// audit 3f964c57, 2026-09-25). The call is counted instead, and not
+/// made: a headed debugging run would block on the real dialog.
+function countPrintDialogs(): void {
+  const w = window as unknown as { __printDialogs?: number };
+  w.__printDialogs = 0;
+  window.print = () => {
+    w.__printDialogs = (w.__printDialogs ?? 0) + 1;
+  };
+}
+
+const printDialogs = (page: Page): Promise<number> =>
+  page
+    .evaluate(() => (window as unknown as { __printDialogs?: number }).__printDialogs ?? 0)
+    .catch(() => 0);
+
 async function installLegs(page: Page, mode: Mode): Promise<void> {
   // The page's own record of the requests it opens, and which of them
   // its own clock opened (_helpers.ts) — THE JUDGING RULE reads it.
   await recordPageRequests(page);
+  await page.addInitScript(countPrintDialogs);
   await installSmokeMocks(page);
   await page.route('**/api/**', async (r) => {
     const url = r.request().url();
@@ -476,6 +497,7 @@ async function clickLeg(
     else tally.refusedClicks += 1;
     const before = await paint(page);
     const markersBefore = await page.locator(RESPONSE_MARKERS).count();
+    const printsBefore = await printDialogs(page);
     errors.length = 0;
     nativeDialog = null;
     // Where the page's record stands before the click: everything after
@@ -603,7 +625,8 @@ async function clickLeg(
       ? await target.evaluate((el) => !(el.closest('form') as HTMLFormElement | null)?.checkValidity()).catch(() => false)
       : false;
     const after = await paint(page);
-    const responded = navigated || nativeDialog !== null || markersAfter > markersBefore || after !== before || invalidForm || issued.length > 0 || next.selected;
+    const printed = (await printDialogs(page)) > printsBefore;
+    const responded = navigated || nativeDialog !== null || printed || markersAfter > markersBefore || after !== before || invalidForm || issued.length > 0 || next.selected;
     if (process.env['CRAWL_VERBOSE']) console.log(`[click:${leg}] ${route} ${next.key} -> ${responded ? 'responded' : 'silent'} issued=${issued.length} [${issued.join(', ')}] heard=${heard.length} [${heard.map(lineOf).join(', ')}] markers ${markersBefore}->${markersAfter}`);
     if (leg === 'main' && !responded) {
       findings.push({ route, control: next.label, what: 'no observable response (no navigation, dialog, alert, request, or change in what is painted)' });

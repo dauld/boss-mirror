@@ -252,35 +252,55 @@ impl RunModels {
     /// pair and the run reads as unpriced — rather than being priced,
     /// wholly, at whichever model came first.
     pub(crate) fn recorded(&self) -> Option<String> {
-        match self.billed.as_slice() {
-            [] => self
-                .identity
-                .as_deref()
-                .map(|i| card_spelling(i).to_string()),
-            [one] => {
-                let spelled = self
-                    .identity
+        // Spelled before they are counted, so a dated id and its undated
+        // twin are one model, not a pair no row names (backlog 8e1a2a6f).
+        let billed = self.billed.iter().map(|m| card_spelling(m)).fold(
+            Vec::<String>::new(),
+            |mut acc, m| {
+                if !acc.contains(&m) {
+                    acc.push(m);
+                }
+                acc
+            },
+        );
+        match billed.as_slice() {
+            [] => self.identity.as_deref().map(card_spelling),
+            [one] => Some(
+                self.identity
                     .as_deref()
-                    .filter(|i| i.split_once('[').map_or(*i, |(base, _)| base) == one)
-                    .unwrap_or(one);
-                Some(card_spelling(spelled).to_string())
-            }
-            many => Some(
-                many.iter()
-                    .map(|m| card_spelling(m))
-                    .collect::<Vec<_>>()
-                    .join("+"),
+                    .map(card_spelling)
+                    .filter(|i| i.split_once('[').map_or(i.as_str(), |(base, _)| base) == one)
+                    .unwrap_or_else(|| one.clone()),
             ),
+            many => Some(many.join("+")),
         }
     }
 }
 
 /// An API model id as the rate card spells it: without the `claude-`
-/// prefix (20260910030644 keys the card on `opus-5`, not `claude-opus-5`).
-/// Nothing else is rewritten — a dated snapshot id keeps its date and
-/// reads as unpriced until a row names it, because matching is exact.
-pub(crate) fn card_spelling(api_id: &str) -> &str {
-    api_id.strip_prefix("claude-").unwrap_or(api_id)
+/// prefix (20260910030644 keys the card on `opus-5`, not `claude-opus-5`)
+/// and without a dated snapshot suffix, keeping any `[1m]` context
+/// suffix.
+///
+/// THE DATE (backlog 8e1a2a6f). Haiku turns are billed as
+/// `claude-haiku-4-5-20251001`, and this function used to keep the date,
+/// so every Haiku run was recorded as a model no row names and read as
+/// unpriced. A snapshot is priced as its model — the pricing page lists
+/// models, never snapshots — so the date is dropped here rather than a
+/// row written per snapshot. Matching against the card stays EXACT
+/// (20260910030644): this spells the id, it does not look for a
+/// neighbour. Only a trailing all-digit segment of eight is a date; a
+/// version number is one or two digits.
+pub(crate) fn card_spelling(api_id: &str) -> String {
+    let bare = api_id.strip_prefix("claude-").unwrap_or(api_id);
+    let (base, context) = bare
+        .find('[')
+        .map_or((bare, ""), |at| (&bare[..at], &bare[at..]));
+    let undated = base
+        .rsplit_once('-')
+        .filter(|(_, tail)| tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(base, |(model, _)| model);
+    format!("{undated}{context}")
 }
 
 /// The models a transcript names, per [`RunModels`].
@@ -481,6 +501,48 @@ mod tests {
         assert_eq!(two.recorded().as_deref(), Some("opus-5-5+haiku-4-5"));
 
         assert_eq!(RunModels::default().recorded(), None, "nothing said");
+    }
+
+    /// A DATED SNAPSHOT ID IS ITS CARD ROW (backlog 8e1a2a6f). Haiku
+    /// turns are billed as `claude-haiku-4-5-20251001`, and the spelling
+    /// kept the date, so the record said `haiku-4-5-20251001` — a model
+    /// no row names — and every Haiku run read as unpriced.
+    #[test]
+    fn a_dated_model_id_is_spelled_as_its_card_row() {
+        assert_eq!(card_spelling("claude-haiku-4-5-20251001"), "haiku-4-5");
+        assert_eq!(
+            card_spelling("claude-haiku-4-5-20251001[1m]"),
+            "haiku-4-5[1m]",
+            "the context suffix survives the date"
+        );
+        // Undated ids are untouched: a version number is not a date.
+        assert_eq!(card_spelling("claude-opus-5-5"), "opus-5-5");
+        assert_eq!(card_spelling("claude-opus-5-5[1m]"), "opus-5-5[1m]");
+        assert_eq!(card_spelling("claude-fable-5-1"), "fable-5-1");
+        // Only an eight-digit trailing segment is a date.
+        assert_eq!(card_spelling("claude-opus-4-1234567"), "opus-4-1234567");
+
+        let haiku = RunModels {
+            billed: vec!["claude-haiku-4-5-20251001".into()],
+            identity: Some("claude-haiku-4-5".into()),
+        };
+        assert_eq!(haiku.recorded().as_deref(), Some("haiku-4-5"));
+        // The identity names the same model undated: it is believed for
+        // its context suffix.
+        let long = RunModels {
+            billed: vec!["claude-haiku-4-5-20251001".into()],
+            identity: Some("claude-haiku-4-5[1m]".into()),
+        };
+        assert_eq!(long.recorded().as_deref(), Some("haiku-4-5[1m]"));
+        // A dated id and its undated twin are one model, not a pair.
+        let twins = RunModels {
+            billed: vec![
+                "claude-haiku-4-5".into(),
+                "claude-haiku-4-5-20251001".into(),
+            ],
+            identity: None,
+        };
+        assert_eq!(twins.recorded().as_deref(), Some("haiku-4-5"));
     }
 
     #[test]

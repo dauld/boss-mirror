@@ -904,3 +904,130 @@ async fn opus_5_5_is_priced_at_its_own_published_rates() {
         assert_eq!(out.run.priced_by.as_deref(), Some(model), "its own row");
     }
 }
+
+/// THE WHOLE CARD IS THE PUBLISHED PAGE, row by row (backlog 8e1a2a6f).
+/// 20260924001627 derived every cache-read rate as 0.1x input, and the
+/// page prices Fable 5.1's at 0.025x: the card read $1.00 where the page
+/// reads $0.25, on the component that is ~97% of a run's tokens. Every
+/// figure below was read off
+/// https://platform.claude.com/docs/en/about-claude/pricing on
+/// 2026-09-25 (input, output, cache hits and refreshes, 5m cache writes,
+/// in micro-USD per MTok) — not derived by a multiplier — and every row's
+/// note names that read date.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_rate_card_is_the_published_page_as_read_2026_09_25() {
+    let db = TestDb::new().await;
+    let card: Vec<(String, i64, i64, Option<i64>, Option<i64>, String)> = sqlx::query_as(
+        "SELECT model, input_usd_micros_per_mtok, output_usd_micros_per_mtok, \
+         cache_read_usd_micros_per_mtok, cache_write_usd_micros_per_mtok, note \
+         FROM agent_rate_card ORDER BY model",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("reads the card");
+    let mut read: Vec<(&str, i64, i64, Option<i64>, Option<i64>)> = vec![
+        (
+            "fable-5",
+            10_000_000,
+            50_000_000,
+            Some(1_000_000),
+            Some(12_500_000),
+        ),
+        (
+            "fable-5-1",
+            10_000_000,
+            50_000_000,
+            Some(250_000),
+            Some(12_500_000),
+        ),
+        (
+            "haiku-4-5",
+            1_000_000,
+            5_000_000,
+            Some(100_000),
+            Some(1_250_000),
+        ),
+        (
+            "opus-4-8",
+            5_000_000,
+            25_000_000,
+            Some(500_000),
+            Some(6_250_000),
+        ),
+        (
+            "opus-5",
+            5_000_000,
+            25_000_000,
+            Some(500_000),
+            Some(6_250_000),
+        ),
+        (
+            "opus-5-5",
+            4_000_000,
+            20_000_000,
+            Some(200_000),
+            Some(5_000_000),
+        ),
+        (
+            "opus-5-5[1m]",
+            4_000_000,
+            20_000_000,
+            Some(200_000),
+            Some(5_000_000),
+        ),
+        (
+            "opus-5[1m]",
+            5_000_000,
+            25_000_000,
+            Some(500_000),
+            Some(6_250_000),
+        ),
+        (
+            "sonnet-4-6",
+            3_000_000,
+            15_000_000,
+            Some(300_000),
+            Some(3_750_000),
+        ),
+        (
+            "sonnet-5",
+            2_000_000,
+            10_000_000,
+            Some(200_000),
+            Some(2_500_000),
+        ),
+    ];
+    let mut got: Vec<(&str, i64, i64, Option<i64>, Option<i64>)> = card
+        .iter()
+        .map(|(m, i, o, r, w, _)| (m.as_str(), *i, *o, *r, *w))
+        .collect();
+    // Sorted here, not by ORDER BY: the database's collation places
+    // `opus-5[1m]` before `opus-5-5`, and a byte order does not.
+    got.sort();
+    read.sort();
+    assert_eq!(got, read, "the card, row by row, against the page");
+    for (model, .., note) in &card {
+        assert!(
+            note.contains("read 2026-09-25"),
+            "{model}'s note names no read date: {note}"
+        );
+    }
+
+    // The same 1,509,040-token run as above, on Fable 5.1:
+    //   40 x $10 + 30,000 x $12.50 + 1,470,000 x $0.25 + 9,000 x $50
+    //   = $0.0004 + $0.375 + $0.3675 + $0.45 = $1.1929
+    // (at the old $1.00 cache read it priced $2.2954).
+    let log = PgAgentRuns::new(db.pool.clone());
+    let mut run = a_run(
+        "run-fable-5-1",
+        TokenUsage::Metered {
+            input: 40,
+            cache_write: 30_000,
+            cache_read: 1_470_000,
+            output: 9_000,
+        },
+    );
+    run.actor_id = ActorId::agent("claude", "fable-5-1");
+    let out = log.record_run(&run, &filer()).await.expect("records");
+    assert_eq!(out.run.usd_micros, Some(1_192_900));
+}
