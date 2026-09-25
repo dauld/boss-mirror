@@ -35,7 +35,7 @@ use boss_core::publisher::DomainPublisher;
 use boss_jobs::http::{JobsApiState, router};
 use boss_jobs::owner_resolution::RosterLookup;
 use boss_jobs::registry::{StepSpec, Terminal, WorkflowSpec};
-use boss_jobs::{InMemoryJobs, InMemoryWorkflows, WorkflowRegistry};
+use boss_jobs::{InMemoryJobs, InMemoryWorkflows, JobsRepository, WorkflowRegistry};
 use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
 use boss_testing::RecordingEventBus;
 use http_body_util::BodyExt;
@@ -149,7 +149,7 @@ fn admin_header() -> String {
 }
 
 /// A role that may edit a packet but not end it — `update` without
-/// `close`, a shape the demo tenant's policy seeds grant to two roles.
+/// `close`, a shape the demo tenant's policy seeds grant to twenty roles.
 fn editor_header() -> String {
     header("emp-editor", "job-editor")
 }
@@ -161,6 +161,12 @@ fn app() -> axum::Router {
 /// `protocols: false` plumbs no Workflow registry: every kind is
 /// admitted, steps are added by hand, and nothing re-evaluates them.
 fn app_with(protocols: bool) -> axum::Router {
+    app_and_jobs(protocols).0
+}
+
+/// The router and the store behind it, for a test that injects a
+/// storage failure.
+fn app_and_jobs(protocols: bool) -> (axum::Router, Arc<InMemoryJobs>) {
     let kinds = Arc::new(InMemoryWorkflows::new());
     kinds.seed(spec()).expect("seed the kind");
     let jobs = Arc::new(InMemoryJobs::new());
@@ -181,14 +187,14 @@ fn app_with(protocols: bool) -> axum::Router {
         kind_registry: protocols.then_some(kinds as Arc<dyn WorkflowRegistry>),
         roster: Some(Arc::new(AdminRoster)),
         ..JobsApiState::minimal(
-            jobs,
+            jobs.clone(),
             bus,
             DomainPublisher::new(bus_dyn, "jobs"),
             policy,
             Arc::new(boss_clock_client::WallClockClient),
         )
     };
-    router(state)
+    (router(state), jobs)
 }
 
 async fn send_as(
@@ -504,6 +510,44 @@ async fn a_terminal_waiting_on_a_job_marker_is_not_completed_without_it() {
     let still = get_job(&app, &job_id).await;
     assert_still_open(&still);
     assert_eq!(step_by_slug(&still, "merged")["status"], "pending");
+}
+
+/// A gate that cannot read its protocol does not open (backlog
+/// 5186c5e1). The step PUT read the packet with `.ok().flatten()`, so a
+/// failed read became "no packet": the predicate gate read no protocol
+/// (`Unpaired`) and let the terminal through with its marker absent,
+/// and the close at the foot — `if let Some(job)` — was skipped too,
+/// leaving a completed terminal on an open packet. A read that fails is
+/// refused out loud, and nothing moves.
+#[tokio::test]
+async fn a_packet_that_cannot_be_read_opens_no_gate() {
+    let (app, jobs) = app_and_jobs(true);
+    let job_id = open_job(&app).await;
+    let job = do_the_work_and_review_it(&app, &job_id).await;
+    let merged = step_by_slug(&job, "merged");
+    let id = boss_core::job::JobId::from_uuid(uuid::Uuid::parse_str(&job_id).expect("uuid"));
+
+    jobs.fail_job_read(&id);
+    let (status, answer) = put_step(&app, &job_id, &merged, json!({ "status": "completed" })).await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a step write whose packet cannot be read must be refused: {answer}"
+    );
+    assert!(
+        answer.as_str().is_some_and(|a| a.contains(&job_id)),
+        "the refusal names the packet it could not read: {answer}"
+    );
+    let steps = jobs.list_steps(&id).await.expect("steps still read");
+    let still = steps
+        .iter()
+        .find(|s| s.spec_slug.as_deref() == Some("merged"))
+        .expect("merged");
+    assert_eq!(
+        still.status,
+        boss_core::job::StepStatus::Pending,
+        "the terminal did not move"
+    );
 }
 
 /// Control: the marker-then-complete order every in-tree closer uses

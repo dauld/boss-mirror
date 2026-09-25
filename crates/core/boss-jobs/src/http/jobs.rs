@@ -1579,9 +1579,13 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // (more restricted than Update); everything else is Update. A cancel
     // is an end exactly as a close is — it retires the packet from every
     // queue — and it took only Update until backlog 570e72bd, so a role
-    // granted `update` without `close` — a shape the demo tenant's own
-    // policy seeds grant to two roles — could end a packet it could not
-    // close.
+    // granted `update` without `close` could end a packet it could not
+    // close. Measured for backlog 5186c5e1 (this said "two roles"): the
+    // demo tenant's seed (examples/brewery/seeds/policy_rules.toml)
+    // grants `update` on job to 25 roles and `close` to 5, so 20 lost
+    // the cancel here. The live instance's rows on 2026-09-25 grant
+    // `update` on job only to platform-admin and break-glass, and both
+    // hold `close`, so none lost it there.
     let ends = |s: JobStatus| matches!(s, JobStatus::Closed | JobStatus::Cancelled);
     let action = if ends(job.status) && !ends(old_status) {
         Action::Close

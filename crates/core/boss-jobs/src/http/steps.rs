@@ -588,11 +588,11 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // found by its OWN id, so without this the path's job id is
     // decorative: a fabricated one was accepted live on 2026-09-21, the
     // step flipped on the real packet, and the caller got 204. What it
-    // costs is below this line, not here — `parent_job` reads
-    // `.ok().flatten()`, so a job id naming nothing becomes `None`, the
-    // event's subject and workflow fall back to empty strings, and the
-    // `if let Some(job)` at the foot skips BOTH the re-evaluator and the
-    // terminal close. The packet is left wedged with no error anywhere.
+    // costs is below this line, not here — a job id naming nothing
+    // makes `parent_job` `None`, the event's subject and workflow fall
+    // back to empty strings, and the `if let Some(job)` at the foot
+    // skips BOTH the re-evaluator and the terminal close. The packet is
+    // left wedged with no error anywhere.
     if old.job_id != job_id {
         return (StatusCode::NOT_FOUND, "step not on this job").into_response();
     }
@@ -604,7 +604,27 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // stays current through all of those. (The auto-close pass at
     // the bottom re-fetches — close_job_on_terminal may have closed
     // the Job in between.)
-    let parent_job = state.jobs.get_job(&job_id).await.ok().flatten();
+    //
+    // A READ THAT FAILS IS REFUSED, NOT READ AS "NO PACKET" (backlog
+    // 5186c5e1). This was `.ok().flatten()`, so a storage error became
+    // `None`: the abort exemption and the predicate gate below both
+    // read no protocol (`protocol_reading` answers `Unpaired` for no
+    // packet), a terminal waiting on a job marker completed without it,
+    // and the close at the foot was skipped — a completed terminal on
+    // an open packet, answered 204. A gate that cannot read its
+    // protocol does not open. `Ok(None)` — a read that answered, with
+    // no row — stays `None` and is judged as it always was; only the
+    // read that did not answer is refused.
+    let parent_job = match state.jobs.get_job(&job_id).await {
+        Ok(job) => job,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("reading packet {job_id} failed, so its step is not written: {e}"),
+            )
+                .into_response();
+        }
+    };
 
     let mut merged = match serde_json::to_value(&old) {
         Ok(v) => v,
@@ -3054,7 +3074,9 @@ pub(super) async fn reevaluate_and_persist<R: JobsRepository + 'static, B: Event
 /// there is no protocol to read — no registry plumbed, no parent packet,
 /// a kind the registry has no spec for — so such a step is judged
 /// exactly as before (backlog 570e72bd). A failed read is an error, not
-/// an `Unpaired`: a gate that cannot read its protocol does not open.
+/// an `Unpaired`: a gate that cannot read its protocol does not open —
+/// and that includes the packet itself, which `update_step` refuses to
+/// go on without rather than handing this `None` (backlog 5186c5e1).
 async fn protocol_reading<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &Arc<JobsApiState<R, B>>,
     job: Option<&Job>,

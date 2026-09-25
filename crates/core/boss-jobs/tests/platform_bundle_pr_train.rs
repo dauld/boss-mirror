@@ -69,6 +69,59 @@ fn the_conductors_steps_declare_the_conductor_as_their_audience() {
     }
 }
 
+/// The `cancelled` terminal is materialised as an ABORT, and that is
+/// the only reason the conductor's cancel can complete it.
+///
+/// WHY (backlog 5186c5e1). Its `ready_when` waits on the `empty`
+/// marker, which a train that boarded cars never carries — and
+/// `cancel_train` (boss-cli train/conductor.rs) completes it anyway,
+/// without the marker, after it has closed the PR and released the
+/// cars. The step API opens a Pending step by hand only where its own
+/// predicate holds (backlog 570e72bd), EXCEPT a terminal whose
+/// materialised `outcome_kind` is `aborted`, which completes from any
+/// open state. So this row, and nothing else, is what lets a cancel
+/// finish: a version without it answers the cancel 409 and the train
+/// is left half-cancelled. (The conductor now also refuses such a
+/// train before its first write; this pin keeps the protocol from
+/// becoming one.)
+#[test]
+fn the_cancelled_terminal_is_an_abort() {
+    let train = bundled("pr-train");
+    let spec = train
+        .steps
+        .iter()
+        .find(|s| s.title == "cancelled")
+        .expect("pr-train carries a `cancelled` terminal");
+    assert_eq!(
+        spec.terminal.as_ref().map(|t| t.outcome.as_str()),
+        Some("cancelled"),
+        "`cancelled` is a terminal with outcome `cancelled`"
+    );
+    assert!(
+        spec.ready_when.contains("job.metadata.empty"),
+        "precondition of this pin: the machine's own road waits on the `empty` marker, which \
+         a cancelled train that boarded cars does not carry — got {:?}",
+        spec.ready_when
+    );
+    let steps = materialize_steps(
+        &train,
+        &Subject::new("custom", "train/20260925-0222"),
+        JobId::new(),
+        &serde_json::Value::Object(Default::default()),
+        StepId::new,
+    );
+    let cancelled = steps
+        .iter()
+        .find(|s| s.spec_slug.as_deref() == Some("cancelled"))
+        .expect("`cancelled` materialised");
+    assert_eq!(
+        cancelled.metadata.get("outcome_kind"),
+        Some(&serde_json::json!("aborted")),
+        "the materialised row the step API reads says `aborted`, so the conductor's cancel \
+         completes it from any open state"
+    );
+}
+
 /// Materialised, the conductor's steps are born the conductor's: the
 /// dispatcher's assignee-already-set guard passes them over, and
 /// neither arm of the assignment query lists them for a person or an
