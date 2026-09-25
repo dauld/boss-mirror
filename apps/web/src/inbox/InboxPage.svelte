@@ -8,10 +8,12 @@
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
   import WriteGate from '@boss/web-kit/ui/WriteGate.svelte';
   import type { Message, MessageKind } from './types';
-  import type { Employee } from '../people/types';
+  import { classLabel, type Employee } from '../people/types';
   import { href, navigate } from '../router';
   import { session } from '@boss/web-kit/session/session.svelte';
+  import { classesFor, loadClasses } from '@boss/web-kit/session/classes.svelte';
   import { fetchRemote, type Remote } from '../data/remote';
+  import { parseInbox } from './read';
   import { postEach, postWrite, type BulkOutcome } from './writes';
 
   /// `needs-you` is the default view, and the reason this file changed.
@@ -74,15 +76,27 @@
 
   async function refreshInbox(): Promise<void> {
     if (!userId) return;
-    inbox = await fetchRemote(
-      `/api/messages/inbox/${encodeURIComponent(userId)}`,
-      (raw) => (Array.isArray(raw) ? (raw as Message[]) : []),
-    );
+    // Only a list is an inbox: any other 200 is a failed read, never
+    // an empty one (backlog e2679b23 (c); ./read.ts).
+    const path = `/api/messages/inbox/${encodeURIComponent(userId)}`;
+    inbox = await fetchRemote(path, parseInbox(path));
   }
+
+  /// A filter button's count, only from a read that landed: a failed or
+  /// pending read has no count to give, and zeros would be the empty
+  /// inbox's words (backlog e2679b23 (b)).
+  function counted(n: number): string {
+    return inbox.kind === 'ready' ? ` (${n})` : '';
+  }
+
+  /// The To list names roles the way the People pages do, from the
+  /// Class registry, rather than printing the code (e2679b23 (e)).
+  let roleClasses = $derived(classesFor('employee', 'role'));
 
   $effect(() => {
     const uid = userId;
     if (!uid) return;
+    void loadClasses('employee');
     void refreshInbox();
     // Load the roster alongside so the compose modal can offer names.
     (async () => {
@@ -119,7 +133,10 @@
       if (kindFilter === 'signal' && m.kind !== 'signal') return false;
       if (query) {
         const q = query.toLowerCase();
-        const hay = `${m.subject} ${m.body} ${m.sender_id}`.toLowerCase();
+        // The sender as the row SHOWS it, and its id: a search that
+        // read only the id found nothing for the name on the screen
+        // (backlog e2679b23 (a)).
+        const hay = `${m.subject} ${m.body} ${senderLabel(m)} ${m.sender_id}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -155,8 +172,12 @@
   /// left, which is the swallow this replaces (129da587). A refused
   /// write keeps the viewer here, where the row says why, and the row
   /// offers the same link without the write.
+  ///
+  /// A read-only guest's link is only the navigation: Mark read is a
+  /// write the gate withholds everywhere else on the row, so the link
+  /// must not send it either (backlog e2679b23 (d)).
   async function openEntity(m: Message, path: string): Promise<void> {
-    if (await markRead(m)) navigate(href(path));
+    if (session.readonly || (await markRead(m))) navigate(href(path));
   }
 
   /// A refusal map with `done` cleared and `refused` added.
@@ -280,7 +301,7 @@
     subtitle={inbox.kind === 'ready'
       ? `${unread.length} unread · ${directCount} direct · ${signalCount} signals · ${messages.length} total`
       : inbox.kind === 'failed'
-        ? 'The message store could not be reached.'
+        ? 'Your inbox could not be read.'
         : 'Loading…'}
   />
 
@@ -321,7 +342,7 @@
           >
             <option value="">Select recipient...</option>
             {#each employees as e (e.id)}
-              <option value={e.id}>{e.name} ({e.role})</option>
+              <option value={e.id}>{e.name} ({classLabel(e.role, roleClasses)})</option>
             {/each}
           </select>
         </div>
@@ -365,7 +386,7 @@
   <div class="catalog-layout">
     <aside class="catalog-filters">
       <FilterGroup label="Search">
-          <SearchInput bind:value={query} placeholder="Subject, sender…" />
+          <SearchInput bind:value={query} placeholder="Subject, sender…" label="Search messages" />
       </FilterGroup>
       <FilterGroup label="Filter">
           <!-- First and default. The other four are still here and
@@ -374,19 +395,19 @@
             active={kindFilter === 'needs-you'}
             onclick={() => (kindFilter = 'needs-you')}
           >
-            Waiting on you ({needsYou.length})
+            Waiting on you{counted(needsYou.length)}
           </FilterButton>
           <FilterButton active={kindFilter === 'all'} onclick={() => (kindFilter = 'all')}>
-            All ({messages.length})
+            All{counted(messages.length)}
           </FilterButton>
           <FilterButton active={kindFilter === 'unread'} onclick={() => (kindFilter = 'unread')}>
-            Unread ({unread.length})
+            Unread{counted(unread.length)}
           </FilterButton>
           <FilterButton active={kindFilter === 'direct'} onclick={() => (kindFilter = 'direct')}>
-            Direct ({directCount})
+            Direct{counted(directCount)}
           </FilterButton>
           <FilterButton active={kindFilter === 'signal'} onclick={() => (kindFilter = 'signal')}>
-            Signals ({signalCount})
+            Signals{counted(signalCount)}
           </FilterButton>
       </FilterGroup>
     </aside>
@@ -415,7 +436,13 @@
       {:else if visible.length === 0}
         <p class="empty">No messages match those filters.</p>
       {:else}
-        <!-- The bulk bar acts on what is shown (backlog 5963a322). -->
+        <!-- The bulk bar acts on what is shown (backlog 5963a322). It
+             and the rows stand behind ONE gate: each row's Mark read,
+             Archive and checkbox is a write affordance too, and they
+             sat outside it — a guest could press every one into a 403
+             (backlog e2679b23 (d)). One gate, one note, not one per
+             row; the links stay live, since a fieldset does not
+             disable an anchor and a guest may read what they name. -->
         <WriteGate>
           <div class="inbox-bulk">
             <label class="inbox-bulk-all">
@@ -441,97 +468,97 @@
               Archive selected ({selectedShown.length})
             </button>
           </div>
-        </WriteGate>
-        <div class="inbox-list">
-          {#each visible as m (m.id)}
-            {@const isUnread = m.read_at === null}
-            <div class="inbox-row {isUnread ? 'inbox-row-unread' : ''}">
-              <div class="inbox-row-header">
-                <input
-                  type="checkbox"
-                  class="inbox-select"
-                  aria-label="Select {m.subject}"
-                  checked={selected.has(m.id)}
-                  onchange={(e) => toggleSelected(m.id, e.currentTarget.checked)}
-                />
-                <span class="inbox-kind inbox-kind-{m.kind}">
-                  {m.kind === 'signal' ? '⚡' : '✉'}
-                </span>
-                <span class="inbox-sender {isUnread ? 'inbox-sender-bold' : ''}">
-                  {senderLabel(m)}
-                </span>
-                <span class="inbox-age">{formatAge(m.sent_at)}</span>
-                {#if isUnread}
-                  <button
-                    class="inbox-mark-read"
-                    onclick={() => markRead(m)}
-                    title="Mark as read"
-                  >
-                    Mark read
-                  </button>
-                {/if}
-                <button
-                  class="inbox-mark-read inbox-archive"
-                  onclick={() => void archive(m)}
-                  title="Archive: take it out of the inbox"
-                >
-                  Archive
-                </button>
-              </div>
-              {#if markReadRefusals[m.id]}
-                <p class="inbox-write-refused" role="alert">
-                  Not marked read — {markReadRefusals[m.id]}
-                </p>
-              {/if}
-              {#if archiveRefusals[m.id]}
-                <p class="inbox-write-refused" role="alert">
-                  Not archived — {archiveRefusals[m.id]}
-                </p>
-              {/if}
-              <div class="inbox-subject {isUnread ? 'inbox-subject-bold' : ''}">
-                {m.subject}
-              </div>
-              <div class="inbox-body">{m.body}</div>
-              <!-- `entity_path` is the producer-owned SPA link: every
-                   emitter that attaches an entity_ref populates it, so
-                   the inbox never has to know tenant route shapes. A
-                   missing path renders as plain text, not a link. -->
-              {#if m.entity_ref}
-                {@const path = m.entity_ref.entity_path ?? null}
-                <div class="inbox-entity">
-                  {#if path}
-                    <a
-                      href={href(path)}
-                      class="inbox-entity-link"
-                      onclick={(e) => {
-                        e.preventDefault();
-                        void openEntity(m, path);
-                      }}
+          <div class="inbox-list">
+            {#each visible as m (m.id)}
+              {@const isUnread = m.read_at === null}
+              <div class="inbox-row {isUnread ? 'inbox-row-unread' : ''}">
+                <div class="inbox-row-header">
+                  <input
+                    type="checkbox"
+                    class="inbox-select"
+                    aria-label="Select {m.subject}"
+                    checked={selected.has(m.id)}
+                    onchange={(e) => toggleSelected(m.id, e.currentTarget.checked)}
+                  />
+                  <span class="inbox-kind inbox-kind-{m.kind}">
+                    {m.kind === 'signal' ? '⚡' : '✉'}
+                  </span>
+                  <span class="inbox-sender {isUnread ? 'inbox-sender-bold' : ''}">
+                    {senderLabel(m)}
+                  </span>
+                  <span class="inbox-age">{formatAge(m.sent_at)}</span>
+                  {#if isUnread}
+                    <button
+                      class="inbox-mark-read"
+                      onclick={() => markRead(m)}
+                      title="Mark as read"
                     >
-                      {m.entity_ref.entity_type}: {m.entity_ref.entity_id}
-                    </a>
-                    {#if markReadRefusals[m.id]}
+                      Mark read
+                    </button>
+                  {/if}
+                  <button
+                    class="inbox-mark-read inbox-archive"
+                    onclick={() => void archive(m)}
+                    title="Archive: take it out of the inbox"
+                  >
+                    Archive
+                  </button>
+                </div>
+                {#if markReadRefusals[m.id]}
+                  <p class="inbox-write-refused" role="alert">
+                    Not marked read — {markReadRefusals[m.id]}
+                  </p>
+                {/if}
+                {#if archiveRefusals[m.id]}
+                  <p class="inbox-write-refused" role="alert">
+                    Not archived — {archiveRefusals[m.id]}
+                  </p>
+                {/if}
+                <div class="inbox-subject {isUnread ? 'inbox-subject-bold' : ''}">
+                  {m.subject}
+                </div>
+                <div class="inbox-body">{m.body}</div>
+                <!-- `entity_path` is the producer-owned SPA link: every
+                     emitter that attaches an entity_ref populates it, so
+                     the inbox never has to know tenant route shapes. A
+                     missing path renders as plain text, not a link. -->
+                {#if m.entity_ref}
+                  {@const path = m.entity_ref.entity_path ?? null}
+                  <div class="inbox-entity">
+                    {#if path}
                       <a
                         href={href(path)}
-                        class="inbox-entity-link inbox-open-anyway"
+                        class="inbox-entity-link"
                         onclick={(e) => {
                           e.preventDefault();
-                          navigate(href(path));
+                          void openEntity(m, path);
                         }}
                       >
-                        Open without marking read
+                        {m.entity_ref.entity_type}: {m.entity_ref.entity_id}
                       </a>
+                      {#if markReadRefusals[m.id]}
+                        <a
+                          href={href(path)}
+                          class="inbox-entity-link inbox-open-anyway"
+                          onclick={(e) => {
+                            e.preventDefault();
+                            navigate(href(path));
+                          }}
+                        >
+                          Open without marking read
+                        </a>
+                      {/if}
+                    {:else}
+                      <span class="mono">
+                        {m.entity_ref.entity_type}: {m.entity_ref.entity_id}
+                      </span>
                     {/if}
-                  {:else}
-                    <span class="mono">
-                      {m.entity_ref.entity_type}: {m.entity_ref.entity_id}
-                    </span>
-                  {/if}
-                </div>
-              {/if}
-            </div>
-          {/each}
-        </div>
+                  </div>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        </WriteGate>
       {/if}
     </section>
   </div>
