@@ -737,7 +737,6 @@ pub mod live {
         // streams above. Keyed by (asset_id, body).
         day_software_configs: Vec<(String, serde_json::Value)>,
         day_accessories: Vec<(String, serde_json::Value)>,
-        day_job_creates: Vec<serde_json::Value>,
         day_step_creates: Vec<(String, serde_json::Value)>, // (job_id, step_body)
         // (step_id → step kind) cache for duration-based completion
         // timing. Populated from emit_step_json so end_of_day's
@@ -871,7 +870,6 @@ pub mod live {
                 day_account_contact_updates: Vec::new(),
                 day_software_configs: Vec::new(),
                 day_accessories: Vec::new(),
-                day_job_creates: Vec::new(),
                 day_step_creates: Vec::new(),
                 day_step_updates: Vec::new(),
                 step_kind_cache: std::collections::HashMap::new(),
@@ -1673,39 +1671,11 @@ pub mod live {
                 }
             }
 
-            // --- Job creates (new Job-centric path) ---
-            //
-            // ?materialize_steps=false opts out of the API's
-            // auto-materialization. The engine then takes
-            // exclusive responsibility for step rows via its
-            // emit_step_create → POST /api/jobs/{id}/steps loop
-            // below. Without the opt-out every Job lands with 2×
-            // the spec's step count (auto-mat fresh UUIDs +
-            // engine deterministic UUIDs = duplicate sets).
-            // Spread job.created across LA 08:00–10:00 so ~700 jobs
-            // / day don't cluster at a single 08:00 anchor. Same
-            // insertion-ordered linear walk as step.creates above.
-            let job_creates: Vec<_> = self.day_job_creates.drain(..).collect();
-            let jobs_count = job_creates.len() as i64;
-            if jobs_count > 0 {
-                const JOB_START_SEC: i64 = 15 * 3600; // LA 08:00
-                const JOB_RANGE_SEC: i64 = 2 * 3600; // 2h window
-                let mut prev_sim_time = day_start + chrono::Duration::seconds(JOB_START_SEC);
-                for (i, body) in job_creates.iter().enumerate() {
-                    let offset = JOB_START_SEC + (i as i64) * JOB_RANGE_SEC / jobs_count;
-                    let target = day_start + chrono::Duration::seconds(offset);
-                    let sim_time = if target > prev_sim_time {
-                        target
-                    } else {
-                        prev_sim_time + chrono::Duration::microseconds(1)
-                    };
-                    prev_sim_time = sim_time;
-                    self.advance_clock_to_instant(sim_time);
-                    if self.post_individual("/api/jobs?materialize_steps=false", body) {
-                        self.stats.jobs += 1;
-                    }
-                }
-            }
+            // (No batched job creates: `emit_job_json` POSTs each Job
+            // synchronously, and the server materializes its steps. The
+            // batch flush that used `?materialize_steps=false` had no
+            // feed and was deleted when the API began refusing that
+            // parameter — afbf4f73.)
 
             // --- Step creates ---
             // Spread step.created across LA 08:00–10:00 (2-hour
@@ -2138,10 +2108,10 @@ pub mod live {
             }
 
             // --- Scheduled assignments (individual POST per row) ---
-            // MUST run after `day_job_creates` above: the assignment
-            // carries a `target_job_id` that the scheduling service
-            // verifies via FK. Flushing Jobs first lets the Jobs row
-            // land before the assignment tries to reference it.
+            // The assignment carries a `target_job_id` that the
+            // scheduling service verifies via FK; the Jobs it names
+            // were POSTed synchronously by `emit_job_json`, so the row
+            // has landed before the assignment tries to reference it.
             let drained_assigns: Vec<_> = self.day_scheduled_assignments.drain(..).collect();
             for s in &drained_assigns {
                 let body = serde_json::json!({

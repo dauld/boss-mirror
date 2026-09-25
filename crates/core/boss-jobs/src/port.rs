@@ -689,10 +689,10 @@ pub trait JobsRepository: Send + Sync {
         self.create_job_at(job, Utc::now(), &[]).await
     }
 
-    /// A job with no steps of its own — the brewery engine's
-    /// `?materialize_steps=false` path, which posts its
-    /// deterministic-UUID steps afterwards, and every test that
-    /// builds a bare job. The one-transaction contract is
+    /// A job with no steps of its own — every test that builds a bare
+    /// job. (The HTTP `?materialize_steps=false` opt-out, whose sim
+    /// caller posted its own steps afterwards, is refused since
+    /// afbf4f73.) The one-transaction contract is
     /// [`JobsRepository::create_job_with_steps_at`]'s; this is that
     /// call with nothing to add.
     async fn create_job_at(

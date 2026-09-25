@@ -1062,14 +1062,14 @@ describe('CrewBoardPage wiring', () => {
 // ---------------------------------------------------------------------
 
 describe('the idle threshold the map and this board share', () => {
-  it('equals boss_jobs::regions::CREW_IDLE_HOURS (crates/core/boss-jobs/src/regions.rs)', () => {
+  it('equals boss_jobs::regions::CREW_IDLE_HOURS (crates/core/boss-jobs/src/regions/machinery.rs)', () => {
     // The shop floor is a region of the system map since backlog
     // 94c6ffd0, and the server judges the same crews this board does.
     // Two copies of "silent this long and a crew is not working" would
     // let the map call a session idle while the board still drew it at
     // work, so the pair is pinned here.
     const src = readFileSync(
-      new URL('../../../../../crates/core/boss-jobs/src/regions.rs', import.meta.url),
+      new URL('../../../../../crates/core/boss-jobs/src/regions/machinery.rs', import.meta.url),
       'utf8',
     );
     const m = src.match(/pub const CREW_IDLE_HOURS: i64 = (\d+);/);

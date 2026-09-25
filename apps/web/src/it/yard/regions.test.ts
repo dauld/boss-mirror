@@ -140,13 +140,13 @@ describe('parseRegions — the payload, parsed once', () => {
 });
 
 describe('the names are the server\'s, in map order', () => {
-  it('equal boss_jobs::regions::REGIONS (crates/core/boss-jobs/src/regions.rs)', () => {
+  it('equal boss_jobs::regions::REGIONS (crates/core/boss-jobs/src/regions/mod.rs)', () => {
     // A fact that lives twice gets an equality test (CLAUDE.md §9a): the
     // server's constant is the decision (0524fc95 Q2); this list is the
     // client's copy so the map can draw a card per name before the read
     // answers, and so a ninth name from a newer server is noticed.
     const src = readFileSync(
-      join(import.meta.dir, '..', '..', '..', '..', '..', 'crates', 'core', 'boss-jobs', 'src', 'regions.rs'),
+      join(import.meta.dir, '..', '..', '..', '..', '..', 'crates', 'core', 'boss-jobs', 'src', 'regions', 'mod.rs'),
       'utf8',
     );
     const block = src.match(/pub const REGIONS: \[&str; (\d+)\] = \[([^\]]*)\];/);
@@ -233,7 +233,7 @@ describe('lampOf — the yard\'s own lamp for a state', () => {
 describe('one state vocabulary, each state with its band (62de32ae decisions 1, 2, 5, 9)', () => {
   it('the three words are the server\'s RegionState, in its order (CLAUDE.md §9a)', () => {
     const src = readFileSync(
-      join(import.meta.dir, '..', '..', '..', '..', '..', 'crates', 'core', 'boss-jobs', 'src', 'regions.rs'),
+      join(import.meta.dir, '..', '..', '..', '..', '..', 'crates', 'core', 'boss-jobs', 'src', 'regions', 'mod.rs'),
       'utf8',
     );
     const block = src.match(/pub enum RegionState \{([^}]*)\}/);

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# preflight: serial — sweeps the live cluster through kubectl wherever one is reachable; one reader of the cluster per pre-flight
 #
 # a-deleted-manifest-leaves-no-object — deleting a manifest must delete
 # the thing it declared. The converge cannot do that, so this is what

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# preflight: serial — reads the live protocol registry off the jobs API through lib/sor-read.sh, waiting out a roll; one reader of the record per pre-flight
 #
 # the-live-protocols-are-the-authored-protocols — every protocol the
 # running registry admits Jobs under is one this tree writes down.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# preflight: serial — reads the live rule registry off the dispatcher through lib/sor-read.sh, waiting out a roll; one reader of the record per pre-flight
 #
 # the-live-rules-are-the-authored-rules — the dispatcher-rule registry
 # the running system enforces is DERIVED from the authored directory, and

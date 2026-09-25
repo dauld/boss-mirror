@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# preflight: serial — cargo audit fetches the advisory DB into CARGO_HOME, which every cargo on the host shares, under cargo's own lock
 # Known-vulnerability scan of Cargo.lock via cargo-audit — REPORT-ONLY.
 #
 # WHY THIS EXISTS. Backlog item ffc2c00c ("No security scanning on the

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# preflight: serial — reads the edit level off the live jobs API through lib/sor-read.sh; one reader of the record per pre-flight
 #
 # a-car-stays-under-the-edit-level — the gate half of the hosting door
 # (a479faf7; design 01c3cc3f "Tiers are one registry, read three

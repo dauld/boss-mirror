@@ -251,7 +251,7 @@ WT_KEPT_LIVE=0; WT_KEPT_RECENT=0; WT_KEPT_LOCKED=0; WT_KEPT_REFUSED=0
 WT_STALE_LOCKS=0; WT_STALE_LOCK_NAMES=""
 WT_PRUNED=0
 WT_TARGETS_REMOVED=0; WT_TARGETS_MIB=0
-FLOOR_WORKTREES_REMOVED=0
+FLOOR_WORKTREES_REMOVED=0; FLOOR_WORKTREES_KEPT_UNREFERENCED_NAMES=""
 STALE_TARGETS_RECLAIMED=0
 FLOOR_TARGETS_RECLAIMED=0; FLOOR_TARGETS_MIB=0
 INCREMENTAL_DROPPED=0
@@ -697,6 +697,17 @@ lock_stale_why() {
     echo "pid $pid started at $now_start, not the $start the lock recorded"
 }
 
+# The first ref that holds a commit — the one question the detached-HEAD
+# guard asks, in whichever pass is about to remove a checkout (backlog
+# adce5171 for the gone-worktree pass, 5da0428a for the floor pass).
+# Empty for an empty sha, for a commit no ref holds, and for a git that
+# cannot answer: every one of them reads as "no ref", and keeps.
+# `--count=1` stops at the first ref that holds it.
+ref_holding() {
+    [ -n "$1" ] || return 0
+    git -C "$REPO_DIR" for-each-ref --count=1 --format='%(refname)' --contains "$1" 2>/dev/null || true
+}
+
 worktree_target() { echo "$SCRATCH_MOUNT/target-$(basename "$1")"; }
 
 remove_worktree_target() {
@@ -822,14 +833,11 @@ reclaim_gone_worktrees() {
         # A branch needs no such check: its ref outlives the checkout.
         # Measured 2026-09-23: of the 16 detached trees the corrected
         # idle clock makes due, 13 sit on a ref (a forge PR ref, a
-        # branch) and 3 on none. `--count=1` stops at the first ref that
-        # holds it; a git that cannot answer reads as no ref, and keeps.
+        # branch) and 3 on none. A git that cannot answer reads as no
+        # ref, and keeps (`ref_holding`).
         if [ "$branch" = detached ]; then
             head=$(git -C "$path" rev-parse -q --verify HEAD 2>/dev/null || true)
-            held=""
-            if [ -n "$head" ]; then
-                held=$(git -C "$REPO_DIR" for-each-ref --count=1 --format='%(refname)' --contains "$head" 2>/dev/null || true)
-            fi
+            held=$(ref_holding "$head")
             if [ -z "$held" ]; then
                 log "  kept $path (detached at ${head:0:8}, a head no ref holds: removing the checkout would leave its commits to gc; idle ${idle_h}h)"
                 WT_KEPT_UNREFERENCED=$((WT_KEPT_UNREFERENCED + 1))
@@ -902,10 +910,10 @@ reclaim_work() {
     local self
     self="$(pwd -P 2>/dev/null || echo /nonexistent)"
 
-    # `path<TAB>locked` per worktree; the first block is the main
-    # worktree. Locked worktrees carry a `locked` line — skip those.
-    local removed=0 skipped=0 first=1 path locked
-    while IFS=$'\t' read -r path locked; do
+    # `path<TAB>locked<TAB>detached` per worktree; the first block is the
+    # main worktree. Locked worktrees carry a `locked` line — skip those.
+    local removed=0 skipped=0 first=1 path locked detached head
+    while IFS=$'\t' read -r path locked detached; do
         [ -z "$path" ] && continue
         if [ "$first" = 1 ]; then first=0; continue; fi   # main worktree
         [ "$locked" = 1 ] && { skipped=$((skipped + 1)); continue; }
@@ -922,9 +930,27 @@ reclaim_work() {
             continue
         fi
 
+        # Committed work outlives the checkout only if a REF names it. A
+        # branch's ref survives `git worktree remove`; a detached HEAD's
+        # only names are the worktree's HEAD and reflog, which the remove
+        # deletes, handing the commits to the next gc. So a detached tree
+        # whose head no ref holds is kept and named, as the gone-worktree
+        # pass keeps it (adce5171). This pass took such trees at 48h with
+        # no reading at all until backlog 5da0428a (2026-09-24), found by
+        # the builder of 99ce8744 — the car that raises this floor from 6
+        # to 18 GB, so this pass fires far more often.
+        if [ "$detached" = 1 ]; then
+            head=$(git -C "$path" rev-parse -q --verify HEAD 2>/dev/null || true)
+            if [ -z "$(ref_holding "$head")" ]; then
+                log "  kept $path (detached at ${head:0:8}, a head no ref holds: removing the checkout would leave its commits to gc)"
+                skipped=$((skipped + 1))
+                FLOOR_WORKTREES_KEPT_UNREFERENCED_NAMES="${FLOOR_WORKTREES_KEPT_UNREFERENCED_NAMES:+$FLOOR_WORKTREES_KEPT_UNREFERENCED_NAMES, }$(basename "$path")"
+                continue
+            fi
+        fi
+
         # No --force: a dirty worktree is refused and left standing, so
-        # uncommitted work is never discarded. Committed work is in the
-        # object store either way.
+        # uncommitted work is never discarded.
         if git -C "$REPO_DIR" worktree remove "$path" 2>/dev/null; then
             log "  removed stale worktree $path"
             removed=$((removed + 1))
@@ -934,9 +960,10 @@ reclaim_work() {
         fi
     done < <(
         git -C "$REPO_DIR" worktree list --porcelain 2>/dev/null | awk '
-            /^worktree / { if (p != "") print p "\t" l; p=substr($0, 10); l=0 }
+            /^worktree / { if (p != "") print p "\t" l "\t" d; p=substr($0, 10); l=0; d=0 }
             /^locked/    { l=1 }
-            END { if (p != "") print p "\t" l }
+            /^detached/  { d=1 }
+            END { if (p != "") print p "\t" l "\t" d }
         '
     )
 
@@ -948,7 +975,7 @@ reclaim_work() {
     log "worktree reclaim: removed $removed, kept $skipped — $WORK_MOUNT now ${gb}GB free"
     if [ "$gb" -lt "$WORK_FLOOR_GB" ]; then
         log "WORK FLOOR UNMET — ${gb}GB free < ${WORK_FLOOR_GB}GB after pruning every eligible worktree." >&2
-        log "  Remaining use is the clone, locked worktrees, or worktrees with uncommitted work. A human decides next." >&2
+        log "  Remaining use is the clone, locked worktrees, worktrees with uncommitted work, or detached heads no ref holds${FLOOR_WORKTREES_KEPT_UNREFERENCED_NAMES:+ ($FLOOR_WORKTREES_KEPT_UNREFERENCED_NAMES)}. A human decides next." >&2
         problems=$((problems + 1))
     fi
 }
@@ -1259,7 +1286,7 @@ record_pass() {
             "worktrees_stale_locks=$WT_STALE_LOCKS" "worktrees_stale_lock_names=$WT_STALE_LOCK_NAMES" \
             "worktrees_pruned=$WT_PRUNED" \
             "targets_removed=$WT_TARGETS_REMOVED" "targets_removed_mib=$WT_TARGETS_MIB" \
-            "floor_worktrees_removed=$FLOOR_WORKTREES_REMOVED" \
+            "floor_worktrees_removed=$FLOOR_WORKTREES_REMOVED" "floor_worktrees_kept_unreferenced_names=$FLOOR_WORKTREES_KEPT_UNREFERENCED_NAMES" \
             "stale_targets_reclaimed=$STALE_TARGETS_RECLAIMED" \
             "floor_targets_reclaimed=$FLOOR_TARGETS_RECLAIMED" "floor_targets_mib=$FLOOR_TARGETS_MIB" \
             "incremental_dirs_dropped=$INCREMENTAL_DROPPED" \

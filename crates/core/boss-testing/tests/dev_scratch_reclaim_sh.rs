@@ -798,6 +798,59 @@ fn a_detached_worktree_whose_head_no_ref_holds_is_kept_and_named() {
     );
 }
 
+/// The OLDER pass, `reclaim_work`, fires only under the /work floor and
+/// removed every clean, unlocked worktree whose DIRECTORY was 48h old —
+/// with no reading of what the checkout holds. Clean is not safe for a
+/// detached HEAD: its commits have no ref but the checkout, so the
+/// guard the gone-worktree pass got in adce5171 is owed here too
+/// (backlog 5da0428a, from the 99ce8744 builder, 2026-09-24). Three
+/// days idle puts both trees past this pass's 48h and inside the gone
+/// pass's 168h idle window, so only the floor pass judges them — and
+/// the tree a ref holds going is what shows the floor pass ran.
+#[test]
+fn under_the_work_floor_a_detached_worktree_whose_head_no_ref_holds_is_kept_and_named() {
+    let root = boss_testing::scratch_dir("boss-dsr-floor-orphan");
+    let _guard = Scratch(root.clone());
+    let yard = Yard::new(&root);
+    let orphan = yard.worktree("agent-floor-orphan", None, 24 * 3);
+    let held = yard.worktree("agent-floor-held", None, 24 * 3);
+    let held_head = git(&held, 0, &["rev-parse", "HEAD"]);
+    git(&yard.repo, 0, &["update-ref", "refs/pulls/7", &held_head]);
+
+    // Under the /work floor both ways it can be spelled: today's
+    // BOSS_WORK_FLOOR_GB, and the stub df's STUB_DF_WORK_GB that the
+    // held car 99ce8744 reads once it retires that knob — so this test
+    // holds on either side of that car landing.
+    let out = run(
+        &root,
+        &[("BOSS_WORK_FLOOR_GB", "1000000"), ("STUB_DF_WORK_GB", "1")],
+    );
+    let text = say(&out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !held.exists(),
+        "a detached tree some ref holds is still the floor pass's to take\n{text}"
+    );
+    assert!(
+        orphan.exists(),
+        "a commit only this worktree names is never thrown to the gc, floor or not\n{text}"
+    );
+    assert!(
+        stdout.contains("agent-floor-orphan") && stdout.contains("no ref holds"),
+        "the kept tree is named with why\n{text}"
+    );
+    let log = curl_log(&root);
+    let put = log
+        .lines()
+        .find(|l| l.starts_with("PUT "))
+        .unwrap_or_else(|| panic!("the run step is completed\n{log}\n{text}"));
+    assert!(
+        put.contains("\"floor_worktrees_removed\":\"1\"")
+            && put.contains("\"floor_worktrees_kept_unreferenced_names\":\"agent-floor-orphan"),
+        "the packet names the kept tree too\n{put}\n{text}"
+    );
+}
+
 /// A fake process table under `root/proc`, read by the pass through
 /// `PROC_ROOT`: `pid1` is what `/proc/1/comm` says (the pod's `pause`
 /// when the sidecar shares the pod's process namespace), and each

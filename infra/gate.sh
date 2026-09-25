@@ -8,9 +8,11 @@
 # Usage:
 #   infra/gate.sh                 # full gate — exactly what CI runs
 #   infra/gate.sh --quick         # PRE-FLIGHT only: fmt + the lints
-#                                 # that need no build, ~17s. Not a
-#                                 # gate — nothing compiles. Run it
-#                                 # before spending 17 minutes of
+#                                 # that need no build, run 8 at a
+#                                 # time: 23-36s on the dev pod
+#                                 # (2026-09-25; 132s one at a time).
+#                                 # Not a gate — nothing compiles. Run
+#                                 # it before spending 17 minutes of
 #                                 # cluster time on a formatting slip.
 #   infra/gate.sh --lint          # --quick PLUS clippy, scoped to the
 #                                 # crates the tree changed. Seconds on
@@ -36,6 +38,10 @@
 #   infra/gate.sh --exclusions    # print the lints the pre-flight
 #                                 # leaves out, `<path>\t<why>` each,
 #                                 # read off their own headers
+#   infra/gate.sh --serial-lane   # print the lints that run one at a
+#                                 # time beside the concurrent pool,
+#                                 # `<path>\t<why>` each, read off
+#                                 # their own headers
 #   infra/gate.sh -p crate [...]  # car mode — cargo phases scoped to
 #                                 # the named crates (FULL suites, all
 #                                 # features); lints + fmt always run
@@ -190,6 +196,7 @@ QUICK=0
 LINT=0
 ROSTER=0
 EXCLUSIONS=0
+SERIAL_LANE=0
 SELFTEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -199,8 +206,9 @@ while [ $# -gt 0 ]; do
         --lint) LINT=1; shift ;;
         --roster) ROSTER=1; shift ;;
         --exclusions) EXCLUSIONS=1; shift ;;
+        --serial-lane) SERIAL_LANE=1; shift ;;
         --self-test) SELFTEST=1; shift ;;
-        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto, --quick, --lint, --roster, --exclusions and --self-test)" >&2; exit 2 ;;
+        *) echo "gate.sh: unknown arg: $1 (accepts -p <crate>, --auto, --quick, --lint, --roster, --exclusions, --serial-lane and --self-test)" >&2; exit 2 ;;
     esac
 done
 # Alternatives, not companions: --auto derives exactly what -p states,
@@ -217,7 +225,9 @@ fi
 # The pre-flight set: every check that needs no build
 # ---------------------------------------------------------------------
 # `cargo fmt -- --check` and the lint roster are repo-wide greps and
-# audits. Together they take ~17 SECONDS on a cold tree. They used to
+# audits. Together they took ~17 SECONDS on a cold tree when this was
+# written; by 2026-09-24 the roster had grown to 90 lints and 106 s,
+# which is why it now runs concurrently ("Running a roster"). They used to
 # run near the END of the gate, behind clippy, the full test suite and
 # the bun web suite.
 #
@@ -276,35 +286,79 @@ fi
 # once, this function reads it, `--exclusions` prints it, and every
 # other reader asks here. The set is pinned by gate_sh.rs against the
 # roster, both asked of this script rather than re-parsed from it.
-consist_exclusions() {
-    local listed path readable=()
-    # Only files awk can open: a lint it cannot read (a dangling
-    # symlink some car left) declares nothing, and the roster loop
-    # below reports it as a check that could not run — which is the
-    # honest verdict, where an awk refusal here would take the whole
-    # roster down over one name.
-    for path in $(LC_ALL=C ls infra/lint/*.sh); do
-        [ -r "$path" ] && readable+=("$path")
-    done
-    [ ${#readable[@]} -eq 0 ] && return 0
-    listed=$(LC_ALL=C awk '
+#
+# The reader is `header_declarations`, shared with the serial lane
+# below (`# preflight: serial — <why>`): one parser for "what a lint
+# says about itself in its header", so the two declarations cannot come
+# to disagree about where a header ends or what counts as a reason.
+header_declarations() { # <marker> <what the reason says> <file>...
+    local marker="$1" reason="$2"
+    shift 2
+    [ $# -eq 0 ] && return 0
+    LC_ALL=C awk -v marker="# $marker" -v reason="$reason" '
         FNR == 1 { header = 1; if (/^#!/) next }
         !header { next }
         /^[ \t]*$/ { next }
         !/^#/ { header = 0; next }
-        sub(/^# consist: skip[ \t]*/, "") {
+        index($0, marker) == 1 {
+            $0 = substr($0, length(marker) + 1)
+            sub(/^[ \t]*/, "")
             sub(/[ \t]+$/, "")
             if (!sub(/^—[ \t]*/, "") || $0 == "") {
-                printf "gate.sh: %s declares a consist skip with no reason — the line is: # consist: skip — <why a bare tree cannot answer it>\n", FILENAME > "/dev/stderr"
+                printf "gate.sh: %s declares %s with no reason — the line is: %s — <%s>\n", FILENAME, marker, marker, reason > "/dev/stderr"
                 bad = 1
                 next
             }
             print FILENAME "\t" $0
         }
         END { exit bad }
-    ' "${readable[@]}") || return 1
+    ' "$@"
+}
+
+# Only files awk can open: a lint it cannot read (a dangling symlink
+# some car left) declares nothing, and the roster loop below reports it
+# as a check that could not run — which is the honest verdict, where an
+# awk refusal here would take the whole roster down over one name.
+readable_lints() {
+    local path
+    for path in $(LC_ALL=C ls infra/lint/*.sh); do
+        [ -r "$path" ] && printf '%s\n' "$path"
+    done
+    return 0
+}
+
+consist_exclusions() {
+    local listed
+    # shellcheck disable=SC2046 # one path per line, none with a space
+    listed=$(header_declarations "consist: skip" "why a bare tree cannot answer it" \
+        $(readable_lints)) || return 1
     [ -n "$listed" ] && printf '%s\n' "$listed"
     return 0
+}
+
+# THE SERIAL LANE, declared the same way and for the same reason: the
+# lint's author is the one who knows it reads something outside the
+# tree. The pre-flight runs its roster CONCURRENTLY (see "Running a
+# roster" below), and a lint whose header says
+#
+#     # preflight: serial — <what it reads that another reader shares>
+#
+# runs instead in one lane beside that pool, one lint at a time, in
+# roster order. Two kinds today: a lint that reads the LIVE system of
+# record or cluster (every lint that sources `lib/sor-read.sh`, pinned
+# by gate_sh.rs `a_lint_that_reads_the_live_record_runs_in_the_serial_
+# lane`), and one that holds host-wide state (`cargo-advisories` and
+# the advisory DB under CARGO_HOME). The lane keeps a pre-flight ONE
+# reader of the record, as it was when every lint ran in sequence — a
+# dozen builders' pre-flights during a roll must not become three dozen
+# simultaneous readers of it. It costs no wall time unless the lane is
+# the longest path: it runs beside the pool, not after it.
+#
+# `<path>\t<why>` per lint, among the paths given (default: every lint).
+serial_lane() {
+    # shellcheck disable=SC2046 # one path per line, none with a space
+    if [ $# -eq 0 ]; then set -- $(readable_lints); fi
+    header_declarations "preflight: serial" "what it reads that another reader shares" "$@"
 }
 
 # FIRST on purpose: it says what this workspace cannot cover, which
@@ -327,6 +381,10 @@ preflight_roster() {
     local excluded path nl=$'\n'
     excluded=$(consist_exclusions) || return 1
     excluded=$(printf '%s\n' "$excluded" | cut -f1)
+    # A serial-lane declaration with no reason is refused HERE, where the
+    # consist skip's is, rather than silently run in the pool: the roster
+    # is what every mode runs from, so a mute declaration stops them all.
+    serial_lane > /dev/null || return 1
     if [ ! -f "$PREFLIGHT_FIRST" ]; then
         echo "gate.sh: the pre-flight roster names a lint that does not exist: $PREFLIGHT_FIRST" >&2
         return 1
@@ -364,6 +422,13 @@ fi
 # print the conductor's consist check and gate_sh.rs both read.
 if [ "$EXCLUSIONS" -eq 1 ]; then
     consist_exclusions
+    exit $?
+fi
+
+# `<path>\t<why>` per lint that runs in the serial lane, in directory
+# order — read-only, so it answers below the floor with the two above.
+if [ "$SERIAL_LANE" -eq 1 ]; then
+    serial_lane
     exit $?
 fi
 
@@ -1457,22 +1522,33 @@ check() {
     # TIMED, and the timing starts AFTER the headroom poll: the number
     # has to be what the check cost, not what the gate's own bookkeeping
     # cost around it.
-    local t0=$SECONDS
+    #
+    # A roster lint has ALREADY RUN when `check` sees it — the roster
+    # runs concurrently and `check` replays each lint's record in order
+    # (see "Running a roster") — so the time `check` could measure is the
+    # replay's, about nothing. The replay hands over the lint's own
+    # measured seconds in CHECK_TOOK, and that is the number recorded;
+    # every other check leaves it empty and is timed here as before.
+    local t0=$SECONDS took
+    CHECK_TOOK=""
     if "$@" < /dev/null; then
         CHECK_STATUS=0
+        took="${CHECK_TOOK:-$((SECONDS - t0))}"
         echo "::endgroup::"
-        RAN+=("${name}:pass:$((SECONDS - t0))")
+        RAN+=("${name}:pass:${took}")
     else
         # Kept for `check_lint`, which needs the NUMBER: a lint's exit 3
         # is not a failure, and pass/fail cannot carry that.
         CHECK_STATUS=$?
+        took="${CHECK_TOOK:-$((SECONDS - t0))}"
         echo "::endgroup::"
-        echo "GATE FAIL: ${name} (exit ${CHECK_STATUS}, after $((SECONDS - t0))s)" >&2
+        echo "GATE FAIL: ${name} (exit ${CHECK_STATUS}, after ${took}s)" >&2
         FAILED+=("${name}")
-        RAN+=("${name}:fail:$((SECONDS - t0))")
+        RAN+=("${name}:fail:${took}")
     fi
 }
 CHECK_STATUS=0
+CHECK_TOOK=""
 
 # A LINT THAT COULD NOT ANSWER IS A REFUSAL, NOT A RED.
 #
@@ -1582,8 +1658,61 @@ check_lint() {
 # ---------------------------------------------------------------------
 # Running a roster
 # ---------------------------------------------------------------------
-# The loop that runs every lint, and the three mechanisms that keep it
-# from eating itself.
+# The roster runs CONCURRENTLY, bounded, and is REPORTED in roster
+# order, in two phases:
+#
+#   1. `roster_pool` runs every lint to a RECORD: its stdout, its stderr,
+#      its exit status and its own seconds, each in a file named by the
+#      lint's place in the roster. BOSS_GATE_LINT_JOBS lints at a time
+#      (default 8), and the serial lane (`serial_lane` above) beside
+#      them, one lint at a time.
+#   2. The loop in `run_roster` walks the roster in order and hands each
+#      record to the runner — `check_lint` in the gate — which replays it
+#      inside the lint's own `::group::` block as if the lint had run
+#      there: the same stdout, the same stderr, the same exit status and
+#      the same duration (`check` records the lint's seconds, handed over
+#      in CHECK_TOOK, not the instant the replay took).
+#
+# WHY (backlog dc5b6302). Measured 2026-09-24 on a72cd3e5 (run
+# d3928d0b): fmt plus the 90 lints took 106 s one at a time, and the
+# slowest single lint took 10 s. That day's 117 pre-flights spent about
+# 2.3 h of builder time in this loop, and every gate spent another 55 s
+# in it. Measured on this change, on the dev pod, 2026-09-25, with the
+# node at a load of 34-80: `--quick` took 131.8 s with the roster run
+# one lint at a time, and 23-36 s (three runs) with it run eight at a
+# time — the roster itself 19-28 s of that.
+#
+# WHAT DOES NOT CHANGE, and each one is why the record is replayed in
+# order rather than printed as it arrives:
+#   - the ORDER of the report is the roster's, whatever order the lints
+#     finish in, so one tree prints one log. The gate runner lifts a
+#     failed check's `::group::` block into the receipt's failure detail,
+#     and a lint's words are still in its own block and no one else's;
+#   - NOTHING IS REDUCED. Every byte a lint prints is kept in its file
+#     and replayed: stdout, then stderr. The one thing a concurrent run
+#     cannot keep is how the two streams interleaved in time;
+#   - a lint's exit 3 is still a REFUSAL, decided by `check_lint` on the
+#     replayed status, and it still stops the run at that lint in roster
+#     order. The records behind it are discarded unread, as their lints
+#     used to go unrun;
+#   - the COUNT still holds the run to the roster (below).
+#
+# THE BOUND. 8 by default, because a lint is a grep or a parse over the
+# tree and nproc cannot be trusted to size it: on the dev pod it reads
+# the NODE's 32 CPUs while the pod's cgroup holds 16, and a dozen
+# builders may be pre-flighting on that one pod at once. The gate
+# runner's container is limited to 20. Measured on the pod, 2026-09-25,
+# whole `--quick` wall-clock: 25 s at 4, 23-36 s at 8, 27 s at 12, 20 s
+# at 16 — inside the noise of a node at load 40-80, because the floor
+# under every one of them is the slowest single lint, not the bound
+# (`a-deleted-manifest-leaves-no-object`, 9-18 s in the serial lane on
+# a box with kubectl, then `the-estate-address-lives-once`, 8-16 s).
+# The closing line of every pre-flight names the three slowest, so the
+# next reader measures this from the log. BOSS_GATE_LINT_JOBS overrides
+# the bound; 1 runs the pool one lint at a time, the serial lane still
+# beside it.
+#
+# The loop and the mechanisms that keep it from eating itself.
 #
 # Until 2026-09-10 this was `while read -r name path; do check "$name"
 # bash "$path"; done <<< "$roster"`, which handed every lint the
@@ -1605,26 +1734,26 @@ check_lint() {
 #
 #   `3<<<` / `<&3` — the ROSTER's defence. The list the loop reads is
 #   not on a descriptor a child is handed by default, so no body this
-#   loop ever grows can truncate it. A `< /dev/null` on the one call
-#   below would have fixed the one call; the descriptor fixes the loop.
+#   loop ever grows can truncate it. Since the roster went concurrent no
+#   lint runs inside this loop at all — `roster_pool` reads the roster
+#   into two lists with builtins alone before any lint starts — so the
+#   descriptor now guards the replay loop's own body, which is ours.
 #
-#   `< /dev/null` — the CHILD's defence, and worth keeping as well.
-#   With only fd 3, a stdin-reading lint inherits whatever stdin the
-#   GATE got: a pipe under the runner, a terminal by hand. The same lint
-#   would then read different bytes, or block forever, depending on how
-#   the gate was invoked. An explicit empty stdin makes it EOF
+#   `< /dev/null` — the CHILD's defence. A stdin-reading lint must not
+#   inherit whatever stdin the GATE got: a pipe under the runner, a
+#   terminal by hand. The same lint would then read different bytes, or
+#   block forever, depending on how the gate was invoked. The worker
+#   below hands every lint an explicit empty stdin, so it reads EOF
 #   everywhere, which is the only answer a lint can be written against.
 #
-#   the COUNT — the unknown mechanism's defence. The two above close the
-#   causes we know; a truncation is invisible by nature, so the loop
-#   also asserts it ran as many checks as the roster holds and refuses
-#   BY NAME when it did not, whatever ate them. fd 3 is deliberately
-#   left open to the children rather than closed with `3<&-`: a lint
-#   reading it directly is absurd but possible, and a loud count refusal
-#   on that is worth more than closing the hole and leaving the count
-#   with no failure mode anyone can exercise.
+#   the COUNT — the unknown mechanism's defence. A lint that left NO
+#   RECORD did not run to an answer: its worker was killed, the record
+#   could not be written, xargs gave up. The loop counts the records it
+#   replayed against the lines the roster holds and refuses BY NAME when
+#   they differ, whatever ate them. A truncation is invisible by nature;
+#   this is the one check that can see it.
 #
-# `$runner` is `check` in the gate and a recorder in the self-test
+# `$runner` is `check_lint` in the gate and a recorder in the self-test
 # below, so the pin exercises THIS loop rather than a copy of it
 # (CLAUDE.md §9a).
 #
@@ -1632,27 +1761,124 @@ check_lint() {
 # checkout may not carry the executable bit, and a lint that quietly
 # could not run is the under-covering gate this roster exists to
 # prevent.
+GATE_LINT_JOBS="${BOSS_GATE_LINT_JOBS:-8}"
+case "$GATE_LINT_JOBS" in
+    ''|*[!0-9]*|0)
+        echo "gate.sh: BOSS_GATE_LINT_JOBS='${GATE_LINT_JOBS}' is not a whole number of at least 1 — refusing rather than guessing how many lints to run at once" >&2
+        exit 2
+        ;;
+esac
+
+# ONE lint, run to a record. A separate `bash -c` rather than a
+# function, because xargs runs it: its SECONDS starts at zero with it,
+# so the number it writes is that lint's own. The status file is
+# written LAST and by rename, so a `.done` that exists is whole, and one
+# that does not is a lint that did not run to an answer.
+# shellcheck disable=SC2016 # expanded by the worker's bash, not here
+ROSTER_WORKER='
+dir=$1 at=$2 path=$3
+[ -n "$path" ] || exit 0
+bash "$path" < /dev/null > "$dir/$at.out" 2> "$dir/$at.err"
+status=$?
+printf "%s %s\n" "$status" "$SECONDS" > "$dir/$at.part" && mv "$dir/$at.part" "$dir/$at.done"
+'
+
+# Phase 1: every lint in <roster> to a record under <dir>. The roster is
+# read into two lists — the serial lane and the pool — with builtins
+# alone, before any lint starts, so nothing a lint does can reach it.
+# The lane starts first because its lints wait on things outside the
+# tree; the pool fills BOSS_GATE_LINT_JOBS slots through `xargs -P`
+# (GNU and BSD both take -0, -n and -P; neither is handed an empty list,
+# on which GNU would run the worker once).
+roster_pool() { # <results dir> <roster>
+    local dir="$1" roster="$2" name path at=0 lane nl=$'\n' lane_pid="" k
+    local paths=() serial=() pool=()
+    while read -r name path; do
+        [ -n "$name" ] && paths+=("$path")
+    done <<< "$roster"
+    [ ${#paths[@]} -eq 0 ] && return 0
+    lane=$(serial_lane "${paths[@]}" | cut -f1)
+    while read -r name path; do
+        [ -n "$name" ] || continue
+        at=$((at + 1))
+        case "${nl}${lane}${nl}" in
+            *"${nl}${path}${nl}"*) serial+=("$at" "$path") ;;
+            *) pool+=("$at" "$path") ;;
+        esac
+    done <<< "$roster"
+    if [ ${#serial[@]} -gt 0 ]; then
+        (
+            k=0
+            while [ "$k" -lt "${#serial[@]}" ]; do
+                bash -c "$ROSTER_WORKER" roster-worker "$dir" "${serial[k]}" "${serial[k + 1]}"
+                k=$((k + 2))
+            done
+        ) < /dev/null &
+        lane_pid=$!
+    fi
+    if [ ${#pool[@]} -gt 0 ]; then
+        printf '%s\0' "${pool[@]}" \
+            | xargs -0 -n 2 -P "$GATE_LINT_JOBS" bash -c "$ROSTER_WORKER" roster-worker "$dir"
+    fi
+    if [ -n "$lane_pid" ]; then wait "$lane_pid"; fi
+    return 0
+}
+
+# Phase 2's command: one lint's record, replayed as the lint would have
+# printed it, returning its exit status. A record that is not two
+# numbers is a failure, said out loud, never a guessed pass.
+roster_replay() { # <results dir> <place in the roster>
+    local dir="$1" at="$2" status="" secs=""
+    read -r status secs < "$dir/$at.done"
+    cat "$dir/$at.out"
+    cat "$dir/$at.err" >&2
+    case "${status:-x}${secs:-x}" in
+        *[!0-9]*)
+            echo "gate: this lint's record is unreadable ($dir/$at.done) — counted as a failure, not guessed at" >&2
+            return 1
+            ;;
+    esac
+    CHECK_TOOK="$secs"
+    return "$status"
+}
+
 run_roster() {
-    local roster="$1" runner="$2" name path want ran=0 last="(none)"
+    local roster="$1" runner="$2" name path want ran=0 at=0 last="(none)" dir missing=""
     want=$(printf '%s\n' "$roster" | grep -c '[^[:space:]]')
+    dir="$(mktemp -d)" || {
+        echo "gate.sh: no temp dir to hold the roster's records — refusing rather than running lints whose words would be lost" >&2
+        return 1
+    }
+    # The records go with the run, however it ends: a lint's exit 3
+    # makes `check_lint` exit the gate from inside the loop below.
+    # shellcheck disable=SC2064
+    trap "rm -rf '$dir'" EXIT
+    roster_pool "$dir" "$roster"
     while read -r name path <&3; do
         [ -n "$name" ] || continue
-        "$runner" "$name" bash "$path" < /dev/null
+        at=$((at + 1))
+        if [ ! -f "$dir/$at.done" ]; then
+            missing="${missing} ${name}"
+            continue
+        fi
+        "$runner" "$name" roster_replay "$dir" "$at" < /dev/null
         ran=$((ran + 1))
         last="$name"
     done 3<<< "$roster"
+    rm -rf "$dir"
+    trap - EXIT
     if [ "$ran" -ne "$want" ]; then
         printf 'GATE REFUSED: the roster holds %s checks but %s ran.\n' "$want" "$ran" >&2
-        printf '  The last check that ran was `%s`. Something consumed the\n' "$last" >&2
-        printf '  descriptor this loop reads, which truncates the roster silently —\n' >&2
-        printf '  without this count the gate would report clean having run %s of\n' "$ran" >&2
-        printf '  %s checks (backlog 9d5797d4).\n' "$want" >&2
+        printf '  Left no record:%s. The last check replayed was `%s`.\n' "${missing:- (none — the roster itself was cut short)}" "$last" >&2
+        printf '  A lint with no record did not run to an answer — its worker died, or\n' >&2
+        printf '  the record could not be written — and without this count the gate\n' >&2
+        printf '  would report clean having run %s of %s checks (backlog 9d5797d4).\n' "$ran" "$want" >&2
         return 1
     fi
     return 0
 }
 
-# The pin on all three mechanisms, and it runs wherever the roster runs.
+# The pin on the loop's mechanisms, and it runs wherever the roster runs.
 # That is why it is NOT a case inside `scope_self_test`: that one fires
 # only on a `-p` invocation, and the modes that matter most here are the
 # bare run CI makes and the `--quick` a builder makes, neither of which
@@ -1662,7 +1888,7 @@ run_roster() {
 # there would be discovered as a real lint by this roster and by the
 # conductor's consist check, which is the one way a fixture could ship.
 #
-# Both cases hand the loop a stdin of their own, so no fixture can block
+# Every case hands the loop a stdin of its own, so no fixture can block
 # on a terminal: case 1 hands it the roster text, which is exactly what
 # the defect did.
 roster_loop_self_test() {
@@ -1671,9 +1897,10 @@ roster_loop_self_test() {
     # shellcheck disable=SC2064
     trap "rm -rf '$tmp'" RETURN
     printf 'cat > /dev/null\n' > "$tmp/eats-stdin.sh"
-    printf 'cat <&3 > /dev/null 2>&1 || true\n' > "$tmp/eats-fd3.sh"
+    printf 'kill -9 "$PPID"\nexit 0\n' > "$tmp/kills-its-worker.sh"
     printf 'if IFS= read -r l; then echo "stdin carried: $l" >&2; exit 1; fi\nexit 0\n' \
         > "$tmp/demands-empty-stdin.sh"
+    printf 'sleep 0.3\nexit 0\n' > "$tmp/slow.sh"
     printf 'exit 0\n' > "$tmp/quiet.sh"
     local ST_SEEN=""
     # The same shape as `check`: take a name, shift, run the rest, record
@@ -1702,16 +1929,18 @@ last $tmp/quiet.sh"
         bad=1
     fi
 
-    # 2. THE COUNT IS NOT VACUOUS. A check that drains the descriptor the
-    #    loop itself reads truncates the roster by a route the two
-    #    redirections do not cover, and the count is the only thing that
-    #    can see it. `run_roster` must REFUSE.
+    # 2. THE COUNT IS NOT VACUOUS. A lint that kills its own worker
+    #    leaves no record — the route by which a concurrent roster loses
+    #    a check without any lint failing — and the count is the only
+    #    thing that can see it. `run_roster` must REFUSE. (Its stderr is
+    #    dropped here only because xargs reports the kill, and this is a
+    #    fixture, not a finding.)
     fixture="first $tmp/quiet.sh
-eats-fd3 $tmp/eats-fd3.sh
+kills-its-worker $tmp/kills-its-worker.sh
 last $tmp/quiet.sh"
     ST_SEEN=""
     if run_roster "$fixture" _st_runner < /dev/null 2>/dev/null; then
-        echo "gate.sh roster self-test FAIL: a check that drained the loop's own descriptor left [${ST_SEEN}] and run_roster still returned success — either the count guard is gone, or the loop no longer reads the roster on fd 3 and case 1 is the one to fix" >&2
+        echo "gate.sh roster self-test FAIL: a lint that left no record left [${ST_SEEN}] and run_roster still returned success — the count guard is gone" >&2
         bad=1
     fi
 
@@ -1720,8 +1949,10 @@ last $tmp/quiet.sh"
     #    ROSTER, so the truncation cases stay green while the lint reads
     #    the gate's own stdin — different bytes on a runner than by hand,
     #    or a block forever on a terminal. This roster holds no eater, so
-    #    the only thing that can give this check EOF is the `< /dev/null`
-    #    on the call itself.
+    #    what gives this check EOF is the worker's `< /dev/null` (GNU
+    #    xargs also hands its commands /dev/null, and the serial lane's
+    #    subshell is redirected from it; the worker's is the layer that
+    #    holds however the lint is launched).
     fixture="first $tmp/quiet.sh
 demands-empty-stdin $tmp/demands-empty-stdin.sh
 last $tmp/quiet.sh"
@@ -1730,6 +1961,19 @@ last $tmp/quiet.sh"
     run_roster "$fixture" _st_runner < "$tmp/as-stdin" 2>/dev/null
     if [ "$ST_SEEN" != "$seen_want" ]; then
         echo "gate.sh roster self-test FAIL: ran [${ST_SEEN}], wanted [${seen_want}] — a check was handed the gate's own stdin instead of an empty one, so what it reads depends on how the gate was invoked" >&2
+        bad=1
+    fi
+
+    # 4. THE REPORT IS IN ROSTER ORDER. The first lint finishes last; the
+    #    report must still name it first, or one tree prints two logs and
+    #    a lint's words can land beside the wrong name.
+    fixture="slow $tmp/slow.sh
+fast $tmp/quiet.sh"
+    seen_want="slow:pass fast:pass "
+    ST_SEEN=""
+    run_roster "$fixture" _st_runner < /dev/null
+    if [ "$ST_SEEN" != "$seen_want" ]; then
+        echo "gate.sh roster self-test FAIL: reported [${ST_SEEN}], wanted [${seen_want}] — the roster is reported in the order lints finished, not the order it holds them" >&2
         bad=1
     fi
 
@@ -1883,14 +2127,34 @@ run_preflight() {
     # pre-flight should not have to open the directory to learn which
     # lints declared themselves out of it.
     echo "pre-flight: not run here, by their own headers: $(consist_exclusions | cut -f1 | sed 's|.*/||; s/\.sh$//' | tr '\n' ' ')"
+    # And how it will be asked: a reader of a slow or strange log should
+    # not have to open this file to learn that the lints ran at once.
+    local lane t0
+    # shellcheck disable=SC2046 # one path per line, none with a space
+    lane=$(serial_lane $(printf '%s\n' "$roster" | cut -d' ' -f2) | cut -f1 | sed 's|.*/||; s/\.sh$//' | tr '\n' ' ')
+    echo "pre-flight: $(printf '%s\n' "$roster" | grep -c '[^[:space:]]') lints, ${GATE_LINT_JOBS} at a time; one at a time beside them, by their own headers: ${lane:-(none)}"
+    # The poll `check` takes before every phase, taken ONCE for the whole
+    # pool: every lint in it starts before the first one is replayed, so
+    # this is the last reading taken before they run.
+    require_headroom "to continue before the lint roster"
     # A truncated roster is a FAILED check, not a quiet shortfall: the
     # receipt has to carry the fact that the gate did not ask everything
     # it claims to ask. `check_lint`, not `check`: a lint's exit 3 is a
     # refusal, and only the roster speaks that vocabulary.
+    t0=$SECONDS
+    local first=${#RAN[@]} entry slowest
     if ! run_roster "$roster" check_lint; then
         FAILED+=("preflight-roster-complete")
         RAN+=("preflight-roster-complete:fail:0")
     fi
+    # The wall-clock and the three lints that set it: with the roster
+    # running at once, the slowest lint IS the roster's floor, so a slow
+    # pre-flight names its own cause instead of sending a reader to time
+    # ninety lints by hand (which is how backlog dc5b6302 was measured).
+    slowest=$(for entry in "${RAN[@]:first}"; do
+        printf '%s %s\n' "$(ran_secs "$entry")" "$(ran_name "$entry")"
+    done | sort -rn | awk 'NR <= 3 { printf "%s%s (%ss)", sep, $2, $1; sep = ", " }')
+    echo "pre-flight: the lint roster took $((SECONDS - t0))s wall-clock; slowest: ${slowest:-(none)}"
 }
 
 # THE PRE-FLIGHT CERTIFIES ONLY A TREE ITS LINTS CAN READ.

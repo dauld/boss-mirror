@@ -779,6 +779,82 @@ built: no experiment has run on this instance, the refusing verb does
 not exist, and `infra/platform/workflows/protocol-experiment.toml`
 still says real experiments ran through it.
 
+**A flight ships a change to our own instance behind a flag, and the
+flight is a packet** (design `c4c2a607`, David 2026-09-24, the one
+question accepted as proposed; answers backlog `73c31776`). David, that
+day: "We need to be able to flight ideas safely too." Measured then: the
+only switch was the tenant manifest's `[modules]` — per tenant, changed
+by a redeploy — so a new idea landed for everyone or not at all.
+Decided: (1) **a flight is an open packet whose job metadata carries a
+`flight` block** (`code`, `hypothesis`, `signal`, `audience = {actors,
+roles}`, `owner`, `observe_days`) **and nothing else stores it** — no
+flights table, since the packet is already versioned, audited and
+rebuildable (§9a); the read is generic, every open packet carrying the
+block whatever its kind, so the protocol is replaceable without a
+deploy; (2) **one server read, resolved for the viewer**: `GET
+/api/flights/mine` (boss-jobs, fronted by the gateway) answers
+`{flights: [codes]}` — the codes on for the session's actor, on for all
+or on for an audience naming the viewer's id or role — and the gateway
+inlines it as `window.__BOSS_FLIGHTS__` so the first paint takes the
+right path, read in the SPA through web-kit's `flightOn(code)`. **A
+code the read does not list is off** — retired, unknown, ambiguous, or
+a dark read — the modules rule (`ce68f137`), so a failure shows the old
+path; the audience is judged on the server and the SPA never sees one.
+The code in `{#if flightOn('<code>')}` is the flight's identity, never
+its state; (3) **the protocol, `flight-a-change`**: filed with its
+hypothesis and deciding signal before any reading, the fork shipped on
+a merged car, turned on for David first, observed for the declared
+period, optionally widened to everyone, then promote or pull — and
+either way a cleanup car deletes the fork and the losing path, and
+**retired means the code no longer names the flag, proven by a machine
+probe** (`git grep -n "flightOn('<code>')"` on the converged main
+printing nothing), never by anyone's statement; turning a flight off
+needs no car; (4) **flags cannot rot**: an hourly dispatcher threshold
+files an alarm naming the flight, its owner and its days over, for a
+flight past `observe_days` + 7 with no verdict or decided 14 days ago
+and not cleaned up; (5) **flights stay apart from protocol
+experiments** (above): a protocol split is decided per packet at
+admission and is never removed, a flight per viewer at read time and
+must be removed. They share the discipline — hypothesis and signal
+before the reading, a declared period, an exclusive verdict with a
+fallback — and if the two workflows keep the same step list for a
+quarter, one workflow over `code-flag | workflow-version` is the
+collapse; (6) **core, per instance**: the read and `flightOn` ship in
+core and the Workflow in the platform bundle; a hosted instance runs
+its own flights, and a flight across instances waits for one to exist;
+(7) **the first flight is `it-map-motion`**, the moving IT map (design
+`31bade8f`), audience David, seven days. The review's one answer: **an
+agent may file, ship, turn on for David, record the reading and pull at
+any time; widening to everyone and the verdict are David's** while he
+is the only human user, to revisit when a second joins. Not decided:
+percentage rollouts (with one human there is nobody to randomise) and a
+flight carrying a value (a value is a registry row).
+Built, 2026-09-24: car 1 (#637) is `boss_jobs::flights` behind `GET
+/api/flights/mine`, the gateway's inline, web-kit's
+`flights.svelte.ts`, `infra/platform/workflows/flight-a-change.toml`
+and the rule `a-flight-past-its-period-is-an-alarm`
+(`jobs.flight_overdue`, whose step names ride the rule row). Where the
+build departs from the doc, the build is current truth: a flight's
+state is **not stored in the block but read from its completed steps
+against the pinned protocol** — each state-setting step declares
+`metadata_defaults.flight_state` (`turn-on` on for the audience,
+`widen` on for all, `pull` off, and off is final), so a completion
+cannot claim a state its step does not declare; `widen` and `decide`
+are `human_only`, and `widen` counts only when `completed_by` is a
+person; `extend` is its own once-only step followed by `reobserve`,
+not a third verdict; `pull` is open from filing; closing the packet
+retires the flight; and a code two open packets both declare answers
+off. Car M2 (#639) put the moving map behind
+`flightOn('it-map-motion')`, and that flight's packet was filed and
+turned on for `emp-david` at 20:55Z the same evening; its `observe`
+step is ready. Not built: `observe` does not refuse a reading before
+the period has passed, and a code's uniqueness among open flights is
+not checked at admission (both named in the workflow's header); no Rust
+client reads flights — `boss-jobs-client` retired in #634 — so a
+service flight reads `GET /api/flights/mine` itself, as the `ship`
+procedure says; and backlog `73c31776` still stands at `build`, its one
+car parked as a part.
+
 **A step declares its audience once, and every surface derives its
 selector from that** (design `f5ebd2e1`, David 2026-09-11; three
 questions accepted as proposed, the fourth a constraint). The
@@ -2065,6 +2141,77 @@ floor out one region at a time, `RegionMap` draws its slice through
 `FloorDeck.svelte`, mounted by `MapPage` — `YardPage.svelte` is gone,
 and with it the wagon plates' `interiorLayout` that nothing read once
 the region map drew the floor.
+
+**The map moves only where the record says work is moving, so
+stillness is the stall signal** (design `31bade8f`, "The IT map moves",
+David 2026-09-24, both questions accepted as proposed; answers backlog
+`d220022f` — "more ambitious with our real-time animations … to more
+easily see the stalled areas"). It builds on the round-3 map design
+`62de32ae`, which decides what the map means; this decides how it
+moves, and changes no count and no state. Measured that afternoon: the
+map redrew every 10 s and nothing moved between reads, its rails' CSS
+dash in five `densityOf` bands was decoration rather than a rate
+(`heavy` spanned 20 to 501 crossings a day), and every border already
+reported `rate.current` and `rate.previous`, `waiting`, its `holds`,
+`last_crossed` and its machine's silence — so motion needed almost no
+new facts. Decided: (1) **motion means work and only work** — crossings
+travel and running machines animate, nothing else moves, no ambient
+shimmer or pulse; (2) **a token is a crossing replayed at the rail's
+measured 24 h rate**, action blue, evenly spaced (a Poisson draw would
+invent bursts the record does not hold), every rail at the SAME speed
+so density alone carries the rate, prefilled to steady state on load,
+aggregated above 5 a second with the rail labelled "●=k", and the time
+compression always stated on screen — **×600 by default** (Q1: one
+real hour is 6 s; pause, ×60 and ×3600 beside it) under "tokens replay
+each rail's measured 24h rate; they are not individual events"; (3)
+**waiting is a pile whose printed number is the server's `waiting`**,
+never a count of squares, "+N" past the grid, each square shaded by its
+hold's class — solid ink for a machine, hollow ink for a person or the
+world, grey for cannot tell, red for stuck and ours, the red settling
+as still sediment at the pile's base with "N stuck · held Xh"; (4) **a
+stall is stillness judged on the server, in three kinds** — a rail
+troubled, at rate 0 or `flowing: false` stops emitting, turns red and
+shows "held 3h 12m"; a region past its band stops its machine glyphs
+and names the band on its plate while its outbound rails keep their
+true rate; and a rail at 0 against a nonzero previous window is drawn
+still with "0 vs 4 /day" — and the client never decides a rail has
+stalled; (5) **unknown is still and grey**, never animated; (6) **no
+number the server did not report is animated**: a pile changes only on
+a read, clocks tick locally from the server's own timestamps, and past
+3 missed reads the whole map desaturates with "not read for 40 s"; (7)
+**poll the aggregates, push the crossings** (`docs/design/sse-policy.md`)
+— regions and borders stay on the 10 s poll, while a
+`GET /api/yard/stream` emits one `crossing` frame per crossing,
+classified by the code in `boss_jobs::borders` that computes the rate,
+drawn as a real, ink-ringed token over the replay; (8) **the server
+adds the only new facts** — per border `flowing`, `held_since` and
+`holds_by_class`, printed by `boss orient` so the one server read stays
+shared; (9) **reduced motion is honoured by default** with the page's
+own toggle, the rate drawn as static dots at the moving spacing, and
+every stall still carrying a word and a colour; (10) **one `<canvas>`
+over the SVG world**, tokens in arrays not DOM nodes, at most 60 in
+flight a rail, `requestAnimationFrame` stopped when hidden or still, a
+2 ms frame budget at 500 tokens, and the arithmetic in pure functions a
+unit test pins, never a pixel snapshot; (11) **region pages speak the
+same grammar** at their zoom; (12) Enamel's colour roles hold in motion
+— blue moving, ink waiting, red stalled, amber only the selected rail.
+And **entering troubled gets one expanding ring, once** (Q2) — never a
+loop, none under reduced motion. One engineering correction, recorded
+on the packet while M1 was built: the still rule is **4 of the rail's
+OWN mean gaps** (`STILL_AFTER_GAPS`, band `border-still` in
+`region_states.rs`), never a machine's declared cadence, because a
+cadence is how often a machine runs, not how often its rail is crossed
+— `train-reconcile` fires every 10 minutes while track → garage is
+crossed about four times a day; the machine's heartbeat stays judged as
+`machine.silent`. Built (2026-09-24): the server half (M1, #636) —
+`flowing`, `held_since`, `flowing_why` and `holds_by_class` on
+`GET /api/yard/borders`, printed by `boss orient` — and the client
+motion layer (M2, #639) — `MotionLayer.svelte` over `WorldMap`, its
+arithmetic in `world-motion.ts` (`emitPerSec`, `pileOf`, `railStill`,
+the ring), pinned by `world-motion.test.ts` and
+`it-map-motion.mocked.spec.ts`. Not built: the crossing stream and its
+real-event tokens (M3, decision 7), so the map runs the replay layer
+alone and says so; and region pages adopting the vocabulary (M4).
 
 **What the website says is checked against what the record holds;
 whether it works is a reading with a threshold named first** (design

@@ -54,6 +54,27 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
         None => return (StatusCode::BAD_REQUEST, "invalid job id").into_response(),
     };
 
+    // The same coarse (Update, step) authority every other step write
+    // is gated on. This door had none at all (afbf4f73); a write that
+    // creates a step is at least a write to steps.
+    match state
+        .policy
+        .check(&user, Action::Update, Resource::step())
+        .await
+    {
+        Ok(Decision::Deny { reason }) => {
+            return (StatusCode::FORBIDDEN, reason).into_response();
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("policy check failed: {e}"),
+            )
+                .into_response();
+        }
+    }
+
     // A JOB'S STEP SET IS FIXED AT ADMISSION, because a step is
     // PROTOCOL — not because appending one breaks the engine. It used
     // to do both. Readiness was recomputed by pairing spec steps with
@@ -79,27 +100,108 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
     //
     // The route stays for the case it is safe in: a job whose kind has
     // no spec to diverge from.
-    if let Some(reg) = &state.kind_registry
-        && let Ok(Some(job)) = state.jobs.get_job(&job_id).await
-        && let Ok(spec) = reg.get_version(&job.kind, job.workflow_version).await
-        && let Ok(existing) = state.jobs.list_steps(&job_id).await
-        && existing.len() >= spec.steps.len()
-    {
+    //
+    // WHOLE, NOT ONLY WHEN FULL (backlog afbf4f73). This guard used to
+    // refuse only a job that already held as many steps as its spec, so
+    // an EMPTY packet — which `?materialize_steps=false` produced on
+    // request — passed it, and a caller could post that packet's steps
+    // itself: an ops-request's presence-assured `approve`, born
+    // completed, carrying a passkey stamp for a person who never touched
+    // a passkey. The opt-out is refused at admission now; this refuses
+    // the residue it left, because a spec'd packet's steps come from its
+    // spec and from nowhere else. And it fails CLOSED: an unreadable job
+    // or registry is an error, not a reason to let the write through.
+    if let Some(reg) = &state.kind_registry {
+        let job = match state.jobs.get_job(&job_id).await {
+            Ok(Some(job)) => job,
+            Ok(None) => return (StatusCode::NOT_FOUND, "job not found").into_response(),
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        };
+        match reg.get_version(&job.kind, job.workflow_version).await {
+            Ok(_) => {
+                return (
+                    StatusCode::CONFLICT,
+                    format!(
+                        "refusing to add a step to job {job_id}: its steps are those of \
+                         workflow {} v{}, fixed at admission. A step is PROTOCOL, so adding \
+                         one is a change to the WORKFLOW, not to a single in-flight job: add \
+                         it to the workflow and publish a new version, and new packets are \
+                         admitted under it. In-flight jobs stay pinned to the version they \
+                         were admitted under, which is the whole point of the versioning.",
+                        job.kind, job.workflow_version
+                    ),
+                )
+                    .into_response();
+            }
+            Err(crate::registry::WorkflowError::NotFound(_)) => {}
+            Err(e) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        }
+    }
+
+    // A POSTED STEP CARRIES NO EVIDENCE (afbf4f73). A sign-off stamp is
+    // the record of a ceremony — the sign-off door verifies the role
+    // and, for presence, the gateway-vouched passkey assertion — and
+    // this door runs none, so a body's stamps are refused, not kept.
+    // Refused rather than stripped so the caller learns the rule at the
+    // call; a silently emptied list is a write that half-landed.
+    if !step.sign_offs.is_empty() {
         return (
-            StatusCode::CONFLICT,
-            format!(
-                "refusing to add a step to job {job_id}: it already has {} step(s), \
-                 matching workflow {} v{}. A step is PROTOCOL, so adding one is a \
-                 change to the WORKFLOW, not to a single in-flight job: add it to the \
-                 workflow and publish a new version, and new packets are admitted \
-                 under it. In-flight jobs stay pinned to the version they were \
-                 admitted under, which is the whole point of the versioning.",
-                existing.len(),
-                job.kind,
-                job.workflow_version
-            ),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": "a posted step cannot carry sign-offs",
+                "detail": "a sign-off stamp is written only by the sign-off door \
+                           (POST /api/jobs/{id}/steps/{step_id}/sign-offs), which runs \
+                           the ceremony the stamp records. Post the step with \
+                           `sign_offs: []` and stamp it there.",
+            })),
         )
             .into_response();
+    }
+
+    // NOR IS A STEP THAT DEMANDS EVIDENCE BORN RESOLVED. Completing a
+    // step is judged at the step PUT — the assurance guard, the
+    // human-only check — and the sign-off door is where required stamps
+    // come from; a step posted straight in as completed or skipped
+    // passes through none of them. So a step that declares a demand is
+    // born open and resolved through the door that judges it. A skip
+    // counts, as it does on the PUT: `ready_when` reads `steps.x.done`,
+    // which a skipped step satisfies. A step that demands nothing may
+    // still be born completed, with the server's stamps below.
+    if matches!(step.status, StepStatus::Completed | StepStatus::Skipped) {
+        let floor = state
+            .step_registry
+            .get(&step.kind)
+            .map(|t| t.assurance_floor)
+            .unwrap_or_default();
+        let required = step.assurance_required.unwrap_or_default().max(floor);
+        let mut demands = Vec::new();
+        if !step.sign_offs_required.is_empty() {
+            demands.push(format!(
+                "sign-offs by {}",
+                step.sign_offs_required.join(", ")
+            ));
+        }
+        if required > boss_core::job::Assurance::Session {
+            demands.push(format!("{required:?} assurance").to_lowercase());
+        }
+        if crate::human_only::declared(&step.metadata) {
+            demands.push("completion by a person (human_only)".to_string());
+        }
+        if !demands.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "a step that demands evidence cannot be posted already resolved",
+                    "demands": demands,
+                    "detail": "post it open (pending, ready or active), then complete it \
+                               through PUT /api/jobs/{id}/steps/{step_id}, which judges \
+                               what it demands.",
+                })),
+            )
+                .into_response();
+        }
     }
 
     // Ensure the step belongs to this job.
@@ -596,10 +698,40 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     step.job_id = job_id;
     step.id = step_id;
 
+    // A STEP'S PLACE IN ITS PROTOCOL DOES NOT MOVE (backlog b433bdf3).
+    // The overlay above took every field from the body, so a writer
+    // could pick which terminal closes the packet (`sort_order` is the
+    // index the close pairs a completed step to its spec by), complete
+    // out of order (`blocked_by: []` emptied the list the gate reads),
+    // or complete without the evidence the protocol asks for (`fields:
+    // []`, or a `kind` whose bundle requires less and whose assurance
+    // floor is lower). Refused, like the `human_only` change below and
+    // for its reason — the caller learns the rule at the call; a body
+    // sending each back as read is not a move. Every read of these
+    // below is from `old` as well, so the refusal is not the only
+    // thing standing between a body and the gate.
+    let reshaped = crate::step_metadata_write::reshaped_fields(&old, &step);
+    if !reshaped.is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "a step's place in its protocol is fixed",
+                "step_id": step_id.to_string(),
+                "refused_fields": reshaped,
+                "hint": crate::step_metadata_write::RESHAPED_FIELDS_HINT,
+            })),
+        )
+            .into_response();
+    }
+
     // Stamps are server-minted (POST .../sign-offs) and requirements
-    // are materialization data — a PUT body controls neither.
+    // are materialization data — a PUT body controls neither. The
+    // assurance requirement is one of those requirements: the guard
+    // below judges `old`, so a body that lowered it would pass THIS
+    // write and step over the bar on the next (afbf4f73).
     step.sign_offs = old.sign_offs.clone();
     step.sign_offs_required = old.sign_offs_required.clone();
+    step.assurance_required = old.assurance_required;
 
     // So are the completion stamps: `completed_by` / `completed_at`
     // are the server's record of who flipped the step and when
@@ -639,6 +771,26 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                 &old.title,
                 &old.metadata,
             )),
+        )
+            .into_response();
+    }
+
+    // `outcome_kind` IS THE PROTOCOL'S (b433bdf3). The abort exemption
+    // below reads the stored value, so a PUT that stored `aborted` on
+    // an ordinary terminal opened the gate for the next, bare, PUT.
+    // Same scope as the `human_only` refusal above: a terminal row's
+    // metadata is refused by the freeze below, which says it better.
+    let protocol_keys =
+        crate::step_metadata_write::protocol_keys_changed(&old.metadata, &step.metadata);
+    if !protocol_keys.is_empty() && !is_terminal {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "metadata body changes a key the protocol owns",
+                "step_id": step_id.to_string(),
+                "refused_keys": protocol_keys,
+                "hint": crate::step_metadata_write::PROTOCOL_KEYS_HINT,
+            })),
         )
             .into_response();
     }
@@ -814,7 +966,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     if is_leaving_open {
         let floor = state
             .step_registry
-            .get(&step.kind)
+            .get(&old.kind)
             .map(|t| t.assurance_floor)
             .unwrap_or_default();
         let key = super::presence::key_for(state.presence_key.as_deref(), &headers).await;
@@ -859,13 +1011,13 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     if step.status == StepStatus::Completed
         && let Err(errors) = state
             .step_registry
-            .validate_metadata(&step.kind, &step.metadata)
+            .validate_metadata(&old.kind, &step.metadata)
             .and_then(|()| {
                 // Inline authoring: the completion contract is
                 // the union of the kind bundle's fields and the step's
                 // own authored fields.
                 crate::step_registry::StepRegistry::validate_authored_fields(
-                    &step.fields,
+                    &old.fields,
                     &step.metadata,
                 )
             })
@@ -983,7 +1135,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             "abort-from-any-state: aborted terminal completing past its blockers",
         );
     } else if is_flipping_to_done
-        && !step.blocked_by.is_empty()
+        && !old.blocked_by.is_empty()
         // A STEP THE ENGINE HAS ALREADY OPENED IS NOT BLOCKED.
         //
         // `blocked_by` is a predicate-derived denormalised edge list
@@ -1012,14 +1164,14 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         // _is_still_refused` holds it.
         && !matches!(old.status, StepStatus::Ready | StepStatus::Active)
     {
-        match state.jobs.resolve_blockers(&step.blocked_by).await {
+        match state.jobs.resolve_blockers(&old.blocked_by).await {
             Ok(statuses) => {
                 // Missing blockers (returned-length < asked-length) are
                 // treated as unresolved — a step we can't find is
                 // definitely not terminal.
                 let resolved_by_id: std::collections::HashMap<_, _> =
                     statuses.into_iter().collect();
-                let unresolved: Vec<String> = step
+                let unresolved: Vec<String> = old
                     .blocked_by
                     .iter()
                     .filter_map(|id| match resolved_by_id.get(id) {
@@ -1415,15 +1567,15 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         // close the Job with that outcome and skip every
         // still-non-terminal step. Pair the live Step back to its
         // StepSpec by index (== sort_order, the materializer's
-        // contract). Resolve the pinned version — same rule as the
-        // re-evaluator.
+        // contract) — the STORED index, never the body's (b433bdf3).
+        // Resolve the pinned version — same rule as the re-evaluator.
         let just_completed =
             old.status != StepStatus::Completed && step.status == StepStatus::Completed;
         if just_completed
             && let Ok(spec) = reg.get_version(&job.kind, job.workflow_version).await
             && let Some(outcome) = spec
                 .steps
-                .get(step.sort_order as usize)
+                .get(old.sort_order as usize)
                 .and_then(|spec_step| spec_step.terminal.as_ref())
                 .map(|t| t.outcome.clone())
             && let Err(e) = close_job_on_terminal(&state, &job_id, &outcome, &actor, now).await
@@ -1695,6 +1847,29 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
                 &old.title,
                 &old.metadata,
             )),
+        )
+            .into_response();
+    }
+    // `outcome_kind` too (b433bdf3): the PUT's abort exemption reads the
+    // stored value, so a merge of `aborted` onto an ordinary terminal
+    // followed by a bare completing PUT walked past the blocker gate.
+    // Refused rather than stripped like `authority_role`, as
+    // `human_only` is, so the caller is told; an unchanged re-send is
+    // not a change and lands. On a terminal row the adapter's refusal
+    // below speaks instead, as it does for every other key.
+    let protocol_keys =
+        crate::step_metadata_write::protocol_keys_changed(&old.metadata, &merged_view);
+    if !protocol_keys.is_empty()
+        && !matches!(old.status, StepStatus::Completed | StepStatus::Skipped)
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "metadata patch changes a key the protocol owns",
+                "step_id": step_id.to_string(),
+                "refused_keys": protocol_keys,
+                "hint": crate::step_metadata_write::PROTOCOL_KEYS_HINT,
+            })),
         )
             .into_response();
     }

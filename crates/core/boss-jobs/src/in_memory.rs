@@ -338,6 +338,13 @@ impl JobsRepository for InMemoryJobs {
             let mut next = job.clone();
             next.partition = existing.partition;
             next.opened_at = existing.opened_at;
+            // So are the kind and the version the packet was admitted
+            // under (backlog b433bdf3). This adapter stored the body's
+            // version while the Pg adapter kept its own — the two
+            // disagreed — and both stored the body's kind. A version
+            // moves through `repin_workflow_version_at`, never here.
+            next.kind = existing.kind.clone();
+            next.workflow_version = existing.workflow_version;
             state.jobs.insert(key, next);
         }
         self.record_all(events);
@@ -814,8 +821,14 @@ impl JobsRepository for InMemoryJobs {
         let mut next = step.clone();
         next.sign_offs = existing.sign_offs.clone();
         next.sign_offs_required = existing.sign_offs_required.clone();
-        next.fields = existing.fields.clone();
+        // The SQL UPDATE never names `spec_slug`, and writes `fields`
+        // on a live row while freezing them on a terminal one (a07cfddd).
+        // This adapter did the opposite of both — stored the slug,
+        // froze the fields everywhere — so the two answered one write
+        // two ways (backlog b433bdf3). Now it says what the SQL says.
+        next.spec_slug = existing.spec_slug.clone();
         if matches!(existing.status, StepStatus::Completed | StepStatus::Skipped) {
+            next.fields = existing.fields.clone();
             next.status = existing.status;
             next.completed_on = existing.completed_on;
             next.completed_by = existing.completed_by.clone();

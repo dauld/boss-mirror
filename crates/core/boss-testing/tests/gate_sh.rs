@@ -1882,3 +1882,429 @@ fn run_from_another_tree_the_pre_flight_refuses_rather_than_checking_its_own() {
         "the refusal names the caller's tree and the command that checks it:\n{stderr}"
     );
 }
+
+// ---------------------------------------------------------------------
+// The roster runs its lints at once (backlog dc5b6302)
+// ---------------------------------------------------------------------
+//
+// MEASURED 2026-09-24 (a72cd3e5, run d3928d0b): fmt plus 90 lints took
+// 106 s serially, the slowest single lint 10 s, and 117 pre-flights that
+// day spent about 2.3 h of builder time waiting on them. So the roster
+// runs its lints concurrently, bounded, and replays each one's record in
+// roster order. What must NOT change with it is everything a reader of a
+// red gate relies on: the failing lint is named, its own words sit in its
+// own `::group::` block (the block the gate runner lifts into the
+// receipt's failure detail), the run still fails, and every check still
+// carries its own duration.
+
+/// A git repository holding this tree's `infra/gate.sh` and what it
+/// sources, the pinned-first lint, the lints a test plants, and stubs for
+/// everything the gate proper runs by name — `cargo`, `bun`, the three
+/// lints it calls outside the roster, a `df` with plenty — so the only
+/// thing that can decide a verdict is the roster.
+struct RosterTree {
+    dir: std::path::PathBuf,
+    tree: std::path::PathBuf,
+}
+
+impl RosterTree {
+    fn new(tag: &str, lints: &[(&str, &str)]) -> RosterTree {
+        let dir = boss_testing::scratch_dir(&format!("gate-roster-{tag}"));
+        let tree = dir.join("tree");
+        boss_testing::create_dir(&tree.join("infra/lint/lib"));
+        boss_testing::copy_gate_sh(&tree);
+        boss_testing::write_exec(
+            &tree.join("infra/lint/workspace-declares-what-it-runs.sh"),
+            "#!/usr/bin/env bash\nexit 0\n",
+        );
+        // Called BY PATH by the gate proper, so each is executable, and
+        // each declares itself out of the roster the way the real ones do.
+        for called in [
+            "an-image-sourced-tenant-passes-its-check.sh",
+            "no-snapshot-arrays.sh",
+            "svelte-check.sh",
+        ] {
+            boss_testing::write_exec(
+                &tree.join("infra/lint").join(called),
+                "#!/usr/bin/env bash\n# consist: skip — a stub the gate proper runs by path\nexit 0\n",
+            );
+        }
+        for (name, body) in lints {
+            boss_testing::write_exec(&tree.join("infra/lint").join(name), body);
+        }
+        for web in ["apps/web", "libs/web-kit"] {
+            boss_testing::create_dir(&tree.join(web));
+        }
+        let bin = dir.join("bin");
+        boss_testing::create_dir(&bin);
+        for tool in ["cargo", "bun"] {
+            boss_testing::write_exec(&bin.join(tool), "#!/usr/bin/env bash\nexit 0\n");
+        }
+        boss_testing::write_exec(
+            &dir.join("df"),
+            "#!/usr/bin/env bash\n\
+             echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n\
+             echo '/dev/fake 1 1 943718400 1% /'\n",
+        );
+        boss_testing::create_dir(&dir.join("shared"));
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["add", "."][..],
+            &[
+                "-c",
+                "user.email=gate-roster@test",
+                "-c",
+                "user.name=gate-roster",
+                "commit",
+                "-q",
+                "-m",
+                "the gate under test",
+            ][..],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&tree)
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        RosterTree { dir, tree }
+    }
+
+    fn receipt_path(&self) -> std::path::PathBuf {
+        self.dir.join("receipt.json")
+    }
+
+    /// The gate with `args`, stdout and stderr into ONE file, the way the
+    /// gate runner captures `gate.log` — so a `::group::` block and the
+    /// lint's stderr can be read in the order a reader of that log sees.
+    fn run(&self, args: &[&str]) -> (Option<i32>, String) {
+        let log = self.dir.join("gate.log");
+        let file = std::fs::File::create(&log).expect("create gate.log");
+        let path = std::env::var("PATH").unwrap_or_default();
+        let status = std::process::Command::new("bash")
+            .arg(self.tree.join("infra/gate.sh"))
+            .args(args)
+            .current_dir(&self.tree)
+            .env("PATH", format!("{}:{path}", self.dir.join("bin").display()))
+            .env("BOSS_GATE_DF_CMD", self.dir.join("df"))
+            .env("BOSS_GATE_MIN_FREE_GB", "12")
+            .env("BOSS_GATE_RECEIPT", self.receipt_path())
+            .env("BOSS_GATE_TRUNK", "HEAD")
+            .env("GIT_CEILING_DIRECTORIES", "")
+            .env("ROSTER_TEST_DIR", self.dir.join("shared"))
+            .stdin(std::process::Stdio::null())
+            .stdout(file.try_clone().expect("clone gate.log"))
+            .stderr(file)
+            .status()
+            .expect("run gate.sh");
+        let text = std::fs::read_to_string(&log).expect("read gate.log");
+        (status.code(), text)
+    }
+}
+
+impl Drop for RosterTree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The lines inside `::group::gate: <name>` … `::endgroup::`.
+fn group_block(log: &str, name: &str) -> Vec<String> {
+    let open = format!("::group::gate: {name}");
+    log.lines()
+        .skip_while(|l| *l != open)
+        .skip(1)
+        .take_while(|l| *l != "::endgroup::")
+        .map(str::to_string)
+        .collect()
+}
+
+/// A FAILING LINT IS STILL NAMED AND STILL FAILS THE RUN, run concurrently.
+///
+/// The gate proper, so there is a receipt to read. Three lints beside the
+/// pinned first: a slow one that passes, the one that fails — printing a
+/// line on each stream — and a quick one after it. The failing lint must
+/// be named in the `GATE FAIL` line, in the closing count, and as `fail`
+/// in the receipt; its words must be inside its OWN group block and no
+/// one else's; the checks must be reported in roster order, not in the
+/// order they finished; and the slow lint must carry its own two seconds,
+/// not the instant it took to replay its record.
+#[test]
+fn a_failing_lint_is_still_named_and_still_fails_the_run() {
+    let tree = RosterTree::new(
+        "a-failing-lint",
+        &[
+            (
+                "a-slow-pass.sh",
+                "#!/usr/bin/env bash\nsleep 2\necho 'a-slow-pass: scanned 1 thing'\nexit 0\n",
+            ),
+            (
+                "b-fails.sh",
+                "#!/usr/bin/env bash\n\
+                 echo 'b-fails: read 3 files'\n\
+                 echo 'b-fails: VIOLATION at x.rs:1 — the words a reader needs' >&2\n\
+                 exit 1\n",
+            ),
+            ("c-quick-pass.sh", "#!/usr/bin/env bash\nexit 0\n"),
+        ],
+    );
+    let (code, log) = tree.run(&[]);
+    assert_eq!(
+        code,
+        Some(1),
+        "a lint that found a violation fails the run:\n{log}"
+    );
+    assert!(
+        log.contains("GATE FAIL: b-fails (exit 1"),
+        "the failing lint is named where it fails:\n{log}"
+    );
+    assert!(
+        log.contains("gate: 1 check(s) failed: b-fails"),
+        "the closing line names exactly the failing lint:\n{log}"
+    );
+
+    let block = group_block(&log, "b-fails");
+    assert!(
+        block.iter().any(|l| l == "b-fails: read 3 files")
+            && block
+                .iter()
+                .any(|l| l == "b-fails: VIOLATION at x.rs:1 — the words a reader needs"),
+        "the lint's stdout AND stderr sit inside its own ::group:: block — the block the \
+         gate runner lifts into the failure detail. The block reads:\n{block:#?}\n{log}"
+    );
+    assert!(
+        !block.iter().any(|l| l.contains("a-slow-pass")),
+        "another lint's words leaked into b-fails's block:\n{block:#?}"
+    );
+    assert!(
+        group_block(&log, "a-slow-pass")
+            .iter()
+            .any(|l| l == "a-slow-pass: scanned 1 thing"),
+        "a passing lint's words stay in its own block:\n{log}"
+    );
+
+    let raw = std::fs::read_to_string(tree.receipt_path())
+        .unwrap_or_else(|e| panic!("the gate proper writes a receipt ({e}):\n{log}"));
+    let receipt: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("the receipt is JSON ({e}): {raw}"));
+    assert_eq!(receipt["verdict"], "failed", "{raw}");
+    let checks = receipt["checks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the receipt carries a checks array: {raw}"));
+    let at = |name: &str| {
+        checks
+            .iter()
+            .position(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is missing from the receipt's checks: {raw}"))
+    };
+    let order = [
+        "workspace-declares-what-it-runs",
+        "a-slow-pass",
+        "b-fails",
+        "c-quick-pass",
+    ]
+    .map(at);
+    assert!(
+        order.windows(2).all(|w| w[0] < w[1]),
+        "the checks are reported in ROSTER order, whatever order they finished in: {raw}"
+    );
+    assert_eq!(checks[at("b-fails")]["result"], "fail", "{raw}");
+    let slow = checks[at("a-slow-pass")]["seconds"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a-slow-pass carries its seconds: {raw}"));
+    assert!(
+        slow >= 2,
+        "a-slow-pass slept two seconds and the receipt says {slow} — the duration must be \
+         the lint's own, not the time it took to replay its record: {raw}"
+    );
+}
+
+/// THE ROSTER RUNS ITS LINTS AT ONCE — AND A SERIAL-LANE LINT ALONE.
+///
+/// Two lints that each wait (up to five seconds) to see the other one
+/// running: run one at a time, the first gives up and fails. Two more
+/// that declare `# preflight: serial` and each hold one shared thing
+/// (a directory only one can create): run at once, the second finds it
+/// held and fails. `--quick` is clean only when the pool is concurrent
+/// AND the serial lane is serial.
+#[test]
+fn the_roster_runs_its_lints_at_once_and_its_serial_lane_one_at_a_time() {
+    let rendezvous = |me: &str, other: &str| {
+        format!(
+            "#!/usr/bin/env bash\n\
+             : \"${{ROSTER_TEST_DIR:?}}\"\n\
+             touch \"$ROSTER_TEST_DIR/{me}\"\n\
+             for _ in $(seq 1 50); do [ -e \"$ROSTER_TEST_DIR/{other}\" ] && exit 0; sleep 0.1; done\n\
+             echo '{me}: {other} never ran while I did — the roster ran its lints one at a time' >&2\n\
+             exit 1\n"
+        )
+    };
+    let holder = |me: &str| {
+        format!(
+            "#!/usr/bin/env bash\n\
+             # preflight: serial — a test lint that holds one thing another reader shares\n\
+             : \"${{ROSTER_TEST_DIR:?}}\"\n\
+             if ! mkdir \"$ROSTER_TEST_DIR/held\" 2>/dev/null; then\n\
+             \x20   echo '{me}: another serial-lane lint held the shared thing beside me' >&2\n\
+             \x20   exit 1\n\
+             fi\n\
+             sleep 0.5\n\
+             rmdir \"$ROSTER_TEST_DIR/held\"\n"
+        )
+    };
+    let (a, b) = (
+        rendezvous("pair-a", "pair-b"),
+        rendezvous("pair-b", "pair-a"),
+    );
+    let (x, y) = (holder("lane-x"), holder("lane-y"));
+    let tree = RosterTree::new(
+        "at-once",
+        &[
+            ("lane-x.sh", &x),
+            ("lane-y.sh", &y),
+            ("pair-a.sh", &a),
+            ("pair-b.sh", &b),
+        ],
+    );
+    let (code, log) = tree.run(&["--quick"]);
+    assert_eq!(
+        code,
+        Some(0),
+        "the pool must run its lints concurrently and the serial lane one at a time:\n{log}"
+    );
+    assert!(
+        log.contains("pre-flight: clean"),
+        "--quick closes clean when every lint passed:\n{log}"
+    );
+}
+
+/// `--serial-lane` LISTS WHAT THE LINTS DECLARE, AND REFUSES A MUTE ONE.
+///
+/// Same rule as the consist skip, for the same reason: a lint says in its
+/// own header that it must not run beside another reader of what it
+/// reads, and says why — a bare declaration nobody explained is one
+/// nobody can later judge, so it is refused by name, in the listing and
+/// in the roster the pre-flight runs from.
+#[test]
+fn a_serial_lane_declaration_names_its_reason_or_is_refused() {
+    let tree = skeleton(
+        "boss-gate-serial-lane",
+        &[
+            (
+                "declared.sh",
+                "#!/usr/bin/env bash\n\
+                 # A lint that reads the live record.\n\
+                 # preflight: serial — reads the live jobs API, one reader at a time\n\
+                 exit 0\n",
+            ),
+            (
+                "plain.sh",
+                "#!/usr/bin/env bash\n# An ordinary static check.\nexit 0\n",
+            ),
+        ],
+    );
+    let out = skeleton_gate(&tree, "--serial-lane")
+        .output()
+        .expect("run the skeleton's gate.sh --serial-lane");
+    assert!(
+        out.status.success(),
+        "--serial-lane refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "infra/lint/declared.sh\treads the live jobs API, one reader at a time\n",
+        "exactly the lint whose header declares the serial lane, with its reason"
+    );
+    let _ = std::fs::remove_dir_all(tree.parent().expect("skeleton has a parent"));
+
+    let mute = skeleton(
+        "boss-gate-serial-lane-mute",
+        &[(
+            "mute.sh",
+            "#!/usr/bin/env bash\n# preflight: serial\nexit 0\n",
+        )],
+    );
+    for mode in ["--serial-lane", "--roster"] {
+        let out = skeleton_gate(&mute, mode)
+            .output()
+            .unwrap_or_else(|e| panic!("run the skeleton's gate.sh {mode}: {e}"));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "{mode} accepted a serial-lane declaration with no reason: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            stderr.contains("infra/lint/mute.sh") && stderr.contains("preflight: serial"),
+            "{mode}'s refusal names the lint and the line it wants: {stderr}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(mute.parent().expect("skeleton has a parent"));
+}
+
+/// A LINT THAT READS THE LIVE RECORD RUNS IN THE SERIAL LANE.
+///
+/// `infra/lint/lib/sor-read.sh` is how a lint reads a registry off the
+/// system of record, so a roster lint that sources it is one whose answer
+/// depends on something outside the tree. Those run one at a time — a
+/// pre-flight is one reader of the record, as it was before the roster
+/// went concurrent, so a dozen builders' pre-flights during a roll do not
+/// become three dozen simultaneous readers of it. Read off the lints and
+/// asked of the script, so the lane cannot quietly lose one.
+#[test]
+fn a_lint_that_reads_the_live_record_runs_in_the_serial_lane() {
+    let roster = gate_cmd(&["--roster"])
+        .output()
+        .expect("run gate.sh --roster");
+    assert!(
+        roster.status.success(),
+        "--roster refused: {}",
+        String::from_utf8_lossy(&roster.stderr)
+    );
+    let lane = gate_cmd(&["--serial-lane"])
+        .output()
+        .expect("run gate.sh --serial-lane");
+    assert!(
+        lane.status.success(),
+        "--serial-lane refused: {}",
+        String::from_utf8_lossy(&lane.stderr)
+    );
+    let lane = String::from_utf8_lossy(&lane.stdout).to_string();
+    let in_lane: Vec<&str> = lane
+        .lines()
+        .filter_map(|l| l.split_once('\t').map(|(p, _)| p))
+        .collect();
+    let sources =
+        regex::Regex::new(r"^\s*(?:\.|source)\s+\S*lib/sor-read\.sh").expect("sources regex");
+    let mut readers = 0usize;
+    let mut missing: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(&roster.stdout).lines() {
+        let Some((_, path)) = line.split_once(' ') else {
+            continue;
+        };
+        if !read(path).lines().any(|l| sources.is_match(l)) {
+            continue;
+        }
+        readers += 1;
+        if !in_lane.contains(&path) {
+            missing.push(path.to_string());
+        }
+    }
+    assert!(
+        readers >= 1,
+        "no roster lint sources infra/lint/lib/sor-read.sh — the shape this test reads has \
+         changed, and a pin that matches nothing passes while proving nothing"
+    );
+    assert!(
+        missing.is_empty(),
+        "these roster lints read the live record through lib/sor-read.sh but do not declare \
+         `# preflight: serial — <why>` in their headers, so they would run beside each other: \
+         {missing:?}\n--serial-lane printed:\n{lane}"
+    );
+}

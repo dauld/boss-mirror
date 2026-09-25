@@ -43,6 +43,63 @@ pub fn omitted_keys<'a>(stored: &'a Value, sent: &Value) -> Vec<&'a str> {
         .unwrap_or_default()
 }
 
+/// Metadata keys the PROTOCOL writes and no step writer may (backlog
+/// b433bdf3). `outcome_kind` is materialised from the spec's
+/// `metadata_defaults`, and the step PUT reads the stored value to let
+/// an `aborted` terminal complete past its blockers — so a writer that
+/// could set it on an ordinary terminal, through either door, and then
+/// PUT a bare completion walked round the blocker gate; one that could
+/// delete it turned a real abort into a gated step.
+pub const PROTOCOL_KEYS: &[&str] = &["outcome_kind"];
+
+/// The hint a refused protocol key carries, on both doors.
+pub const PROTOCOL_KEYS_HINT: &str = "these metadata keys are materialised from the step's \
+     protocol and are not a writer's to set, change or delete. Send the stored value back \
+     unchanged, or leave the key out of a merge.";
+
+/// PURE: the [`PROTOCOL_KEYS`] whose value in `after` (the row as the
+/// write would leave it) differs from `stored` — added, changed or
+/// removed. Empty for an unchanged re-send.
+pub fn protocol_keys_changed(stored: &Value, after: &Value) -> Vec<&'static str> {
+    PROTOCOL_KEYS
+        .iter()
+        .copied()
+        .filter(|k| stored.get(k) != after.get(k))
+        .collect()
+}
+
+/// The step fields a PUT body may not move, in the order it reports
+/// them (backlog b433bdf3). Each is the step's place in its protocol:
+/// `kind` chooses the kind bundle's required fields and the assurance
+/// floor; `spec_slug` names the step to every predicate and rule;
+/// `sort_order` is the index a completed step is paired back to its
+/// spec by, and so chooses the terminal that closes the packet;
+/// `blocked_by` is what the blocker gate reads; `fields` is the
+/// required-at-done contract. A read-merge-write sends each back as it
+/// stands and is not judged.
+pub fn reshaped_fields(
+    stored: &boss_core::job::Step,
+    after: &boss_core::job::Step,
+) -> Vec<&'static str> {
+    [
+        ("kind", stored.kind != after.kind),
+        ("spec_slug", stored.spec_slug != after.spec_slug),
+        ("sort_order", stored.sort_order != after.sort_order),
+        ("blocked_by", stored.blocked_by != after.blocked_by),
+        ("fields", stored.fields != after.fields),
+    ]
+    .into_iter()
+    .filter_map(|(name, moved)| moved.then_some(name))
+    .collect()
+}
+
+/// The hint the step PUT's reshape refusal carries.
+pub const RESHAPED_FIELDS_HINT: &str = "a step's kind, slug, index, blocker edges and \
+     required-at-done fields are its place in the protocol the packet was admitted under, and \
+     a step PUT does not move them. Send them back as read, or leave them out. A packet moves \
+     between protocol versions only through `boss job convert <packet> [--to vN]`, which \
+     records the move.";
+
 /// PURE: would merging `patch` into `stored` leave it exactly as it is?
 /// Every key already holds the value sent, and every key sent as `null`
 /// (a delete) is already absent. The merge door's idempotent re-send
@@ -118,6 +175,61 @@ mod tests {
         assert!(!patch_is_noop(&stored, &obj(json!({"verdict": null}))));
         // A stored null is still a stored KEY; a null patch deletes it.
         assert!(!patch_is_noop(&stored, &obj(json!({"gone": null}))));
+    }
+
+    #[test]
+    fn a_protocol_key_added_changed_or_removed_is_named_and_a_resend_is_not() {
+        let stored = json!({"outcome_kind": "completed", "note": 1});
+        assert!(protocol_keys_changed(&stored, &stored).is_empty());
+        assert!(protocol_keys_changed(&stored, &json!({"outcome_kind": "completed"})).is_empty());
+        assert_eq!(
+            protocol_keys_changed(&stored, &json!({"outcome_kind": "aborted"})),
+            vec!["outcome_kind"]
+        );
+        assert_eq!(
+            protocol_keys_changed(&stored, &json!({})),
+            vec!["outcome_kind"]
+        );
+        assert_eq!(
+            protocol_keys_changed(&json!({}), &json!({"outcome_kind": "aborted"})),
+            vec!["outcome_kind"]
+        );
+        assert!(protocol_keys_changed(&Value::Null, &json!({"other": 1})).is_empty());
+    }
+
+    #[test]
+    fn a_step_sent_back_as_read_moves_nothing_and_each_move_is_named() {
+        let job = boss_core::job::JobId::new();
+        let stored = boss_core::job::Step::new(job, "task", "Work", 0);
+        assert!(reshaped_fields(&stored, &stored.clone()).is_empty());
+        let mut after = stored.clone();
+        after.title = "Retitled".into();
+        after.status = boss_core::job::StepStatus::Active;
+        assert!(
+            reshaped_fields(&stored, &after).is_empty(),
+            "title and status are not the protocol's"
+        );
+        after.kind = "outcome".into();
+        after.sort_order = 2;
+        after.blocked_by = vec![boss_core::job::StepId::new()];
+        after.spec_slug = Some("done".into());
+        after.fields = vec![];
+        let mut with_fields = stored.clone();
+        with_fields.fields = vec![boss_core::job::StepField {
+            name: "evidence".into(),
+            field_type: "string".into(),
+            required: true,
+            filled_by: Default::default(),
+            item_keys: Vec::new(),
+            covers: None,
+            binds: None,
+            item_value_max_bytes: None,
+            item_one_of: Vec::new(),
+        }];
+        assert_eq!(
+            reshaped_fields(&with_fields, &after),
+            vec!["kind", "spec_slug", "sort_order", "blocked_by", "fields"]
+        );
     }
 
     #[test]

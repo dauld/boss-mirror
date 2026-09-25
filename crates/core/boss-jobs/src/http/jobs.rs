@@ -556,12 +556,19 @@ pub(super) fn job_status_str_public(s: JobStatus) -> &'static str {
 
 #[derive(Deserialize, Default)]
 pub(super) struct CreateJobQuery {
-    /// When false, the handler creates the Job row but skips
-    /// materializing the Workflow's steps. Used by the brewery
-    /// engine, which emits its own deterministic-UUID step
-    /// creates via POST /api/jobs/{id}/steps and would otherwise
-    /// land 2× the steps per Job. SPA / admin creates omit the
-    /// param so steps auto-materialize (default true).
+    /// Kept on the wire ONLY so `false` can be refused by name
+    /// (backlog afbf4f73). It used to create the Job row and skip
+    /// materializing the Workflow's steps, for a sim path that posted
+    /// its own step rows through POST /api/jobs/{id}/steps. That made
+    /// an EMPTY packet of any kind on request — which the append guard
+    /// then let a caller fill with a step of its own, `sign_offs` and
+    /// `status` included: an ops-request's presence-assured approval,
+    /// completed, stamped for a person who never touched a passkey.
+    /// Nothing needs it (the sim's batch job flush has had no feed since
+    /// the sim stopped posting step rows), so a packet is admitted WITH
+    /// its protocol's steps or not at all. Dropping the field instead
+    /// would be worse: serde ignores an unknown parameter, so a caller
+    /// that asked for no steps would silently get them.
     #[serde(default = "default_materialize_steps")]
     materialize_steps: bool,
 }
@@ -691,6 +698,21 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     Query(q): Query<CreateJobQuery>,
     Json(mut raw): Json<serde_json::Value>,
 ) -> Response {
+    // A packet is admitted with its protocol's steps or not at all
+    // (afbf4f73 — the reasoning is on `CreateJobQuery`). Refused before
+    // anything is read or written.
+    if !q.materialize_steps {
+        return (
+            StatusCode::BAD_REQUEST,
+            "materialize_steps=false is refused: a packet is admitted with its \
+             Workflow's steps or not at all. Its steps are PROTOCOL, fixed at \
+             admission from the version the packet pins to; an empty packet whose \
+             steps a caller posts afterwards would carry whatever status and \
+             sign-offs the caller wrote. Omit the parameter.",
+        )
+            .into_response();
+    }
+
     // `opened_on` is optional on the wire: dispatcher- and
     // operator-initiated creates omit it and inherit the authoritative
     // (sim-aware) clock; the simulator supplies it explicitly to stamp
@@ -959,43 +981,35 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
 
     // Materialize the Workflow's steps BEFORE anything persists. Job
     // kinds with no steps (`ad-hoc`, where the user defines work as
-    // they go) materialize into zero steps.
-    //
-    // The brewery engine sets ?materialize_steps=false because it
-    // emits its own deterministic-UUID step creates via
-    // POST /api/jobs/{id}/steps; without the opt-out, every Job
-    // would carry 2× the spec's step count.
+    // they go) materialize into zero steps. There is no opt-out: the
+    // handler's first act refuses `?materialize_steps=false`.
     //
     // Materialization is pure, so running it ahead of the job insert
     // costs nothing — and it is what lets the filer-field gate below
     // refuse a packet while NOTHING has been written yet: a refused
     // admission leaves no half-created Job behind (conservation).
-    let materialized_steps: Option<Vec<Step>> = if q.materialize_steps {
-        kind_spec.as_ref().map(|spec| {
-            // Live-API path stamps `{day}` tokens against the
-            // clock-api's current day so payroll / period-end
-            // metadata derives from the system clock (sim or wall
-            // depending on the deploy's clock mode), matching what
-            // the sim engine does with its own day cursor.
-            crate::registry::materialize_steps_at(
-                spec,
-                &job.subject,
-                job_id,
-                &job.metadata,
-                boss_core::job::StepId::new,
-                Some(now.date_naive()),
-                // Resolve trigger provenance at materialization: the firing
-                // trigger (named by `metadata.trigger_name`) is born
-                // `Completed`, its alternatives `Skipped`. Every production
-                // Job — dispatcher-spawned, sim, operator — flows through
-                // here, so this is the single point that makes triggers
-                // honest.
-                Some(state.step_registry.as_ref()),
-            )
-        })
-    } else {
-        None
-    };
+    let materialized_steps: Option<Vec<Step>> = kind_spec.as_ref().map(|spec| {
+        // Live-API path stamps `{day}` tokens against the
+        // clock-api's current day so payroll / period-end
+        // metadata derives from the system clock (sim or wall
+        // depending on the deploy's clock mode), matching what
+        // the sim engine does with its own day cursor.
+        crate::registry::materialize_steps_at(
+            spec,
+            &job.subject,
+            job_id,
+            &job.metadata,
+            boss_core::job::StepId::new,
+            Some(now.date_naive()),
+            // Resolve trigger provenance at materialization: the firing
+            // trigger (named by `metadata.trigger_name`) is born
+            // `Completed`, its alternatives `Skipped`. Every production
+            // Job — dispatcher-spawned, sim, operator — flows through
+            // here, so this is the single point that makes triggers
+            // honest.
+            Some(state.step_registry.as_ref()),
+        )
+    });
 
     // Filer fields validate at ADMISSION — the flip side of
     // required-at-done. A field the Workflow declares
@@ -1463,15 +1477,35 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+/// The door the job PUT's protocol refusal names (backlog b433bdf3).
+const PROTOCOL_FIXED_HINT: &str = "A packet's kind never changes. Its workflow version moves only \
+     through `boss job convert <packet> [--to vN]` (POST /api/jobs/{id}/convert), which refuses a \
+     move that would strand a step and records the move it makes. Send the stored kind and \
+     version back, or omit workflow_version.";
+
 pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     Path(id): Path<String>,
     CurrentUser(user): CurrentUser,
-    Json(mut job): Json<Job>,
+    Json(body): Json<serde_json::Value>,
 ) -> Response {
     let job_id = match resolve_path_job_id(&state, &id).await {
         Ok(job_id) => job_id,
         Err(refusal) => return refusal,
+    };
+    // Read as a value first so the version refusal below can tell a
+    // body that SENT a version from one that omitted it: `Job` defaults
+    // an absent `workflow_version` to 1, and an omission is not a move.
+    let sent_version = body.get("workflow_version").is_some_and(|v| !v.is_null());
+    let mut job: Job = match serde_json::from_value(body) {
+        Ok(job) => job,
+        Err(e) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("invalid job body: {e}"),
+            )
+                .into_response();
+        }
     };
 
     // Ensure path ID matches body ID.
@@ -1537,6 +1571,44 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     if !scope_matches(&user, &scope, &existing) {
         return (StatusCode::FORBIDDEN, "job is outside your scope").into_response();
     }
+
+    // THE PROTOCOL A PACKET RUNS IS FIXED AT ADMISSION (backlog
+    // b433bdf3). `kind` and `workflow_version` name the spec every
+    // step is paired against — readiness, the terminal that closes it,
+    // the fields required at done — so this route used to let a body
+    // re-point that pairing: PUT kind to one with no protocol, add a
+    // forged step while nothing could judge it, PUT the kind back, and
+    // the forged step resolved first. The version moves only through
+    // `boss job convert`, which checks the move and records it; the
+    // kind never moves. REFUSED, not silently kept like `partition`
+    // above: a changed value is a caller trying to do something, and a
+    // 204 over a write that did not land is the defect class 09576fab
+    // named. A round-trip that sends the stored values back, or omits
+    // the version, is not a change.
+    let mut reshaped: Vec<&str> = Vec::new();
+    if job.kind != existing.kind {
+        reshaped.push("kind");
+    }
+    if sent_version && job.workflow_version != existing.workflow_version {
+        reshaped.push("workflow_version");
+    }
+    if !reshaped.is_empty() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "a packet's protocol is fixed at admission",
+                "job_id": job_id.to_string(),
+                "refused_fields": reshaped,
+                "stored": {
+                    "kind": existing.kind,
+                    "workflow_version": existing.workflow_version,
+                },
+                "hint": PROTOCOL_FIXED_HINT,
+            })),
+        )
+            .into_response();
+    }
+    job.workflow_version = existing.workflow_version;
 
     // Same opt-in subject validation as create_job. Catches a body that
     // swaps Subject::System(…) for Subject::Custom { custom_kind:

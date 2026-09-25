@@ -592,18 +592,21 @@ impl JobsRepository for PgJobs {
         // and the instant it was admitted are decided at admission and
         // never revisited.
         // The storage enforces the immutability rather than trusting
-        // every caller to (same rule as rebuild.rs's upsert).
+        // every caller to (same rule as rebuild.rs's upsert). `kind`
+        // and `workflow_version` are absent for the same reason: they
+        // name the protocol the packet was admitted under (backlog
+        // b433bdf3), and a version moves only through
+        // `repin_workflow_version_at`.
         let result = sqlx::query(
             r#"
-            UPDATE jobs SET kind = $2, subject_kind = $3, subject_id = $4,
-                title = $5, owner_id = $6, status = $7, priority = $8,
-                opened_on = $9, due_on = $10, closed_on = $11, metadata = $12,
-                tags = $13, updated_at = $14
+            UPDATE jobs SET subject_kind = $2, subject_id = $3,
+                title = $4, owner_id = $5, status = $6, priority = $7,
+                opened_on = $8, due_on = $9, closed_on = $10, metadata = $11,
+                tags = $12, updated_at = $13
             WHERE id = $1
             "#,
         )
         .bind(*job.id.inner().as_uuid())
-        .bind(&job.kind)
         .bind(subj_kind)
         .bind(subj_ref)
         .bind(&job.title)

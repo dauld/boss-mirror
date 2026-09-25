@@ -871,9 +871,11 @@ a door that stops being true is a defect worth a car.
   credited to the train automation (backlog 5083d6f5).
 
 - **Before pushing — `infra/gate.sh --lint`.** `--quick` (fmt plus every
-  build-free lint, ~11s) PLUS clippy scoped to the crates the tree
-  changed — seconds on a warm tree, against the ~11 minutes a gate
-  costs. Neither is a gate, and both say so: the build and the suites
+  build-free lint, run eight at a time: 23-36 s on the dev pod, measured
+  2026-09-25 against 132 s one at a time, backlog dc5b6302; the closing
+  line names the three slowest lints) PLUS clippy scoped to the crates
+  the tree changed — seconds on a warm tree, against the ~11 minutes a
+  gate costs. Neither is a gate, and both say so: the build and the suites
   stay unproven either way. Skipping the pre-flight once cost 17 minutes
   of cluster time to learn that `cargo fmt` had been run on one crate and
   not another, and `--quick` alone cost two more gates to clippy errors

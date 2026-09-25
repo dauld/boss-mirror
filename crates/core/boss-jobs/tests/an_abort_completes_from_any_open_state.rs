@@ -388,7 +388,10 @@ async fn a_body_cannot_claim_aborted_to_pass_the_gate() {
         StatusCode::CONFLICT,
         "a body-claimed outcome_kind must not open the gate: {body}"
     );
-    assert_eq!(body["error"], "step has unresolved blockers");
+    // Refused before the gate is reached since b433bdf3: the key is the
+    // protocol's, and a body that changes it is told so by name.
+    assert_eq!(body["refused_keys"], serde_json::json!(["outcome_kind"]));
+    assert_eq!(get_job(&h.app, &job_id).await["status"], "open");
 }
 
 /// The abort's own contract is still enforced: no reason, no abort.
