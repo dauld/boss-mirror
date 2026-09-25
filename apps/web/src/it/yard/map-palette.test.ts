@@ -28,6 +28,9 @@ const MAP_FILES = [
   // The motion layer over the world (design 31bade8f, car M2): its canvas
   // reads the same tokens rather than naming a colour of its own.
   'MotionLayer.svelte',
+  // The transit monitor (design 16091dfb, flight it-map-transit): its
+  // lines are --map-line-* tokens, its rings the map's own states.
+  'TransitMap.svelte',
 ] as const;
 
 /** The grammar round 2 swaps: grounds, text, rules, the accent, and
@@ -35,6 +38,8 @@ const MAP_FILES = [
 const GRAMMAR = [
   'bg', 'surface', 'ink', 'muted', 'rule', 'rule-strong', 'accent', 'link',
   ...(['ok', 'warn', 'bad'] as const).flatMap((s) => [`${s}-ink`, `${s}-bg`, `${s}-edge`]),
+  // the transit monitor's routes (design 16091dfb Q1): Design's tokens
+  ...(['delivery', 'publish', 'siding', 'tenant'] as const).map((l) => `line-${l}`),
 ].map((n) => `--map-${n}`);
 
 /** Custom properties that are not colours, which a map file may still

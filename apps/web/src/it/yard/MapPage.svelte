@@ -76,6 +76,8 @@
   import type { LastGood } from './hud';
   import HudFrame from './HudFrame.svelte';
   import WorldMap from './WorldMap.svelte';
+  import TransitMap from './TransitMap.svelte';
+  import { flightOn } from '@boss/web-kit/session/flights.svelte';
   import PlantStrip from './PlantStrip.svelte';
   import FloorDeck from './FloorDeck.svelte';
   import CrewBoardPage from '../crew/CrewBoardPage.svelte';
@@ -121,6 +123,11 @@
    *  mounted, never both hidden by CSS — a hidden world would still be
    *  read, counted and crawled as if it were on the screen. */
   const phone = new MediaQuery(PHONE_QUERY);
+  /** THE TRANSIT MONITOR (design 16091dfb, Q2 decided 2026-09-25):
+   *  behind its flight, on for David first. Off — and for every viewer
+   *  the flight does not list — the world map is the map; the phone
+   *  keeps its strip either way. */
+  const transit = $derived(flightOn('it-map-transit'));
 
   let regions = $state<Remote<Regions>>({ kind: 'loading' });
   let borders = $state<Remote<Borders>>({ kind: 'loading' });
@@ -172,7 +179,9 @@
     <PageHeader
       eyebrow="IT · Forge line"
       title="The IT world"
-      subtitle="The territories along the packet flow, each a door to its floor, and the borders between them carrying what crosses, what waits and the machine that moves it"
+      subtitle={transit
+        ? 'The network as a transit monitor: each region a station on its line, each border a section of track with what waits on it and its headway, and the alarms board beside it'
+        : 'The territories along the packet flow, each a door to its floor, and the borders between them carrying what crosses, what waits and the machine that moves it'}
     />
   {/if}
 
@@ -220,6 +229,13 @@
       <PhoneStrip
         regions={regions.data}
         borders={borders.kind === 'ready' ? borders.data : null} />
+    {:else if transit}
+      <!-- The same two reads, drawn as a transit map (design 16091dfb):
+           stations, sections, headways and the alarms board. -->
+      <TransitMap
+        regions={regions.data}
+        borders={borders.kind === 'ready' ? borders.data : null} />
+      <PlantStrip machines={regions.data.plant} />
     {:else}
       <WorldMap
         regions={regions.data}

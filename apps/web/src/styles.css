@@ -228,6 +228,17 @@
   --map-ok-ink: var(--ok);     --map-ok-bg: transparent;   --map-ok-edge: var(--clear);
   --map-warn-ink: var(--warn); --map-warn-bg: transparent; --map-warn-edge: var(--busy);
   --map-bad-ink: var(--err);   --map-bad-bg: transparent;  --map-bad-edge: var(--troubled);
+
+  /* The transit monitor's LINES (design 16091dfb Q1, decided by David
+     2026-09-25): one colour per route, owned by the Design department —
+     re-colouring a line is an edit here and nowhere else. They are not
+     states: a held section is drawn in --map-bad-edge over its line, and
+     the station rings keep the ok / warn / bad edges above, so a line's
+     colour can never be read as a verdict. */
+  --map-line-delivery: #1F5FA8;
+  --map-line-publish: #7A3FA0;
+  --map-line-siding: #8B95A3;
+  --map-line-tenant: #C0772A;
 }
 
 /* =============================================================================
