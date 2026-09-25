@@ -872,3 +872,35 @@ async fn the_seeded_card_prices_a_metered_run_and_declares_no_blend() {
     assert_eq!(held.run.tokens, run.tokens);
     assert_eq!(held.pricing_basis(), Some(PricingBasis::Metered));
 }
+
+/// The model the dispatched runs ACTUALLY ran on (backlog 6bb85880,
+/// measured 2026-09-24: every turn of the newest subagent transcripts
+/// says `claude-opus-5-5`) is priced at ITS published rates — $4 in,
+/// $5 5-minute cache write, $0.20 cache read (0.05x, not the 0.1x the
+/// other rows carry), $20 out per MTok, read from Anthropic's pricing
+/// page 2026-09-25 — under both spellings a transcript can yield, and
+/// never at Opus 5's. The same 1,509,040-token run priced above at
+/// $1.1477 on `opus-5[1m]` is:
+///
+///   40 x $4 + 30,000 x $5 + 1,470,000 x $0.20 + 9,000 x $20 per MTok
+///   = $0.00016 + $0.15 + $0.294 + $0.18 = $0.62416
+#[tokio::test(flavor = "multi_thread")]
+async fn opus_5_5_is_priced_at_its_own_published_rates() {
+    let db = TestDb::new().await;
+    let log = PgAgentRuns::new(db.pool.clone());
+    for (i, model) in ["opus-5-5", "opus-5-5[1m]"].into_iter().enumerate() {
+        let mut run = a_run(
+            &format!("run-opus-5-5-{i}"),
+            TokenUsage::Metered {
+                input: 40,
+                cache_write: 30_000,
+                cache_read: 1_470_000,
+                output: 9_000,
+            },
+        );
+        run.actor_id = ActorId::agent("claude", model);
+        let out = log.record_run(&run, &filer()).await.expect("records");
+        assert_eq!(out.run.usd_micros, Some(624_160), "{model}");
+        assert_eq!(out.run.priced_by.as_deref(), Some(model), "its own row");
+    }
+}

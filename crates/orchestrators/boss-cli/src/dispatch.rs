@@ -621,15 +621,27 @@ pub(crate) fn run_body(
     )
 }
 
-/// The `briefed` completion: `prompt_bytes` over the step's own
-/// metadata (PATCH-on-PUT replaces `metadata` wholesale).
-pub(crate) fn briefed_body(existing: &Value, prompt_bytes: usize) -> Value {
-    let mut md = match existing.get("metadata") {
-        Some(Value::Object(m)) => m.clone(),
-        _ => serde_json::Map::new(),
-    };
-    md.insert("prompt_bytes".into(), json!(prompt_bytes.to_string()));
-    json!({ "status": "completed", "metadata": Value::Object(md) })
+/// The `briefed` completion's field, for the step merge door — only the
+/// field, since the door keeps every key the step already holds.
+///
+/// A RUN STEP COMPLETES AS TWO WRITES (backlog e39a9d2a, stage 2 of
+/// design 93d2bddb): its fields through `PATCH …/steps/{id}/metadata`,
+/// then [`completed`] alone through the step PUT. `briefed` and
+/// `reported` were each one PUT of `{status, metadata}`, the metadata a
+/// read-merge-write of the step. Correct under the live rule (the PUT
+/// refuses only a body that OMITS a stored key), but David's decided end
+/// state refuses ANY metadata body, and the merge door is one
+/// transaction against the row as it stands, so it cannot drop a key a
+/// concurrent writer added after the read. Merge FIRST: a required-at-
+/// done field (`reported`'s `summary`) is validated when the step flips.
+pub(crate) fn briefed_writes(prompt_bytes: usize) -> Value {
+    json!({ "prompt_bytes": prompt_bytes.to_string() })
+}
+
+/// The second write of a run step's completion: the status alone, so
+/// the PUT carries no metadata to replace or drop.
+pub(crate) fn completed() -> Value {
+    json!({ "status": "completed" })
 }
 
 /// The agent definition a run's declared effort selects — the one
@@ -1349,9 +1361,16 @@ pub(crate) async fn dispatch_at(
         print!("{prompt}");
     }
     api_at(
+        Method::PATCH,
+        format!("/api/jobs/{run_id}/steps/{briefed_id}/metadata"),
+        Some(briefed_writes(prompt.len())),
+    )
+    .await
+    .context("recording prompt_bytes on the run's briefed step")?;
+    api_at(
         Method::PUT,
         format!("/api/jobs/{run_id}/steps/{briefed_id}"),
-        Some(briefed_body(&briefed, prompt.len())),
+        Some(completed()),
     )
     .await
     .context("completing the run's briefed step")?;
@@ -1685,15 +1704,13 @@ pub(crate) fn report_patch(r: &Report) -> Value {
     Value::Object(md)
 }
 
-/// The `reported` completion: the step's three declared fields
-/// (`summary` required; `spend_usd` and `tokens` are string fields on
-/// the row) over the step's own metadata, since PATCH-on-PUT replaces
-/// `metadata` wholesale.
-pub(crate) fn reported_body(existing: &Value, r: &Report) -> Value {
-    let mut md = match existing.get("metadata") {
-        Some(Value::Object(m)) => m.clone(),
-        _ => serde_json::Map::new(),
-    };
+/// The `reported` completion's fields, for the step merge door: the
+/// step's three declared fields (`summary` required; `spend_usd` and
+/// `tokens` are string fields on the row) and nothing else — the door
+/// keeps what the step already holds (two writes, as [`briefed_writes`]
+/// says why).
+pub(crate) fn reported_writes(r: &Report) -> Value {
+    let mut md = serde_json::Map::new();
     md.insert("summary".into(), json!(r.summary));
     if let Some(d) = r.spend_usd {
         md.insert("spend_usd".into(), json!(d.to_string()));
@@ -1701,7 +1718,7 @@ pub(crate) fn reported_body(existing: &Value, r: &Report) -> Value {
     if let Some(t) = r.counted() {
         md.insert("tokens".into(), json!(t.total().to_string()));
     }
-    json!({ "status": "completed", "metadata": Value::Object(md) })
+    Value::Object(md)
 }
 
 /// The registered id the run's `agent` signs as, off `GET /api/agents`:
@@ -1824,7 +1841,8 @@ pub(crate) fn run_branch(run: &Value) -> Option<String> {
 }
 
 /// The `agent_runs` record for a run packet: keyed on the run's own id
-/// (idempotent), the CPU as its registered id, the model and packet
+/// (idempotent), the CPU as its registered id, the model its transcript
+/// was billed as (else the one its metadata declared) and the packet
 /// off the run's metadata, started when `briefed` completed (the
 /// instant the build began — the same stamp the silence rule reads)
 /// or when the packet opened, finished at the report. A total-only
@@ -1883,10 +1901,26 @@ pub(crate) fn run_record(
         // point: silence and a stated null are different facts.
         None => json!({ "total_tokens": null }),
     };
+    // WHICH MODEL RAN (backlog 6bb85880): the one the transcript's
+    // turns were billed as, when the run was metered — not the packet's
+    // `model`, which is the agent block's DECLARATION. Until 2026-09-25
+    // the declaration was recorded as the fact: every run said
+    // `opus-5[1m]` and was priced at Opus 5's rates while its turns said
+    // `claude-opus-5-5`. The declaration rides `detail` beside the fact,
+    // so a run on another model than its step asked for is visible. A
+    // model the card has no row for is recorded as it is and reads as
+    // unpriced (the API matches rows exactly), never at a neighbour's
+    // rate.
+    let declared = text("model");
+    let model = r
+        .meter
+        .as_ref()
+        .and_then(|m| m.models.recorded())
+        .or_else(|| declared.clone());
     let mut body = json!({
         "run_id": run_id,
         "actor_id": actor_id,
-        "model": text("model"),
+        "model": model,
         "started_at": started_at,
         "finished_at": finished_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         "outcome": outcome,
@@ -1900,6 +1934,9 @@ pub(crate) fn run_record(
             // column: it is free-form on purpose, and a field can
             // graduate once the comparison says what it needs.
             "effort": text("effort"),
+            // The model the step's agent block asked for; `model` is
+            // the one that ran, when the transcript said (6bb85880).
+            "declared_model": declared,
             "reported_spend_usd": r.spend_usd,
             // No `tokens_reported` flag: the column says it now. The
             // flag existed because a zero could not, and keeping both
@@ -1931,6 +1968,9 @@ pub(crate) fn run_record(
                 "final_context_tokens": m.usage.final_context,
                 "cache_write_1h_tokens": m.usage.cache_write_1h,
                 "typed_tokens": r.tokens.map(Tokens::total),
+                // The two readings `model` was derived from, verbatim.
+                "model_ids": m.models.billed,
+                "model_identity": m.models.identity,
             }),
         );
     }
@@ -1982,9 +2022,23 @@ pub(crate) fn tokens_phrase(t: Option<Tokens>) -> String {
 /// own rule ([`boss_jobs::agent_runs::pricing_basis`]), never a second
 /// copy of it here, so a blended figure is never printed as a measured
 /// one (design 91a9bfe7).
-fn price_phrase(priced: Option<u64>, basis: Option<PricingBasis>) -> String {
+fn price_phrase(
+    priced: Option<u64>,
+    basis: Option<PricingBasis>,
+    held: Option<Tokens>,
+    model: Option<&str>,
+) -> String {
     let dollars = |m: u64| format!("${:.4}", m as f64 / 1_000_000.0);
     match (priced, basis) {
+        // Four counts and no price: the one thing missing is a row for
+        // the model (backlog 6bb85880). Say which, and that nothing
+        // stands in for it.
+        (None, _) if matches!(held, Some(Tokens::Metered { .. })) => format!(
+            "unpriced — METERED, but the rate card has no row for `{}` with all four rates: a \
+             model is priced at its own row or not at all, never a neighbour's rate. A price \
+             arrives by migration, read from the published rate",
+            model.unwrap_or("(no model)")
+        ),
         (Some(m), Some(PricingBasis::Blended)) => format!(
             "at {} — BLENDED, not measured: a bare total priced at the model's declared \
              input/output ratio (rate card)",
@@ -2051,13 +2105,16 @@ pub(crate) fn record_line(
     let held = row.and_then(row_tokens);
     let usage = held.map_or(TokenUsage::Unreported, Tokens::usage);
     let basis = boss_jobs::agent_runs::pricing_basis(usage, priced);
-    let phrase = price_phrase(priced, basis);
+    let model = row.and_then(|v| v.get("model")).and_then(Value::as_str);
+    let phrase = price_phrase(priced, basis, held, model);
 
     if out.and_then(|o| o.get("recorded")).and_then(Value::as_bool) != Some(false) {
         let mut line =
             format!("boss dispatch: agent_runs holds run {short} for {actor_id} {phrase}");
         match basis {
             Some(PricingBasis::Metered) => {}
+            // Already metered; the phrase names the missing row.
+            None if matches!(held, Some(Tokens::Metered { .. })) => {}
             // A typed count was all the record had: say how to meter
             // the run instead (backlog e6b2066f).
             Some(_) => line.push_str(
@@ -2318,9 +2375,16 @@ pub(crate) async fn report_with_receipt_at(
             .and_then(Value::as_str)
             .context("the reported step has no id")?;
         api_at(
+            Method::PATCH,
+            format!("/api/jobs/{run_id}/steps/{step_id}/metadata"),
+            Some(reported_writes(report)),
+        )
+        .await
+        .with_context(|| format!("recording the report on `{REPORTED_SLUG}` of run {short}"))?;
+        api_at(
             Method::PUT,
             format!("/api/jobs/{run_id}/steps/{step_id}"),
-            Some(reported_body(&reported, report)),
+            Some(completed()),
         )
         .await
         .with_context(|| format!("completing `{REPORTED_SLUG}` on run {short}"))?;
@@ -2454,10 +2518,13 @@ pub async fn report(
         Ok(m) => {
             let u = m.usage;
             eprintln!(
-                "boss dispatch: metered run {} from {}: {} turns, {} in / {} cache write / {} \
-                 cache read / {} out = {} processed (final context {}{})",
+                "boss dispatch: metered run {} from {}: model {}, {} turns, {} in / {} cache \
+                 write / {} cache read / {} out = {} processed (final context {}{})",
                 &run_id[..8.min(run_id.len())],
                 m.path.display(),
+                m.models
+                    .recorded()
+                    .unwrap_or_else(|| "unnamed by the transcript".to_string()),
                 u.turns,
                 u.input,
                 u.cache_write,
@@ -2964,11 +3031,10 @@ mod tests {
 
     #[test]
     fn briefed_keeps_the_steps_own_keys_and_the_run_section_names_the_export() {
-        let existing = json!({ "metadata": { "authority_role": "platform-admin" } });
-        let body = briefed_body(&existing, 4242);
-        assert_eq!(body["status"], "completed");
-        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
-        assert_eq!(body["metadata"]["prompt_bytes"], "4242");
+        // Only the field, for the merge door; the status goes alone
+        // (e39a9d2a), so neither write carries the step's stored keys.
+        assert_eq!(briefed_writes(4242), json!({ "prompt_bytes": "4242" }));
+        assert_eq!(completed(), json!({ "status": "completed" }));
 
         let s = run_section("5b1d2c3e-0000-4000-8000-000000000001", &block(), None);
         assert!(s.contains("export BOSS_AGENT_RUN=5b1d2c3e-0000-4000-8000-000000000001"));
@@ -3206,10 +3272,27 @@ mod tests {
                     turns: 88,
                     final_context: 153_121,
                 },
+                models: crate::transcript_usage::RunModels {
+                    billed: vec!["claude-opus-5-5".into()],
+                    identity: Some("claude-opus-5-5[1m]".into()),
+                },
             }),
             tokens: Some(Tokens::Total(153_746)),
         };
         let rec = run_record(&run, "agent-claude", &metered, at, "success").unwrap();
+        // WHICH MODEL RAN (backlog 6bb85880): the transcript's, not the
+        // block's. The block's word rides `detail` beside it, so a run
+        // on a model other than the one its step declared is visible.
+        assert_eq!(rec["model"], "opus-5-5[1m]");
+        assert_eq!(rec["detail"]["declared_model"], "opus-5[1m]");
+        assert_eq!(
+            rec["detail"]["metered"]["model_ids"],
+            json!(["claude-opus-5-5"])
+        );
+        assert_eq!(
+            rec["detail"]["metered"]["model_identity"],
+            "claude-opus-5-5[1m]"
+        );
         assert_eq!(rec["input_tokens"], 40);
         assert_eq!(rec["output_tokens"], 9_000);
         assert_eq!(rec["cache_read_tokens"], 1_470_000);
@@ -3220,7 +3303,17 @@ mod tests {
         assert_eq!(rec["detail"]["metered"]["turns"], 88);
         let parsed: boss_jobs::agent_runs::NewAgentRun = serde_json::from_value(rec).unwrap();
         assert_eq!(parsed.tokens.total(), Some(1_509_040));
+        assert_eq!(parsed.model.as_deref(), Some("opus-5-5[1m]"));
         assert_eq!(report_patch(&metered)["tokens"], 1_509_040);
+
+        // A transcript that names no model leaves the block's word as
+        // the only one there is.
+        let mut silent = metered.clone();
+        if let Some(m) = silent.meter.as_mut() {
+            m.models = crate::transcript_usage::RunModels::default();
+        }
+        let rec = run_record(&run, "agent-claude", &silent, at, "success").unwrap();
+        assert_eq!(rec["model"], "opus-5[1m]");
     }
 
     /// THE CAR THE RUN PRODUCED, AND THE COUNT NOBODY TOOK — the two
@@ -3487,16 +3580,14 @@ mod tests {
             "a number on the packet, as the schema says"
         );
         assert_eq!(patch["tokens"], 1000);
-        let existing = json!({ "metadata": { "authority_role": "platform-admin" } });
-        let body = reported_body(&existing, &r);
-        assert_eq!(body["status"], "completed");
-        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
-        assert_eq!(body["metadata"]["summary"], "packet x, branch y, sha z");
+        // The step's fields, and only those — the merge door keeps the
+        // step's own keys (e39a9d2a).
         assert_eq!(
-            body["metadata"]["spend_usd"], "3.5",
+            reported_writes(&r),
+            json!({ "summary": "packet x, branch y, sha z", "spend_usd": "3.5",
+                    "tokens": "1000" }),
             "string fields on the row"
         );
-        assert_eq!(body["metadata"]["tokens"], "1000");
         // Nothing is written for what was not given.
         let bare = Report {
             summary: "s".into(),
@@ -3505,11 +3596,7 @@ mod tests {
             tokens: None,
         };
         assert!(report_patch(&bare).get("spend_usd").is_none());
-        assert!(
-            reported_body(&existing, &bare)["metadata"]
-                .get("tokens")
-                .is_none()
-        );
+        assert_eq!(reported_writes(&bare), json!({ "summary": "s" }));
     }
 
     /// A SECOND `--report` on a run already in `agent_runs` writes
@@ -3652,6 +3739,35 @@ mod tests {
         assert!(line.contains("recorded in full either way"), "{line}");
     }
 
+    /// A METERED run the card cannot price is unpriced BY NAME (backlog
+    /// 6bb85880): its four counts are all there, so the only thing
+    /// missing is a row for the model it ran on — and the line says
+    /// which model, and that no neighbour's rate stands in for it.
+    /// Advising `--transcript` here would send the operator to re-read
+    /// a transcript that was already read.
+    #[test]
+    fn a_metered_run_on_a_model_the_card_does_not_name_is_unpriced_by_name() {
+        let out = json!({
+            "recorded": true,
+            "run": {
+                "model": "opus-9-9", "usd_micros": null,
+                "input_tokens": 40, "output_tokens": 9_000,
+                "cache_read_tokens": 1_470_000, "cache_write_tokens": 30_000,
+            },
+        });
+        let r = Report {
+            summary: "s".into(),
+            spend_usd: None,
+            meter: None,
+            tokens: None,
+        };
+        let line = record_line("54f43757", "agent-claude", Some(&out), &r).expect("recorded");
+        assert!(line.contains("unpriced"), "{line}");
+        assert!(line.contains("`opus-9-9`"), "names the model: {line}");
+        assert!(line.contains("never a neighbour"), "{line}");
+        assert!(!line.contains("--transcript"), "already metered: {line}");
+    }
+
     #[test]
     fn the_runs_cpu_is_resolved_to_its_registered_id() {
         let agents = vec![json!({ "id": "agent-claude", "aliases": ["claude@algedonic.dev"] })];
@@ -3690,6 +3806,24 @@ mod wire_tests {
     /// One request as the stub reads it: method, path (query stripped),
     /// the full target, and the JSON body.
     type Answer = (&'static str, String);
+
+    /// A step PUT on the run, answered as the END STATE of design
+    /// 93d2bddb answers it (e39a9d2a): a body carrying `metadata` is
+    /// refused, one carrying the status alone lands. One stage stricter
+    /// than the live server — which refuses only a body that OMITS a
+    /// stored key — so the run's completions are pinned to the form that
+    /// survives the tighten, and a slide back to a read-merge-write PUT
+    /// fails here rather than on the day the tighten lands.
+    fn run_step_put(body: &Value) -> Answer {
+        if body.get("metadata").is_some() {
+            (
+                "409 Conflict",
+                r#"{"error":"a step PUT carries no metadata; use the merge door"}"#.into(),
+            )
+        } else {
+            ("204 No Content", String::new())
+        }
+    }
 
     /// The HTTP loop every stub here shares: reads one request per
     /// connection, logs it, and answers with what `route` says.
@@ -3824,6 +3958,10 @@ mod wire_tests {
                         }
                     }
                     ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
+                        run_step_put(body)
+                    }
+                    // The run's step merge door: `briefed`'s fields.
+                    ("PATCH", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
                         ("204 No Content", String::new())
                     }
                     // The edge onto the CLAIMED step (dd6d44b7) — on
@@ -3935,6 +4073,12 @@ mod wire_tests {
                     format!("/api/jobs/{PACKET}/steps/s-build/metadata")
                 ),
                 ("GET".to_string(), format!("/api/jobs/{RUN}")),
+                // `briefed` completes as TWO writes (e39a9d2a): its
+                // field through the merge door, then the status alone.
+                (
+                    "PATCH".to_string(),
+                    format!("/api/jobs/{RUN}/steps/run-briefed/metadata")
+                ),
                 (
                     "PUT".to_string(),
                     format!("/api/jobs/{RUN}/steps/run-briefed")
@@ -4001,17 +4145,22 @@ mod wire_tests {
         assert!(brief.contains("# Builder rules"), "the profile's document");
         assert!(prompt.contains(&format!("export BOSS_AGENT_RUN={RUN}")));
 
+        let merged = &calls
+            .iter()
+            .find(|(m, p, _)| m == "PATCH" && p.ends_with("/steps/run-briefed/metadata"))
+            .expect("the briefed field goes through the merge door")
+            .2;
+        assert_eq!(
+            *merged,
+            json!({ "prompt_bytes": prompt.len().to_string() }),
+            "only the field travels; the step's stored keys stay where they are"
+        );
         let briefed = &calls
             .iter()
             .find(|(m, p, _)| m == "PUT" && p.ends_with("/steps/run-briefed"))
             .expect("the briefed step is completed")
             .2;
-        assert_eq!(briefed["status"], "completed");
-        assert_eq!(
-            briefed["metadata"]["prompt_bytes"],
-            prompt.len().to_string()
-        );
-        assert_eq!(briefed["metadata"]["authority_role"], "platform-admin");
+        assert_eq!(*briefed, json!({ "status": "completed" }));
     }
 
     /// A step nobody declared a block for is refused BEFORE the claim —
@@ -4792,6 +4941,9 @@ mod wire_tests {
                     }
                 }
                 ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
+                    run_step_put(body)
+                }
+                ("PATCH", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
                     ("204 No Content", String::new())
                 }
                 // The run edge (dd6d44b7): dispatch writes `agent_run`
@@ -4861,14 +5013,15 @@ mod wire_tests {
     /// The report's stub: the run, the agents registry, and the three
     /// writes answered.
     async fn report_stub(run: Value) -> (String, Log) {
-        serve(move |method, path, target, _body| match (method, path) {
+        serve(move |method, path, target, body| match (method, path) {
             ("GET", p) if p == format!("/api/jobs/{RUN}") => ("200 OK", run.to_string()),
             ("PATCH", p) if p == format!("/api/jobs/{RUN}/metadata") => {
                 ("204 No Content", String::new())
             }
-            ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
+            ("PATCH", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
                 ("204 No Content", String::new())
             }
+            ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => run_step_put(body),
             ("GET", "/api/agents") => (
                 "200 OK",
                 json!({ "data": [{ "id": "agent-claude", "aliases": ["claude@algedonic.dev"],
@@ -4922,6 +5075,12 @@ mod wire_tests {
             vec![
                 ("GET".to_string(), format!("/api/jobs/{RUN}")),
                 ("PATCH".to_string(), format!("/api/jobs/{RUN}/metadata")),
+                // `reported` completes as TWO writes (e39a9d2a): its
+                // fields through the step merge door, then the status.
+                (
+                    "PATCH".to_string(),
+                    format!("/api/jobs/{RUN}/steps/run-reported/metadata")
+                ),
                 (
                     "PUT".to_string(),
                     format!("/api/jobs/{RUN}/steps/run-reported")
@@ -4938,13 +5097,16 @@ mod wire_tests {
         );
         assert_eq!(patch["spend_usd"], 4.2);
         assert_eq!(patch["tokens"], 761_000);
-        let put = &calls[2].2;
-        assert_eq!(put["status"], "completed");
-        assert_eq!(put["metadata"]["summary"], patch["report"]);
-        assert_eq!(put["metadata"]["spend_usd"], "4.2");
-        assert_eq!(put["metadata"]["tokens"], "761000");
-        assert_eq!(put["metadata"]["authority_role"], "platform-admin");
-        let rec = &calls[4].2;
+        let merged = &calls[2].2;
+        assert_eq!(merged["summary"], patch["report"]);
+        assert_eq!(merged["spend_usd"], "4.2");
+        assert_eq!(merged["tokens"], "761000");
+        assert!(
+            merged.get("authority_role").is_none(),
+            "only the fields travel; the stored keys stay where they are: {merged}"
+        );
+        assert_eq!(calls[3].2, json!({ "status": "completed" }));
+        let rec = &calls[5].2;
         assert_eq!(rec["run_id"], RUN);
         assert_eq!(rec["actor_id"], "agent-claude");
         assert_eq!(rec["job_id"], PACKET);
@@ -5309,6 +5471,9 @@ mod wire_tests {
                         }
                     }
                     ("PUT", p) if p.starts_with(&format!("/api/jobs/{INBOX_RUN}/steps/")) => {
+                        run_step_put(body)
+                    }
+                    ("PATCH", p) if p.starts_with(&format!("/api/jobs/{INBOX_RUN}/steps/")) => {
                         ("204 No Content", String::new())
                     }
                     // The edge onto the claimed step (dd6d44b7): a

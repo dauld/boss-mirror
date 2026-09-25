@@ -417,18 +417,24 @@ pub(crate) fn open_step<'a>(packet: &'a Value, slug: &str) -> Result<&'a Value, 
     }
 }
 
-/// The completion body: `writes` laid over the step's own metadata.
-/// PATCH-on-PUT replaces `metadata` wholesale, and `authority_role`,
-/// `audience` and `procedure` live there — so the existing keys ride
-/// through and only the declared fields change.
-pub(crate) fn completion(step: &Value, writes: &Map<String, Value>) -> Value {
+/// The step's metadata as it will STAND once `writes` are merged onto
+/// it — what the registry judges at done, and so what
+/// [`contract_check`] judges before the round trip. A view, never a
+/// body: nothing sends it.
+pub(crate) fn as_it_will_stand(step: &Value, writes: &Map<String, Value>) -> Value {
     let mut md = step
         .get("metadata")
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
     md.extend(writes.iter().map(|(k, v)| (k.clone(), v.clone())));
-    json!({ "status": "completed", "metadata": Value::Object(md) })
+    Value::Object(md)
+}
+
+/// The completion's SECOND write: the status alone. No `metadata` key,
+/// so the PUT has nothing to replace and nothing to drop.
+pub(crate) fn completed_status() -> Value {
+    json!({ "status": "completed" })
 }
 
 /// The text fields a triage row may declare for its measurement, in
@@ -810,6 +816,41 @@ impl Wire {
         .await
         .map(|_| ())
     }
+
+    /// Complete a step carrying `writes`, as TWO writes: the writes to
+    /// the merge door, then the status alone through the PUT.
+    ///
+    /// WHY TWO (backlog e39a9d2a, stage 2 of design 93d2bddb). This was
+    /// one PUT of `{status, metadata}`, the metadata a read-merge-write
+    /// of the step as the packet was read. That is correct under the
+    /// live rule (the PUT refuses only a body that OMITS a stored key),
+    /// but David's decided end state refuses ANY metadata body on the
+    /// PUT, and a read-merge-write can still race: a key a concurrent
+    /// writer adds between the read and the PUT is refused (stage 1)
+    /// rather than kept. The merge door is one transaction against the
+    /// row as it stands, so it cannot race, and it is the only form
+    /// that survives the tighten.
+    ///
+    /// MERGE FIRST: required-at-done fields are validated when the step
+    /// flips to completed, so the evidence must already be on the row.
+    /// The cost is a window where the fields are written and the step
+    /// is still open; if the completion is then refused at done, the
+    /// step stays open carrying the writes, and a retry re-merges them
+    /// — each verb judges the row's contract BEFORE the first write
+    /// ([`contract_check`]), so the refusal it can see is not sent.
+    /// An empty `writes` sends no merge at all.
+    async fn complete_step(
+        &self,
+        job_id: &str,
+        step_id: &str,
+        writes: &Map<String, Value>,
+    ) -> Result<()> {
+        if !writes.is_empty() {
+            self.patch_step_metadata(job_id, step_id, Value::Object(writes.clone()))
+                .await?;
+        }
+        self.put_step(job_id, step_id, completed_status()).await
+    }
 }
 
 fn step_id(step: &Value) -> Result<&str> {
@@ -931,7 +972,7 @@ pub(crate) async fn triage(
         .map_err(|e| anyhow!("{}: {e}", short(&packet)))?;
     let jid = crate::envelope::job_id(&packet).context("the packet has no id")?;
     let sid = step_id(step)?;
-    wire.put_step(jid, sid, completion(step, &writes)).await?;
+    wire.complete_step(jid, sid, &writes).await?;
 
     let after = wire.packet(jid).await?;
     confirm_completed(step_after(&after, sid)?, &writes)?;
@@ -960,7 +1001,7 @@ pub(crate) async fn fold(
         fold_writes(step, change, folded_into).map_err(|e| anyhow!("{}: {e}", short(&packet)))?;
     let jid = crate::envelope::job_id(&packet).context("the packet has no id")?;
     let sid = step_id(step)?;
-    wire.put_step(jid, sid, completion(step, &writes)).await?;
+    wire.complete_step(jid, sid, &writes).await?;
 
     let after = wire.packet(jid).await?;
     confirm_completed(step_after(&after, sid)?, &writes)?;
@@ -1053,8 +1094,10 @@ pub(crate) async fn hold(wire: &Wire, car: &str, reason: Option<&str>) -> Result
 // `boss-jobs/src/http/steps.rs`: `metadata` is REPLACED wholesale by
 // the body's top-level keys, so a naive completion would delete the
 // step's `procedure` and its `agent` block — since e39a9d2a the PUT
-// refuses such a body (409, naming the dropped keys), which makes the
-// read-merge-write below the required form rather than a workaround;
+// refuses such a body (409, naming the dropped keys), and the decided
+// end state refuses ANY metadata body, so the fields go through the
+// step merge door and the PUT carries the status alone
+// (`Wire::complete_step`);
 // an UNKNOWN field name is not refused but
 // stored beside the real ones, so a name typed from memory reads as
 // success and records nothing (retro 27fad542, class B); and a 204 is
@@ -1405,13 +1448,14 @@ pub(crate) async fn complete(
     // Merged, not replaced — the step keeps its `procedure`, its
     // `agent` block and its audience — and the MERGED document is what
     // the registry judges, exactly as the API judges it after its own
-    // merge.
-    let body = completion(step, &writes);
-    contract_check(step, &body["metadata"])
+    // merge. Judged HERE, before the first of the two writes, so a
+    // completion the row would refuse at done never leaves its fields
+    // half-written on an open step.
+    contract_check(step, &as_it_will_stand(step, &writes))
         .map_err(|e| anyhow!("{} `{slug}`: {e}", short(&packet)))?;
     let jid = crate::envelope::job_id(&packet).context("the packet has no id")?;
     let sid = step_id(step)?;
-    wire.put_step(jid, sid, body).await?;
+    wire.complete_step(jid, sid, &writes).await?;
 
     let after = wire.packet(jid).await?;
     confirm_completed(step_after(&after, sid)?, &writes)?;
@@ -1869,21 +1913,20 @@ mod tests {
         );
     }
 
-    /// PATCH-on-PUT replaces `metadata` wholesale, and `authority_role`
-    /// / `audience` live there: the completion carries them through.
+    /// The view the contract is judged against is the writes laid over
+    /// the step's own keys — `authority_role` and `audience` live there
+    /// — while the status write carries no metadata at all, so it has
+    /// nothing to drop (e39a9d2a).
     #[test]
     fn the_completion_lays_the_writes_over_the_steps_own_keys() {
         let step = backlog_triage("ready");
         let writes = triage_writes(&step, "build", "measured", None).unwrap();
-        let body = completion(&step, &writes);
-        assert_eq!(body["status"], json!("completed"));
-        assert_eq!(body["metadata"]["authority_role"], json!("platform-admin"));
-        assert_eq!(
-            body["metadata"]["audience"]["role"],
-            json!("platform-admin")
-        );
-        assert_eq!(body["metadata"]["disposition"], json!("build"));
-        assert_eq!(body["metadata"]["evidence"], json!("measured"));
+        let stands = as_it_will_stand(&step, &writes);
+        assert_eq!(stands["authority_role"], json!("platform-admin"));
+        assert_eq!(stands["audience"]["role"], json!("platform-admin"));
+        assert_eq!(stands["disposition"], json!("build"));
+        assert_eq!(stands["evidence"], json!("measured"));
+        assert_eq!(completed_status(), json!({ "status": "completed" }));
     }
 
     // ------------------------------------------------------------------
@@ -1958,9 +2001,8 @@ mod tests {
             writes["fold_change"],
             json!("docs/architecture-decisions.md gains a section")
         );
-        let body = completion(step, &writes);
         assert_eq!(
-            body["metadata"]["procedure"],
+            as_it_will_stand(step, &writes)["procedure"],
             json!("State what CURRENT TRUTH gains")
         );
         // Already folded: the refusal is the generic standing one.
@@ -2239,23 +2281,27 @@ mod tests {
                 else {
                     return ("404 Not Found", "step not found".into());
                 };
-                // THE SERVER REFUSES A METADATA BODY THAT DROPS A STORED
-                // KEY (e39a9d2a, pinned by
-                // `a_step_put_that_drops_a_stored_key_is_refused`).
-                // Modelled here so a verb that clears by omission
-                // through THIS door fails the test exactly as it fails
-                // live, instead of passing against a stub that is
-                // kinder than the API.
-                // Judged on an open step only, as the server does: a
-                // terminal one answers with the frozen-row rule below.
-                if let Some(sent_md) = sent.get("metadata")
+                // THE STEP PUT CARRIES NO METADATA — the END STATE of
+                // design 93d2bddb (e39a9d2a), one stage stricter than the
+                // live server. Live today, a step PUT refuses only a
+                // metadata body that OMITS a stored key (stage 1, pinned
+                // by `a_step_put_that_drops_a_stored_key_is_refused`);
+                // the decided end state refuses ANY metadata body, and
+                // the tighten is one block in `update_step` once every
+                // writer has moved to the merge door. This stub refuses
+                // the end state already, so every verb it drives —
+                // triage, fold, step complete, release — is pinned to
+                // the form that survives the tighten, and a verb that
+                // slid back to a read-merge-write PUT fails HERE rather
+                // than on the day the tighten lands. Judged on an open
+                // step only, as the server does: a terminal one answers
+                // with the frozen-row rule below.
+                if sent.get("metadata").is_some()
                     && !matches!(step["status"].as_str(), Some("completed" | "skipped"))
-                    && !boss_jobs::step_metadata_write::omitted_keys(&step["metadata"], sent_md)
-                        .is_empty()
                 {
                     return (
                         "409 Conflict",
-                        r#"{"error":"metadata body omits stored keys"}"#.into(),
+                        r#"{"error":"a step PUT carries no metadata; use the merge door"}"#.into(),
                     );
                 }
                 // The frozen-row rule (http/steps.rs): a terminal step's
@@ -2350,24 +2396,37 @@ mod tests {
         .await
         .expect("completes");
         let puts = s.puts.lock().unwrap();
-        assert_eq!(puts.len(), 1, "one step PUT: {puts:?}");
-        let (path, body) = &puts[0];
+        // TWO writes (e39a9d2a): the evidence to the merge door, then
+        // the status alone — the stub refuses a PUT carrying metadata.
+        assert_eq!(puts.len(), 2, "one merge, then one status PUT: {puts:?}");
+        let step_path =
+            "/0d2e1655-02c0-47d1-942a-5c8ae661f27f/steps/11111111-1111-1111-1111-111111111111";
+        let (path, merged) = &puts[0];
+        assert_eq!(path, &format!("{step_path}/metadata"), "the merge first");
+        assert_eq!(merged["disposition"], json!("duplicate"));
+        assert_eq!(merged["evidence"], json!("same defect, older packet"));
         assert_eq!(
-            path,
-            "/0d2e1655-02c0-47d1-942a-5c8ae661f27f/steps/11111111-1111-1111-1111-111111111111"
-        );
-        assert_eq!(body["status"], json!("completed"));
-        assert_eq!(body["metadata"]["disposition"], json!("duplicate"));
-        assert_eq!(
-            body["metadata"]["evidence"],
-            json!("same defect, older packet")
-        );
-        assert_eq!(
-            body["metadata"]["duplicate_of"],
+            merged["duplicate_of"],
             json!("236529aa-cf49-4c50-856b-889160e3d565"),
             "the full id, resolved — never the eight characters typed"
         );
-        assert_eq!(body["metadata"]["authority_role"], json!("platform-admin"));
+        assert!(
+            merged.get("authority_role").is_none(),
+            "only the writes travel; the stored keys stay where they are: {merged}"
+        );
+        assert_eq!(
+            puts[1],
+            (step_path.to_string(), json!({ "status": "completed" }))
+        );
+        drop(puts);
+        let after = s.packets.lock().unwrap();
+        let triaged = &after[0]["steps"][1];
+        assert_eq!(triaged["status"], "completed");
+        assert_eq!(
+            triaged["metadata"]["authority_role"],
+            json!("platform-admin"),
+            "the stored key survives, as read back"
+        );
     }
 
     /// The refusals happen BEFORE the write: a wrong disposition, a
@@ -2440,8 +2499,8 @@ mod tests {
         );
         assert_eq!(
             s.puts.lock().unwrap().len(),
-            1,
-            "the PUT was sent, and answered"
+            2,
+            "the merge and the PUT were sent, and answered"
         );
     }
 
@@ -2463,14 +2522,21 @@ mod tests {
         .await
         .expect("folds");
         let puts = s.puts.lock().unwrap();
-        assert_eq!(puts.len(), 1);
+        assert_eq!(puts.len(), 2, "one merge, then one status PUT: {puts:?}");
+        assert!(puts[0].0.ends_with("/steps/s-fold/metadata"), "{puts:?}");
         assert_eq!(
-            puts[0].1["metadata"]["fold_change"],
-            json!("architecture-decisions.md gains a section")
+            puts[0].1,
+            json!({ "fold_change": "architecture-decisions.md gains a section" })
         );
+        assert_eq!(puts[1].1, json!({ "status": "completed" }));
+        drop(puts);
+        let after = s.packets.lock().unwrap();
+        let fold = &after[0]["steps"][2];
+        assert_eq!(fold["status"], "completed");
         assert_eq!(
-            puts[0].1["metadata"]["procedure"],
-            json!("State what CURRENT TRUTH gains")
+            fold["metadata"]["procedure"],
+            json!("State what CURRENT TRUTH gains"),
+            "the stored procedure survives the completion"
         );
     }
 
@@ -2729,9 +2795,9 @@ mod tests {
         assert!(err.contains("is not a JSON array"), "{err}");
     }
 
-    /// HAZARD 1: the completion is the writes laid OVER the step's own
-    /// metadata, so the procedure and the agent keys survive a PUT that
-    /// replaces metadata wholesale.
+    /// HAZARD 1: the contract is judged against the writes laid OVER
+    /// the step's own metadata — the procedure and the agent keys stay,
+    /// as the merge door leaves them.
     #[test]
     fn the_completion_keeps_the_steps_procedure_and_agent_keys() {
         let step = measure_step("ready");
@@ -2744,20 +2810,15 @@ mod tests {
             ]),
         )
         .expect("all three are declared");
-        let body = completion(&step, &writes);
-        assert_eq!(body["status"], "completed");
+        let stands = as_it_will_stand(&step, &writes);
         assert_eq!(
-            body["metadata"]["procedure"],
-            "Read the PAGE and the DEPARTMENT, and write the difference.",
-            "a wholesale metadata PUT would have deleted this"
+            stands["procedure"], "Read the PAGE and the DEPARTMENT, and write the difference.",
+            "the merge keeps what the step already holds"
         );
-        assert_eq!(body["metadata"]["agent_profile"], "analyst");
-        assert_eq!(body["metadata"]["human_only"], false);
-        assert_eq!(
-            body["metadata"]["gaps_md"],
-            "1. no failure line on the queue read"
-        );
-        contract_check(&step, &body["metadata"]).expect("the row's contract is satisfied");
+        assert_eq!(stands["agent_profile"], "analyst");
+        assert_eq!(stands["human_only"], false);
+        assert_eq!(stands["gaps_md"], "1. no failure line on the queue read");
+        contract_check(&step, &stands).expect("the row's contract is satisfied");
     }
 
     /// A completion short of a required field is refused HERE, in the
@@ -2768,8 +2829,8 @@ mod tests {
         let step = measure_step("ready");
         let writes =
             field_writes(&step, &given(&[("controls_md", "seven links")])).expect("declared");
-        let body = completion(&step, &writes);
-        let err = contract_check(&step, &body["metadata"]).expect_err("two are missing");
+        let err =
+            contract_check(&step, &as_it_will_stand(&step, &writes)).expect_err("two are missing");
         assert!(
             err.contains("required field 'needs_md' is missing")
                 && err.contains("required field 'gaps_md' is missing"),
@@ -2837,29 +2898,36 @@ mod tests {
         .expect("completed");
 
         let puts = s.puts.lock().unwrap();
-        assert_eq!(puts.len(), 1, "one PUT: {puts:?}");
-        let (path, body) = &puts[0];
+        assert_eq!(puts.len(), 2, "one merge, then one status PUT: {puts:?}");
+        let (path, merged) = &puts[0];
+        assert!(
+            path.ends_with("/33333333-3333-3333-3333-333333333333/metadata"),
+            "the merge first: {path}"
+        );
+        assert_eq!(
+            merged["gaps_md"],
+            "1. the queue read paints empty on failure"
+        );
+        assert!(
+            merged.get("agent_profile").is_none(),
+            "only the writes travel: {merged}"
+        );
+        let (path, status) = &puts[1];
         assert!(
             path.ends_with("/33333333-3333-3333-3333-333333333333"),
             "{path}"
         );
-        assert_eq!(body["status"], "completed");
-        assert_eq!(body["metadata"]["agent_profile"], "analyst");
-        assert_eq!(
-            body["metadata"]["gaps_md"],
-            "1. the queue read paints empty on failure"
-        );
+        assert_eq!(*status, json!({ "status": "completed" }));
         drop(puts);
-        // ONE PUT, from a step that is still open, is the whole
-        // sequence — and the stored step is READ, not assumed. The
-        // freeze in `update_step` is scoped to a step whose OLD status
-        // is already terminal, so a `ready` step takes its metadata and
-        // its completion in the same body (what `boss triage` and `boss
-        // fold` have done since they landed). What a two-PUT sequence
-        // would buy is a window where the fields are written and the
-        // step is not completed — and if the completion were then
-        // refused at done, a half-written open step to clean up by
-        // hand.
+        // TWO writes, merge first (e39a9d2a, stage 2 of design
+        // 93d2bddb): the decided end state refuses ANY metadata body on
+        // the step PUT, so the fields go through the merge door and the
+        // PUT carries the status alone. The window this opens — fields
+        // written, step still open — is narrowed by `contract_check`
+        // running before either write, so a completion the row would
+        // refuse at done is refused here instead (see
+        // `every_step_complete_refusal_happens_before_any_write`). And
+        // the stored step is READ, not assumed.
         let after = s.packets.lock().unwrap();
         assert_eq!(after[0]["steps"][0]["status"], "completed");
         assert_eq!(

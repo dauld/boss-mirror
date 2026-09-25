@@ -219,13 +219,18 @@ pub fn resolved_steps(
     steps.iter().map(|s| resolved(s, active)).collect()
 }
 
-/// The migration that seeds `agent_rate_card`. Read at compile time so
-/// the lint can name the priced models without a database; the pin
-/// tests below hold it equal to the whole schema directory and to the
-/// live table.
-const RATE_CARD_SEED: &str = include_str!(
-    "../../../../infra/postgres/schema/20260910030644-an-agent-run-leaves-a-record.sql"
-);
+/// The migrations that insert `agent_rate_card` rows: the seed, then
+/// Opus 5.5 (backlog 6bb85880). Read at compile time so the lint can
+/// name the priced models without a database; the pin tests below hold
+/// them equal to the whole schema directory and to the live table.
+const RATE_CARD_SEED: &[&str] = &[
+    include_str!(
+        "../../../../infra/postgres/schema/20260910030644-an-agent-run-leaves-a-record.sql"
+    ),
+    include_str!(
+        "../../../../infra/postgres/schema/20260925023146-opus-5-5-is-priced-at-its-own-rates.sql"
+    ),
+];
 
 /// Every model an `INSERT INTO agent_rate_card … VALUES` block in `sql`
 /// names, in file order. Line-based: a VALUES row is written one per
@@ -260,7 +265,12 @@ pub fn models_in(sql: &str) -> Vec<String> {
 /// The models the rate card prices — the set a step's `agent.model`
 /// must belong to.
 pub fn known_models() -> &'static [String] {
-    static MODELS: LazyLock<Vec<String>> = LazyLock::new(|| models_in(RATE_CARD_SEED));
+    static MODELS: LazyLock<Vec<String>> = LazyLock::new(|| {
+        RATE_CARD_SEED
+            .iter()
+            .flat_map(|sql| models_in(sql))
+            .collect()
+    });
     &MODELS
 }
 
@@ -458,6 +468,11 @@ mod tests {
             "the dev pod's session model is priced: {models:?}"
         );
         assert!(models.len() >= 8, "{models:?}");
+        // The model the runs actually ran on (backlog 6bb85880), under
+        // both spellings a transcript yields — so a block may name it.
+        for m in ["opus-5-5", "opus-5-5[1m]"] {
+            assert!(models.iter().any(|k| k == m), "{m} is priced: {models:?}");
+        }
     }
 
     /// The one definition is the schema directory, whole: a later

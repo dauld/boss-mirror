@@ -34,6 +34,10 @@
 //! more than one, is said out loud and the report falls back to the
 //! count it was given, because guessing between two transcripts would
 //! record one run's spend against another.
+//!
+//! WHICH MODEL. The same transcript says which model every turn was
+//! billed as, so the record names that model rather than the one the
+//! step's agent block declared ([`RunModels`], backlog 6bb85880).
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -214,11 +218,105 @@ pub(crate) fn find_transcripts(root: &Path, run_id: &str, since: SystemTime) -> 
     found
 }
 
+/// Which model a run ran on, as its transcript says (backlog 6bb85880).
+///
+/// THE WORD THIS REPLACES. The record took the model from the run
+/// packet — the Workflow agent block's `model`, `opus-5[1m]` on all 20
+/// blocks — and priced the run at that row. Measured 2026-09-24: the
+/// newest subagent transcripts say `claude-opus-5-5` on every billed
+/// turn, because the agent definitions say `model: opus`, an alias the
+/// harness resolves to the newest Opus. The block was a declaration;
+/// the transcript is the receipt, and the meter already reads it.
+///
+/// Two readings, both the harness's own: every billed turn's
+/// `message.model` (the API id the turn was billed as), and the model
+/// attachment's `identity.modelId` (what the session was launched as,
+/// which carries the `[1m]` context suffix the card spells). The turns
+/// are the authority; the identity is believed only when it names the
+/// same model, and then only for its spelling.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RunModels {
+    /// Every distinct model id a billed turn names, first-seen order.
+    /// `<synthetic>` is the harness speaking — a zero-usage line no model
+    /// produced — and is not a model.
+    pub billed: Vec<String>,
+    /// The harness's model attachment, when the transcript has one.
+    pub identity: Option<String>,
+}
+
+impl RunModels {
+    /// The model as `agent_rate_card` spells it, or `None` when the
+    /// transcript names none. Several billed models are named together
+    /// (`opus-5-5+haiku-4-5`): the four counts are summed across them
+    /// and cannot be priced at one row's rates, so no row names the
+    /// pair and the run reads as unpriced — rather than being priced,
+    /// wholly, at whichever model came first.
+    pub(crate) fn recorded(&self) -> Option<String> {
+        match self.billed.as_slice() {
+            [] => self
+                .identity
+                .as_deref()
+                .map(|i| card_spelling(i).to_string()),
+            [one] => {
+                let spelled = self
+                    .identity
+                    .as_deref()
+                    .filter(|i| i.split_once('[').map_or(*i, |(base, _)| base) == one)
+                    .unwrap_or(one);
+                Some(card_spelling(spelled).to_string())
+            }
+            many => Some(
+                many.iter()
+                    .map(|m| card_spelling(m))
+                    .collect::<Vec<_>>()
+                    .join("+"),
+            ),
+        }
+    }
+}
+
+/// An API model id as the rate card spells it: without the `claude-`
+/// prefix (20260910030644 keys the card on `opus-5`, not `claude-opus-5`).
+/// Nothing else is rewritten — a dated snapshot id keeps its date and
+/// reads as unpriced until a row names it, because matching is exact.
+pub(crate) fn card_spelling(api_id: &str) -> &str {
+    api_id.strip_prefix("claude-").unwrap_or(api_id)
+}
+
+/// The models a transcript names, per [`RunModels`].
+pub(crate) fn read_models(jsonl: &str) -> RunModels {
+    jsonl
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .fold(RunModels::default(), |mut acc, v| {
+            let billed = (v.get("type").and_then(Value::as_str) == Some("assistant"))
+                .then(|| v.pointer("/message/model").and_then(Value::as_str))
+                .flatten()
+                .filter(|m| *m != "<synthetic>" && !m.is_empty());
+            if let Some(m) = billed
+                && !acc.billed.iter().any(|b| b == m)
+            {
+                acc.billed.push(m.to_string());
+            }
+            if acc.identity.is_none()
+                && v.pointer("/attachment/type").and_then(Value::as_str) == Some("model")
+            {
+                acc.identity = v
+                    .pointer("/attachment/identity/modelId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            acc
+        })
+}
+
 /// What the report read, and from where.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Metered {
     pub path: PathBuf,
     pub usage: Usage,
+    /// The model the transcript says ran (backlog 6bb85880).
+    pub models: RunModels,
 }
 
 /// The run's metered usage: from `explicit` when the operator named a
@@ -269,7 +367,12 @@ pub(crate) fn meter(
         .map_err(|e| format!("could not read transcript {}: {e}", path.display()))?;
     let usage = sum_usage(&text)
         .ok_or_else(|| format!("transcript {} holds no turn usage", path.display()))?;
-    Ok(Metered { path, usage })
+    let models = read_models(&text);
+    Ok(Metered {
+        path,
+        usage,
+        models,
+    })
 }
 
 #[cfg(test)]
@@ -321,6 +424,73 @@ mod tests {
             sum_usage(r#"{"type":"user","message":{"content":"hi"}}"#),
             None
         );
+    }
+
+    /// The shape measured on this car's own transcript, 2026-09-25: the
+    /// harness's model attachment names `claude-opus-5-5[1m]`, every
+    /// billed turn names `claude-opus-5-5`, and a `<synthetic>` line —
+    /// the harness speaking, zero usage — rides beside them.
+    const OPUS_5_5: &str = concat!(
+        r#"{"type":"attachment","attachment":{"type":"model","identity":{"modelId":"claude-opus-5-5[1m]","marketingName":"Opus 5.5 (1M context)"}}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_a","model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":900,"output_tokens":7}}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_s","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_b","model":"claude-opus-5-5","usage":{"input_tokens":1,"cache_creation_input_tokens":10,"cache_read_input_tokens":1000,"output_tokens":9}}}"#,
+        "\n",
+    );
+
+    /// WHICH MODEL RAN is read from the transcript it was billed in
+    /// (backlog 6bb85880): the record said `opus-5[1m]` — the Workflow
+    /// block's word — for runs whose every turn said `claude-opus-5-5`.
+    #[test]
+    fn the_model_is_read_from_the_transcript_and_spelled_as_the_card_spells_it() {
+        let m = read_models(OPUS_5_5);
+        assert_eq!(m.billed, vec!["claude-opus-5-5".to_string()]);
+        assert_eq!(m.identity.as_deref(), Some("claude-opus-5-5[1m]"));
+        assert_eq!(
+            m.recorded().as_deref(),
+            Some("opus-5-5[1m]"),
+            "the identity names the billed model and the context it ran at"
+        );
+
+        // No identity attachment (a transcript older than it): the
+        // billed id alone, still without the `claude-` prefix.
+        let bare = RunModels {
+            billed: vec!["claude-opus-5-5".into()],
+            identity: None,
+        };
+        assert_eq!(bare.recorded().as_deref(), Some("opus-5-5"));
+
+        // An identity that is NOT the billed model is not believed: the
+        // turns are what was billed.
+        let disagree = RunModels {
+            billed: vec!["claude-opus-5-5".into()],
+            identity: Some("claude-opus-5[1m]".into()),
+        };
+        assert_eq!(disagree.recorded().as_deref(), Some("opus-5-5"));
+
+        // Two billed models cannot be priced at one row's rates. Both
+        // are named, and no row names the pair, so the run reads as
+        // unpriced rather than wholly priced at either one.
+        let two = RunModels {
+            billed: vec!["claude-opus-5-5".into(), "claude-haiku-4-5".into()],
+            identity: Some("claude-opus-5-5[1m]".into()),
+        };
+        assert_eq!(two.recorded().as_deref(), Some("opus-5-5+haiku-4-5"));
+
+        assert_eq!(RunModels::default().recorded(), None, "nothing said");
+    }
+
+    #[test]
+    fn a_metered_run_carries_the_models_its_transcript_names() {
+        let root = boss_testing::scratch_dir("transcript-usage-model");
+        let path = write(&root, "s/subagents/agent-m.jsonl", OPUS_5_5);
+        let got = meter(Some(&path), None, "r-1", SystemTime::UNIX_EPOCH).expect("named");
+        assert_eq!(got.models.recorded().as_deref(), Some("opus-5-5[1m]"));
+        assert_eq!(got.usage.turns, 3, "the synthetic line is a turn of zero");
+        assert_eq!(got.usage.output, 16);
     }
 
     fn write(root: &Path, rel: &str, text: &str) -> PathBuf {

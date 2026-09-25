@@ -1,0 +1,56 @@
+-- 20260925023146-opus-5-5-is-priced-at-its-own-rates.sql — the model
+-- the dispatched runs actually ran on gets a rate-card row of its own.
+--
+-- WHAT WAS MEASURED (backlog 6bb85880, 2026-09-24 22:25Z). The three
+-- newest subagent transcripts under the dev session record
+-- "model":"claude-opus-5-5" on every billed turn (88, 84 and 142
+-- turns), and the harness's model attachment names it
+-- `claude-opus-5-5[1m]`. .claude/agents/effort-*.md say `model: opus`,
+-- an alias Claude Code resolves to the newest Opus. Every run was
+-- nevertheless recorded as `opus-5[1m]` — the Workflow agent block's
+-- word — and priced at Claude Opus 5's rates: a model that did not run,
+-- at a price nobody read for the one that did.
+--
+-- WHAT CHANGES WITH THIS FILE. `boss dispatch --report` now records the
+-- model the run's own transcript names (boss-cli transcript_usage::
+-- RunModels), spelled as this table spells a model: the API id without
+-- its `claude-` prefix, with the harness's `[1m]` context suffix when
+-- its identity attachment names the same model the turns were billed
+-- as. So a run on Opus 5.5 is recorded as `opus-5-5[1m]`, or
+-- `opus-5-5` from a transcript without the attachment, and this file
+-- gives each spelling a row. Matching stays EXACT (20260910030644): a
+-- model no row names reads as unpriced, never at a neighbour's rate.
+--
+-- WHERE THE NUMBERS CAME FROM. Anthropic's pricing page,
+-- https://platform.claude.com/docs/en/about-claude/pricing, read
+-- 2026-09-25 by the builder of this car, row "Claude Opus 5.5":
+--
+--   base input $4 / MTok        5m cache writes $5 / MTok
+--   1h cache writes $8 / MTok   cache hits and refreshes $0.20 / MTok
+--   output $20 / MTok
+--
+-- with the footnote "Cache hits and refreshes on Claude Opus 5.5 are
+-- priced at 0.05x the base input price" — so the cache-read rate is
+-- written here as read, NOT derived by the 0.1x multiplier
+-- 20260924001627 applied to every earlier row (which would have priced
+-- it at $0.40, double). The cache-write rate is the 5-minute one, as on
+-- every other row; a 1-hour write ($8) is priced at that floor and its
+-- count rides the run's detail. The page's "Long context pricing"
+-- section puts the full 1M window at standard pricing for Claude 4.6
+-- and later, which is why `[1m]` carries the same rate — stated as a
+-- row of its own, as `opus-5[1m]` is, rather than matched by prefix.
+-- The bundled claude-api reference (cached 2026-06-24) agrees: $4/$20,
+-- cache reads $0.20.
+--
+-- No blend is declared: 20260924001627 retired the blend, and a
+-- total-only run on this model stays unpriced.
+--
+-- boss_jobs::agent_spec::known_models reads this file beside the seed,
+-- so a Workflow agent block may now name either spelling (moving the 20
+-- blocks under infra/platform/workflows off `opus-5[1m]` is the next
+-- car, not this one).
+
+INSERT INTO agent_rate_card (model, input_usd_micros_per_mtok, output_usd_micros_per_mtok, cache_read_usd_micros_per_mtok, cache_write_usd_micros_per_mtok, note) VALUES
+  ('opus-5-5',      4000000, 20000000, 200000, 5000000, 'Claude Opus 5.5 — $4.00 in / $20.00 out / $0.20 cache read (0.05x) / $5.00 5m cache write per MTok (platform.claude.com/docs/en/about-claude/pricing, read 2026-09-25; backlog 6bb85880)'),
+  ('opus-5-5[1m]',  4000000, 20000000, 200000, 5000000, 'Claude Opus 5.5, 1M context — same rate as opus-5-5 (1M context at standard pricing, same page, read 2026-09-25); the dispatched runs'' model as the harness names it')
+ON CONFLICT (model) DO NOTHING;

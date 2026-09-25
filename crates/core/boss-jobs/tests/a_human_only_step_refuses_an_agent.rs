@@ -128,10 +128,48 @@ fn review_spec() -> WorkflowSpec {
     )
 }
 
+fn field(name: &str, filled_by: boss_core::job::FilledBy) -> boss_core::job::StepField {
+    boss_core::job::StepField {
+        name: name.into(),
+        field_type: "string".into(),
+        required: false,
+        filled_by,
+        item_keys: Vec::new(),
+        covers: None,
+        binds: None,
+        item_value_max_bytes: None,
+        item_one_of: Vec::new(),
+    }
+}
+
+/// flight-a-change's `decide`, reduced: a human-only step whose
+/// protocol declares the person's field (`verdict`, filled by the
+/// executor) and one the filer supplies (`brief_md`).
+fn decide_spec() -> WorkflowSpec {
+    WorkflowSpec::platform_seed(
+        "decide",
+        "Decide a flight",
+        "test",
+        vec!["custom".into()],
+        vec![StepSpec {
+            fields: vec![
+                field("verdict", boss_core::job::FilledBy::Executor),
+                field("brief_md", boss_core::job::FilledBy::Filer),
+            ],
+            ..task(
+                "decide",
+                "platform-admin",
+                serde_json::json!({ "human_only": true }),
+            )
+        }],
+    )
+}
+
 fn app() -> (Router, Arc<InMemoryJobs>) {
     let kinds = Arc::new(InMemoryWorkflows::new());
     kinds.seed(rotation_spec()).unwrap();
     kinds.seed(review_spec()).unwrap();
+    kinds.seed(decide_spec()).unwrap();
     let jobs = Arc::new(InMemoryJobs::new());
     let mut policy = FakePolicyClient::builder();
     for role in ["system", "platform-admin"] {
@@ -677,12 +715,228 @@ async fn the_declaration_cannot_be_lifted_on_the_way_to_completion() {
     assert_completion_refused(status, &body, &text, &kill, AGENT);
 
     // An unchanged re-send is not a change: the merge door still takes
-    // other keys beside the declaration as it stands.
+    // other keys beside the declaration as it stands — context for the
+    // person, which is all an agent may write here (50f012ed).
     let (status, _, text) = patch_metadata(
         &app,
         &kill,
         &agent,
-        serde_json::json!({ "human_only": "true", "note": "looked at it" }),
+        serde_json::json!({ "human_only": "true", "context_md": "looked at it" }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {text}");
+}
+
+// ── THE PERSON'S RECORD (backlog 50f012ed) ─────────────────────────
+//
+// The completion check above guards the FLIP. The fields beside it were
+// open: since e39a9d2a a completion writes its fields through the merge
+// door and then PUTs the status, so an agent completing a person's step
+// had its fields land and only the status refused — the record kept a
+// write the step reserves for a person. Measured here first: before the
+// fix the merge door answered 204 to every agent write below.
+//
+// THE RULE: on an OPEN human-only step, a write signed by anyone who is
+// not a person may change only CONTEXT for that person — `context_md`,
+// `sign_off_context`, or a field the step declares `filled_by =
+// "filer"`. Every other key is the person's record. Context stays
+// writable because it is a real caller: the retro and publish runs
+// write `context_md` onto the review step a person decides from.
+
+fn assert_write_refused(
+    status: StatusCode,
+    body: &serde_json::Value,
+    text: &str,
+    step: &Step,
+    actor: &str,
+    key: &str,
+) {
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a human-only step must refuse {actor} writing {key}: {text}"
+    );
+    assert_eq!(body["step_id"], step.id.to_string(), "{text}");
+    assert_eq!(body["actor_id"], actor, "{text}");
+    assert!(
+        body["refused_keys"]
+            .as_array()
+            .is_some_and(|k| k.iter().any(|k| k == key)),
+        "the refusal names the key: {text}"
+    );
+    assert!(
+        body["rule"]
+            .as_str()
+            .is_some_and(|r| r.contains("human_only") && r.contains("context_md")),
+        "the refusal names the rule and what IS writable: {text}"
+    );
+    assert!(
+        body["door"].as_str().is_some_and(|d| d.contains("/steps/")),
+        "the refusal names the door it came through: {text}"
+    );
+}
+
+/// THE HOLE: an agent writes the person's field onto an open human-only
+/// step through the merge door — in each spelling an agent reaches the
+/// API with, and as an automation.
+#[tokio::test]
+async fn an_agent_cannot_write_the_persons_field_through_the_merge_door() {
+    let (app, jobs) = app();
+    let job = file(&app, &jobs, "decide", serde_json::json!({})).await;
+    let decide = step_by_slug(&jobs, &job, "decide").await;
+
+    for (actor, signed) in [
+        (AGENT, user(AGENT, "platform-admin")),
+        ("agent-claude", user("agent-claude", "platform-admin")),
+        ("system:dispatcher", dispatcher()),
+    ] {
+        // A declared executor field, and a key the protocol never named:
+        // what is not context is the person's, declared or not.
+        for key in ["verdict", "note"] {
+            let (status, body, text) = patch_metadata(
+                &app,
+                &decide,
+                &signed,
+                serde_json::Value::Object(
+                    [(key.to_string(), serde_json::json!("promote"))]
+                        .into_iter()
+                        .collect(),
+                ),
+            )
+            .await;
+            assert_write_refused(status, &body, &text, &decide, actor, key);
+            let stored = jobs.get_step(&decide.id).await.unwrap().unwrap();
+            assert_eq!(
+                stored.metadata, decide.metadata,
+                "a refused write writes nothing"
+            );
+        }
+    }
+}
+
+/// The same rule on the step PUT: a metadata body that stops short of
+/// completing does not carry the person's field past the check either.
+#[tokio::test]
+async fn an_agent_cannot_write_the_persons_field_through_the_step_put() {
+    let (app, jobs) = app();
+    let job = file(&app, &jobs, "decide", serde_json::json!({})).await;
+    let decide = step_by_slug(&jobs, &job, "decide").await;
+
+    let (status, body, text) = put_step(
+        &app,
+        &decide,
+        &user(AGENT, "platform-admin"),
+        serde_json::json!({ "metadata": over(&decide, serde_json::json!({ "verdict": "pull" })) }),
+    )
+    .await;
+    assert_write_refused(status, &body, &text, &decide, AGENT, "verdict");
+    let stored = jobs.get_step(&decide.id).await.unwrap().unwrap();
+    assert_eq!(stored.metadata, decide.metadata);
+
+    // Context through the PUT is still context.
+    let (status, _, text) = put_step(
+        &app,
+        &decide,
+        &user(AGENT, "platform-admin"),
+        serde_json::json!({ "metadata": over(&decide, serde_json::json!({ "context_md": "the reading" })) }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {text}");
+}
+
+/// THE CALLER THAT MUST KEEP WORKING: context written for the person —
+/// the reviewer's `context_md`, a sign-off's `sign_off_context`, and a
+/// field the protocol says the filer supplies. An unchanged re-send of
+/// a stored person's field is not a write either.
+#[tokio::test]
+async fn an_agent_still_writes_context_for_the_person() {
+    let (app, jobs) = app();
+    let job = file(&app, &jobs, "decide", serde_json::json!({})).await;
+    let decide = step_by_slug(&jobs, &job, "decide").await;
+
+    for signed in [user(AGENT, "platform-admin"), dispatcher()] {
+        let (status, _, text) = patch_metadata(
+            &app,
+            &decide,
+            &signed,
+            serde_json::json!({
+                "context_md": "What the retro found, in full.",
+                "sign_off_context": "Nothing needs deciding except the sign-off.",
+                "brief_md": "The hypothesis and the signal.",
+            }),
+        )
+        .await;
+        assert!(status.is_success(), "{status} {text}");
+    }
+    let stored = jobs.get_step(&decide.id).await.unwrap().unwrap();
+    assert_eq!(
+        stored.metadata["context_md"],
+        "What the retro found, in full."
+    );
+    assert_eq!(
+        stored.metadata["brief_md"],
+        "The hypothesis and the signal."
+    );
+    // Clearing context is context too.
+    let (status, _, text) = patch_metadata(
+        &app,
+        &decide,
+        &user(AGENT, "platform-admin"),
+        serde_json::json!({ "sign_off_context": null }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {text}");
+}
+
+/// The person writes their own record, and once it is written an agent
+/// re-sending it unchanged (a retry) is not a write — but changing it is.
+#[tokio::test]
+async fn the_person_writes_the_record_and_an_agent_cannot_change_it() {
+    let (app, jobs) = app();
+    let job = file(&app, &jobs, "decide", serde_json::json!({})).await;
+    let decide = step_by_slug(&jobs, &job, "decide").await;
+
+    let (status, _, text) = patch_metadata(
+        &app,
+        &decide,
+        &user(DAVID, "platform-admin"),
+        serde_json::json!({ "verdict": "promote" }),
+    )
+    .await;
+    assert!(status.is_success(), "{status} {text}");
+
+    let agent = user(AGENT, "platform-admin");
+    let (status, _, text) = patch_metadata(
+        &app,
+        &decide,
+        &agent,
+        serde_json::json!({ "verdict": "promote" }),
+    )
+    .await;
+    assert!(status.is_success(), "an unchanged re-send: {status} {text}");
+    for patch in [
+        serde_json::json!({ "verdict": "pull" }),
+        serde_json::json!({ "verdict": null }),
+    ] {
+        let (status, body, text) = patch_metadata(&app, &decide, &agent, patch).await;
+        assert_write_refused(status, &body, &text, &decide, AGENT, "verdict");
+    }
+    let stored = jobs.get_step(&decide.id).await.unwrap().unwrap();
+    assert_eq!(stored.metadata["verdict"], "promote");
+}
+
+/// A step the protocol did not reserve is untouched: an agent writes any
+/// key through the merge door.
+#[tokio::test]
+async fn the_merge_door_is_unchanged_on_a_step_that_is_not_human_only() {
+    let (app, jobs) = app();
+    let job = file(&app, &jobs, "rotation", serde_json::json!({})).await;
+    let install = step_by_slug(&jobs, &job, "install").await;
+    let (status, _, text) = patch_metadata(
+        &app,
+        &install,
+        &user(AGENT, "platform-admin"),
+        serde_json::json!({ "verdict": "done", "note": "installed" }),
     )
     .await;
     assert!(status.is_success(), "{status} {text}");

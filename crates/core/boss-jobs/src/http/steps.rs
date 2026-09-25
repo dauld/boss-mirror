@@ -985,6 +985,32 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         )
             .into_response();
     }
+    // ...AND ITS RECORD IS WRITTEN BY A PERSON (backlog 50f012ed): a PUT
+    // that stops short of completing must not carry the person's fields
+    // past the check above either. The merge door's rule, on the same
+    // stored row; context for the person stays writable. A status-only
+    // or assignment PUT changes no key and asks nothing of the roster.
+    if !is_terminal && crate::human_only::declared(&old.metadata) {
+        let refused =
+            crate::human_only::record_keys_changed(&old.metadata, &step.metadata, &old.fields);
+        if !refused.is_empty()
+            && let Err(why) =
+                crate::human_only::person_check(state.roster.as_deref(), &user.id).await
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(crate::human_only::write_refusal_body(
+                    &step_id.to_string(),
+                    &old.title,
+                    &format!("PUT /api/jobs/{job_id}/steps/{step_id}"),
+                    &user.id,
+                    &why,
+                    &refused,
+                )),
+            )
+                .into_response();
+        }
+    }
     if is_leaving_open {
         let floor = state
             .step_registry
@@ -1988,6 +2014,38 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
             )),
         )
             .into_response();
+    }
+    // THE PERSON'S RECORD (backlog 50f012ed). Completions write their
+    // fields here and then PUT the status (e39a9d2a), and the PUT's
+    // completion check refuses only the flip — so an agent completing a
+    // person's step landed its fields and was refused the status, and
+    // the record kept a write the step reserves for a person. The same
+    // person check as the PUT, on the actor that SIGNED this write, over
+    // every key it would change that is not context for the person
+    // (`human_only::record_keys_changed` holds the rule and its why).
+    // Open steps only: a terminal row is the adapter's refusal below.
+    if !matches!(old.status, StepStatus::Completed | StepStatus::Skipped)
+        && crate::human_only::declared(&old.metadata)
+    {
+        let refused =
+            crate::human_only::record_keys_changed(&old.metadata, &merged_view, &old.fields);
+        if !refused.is_empty()
+            && let Err(why) =
+                crate::human_only::person_check(state.roster.as_deref(), &user.id).await
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(crate::human_only::write_refusal_body(
+                    &step_id.to_string(),
+                    &old.title,
+                    &format!("PATCH /api/jobs/{job_id}/steps/{step_id}/metadata"),
+                    &user.id,
+                    &why,
+                    &refused,
+                )),
+            )
+                .into_response();
+        }
     }
     // `outcome_kind` too (b433bdf3): the PUT's abort exemption reads the
     // stored value, so a merge of `aborted` onto an ordinary terminal

@@ -193,6 +193,97 @@ pub fn completion_refusal_body(
     })
 }
 
+/// The keys that are CONTEXT for the person a human-only step is
+/// reserved for — written so they can decide, never a decision. The
+/// reviewer-context convention (analyst-rules rule 9): a sign-off
+/// renders the step the reader is on, so the run that did the work
+/// writes `context_md` (and a sign-off's `sign_off_context`) onto the
+/// person's step. The empty-decisions sweep reads the same two as "no
+/// judgement recorded" (`MATERIALIZATION_KEYS`), which is the same fact
+/// from the other side.
+pub const CONTEXT_KEYS: &[&str] = &["context_md", "sign_off_context"];
+
+/// The sentence a WRITE refusal carries as its `rule` (backlog 50f012ed).
+pub const WRITE_RULE: &str = "metadata.human_only = true: while the step is open, a write \
+                              signed by an automation or agent session may change only \
+                              context for the person — context_md, sign_off_context, or a \
+                              field the step declares filled_by = \"filer\"; every other key \
+                              is the person's record";
+
+/// PURE: the keys a write by a NON-PERSON would change on an open
+/// human-only step that are not context — added, changed, or deleted
+/// (`next` is the row as the write would leave it, a merge-door `null`
+/// already applied). Sorted; empty when the write is context only, or
+/// an unchanged re-send (a retry writes nothing, so it records nothing).
+///
+/// WHY DEFAULT-DENY, AND WHY CONTEXT IS THE CARVE-OUT (backlog
+/// 50f012ed). Since e39a9d2a a completion writes its fields through the
+/// merge door and then PUTs the status, so an agent completing a
+/// person's step had its fields LAND and only the flip refused: the
+/// record kept a write the step reserves for a person. Two rules were
+/// possible. Refusing only the fields the step declares executor-filled
+/// leaves everything a protocol never named writable — and the incident
+/// review, a human-only step with no declared fields whose surface
+/// renders every key on it as the review's answer, would render an
+/// agent's key as the person's. So the rule runs the other way: the
+/// person's record is everything that is not context, and context is
+/// named — [`CONTEXT_KEYS`], plus the fields the protocol itself says
+/// the FILER supplies (`filled_by = "filer"`: supplied so the work is
+/// doable, by definition not the executor's answer). Context stays
+/// writable because it is a real caller: the retro and publish runs
+/// write `context_md` onto the review step a person decides from.
+pub fn record_keys_changed(
+    stored: &Value,
+    next: &Value,
+    fields: &[boss_core::job::StepField],
+) -> Vec<String> {
+    let empty = serde_json::Map::new();
+    let before = stored.as_object().unwrap_or(&empty);
+    let after = next.as_object().unwrap_or(&empty);
+    let is_context = |k: &str| {
+        CONTEXT_KEYS.contains(&k)
+            || fields
+                .iter()
+                .any(|f| f.name == k && f.filled_by == boss_core::job::FilledBy::Filer)
+    };
+    let mut changed: Vec<String> = before
+        .keys()
+        .chain(after.keys())
+        .filter(|k| before.get(*k) != after.get(*k) && !is_context(k))
+        .cloned()
+        .collect();
+    changed.sort();
+    changed.dedup();
+    changed
+}
+
+/// The write refusal: names the step, the actor that signed the write,
+/// the keys refused, the door it came through, and the rule — so the
+/// caller learns what IS writable without re-deriving it.
+pub fn write_refusal_body(
+    step_id: &str,
+    step_title: &str,
+    door: &str,
+    actor_id: &str,
+    why: &NotAPerson,
+    refused_keys: &[String],
+) -> Value {
+    serde_json::json!({
+        "error": "human-only step refuses a non-human actor writing the person's record",
+        "step_id": step_id,
+        "step_title": step_title,
+        "door": door,
+        "actor_id": actor_id,
+        "why": why.to_string(),
+        "refused_keys": refused_keys,
+        "context_keys": CONTEXT_KEYS,
+        "rule": WRITE_RULE,
+        "hint": "write what the person needs to decide as context_md on this step (or \
+                 annotate the packet through PATCH /api/jobs/{id}/metadata); the step's \
+                 answer and its completion are the person's, signed in as themselves",
+    })
+}
+
 /// Whether a write would change the declaration the STORED step makes.
 /// `next` is the metadata as it would stand after the write (a merge
 /// door `null` already applied). A stored row that says nothing has
@@ -363,6 +454,86 @@ mod tests {
             &json!({ "note": "x" }),
             &json!({ "human_only": true })
         ));
+    }
+
+    fn field(name: &str, filled_by: boss_core::job::FilledBy) -> boss_core::job::StepField {
+        boss_core::job::StepField {
+            name: name.into(),
+            field_type: "string".into(),
+            required: false,
+            filled_by,
+            item_keys: Vec::new(),
+            covers: None,
+            binds: None,
+            item_value_max_bytes: None,
+            item_one_of: Vec::new(),
+        }
+    }
+
+    /// The rule (50f012ed): everything a write changes is the person's
+    /// record except named context — the two reviewer-context keys and
+    /// a field the protocol says the filer supplies.
+    #[test]
+    fn only_context_is_outside_the_persons_record() {
+        use boss_core::job::FilledBy;
+        let fields = vec![
+            field("verdict", FilledBy::Executor),
+            field("brief_md", FilledBy::Filer),
+        ];
+        let stored = json!({ "human_only": true, "verdict": "promote", "procedure": "p" });
+
+        // Context: the reviewer keys and a filer field, added or cleared.
+        for next in [
+            json!({ "human_only": true, "verdict": "promote", "procedure": "p",
+                    "context_md": "c", "sign_off_context": "s", "brief_md": "b" }),
+            json!({ "human_only": true, "verdict": "promote", "procedure": "p" }),
+        ] {
+            assert!(
+                record_keys_changed(&stored, &next, &fields).is_empty(),
+                "{next}"
+            );
+        }
+        // A declared executor field changed or deleted, and an
+        // undeclared key added: each is the person's record, named.
+        assert_eq!(
+            record_keys_changed(
+                &stored,
+                &json!({ "human_only": true, "procedure": "p", "note": "n", "context_md": "c" }),
+                &fields
+            ),
+            vec!["note".to_string(), "verdict".to_string()]
+        );
+        assert_eq!(
+            record_keys_changed(
+                &stored,
+                &json!({ "human_only": true, "verdict": "pull", "procedure": "p" }),
+                &fields
+            ),
+            vec!["verdict".to_string()]
+        );
+        // A step with no declared fields: only the context keys are
+        // context (the incident review's shape).
+        assert_eq!(
+            record_keys_changed(&json!({}), &json!({ "brief_md": "b" }), &[]),
+            vec!["brief_md".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_write_refusal_names_the_step_the_door_the_keys_and_the_rule() {
+        let body = write_refusal_body(
+            "step-1",
+            "Decide",
+            "PATCH /api/jobs/j/steps/step-1/metadata",
+            "agent-claude",
+            &NotAPerson::MachineShaped,
+            &["verdict".to_string()],
+        );
+        assert_eq!(body["step_id"], "step-1");
+        assert_eq!(body["actor_id"], "agent-claude");
+        assert_eq!(body["refused_keys"], json!(["verdict"]));
+        assert!(body["door"].as_str().unwrap().contains("/metadata"));
+        assert!(body["rule"].as_str().unwrap().contains("context_md"));
     }
 
     #[test]
