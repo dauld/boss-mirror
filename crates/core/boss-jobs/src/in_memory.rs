@@ -1047,6 +1047,13 @@ impl JobsRepository for InMemoryJobs {
         Ok(())
     }
 
+    /// This adapter holds no step-plugin registry, so no plugin serves
+    /// any kind: 0, which is what its step insert stores (backlog
+    /// aba364fe).
+    async fn active_step_plugin_version(&self, _kind: &str) -> Result<i32, JobsError> {
+        Ok(0)
+    }
+
     async fn list_steps(&self, job_id: &JobId) -> Result<Vec<Step>, JobsError> {
         let state = self.inner.lock().expect("poisoned");
         let job_key = job_id.to_string();

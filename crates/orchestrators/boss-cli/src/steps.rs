@@ -115,9 +115,21 @@ pub enum Cmd {
         reason: String,
     },
     /// Release a held car: the hold comes off its review step and it boards at the next tick.
+    ///
+    /// With `--diagnosis-file`, release a car the conductor holds after
+    /// red trains instead: the diagnosis must name, by full id, a red
+    /// train gate-run the car rode; `red_trains` is cleared and the look
+    /// is appended to the car's `strike_releases` (backlog c96aac11).
     Release {
         /// The car: its branch, or 8+ characters of its id.
         car: String,
+        /// Clear the car's red-train strikes on this written diagnosis.
+        /// It must name at least one red train gate-run the car rode by
+        /// its FULL id; it is recorded verbatim with who looked and when.
+        /// A file, so no shell sits between the prose and the record
+        /// (backlog 2376b89e).
+        #[arg(long)]
+        diagnosis_file: Option<std::path::PathBuf>,
     },
     /// Step verbs that belong to no one protocol — today, the generic completion.
     Step {
@@ -226,7 +238,22 @@ pub async fn dispatch(cmd: Cmd) -> Result<()> {
             fold(&wire, &design, &change, folded_into.as_deref()).await
         }
         Cmd::Hold { car, reason } => hold(&wire, &car, Some(&reason)).await,
-        Cmd::Release { car } => hold(&wire, &car, None).await,
+        Cmd::Release {
+            car,
+            diagnosis_file: None,
+        } => hold(&wire, &car, None).await,
+        Cmd::Release {
+            car,
+            diagnosis_file: Some(path),
+        } => {
+            let diagnosis = crate::prose::text_or_file(
+                "--diagnosis-file",
+                "--diagnosis-file",
+                None,
+                Some(path.as_path()),
+            )?;
+            crate::strike_release::release_struck(&wire, &car, &diagnosis).await
+        }
         Cmd::Step { action } => match action {
             StepAction::Complete {
                 packet,
@@ -735,7 +762,7 @@ impl Wire {
             .context("the step-type registry read back empty")
     }
 
-    async fn packet(&self, id: &str) -> Result<Value> {
+    pub(crate) async fn packet(&self, id: &str) -> Result<Value> {
         self.call(reqwest::Method::GET, &format!("/api/jobs/{id}"), None)
             .await?
             .with_context(|| format!("packet {id} read back empty"))
@@ -779,7 +806,7 @@ impl Wire {
     /// The one car for `given` — its branch or 8+ characters of its id
     /// — resolved the way `boss prove` resolves one (`prove::find_car`,
     /// live cars only), over every open car.
-    async fn car(&self, given: &str) -> Result<Value> {
+    pub(crate) async fn car(&self, given: &str) -> Result<Value> {
         let cars = self.open_rows(Some("ship-a-change")).await?;
         let car = crate::prove::find_car(&cars, given, crate::prove::Eligible::Live)?;
         let id = crate::envelope::job_id(car).context("matched a car with no id")?;
@@ -801,6 +828,19 @@ impl Wire {
         self.call(
             reqwest::Method::PATCH,
             &format!("/api/jobs/{job_id}/steps/{step_id}/metadata"),
+            Some(body),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// The JOB's merge door, `PATCH /api/jobs/{id}/metadata`: top-level
+    /// keys merge and an explicit null deletes one. The strike release
+    /// writes the car's own metadata through it (`strike_release`).
+    pub(crate) async fn patch_job_metadata(&self, job_id: &str, body: Value) -> Result<()> {
+        self.call(
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{job_id}/metadata"),
             Some(body),
         )
         .await
@@ -1038,6 +1078,22 @@ pub(crate) async fn hold(wire: &Wire, car: &str, reason: Option<&str>) -> Result
         Some(r) => hold_patch(r),
         None => {
             if already.is_none() {
+                // A car the conductor holds after red trains carries no
+                // review marker, so "no hold" was the answer this verb
+                // gave it — true of the step, false of the car (backlog
+                // c96aac11). Its door is named instead.
+                let reds = crate::strike_release::red_trains(&packet);
+                if reds > 0 {
+                    bail!(
+                        "boss release: {} {branch} \"{}\" carries no review hold, but it carries \
+                         {reds} red-train strike(s) — the conductor holds a car at the policy's \
+                         max_red_trains until someone looks. Record the look: `boss release \
+                         {branch} --diagnosis-file <PATH>`, a diagnosis naming a red train \
+                         gate-run it rode by full id.",
+                        short(&packet),
+                        title_of(&packet)
+                    );
+                }
                 println!(
                     "boss release: {} {branch} \"{}\" carries no hold — nothing to release",
                     short(&packet),
@@ -2357,6 +2413,33 @@ mod tests {
                 }
                 ("204 No Content", String::new())
             }
+            // The JOB's merge door (`patch_job_metadata` in
+            // http/jobs.rs): top-level keys merge, an explicit null
+            // deletes, and it answers the job as it now stands.
+            ("PATCH", rest) if rest.ends_with("/metadata") => {
+                let jid = rest.trim_end_matches("/metadata").trim_start_matches('/');
+                let sent: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                puts.lock().unwrap().push((rest.to_string(), sent.clone()));
+                if dropping {
+                    return ("204 No Content", String::new());
+                }
+                let Some(p) = packets.iter_mut().find(|p| p["id"] == jid) else {
+                    return ("404 Not Found", "no such job".into());
+                };
+                if !p["metadata"].is_object() {
+                    p["metadata"] = json!({});
+                }
+                if let (Some(md), Some(obj)) = (p["metadata"].as_object_mut(), sent.as_object()) {
+                    for (k, v) in obj {
+                        if v.is_null() {
+                            md.remove(k);
+                        } else {
+                            md.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+                ("200 OK", p.to_string())
+            }
             _ => ("404 Not Found", "unrouted".into()),
         }
     }
@@ -2635,6 +2718,198 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("no ship-a-change car for \"fix/nothing\""),
+            "{err}"
+        );
+        assert!(s.puts.lock().unwrap().is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // `boss release --diagnosis-file` — the look that clears a struck
+    // car (backlog c96aac11)
+    // ------------------------------------------------------------------
+
+    const STRUCK_CAR: &str = "c6bd173e-3dc9-426f-8fff-866a3b2a6117";
+    const RED_TRAIN: &str = "7a1b2c3d-0000-4000-8000-000000000001";
+    const RED_RUN: &str = "9f8e7d6c-0000-4000-8000-000000000002";
+    const GREEN_RUN: &str = "9f8e7d6c-0000-4000-8000-000000000003";
+    const OTHER_TRAIN: &str = "7a1b2c3d-0000-4000-8000-000000000004";
+    const OTHER_RUN: &str = "9f8e7d6c-0000-4000-8000-000000000005";
+    const HELD: &str = "held after 2 red trains — needs a look before it boards again";
+
+    /// A car the conductor holds after two red trains: no review marker,
+    /// `red_trains` at the compiled max, the hold's own skip note.
+    fn struck_car() -> Value {
+        let mut c = car("ready", json!({ "authority_role": "platform-admin" }));
+        c["metadata"]["red_trains"] = json!(2);
+        c["metadata"]["skip_reason"] = json!(HELD);
+        c
+    }
+
+    fn train_gate_run(id: &str, train: &str, verdict: &str) -> Value {
+        json!({
+            "id": id, "kind": "gate-run", "status": "closed", "title": "gate train/x",
+            "metadata": { "train_gate": true, "train": train, "branch": "train/x" },
+            "steps": [{ "id": format!("s-v-{id}"), "spec_slug": "record-verdict",
+                        "status": "completed", "metadata": { "verdict": verdict } }],
+        })
+    }
+
+    fn a_train(id: &str, boarded: &[&str]) -> Value {
+        json!({ "id": id, "kind": "pr-train", "status": "closed", "title": "train",
+                "metadata": { "boarded_jobs": boarded }, "steps": [] })
+    }
+
+    /// The yard as it stood on 2026-09-25: the car rode a red train; a
+    /// green run and a red train it never rode sit beside it.
+    fn the_yard() -> Vec<Value> {
+        vec![
+            struck_car(),
+            a_train(
+                RED_TRAIN,
+                &[STRUCK_CAR, "dcdc6c64-0000-4000-8000-000000000009"],
+            ),
+            train_gate_run(RED_RUN, RED_TRAIN, "failed"),
+            train_gate_run(GREEN_RUN, RED_TRAIN, "green"),
+            a_train(OTHER_TRAIN, &["dcdc6c64-0000-4000-8000-000000000009"]),
+            train_gate_run(OTHER_RUN, OTHER_TRAIN, "failed"),
+        ]
+    }
+
+    /// The verb end to end: the diagnosis names the red gate-run the car
+    /// rode, one write to the JOB's merge door clears the strikes and
+    /// the hold's note and appends the look, and the car reads back
+    /// boardable. A second look appends; the first stays.
+    #[tokio::test]
+    async fn a_struck_car_is_released_on_a_diagnosis_naming_a_red_gate_run_it_rode() {
+        let s = stub(the_yard()).await;
+        let wire = Wire::at(s.base.clone(), named());
+        let diagnosis = format!(
+            "Both reds were car dcdc6c64's combined-tree stub gap, not this car: gate-run \
+             {RED_RUN} failed only on its test. Also read {OTHER_RUN}, a train this car was not on."
+        );
+        crate::strike_release::release_struck(&wire, "fix/held", &diagnosis)
+            .await
+            .expect("released");
+        {
+            let puts = s.puts.lock().unwrap();
+            assert_eq!(puts.len(), 1, "one write: {puts:?}");
+            assert_eq!(
+                puts[0].0,
+                format!("/{STRUCK_CAR}/metadata"),
+                "the job's merge door"
+            );
+            assert_eq!(puts[0].1["red_trains"], Value::Null);
+            assert_eq!(puts[0].1["skip_reason"], Value::Null);
+        }
+        let car = s.packets.lock().unwrap()[0].clone();
+        assert!(car["metadata"].get("red_trains").is_none(), "{car}");
+        assert!(car["metadata"].get("skip_reason").is_none(), "{car}");
+        assert_eq!(crate::train::car_hold_reason(&car, 2), None);
+        assert_eq!(
+            car["metadata"]["branch"],
+            json!("fix/held"),
+            "other keys stay"
+        );
+        let looks = car["metadata"]["strike_releases"].as_array().unwrap();
+        assert_eq!(looks.len(), 1);
+        assert_eq!(looks[0]["by"], json!("claude@algedonic.dev"));
+        assert_eq!(looks[0]["red_trains_cleared"], json!(2));
+        assert_eq!(
+            looks[0]["gate_runs"],
+            json!([RED_RUN]),
+            "only the verified run is recorded as the evidence"
+        );
+        assert_eq!(looks[0]["diagnosis"], json!(diagnosis));
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(looks[0]["at"].as_str().unwrap()).is_ok(),
+            "{}",
+            looks[0]["at"]
+        );
+
+        // Struck again later, looked at again: the list grows.
+        s.packets.lock().unwrap()[0]["metadata"]["red_trains"] = json!(2);
+        crate::strike_release::release_struck(&wire, "c6bd173e", &diagnosis)
+            .await
+            .expect("released again");
+        let car = s.packets.lock().unwrap()[0].clone();
+        let looks = car["metadata"]["strike_releases"].as_array().unwrap();
+        assert_eq!(looks.len(), 2, "append-only: {looks:?}");
+    }
+
+    /// Every refusal names what the diagnosis failed to name, and none
+    /// of them writes.
+    #[tokio::test]
+    async fn a_diagnosis_naming_no_red_gate_run_the_car_rode_is_refused_before_any_write() {
+        let s = stub(the_yard()).await;
+        let wire = Wire::at(s.base.clone(), named());
+        let err = crate::strike_release::release_struck(
+            &wire,
+            "fix/held",
+            "looked at it, it is fine (dcdc6c64 was the cause)",
+        )
+        .await
+        .expect_err("no id");
+        assert!(err.to_string().contains("names no gate-run"), "{err}");
+
+        let missing = "00000000-0000-4000-8000-00000000dead";
+        let text = format!(
+            "green {GREEN_RUN}; not its train {OTHER_RUN}; the car itself {STRUCK_CAR}; \
+             nothing at {missing}"
+        );
+        let err = crate::strike_release::release_struck(&wire, "fix/held", &text)
+            .await
+            .expect_err("nothing qualifies");
+        let err = err.to_string();
+        assert!(err.contains("names no red train gate-run"), "{err}");
+        assert!(err.contains(&format!("{GREEN_RUN} is not red")), "{err}");
+        assert!(
+            err.contains(&format!("{OTHER_RUN} gates train 7a1b2c3d")),
+            "{err}"
+        );
+        assert!(err.contains("did not carry this car"), "{err}");
+        assert!(
+            err.contains(&format!("{STRUCK_CAR} is a ship-a-change")),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!("{missing} could not be read")),
+            "{err}"
+        );
+        assert!(s.puts.lock().unwrap().is_empty());
+        assert_eq!(
+            s.packets.lock().unwrap()[0]["metadata"]["red_trains"],
+            json!(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_car_with_no_strikes_has_nothing_for_a_diagnosis_to_clear() {
+        let s = stub(vec![car("ready", json!({}))]).await;
+        let wire = Wire::at(s.base.clone(), named());
+        let err = crate::strike_release::release_struck(&wire, "fix/held", RED_RUN)
+            .await
+            .expect_err("no strikes");
+        assert!(
+            err.to_string().contains("carries no red-train strikes"),
+            "{err}"
+        );
+        assert!(s.puts.lock().unwrap().is_empty());
+    }
+
+    /// THE DEFECT (c96aac11): a bare `boss release` on the struck car
+    /// answered "carries no hold" and exited 0. It now names the strikes
+    /// and the door that records the look, and writes nothing.
+    #[tokio::test]
+    async fn a_bare_release_on_a_struck_car_names_the_diagnosis_door() {
+        let s = stub(vec![struck_car()]).await;
+        let wire = Wire::at(s.base.clone(), named());
+        let err = hold(&wire, "fix/held", None)
+            .await
+            .expect_err("a struck car is not released by a bare release");
+        let err = err.to_string();
+        assert!(err.contains("2 red-train strike(s)"), "{err}");
+        assert!(
+            err.contains("boss release fix/held --diagnosis-file <PATH>"),
             "{err}"
         );
         assert!(s.puts.lock().unwrap().is_empty());

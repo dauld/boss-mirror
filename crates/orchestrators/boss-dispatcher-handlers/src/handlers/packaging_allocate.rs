@@ -273,36 +273,34 @@ impl PackagingAllocate {
         Ok(())
     }
 
-    /// Write the packaged qty + excise onto the produce step that yields
-    /// `sku` ([`produce_stamp`]), through the step merge door. No status
+    /// Write every format's packaged qty + the levied volume onto the
+    /// produce steps that yield them ([`produce_stamps`]): ONE merge per
+    /// produce step, carrying every SKU that step yields. No status
     /// change — the step stays pending until the fork lets it become
     /// ready and the workforce packages it.
-    async fn stamp_produce_qty(
+    async fn stamp_produce_qtys(
         &self,
         job_id: &str,
         steps: &[JsonValue],
-        sku: &str,
-        kegs: i64,
-        keg_bbl: f64,
+        packaged: &[Packaged<'_>],
         rule: &str,
     ) -> Result<(), HandlerError> {
-        let levied = (kegs as f64 * keg_bbl).round() as i64;
-        let Some((sid, fields)) = produce_stamp(steps, sku, kegs, levied) else {
-            return Ok(());
-        };
-        let url = format!(
-            "{}/api/jobs/{}/steps/{}/metadata",
-            self.jobs_base.trim_end_matches('/'),
-            job_id,
-            sid
-        );
-        self.write_step(
-            reqwest::Method::PATCH,
-            &url,
-            JsonValue::Object(fields),
-            rule,
-        )
-        .await
+        for (sid, fields) in produce_stamps(steps, packaged) {
+            let url = format!(
+                "{}/api/jobs/{}/steps/{}/metadata",
+                self.jobs_base.trim_end_matches('/'),
+                job_id,
+                sid
+            );
+            self.write_step(
+                reqwest::Method::PATCH,
+                &url,
+                JsonValue::Object(fields),
+                rule,
+            )
+            .await?;
+        }
+        Ok(())
     }
 }
 
@@ -387,24 +385,24 @@ impl Handler for PackagingAllocate {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        for (fmt, &alloc) in formats.iter().zip(&allocated) {
-            // Write the allocated qty onto every format's produce step — the
-            // packaged split, INCLUDING a 0 for a skipped format. products.produce
-            // reads these quantities to spread the batch's WIP across the formats
-            // by packaged volume; a 0-qty format contributes 0 volume, drains no
-            // WIP, and its share is absorbed by the packaged formats. (Its produce
-            // step never runs — the fork routes it to `skip` — so writing 0 only
-            // corrects the sibling's cost basis; it never produces phantom FG.)
-            self.stamp_produce_qty(
-                ev.job_id,
-                &steps,
-                &fmt.sku,
-                alloc,
-                fmt.keg_bbl,
-                &ctx.rule_name,
-            )
+        // Write the allocated qty onto every format's produce step — the
+        // packaged split, INCLUDING a 0 for a skipped format. products.produce
+        // reads these quantities to spread the batch's WIP across the formats
+        // by packaged volume; a 0-qty format contributes 0 volume, drains no
+        // WIP, and its share is absorbed by the packaged formats. (Its produce
+        // step never runs — the fork routes it to `skip` — so writing 0 only
+        // corrects the sibling's cost basis; it never produces phantom FG.)
+        let packaged: Vec<Packaged> = formats
+            .iter()
+            .zip(&allocated)
+            .map(|(fmt, &qty)| Packaged {
+                sku: &fmt.sku,
+                qty,
+                unit_volume: fmt.keg_bbl,
+            })
+            .collect();
+        self.stamp_produce_qtys(ev.job_id, &steps, &packaged, &ctx.rule_name)
             .await?;
-        }
 
         // Complete this step: the outcomes through the step merge door,
         // THEN a status-only PUT (backlog e39a9d2a). This was one PUT
@@ -439,48 +437,89 @@ impl Handler for PackagingAllocate {
 /// the tenant's ledger rule reads.
 const LEVIED_KEY: &str = "excise_bbl";
 
-/// PURE: the first step of `steps` that produces `sku`, and the two keys
-/// that stamp its packaged quantity: `produces_products` with `sku`'s
-/// `qty` set, and the volume the tax is levied on. ONLY those two — they
-/// ride the step merge door, which keeps the step's other keys on the row
-/// (backlog e39a9d2a). This was a PUT of the step's whole metadata as the
-/// Job read it before the loop, and the PUT replaces metadata wholesale.
-///
-/// NOT FIXED HERE, and worth its own item: `produces_products` is itself
-/// built from that pre-loop read, so two SKUs stamped onto ONE produce
-/// step still overwrite each other's `qty` (the second write carries the
-/// first SKU's stale 0). Every produce step the seeded tenant declares
-/// yields one SKU, so it has not bitten.
-fn produce_stamp(
-    steps: &[JsonValue],
-    sku: &str,
+/// One format's packaged quantity, as the produce stamp writes it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Packaged<'a> {
+    sku: &'a str,
     qty: i64,
-    levied_volume: i64,
-) -> Option<(String, serde_json::Map<String, JsonValue>)> {
-    steps.iter().find_map(|s| {
-        let sid = s.get("id").and_then(|v| v.as_str())?;
-        let produces = s.pointer("/metadata/produces_products")?.as_array()?;
-        if !produces
+    /// Volume per unit — the levied volume is `qty × unit_volume`.
+    unit_volume: f64,
+}
+
+/// A step's id and its `produces_products` list, when it has both.
+fn producer(step: &JsonValue) -> Option<(&str, &Vec<JsonValue>)> {
+    Some((
+        step.get("id")?.as_str()?,
+        step.pointer("/metadata/produces_products")?.as_array()?,
+    ))
+}
+
+fn sku_of(product: &JsonValue) -> Option<&str> {
+    product.get("sku").and_then(|v| v.as_str())
+}
+
+/// PURE: the merges that stamp every packaged format onto the step that
+/// produces it — the FIRST step of `steps` whose `produces_products`
+/// names the SKU — ONE per produce step, in step order. Each carries two
+/// keys and nothing else: `produces_products` with the `qty` of EVERY
+/// packaged SKU that step yields, and [`LEVIED_KEY`], the step's whole
+/// packaged volume. They ride the step merge door, which keeps the step's
+/// other keys on the row (backlog e39a9d2a).
+///
+/// WHY ONE MERGE PER STEP, NOT PER SKU (backlog 9e7000f6, conservation).
+/// The merge door replaces a key wholesale — a list is not appended to —
+/// and `produces_products` is built from the Job as read before the
+/// stamps. Stamped once per SKU, two SKUs on one produce step each sent
+/// the whole list with only their own `qty` set, so the second write
+/// carried the first SKU's stale 0 and erased its quantity, and the
+/// second levied volume erased the first's. Every SKU a step
+/// yields is now set in the one list that step is sent.
+///
+/// What this does NOT close: a product on the list that this allocation
+/// does not package keeps the `qty` the pre-loop read held, so a writer
+/// changing that entry between the read and this merge is still lost —
+/// the price of a list-valued key under a top-level merge.
+fn produce_stamps(
+    steps: &[JsonValue],
+    packaged: &[Packaged],
+) -> Vec<(String, serde_json::Map<String, JsonValue>)> {
+    // The step each packaged SKU is stamped onto: the first that yields it.
+    let stamped_onto = |p: &Packaged| {
+        steps
             .iter()
-            .any(|p| p.get("sku").and_then(|v| v.as_str()) == Some(sku))
-        {
-            return None;
-        }
-        let stamped: Vec<JsonValue> = produces
-            .iter()
-            .map(|p| {
-                let mut p = p.clone();
-                if p.get("sku").and_then(|v| v.as_str()) == Some(sku) {
-                    p["qty"] = json!(qty);
-                }
-                p
-            })
-            .collect();
-        let mut fields = serde_json::Map::new();
-        fields.insert("produces_products".into(), JsonValue::Array(stamped));
-        fields.insert(LEVIED_KEY.into(), json!(levied_volume));
-        Some((sid.to_string(), fields))
-    })
+            .filter_map(producer)
+            .find(|(_, products)| products.iter().any(|x| sku_of(x) == Some(p.sku)))
+            .map(|(sid, _)| sid)
+    };
+    steps
+        .iter()
+        .filter_map(producer)
+        .filter_map(|(sid, products)| {
+            let mine: Vec<&Packaged> = packaged
+                .iter()
+                .filter(|p| stamped_onto(p) == Some(sid))
+                .collect();
+            if mine.is_empty() {
+                return None;
+            }
+            let stamped: Vec<JsonValue> = products
+                .iter()
+                .map(|x| match mine.iter().find(|p| sku_of(x) == Some(p.sku)) {
+                    Some(p) => {
+                        let mut x = x.clone();
+                        x["qty"] = json!(p.qty);
+                        x
+                    }
+                    None => x.clone(),
+                })
+                .collect();
+            let levied: f64 = mine.iter().map(|p| p.qty as f64 * p.unit_volume).sum();
+            let mut fields = serde_json::Map::new();
+            fields.insert("produces_products".into(), JsonValue::Array(stamped));
+            fields.insert(LEVIED_KEY.into(), json!(levied.round() as i64));
+            Some((sid.to_string(), fields))
+        })
+        .collect()
 }
 
 /// PURE: the per-format fork outcomes the allocation step records —
@@ -586,16 +625,164 @@ mod tests {
                 "produces_products": [{"sku": "SKU-A", "qty": 0}, {"sku": "SKU-C", "qty": 4}],
             }}),
         ];
-        let (sid, fields) = produce_stamp(&steps, "SKU-A", 20, 10).expect("SKU-A is produced");
-        assert_eq!(sid, "s-half");
+        let a = Packaged {
+            sku: "SKU-A",
+            qty: 20,
+            unit_volume: HALF,
+        };
+        let stamps = produce_stamps(&steps, &[a]);
         let mut expected = serde_json::Map::new();
         expected.insert(
             "produces_products".into(),
             json!([{"sku": "SKU-A", "qty": 20}, {"sku": "SKU-C", "qty": 4}]),
         );
         expected.insert(LEVIED_KEY.into(), json!(10));
-        assert_eq!(fields, expected);
-        assert!(produce_stamp(&steps, "SKU-Z", 1, 1).is_none());
+        assert_eq!(stamps, vec![("s-half".to_string(), expected)]);
+        let z = Packaged {
+            sku: "SKU-Z",
+            qty: 1,
+            unit_volume: 1.0,
+        };
+        assert!(produce_stamps(&steps, &[z]).is_empty());
+    }
+
+    /// One merge per produce step, and each step only its own SKUs: two
+    /// formats on one step ride ONE stamp with both quantities and the
+    /// summed levied volume, a format on another step rides its own, and
+    /// a SKU two steps both list is stamped on the first alone.
+    #[test]
+    fn the_stamp_is_one_merge_per_produce_step_carrying_every_sku_it_yields() {
+        let steps = vec![
+            json!({"id": "s-line-1", "metadata": {
+                "produces_products": [{"sku": "SKU-A", "qty": 0}, {"sku": "SKU-B", "qty": 0}],
+            }}),
+            json!({"id": "s-line-2", "metadata": {
+                "produces_products": [{"sku": "SKU-C", "qty": 0}, {"sku": "SKU-A", "qty": 0}],
+            }}),
+        ];
+        let packaged = [
+            Packaged {
+                sku: "SKU-A",
+                qty: 12,
+                unit_volume: HALF,
+            },
+            Packaged {
+                sku: "SKU-B",
+                qty: 24,
+                unit_volume: SIXTEL,
+            },
+            Packaged {
+                sku: "SKU-C",
+                qty: 3,
+                unit_volume: 1.0,
+            },
+        ];
+        let stamps: Vec<(String, JsonValue)> = produce_stamps(&steps, &packaged)
+            .into_iter()
+            .map(|(sid, f)| (sid, JsonValue::Object(f)))
+            .collect();
+        assert_eq!(
+            stamps,
+            vec![
+                (
+                    "s-line-1".to_string(),
+                    json!({"produces_products": [{"sku": "SKU-A", "qty": 12}, {"sku": "SKU-B", "qty": 24}],
+                           LEVIED_KEY: 10}),
+                ),
+                (
+                    "s-line-2".to_string(),
+                    json!({"produces_products": [{"sku": "SKU-C", "qty": 3}, {"sku": "SKU-A", "qty": 0}],
+                           LEVIED_KEY: 3}),
+                ),
+            ]
+        );
+    }
+
+    /// The step merge door's own rule, applied to a step's stored
+    /// metadata: every key a patch sends REPLACES that key wholesale
+    /// (a list is not appended to), and `null` removes it — the
+    /// `metadata || patch` of `merge_step_metadata_at`.
+    fn through_the_merge_door(stored: JsonValue, patches: &[JsonValue]) -> JsonValue {
+        patches.iter().fold(stored, |mut md, patch| {
+            for (k, v) in patch.as_object().into_iter().flatten() {
+                if v.is_null() {
+                    md.as_object_mut().unwrap().remove(k);
+                } else {
+                    md[k] = v.clone();
+                }
+            }
+            md
+        })
+    }
+
+    /// TWO SKUS ON ONE PRODUCE STEP BOTH KEEP THEIR QUANTITY (backlog
+    /// 9e7000f6, conservation). The produce stamp was written once per
+    /// SKU, each carrying the WHOLE `produces_products` list as the Job
+    /// read it before the loop with only its own SKU's `qty` set. The
+    /// merge door replaces a list wholesale, so the second SKU's stamp
+    /// carried the first SKU's stale 0 and erased it — and the second
+    /// levied volume erased the first's. Driven end to end through the
+    /// handler; the step's patches are folded the way the merge door
+    /// applies them, so the test reads what the row would hold, not
+    /// what one request said.
+    #[tokio::test]
+    async fn two_skus_on_one_produce_step_both_keep_their_quantity() {
+        use crate::handlers::listing_stub::serve;
+        let produce_md = json!({
+            "authority_role": "platform-admin",
+            "produces_products": [{"sku": "SKU-A", "qty": 0}, {"sku": "SKU-B", "qty": 0}],
+        });
+        let stub = serve(vec![
+            (
+                "/api/jobs/j1",
+                json!({"id": "j1", "kind": "packaging-run", "steps": [
+                    {"id": "s-alloc", "metadata": {}},
+                    {"id": "s-produce", "metadata": produce_md.clone()},
+                ]}),
+            ),
+            (
+                "/api/jobs?kind=packaging-run",
+                json!({"data": [], "total": 1}),
+            ),
+        ])
+        .await;
+        let h = PackagingAllocate::new(stub.base.clone(), stub.base.clone());
+        // One volume unit per SKU (no volume suffix). Targets 45 and 90
+        // (daily × 30 days × 1.5), none on hand, so the batch of 10
+        // splits 45 : 90 — 3 of SKU-A and 7 of SKU-B, 10 levied.
+        let ctx = InvocationContext {
+            rule_name: "packaging-allocate".into(),
+            triggering_event_id: "evt-1".into(),
+            triggering_topic: "step.ready.task".into(),
+            event_payload: json!({
+                "job_id": "j1", "step_id": "s-alloc", "kind": "task",
+                "metadata": {
+                    "batch_bbl": 10.0,
+                    "target_skus": ["SKU-A", "SKU-B"],
+                    "expected_daily_demand": {"SKU-A": 1.0, "SKU-B": 2.0},
+                },
+            }),
+        };
+        h.invoke(&[], &ctx).await.expect("the allocation completes");
+
+        let patches: Vec<JsonValue> = stub
+            .sent()
+            .into_iter()
+            .filter(|(w, _)| w == "PATCH /api/jobs/j1/steps/s-produce/metadata")
+            .map(|(_, body)| body)
+            .collect();
+        let row = through_the_merge_door(produce_md, &patches);
+        assert_eq!(
+            row["produces_products"],
+            json!([{"sku": "SKU-A", "qty": 3}, {"sku": "SKU-B", "qty": 7}]),
+            "every SKU's packaged quantity survives on the row: {patches:?}"
+        );
+        assert_eq!(
+            row[LEVIED_KEY],
+            json!(10),
+            "the levied volume is the step's whole packaged volume, 3 + 7: {patches:?}"
+        );
+        assert_eq!(row["authority_role"], "platform-admin");
     }
 
     #[test]

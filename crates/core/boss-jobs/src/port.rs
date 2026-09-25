@@ -1153,6 +1153,21 @@ pub trait JobsRepository: Send + Sync {
     /// small transaction.
     async fn record_events(&self, events: &[boss_core::event::Event]) -> Result<(), JobsError>;
 
+    /// The plugin version a step of `kind` written now is stamped with:
+    /// the version of the step plugin active for the kind in THIS
+    /// adapter's registry, 0 when none serves it — the same lookup a
+    /// step insert applies to a step written at 0.
+    ///
+    /// A writer stamps the step with this BEFORE it builds the step's
+    /// STEP_CREATED, so the event carries what the row stores (backlog
+    /// aba364fe, determinism). Both handlers built the event from the
+    /// caller's 0 while the Pg insert stamped the row, and the
+    /// rebuilder replays the payload: on 2026-09-25 every plugin-served
+    /// STEP_CREATED in the live log said 0, and 144 steps with no later
+    /// STEP_UPDATED would have rebuilt at 0 from rows at 1 or 3.
+    /// Pinned by `tests/a_created_step_replays_at_its_plugin_version_pg.rs`.
+    async fn active_step_plugin_version(&self, kind: &str) -> Result<i32, JobsError>;
+
     async fn list_steps(&self, job_id: &JobId) -> Result<Vec<Step>, JobsError>;
 
     /// Open, workable steps for an executor — the pull side of the

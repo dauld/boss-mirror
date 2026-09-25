@@ -5,10 +5,11 @@
 //! `('*', 'waiting_on')` job edge, migration 110); this handler finds
 //! them with the jobs API's `?waiting_on=` filter — prefix-aware, so
 //! a waiter that wrote an 8-char prefix still wakes — and clears the
-//! key on each. The clear goes through `PUT /api/jobs/{id}`, whose
-//! update path re-evaluates metadata-gated steps (aa9980c8), so a
-//! step whose `ready_when` references `job.metadata.waiting_on`
-//! becomes ready in the same write. Clearing writes `""` rather than
+//! key on each. The clear goes through the job merge door, `PATCH
+//! /api/jobs/{id}/metadata` (9e7000f6; it was a whole-row PUT from the
+//! listing's copy), which re-evaluates metadata-gated steps as the PUT
+//! does (aa9980c8), so a step whose `ready_when` references
+//! `job.metadata.waiting_on` becomes ready in the same write. Clearing writes `""` rather than
 //! deleting the key: the edge guard resolves the empty string
 //! trivially, and boards read "" as no wait.
 //!
@@ -92,32 +93,31 @@ impl Handler for JobsClearWaiting {
             let Some(id) = waiter.get("id").and_then(|v| v.as_str()) else {
                 continue;
             };
-            // PUT the full Job back with only `waiting_on` cleared —
-            // the update endpoint takes the whole row, and jobs that
-            // vanished between list and write just 404 into the error
-            // path for a retry.
-            let mut job = waiter.clone();
-            if let Some(meta) = job.get_mut("metadata").and_then(|m| m.as_object_mut()) {
-                meta.insert("waiting_on".to_string(), json!(""));
-            } else {
-                continue;
-            }
-            let put_url = format!("{base}/api/jobs/{id}");
+            // Merge the ONE key through the job merge door (backlog
+            // 9e7000f6). This PUT the whole Job back — the LISTING's
+            // copy with `waiting_on` cleared — and the job PUT replaces
+            // what it is sent, so any write that landed on the waiter
+            // between the listing and the PUT was reverted. The merge
+            // runs server-side against the row as it stands, and wakes
+            // metadata-gated steps exactly as the PUT did. A job that
+            // vanished between list and write 404s into the error path
+            // for a retry.
+            let patch_url = format!("{base}/api/jobs/{id}/metadata");
             let resp = self
                 .client
-                .put(&put_url)
+                .patch(&patch_url)
                 .header("content-type", "application/json")
                 .header("x-boss-user", dispatcher_actor_header(&ctx.rule_name))
                 .header("x-sim-origin", sim_origin_value())
-                .json(&job)
+                .json(&json!({ "waiting_on": "" }))
                 .send()
                 .await
-                .map_err(|e| HandlerError::Downstream(format!("PUT {put_url}: {e}")))?;
+                .map_err(|e| HandlerError::Downstream(format!("PATCH {patch_url}: {e}")))?;
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
                 return Err(HandlerError::Downstream(format!(
-                    "PUT {put_url} returned {status}: {body}"
+                    "PATCH {patch_url} returned {status}: {body}"
                 )));
             }
         }
@@ -167,5 +167,37 @@ mod tests {
         let h = JobsClearWaiting::new(stub.base.clone());
         let res = h.invoke(&[], &ctx(json!({ "id": "j-1" }))).await;
         assert_refused_by_name(res, "the waiter read");
+    }
+
+    /// THE CLEAR MERGES ONE KEY, NEVER THE ROW (backlog 9e7000f6). The
+    /// wake PUT the whole job back — the copy the waiter LISTING held,
+    /// with `waiting_on` set to "" — and the job PUT replaces what it is
+    /// sent, so anything written to the waiter between the listing and
+    /// the PUT (a metadata key, a status) was reverted to the listing's
+    /// copy. The stub refuses that write as the stale-copy it is
+    /// ([`listing_stub::whole_job_row_put`]); the clear now goes through
+    /// the job merge door, which runs the same wake of metadata-gated
+    /// steps as the PUT did.
+    #[tokio::test]
+    async fn the_clear_merges_waiting_on_through_the_job_merge_door() {
+        use crate::handlers::listing_stub::serve;
+        let stub = serve(vec![(
+            "/api/jobs?waiting_on=j-1",
+            json!({ "data": [{
+                "id": "w-1", "status": "open",
+                "metadata": { "waiting_on": "j-1", "note": "as the listing read it" },
+            }], "total": 1 }),
+        )])
+        .await;
+        let h = JobsClearWaiting::new(stub.base.clone());
+        let res = h.invoke(&[], &ctx(json!({ "id": "j-1" }))).await;
+        assert!(res.is_ok(), "{res:?}; writes {:?}", stub.writes());
+        assert_eq!(
+            stub.sent(),
+            vec![(
+                "PATCH /api/jobs/w-1/metadata".to_string(),
+                json!({ "waiting_on": "" })
+            )]
+        );
     }
 }

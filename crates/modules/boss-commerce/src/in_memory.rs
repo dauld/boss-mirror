@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use boss_core::publisher::EventStamp;
 
 use crate::port::{CommerceError, CommerceRepository};
-use crate::types::{AccountOpenAr, Invoice, InvoiceSummary, RevenueLine};
+use crate::types::{AccountOpenAr, ArAgingBucket, Invoice, InvoiceSummary, RevenueLine};
 
 pub struct InMemoryCommerce {
     invoices: Vec<Invoice>,
@@ -44,6 +44,21 @@ impl InMemoryCommerce {
         self.revenue = revenue;
         self
     }
+
+    /// The invoices still owed — `InvoiceStatus::is_owed`, with the
+    /// write-off overlay applied. The one filter `open_ar_by_account`
+    /// and the summary's AR aging both read (backlog 926d64a3).
+    fn owed_invoices(&self) -> Result<Vec<&Invoice>, CommerceError> {
+        let written_off = self
+            .written_off
+            .lock()
+            .map_err(|e| CommerceError::Storage(format!("written_off lock: {e}")))?;
+        Ok(self
+            .invoices
+            .iter()
+            .filter(|i| i.status.is_owed() && !written_off.contains(&i.id))
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -80,23 +95,14 @@ impl CommerceRepository for InMemoryCommerce {
     }
 
     async fn open_ar_by_account(&self) -> Result<Vec<AccountOpenAr>, CommerceError> {
-        let written_off = self
-            .written_off
-            .lock()
-            .map_err(|e| CommerceError::Storage(format!("written_off lock: {e}")))?
-            .clone();
-        let by_account = self
-            .invoices
-            .iter()
-            .filter(|i| i.status.is_owed() && !written_off.contains(&i.id))
-            .fold(
-                std::collections::BTreeMap::<&str, (i64, i64)>::new(),
-                |mut acc, i| {
-                    let e = acc.entry(i.account_id.as_str()).or_default();
-                    *e = (e.0 + i.amount_cents, e.1 + 1);
-                    acc
-                },
-            );
+        let by_account = self.owed_invoices()?.into_iter().fold(
+            std::collections::BTreeMap::<&str, (i64, i64)>::new(),
+            |mut acc, i| {
+                let e = acc.entry(i.account_id.as_str()).or_default();
+                *e = (e.0 + i.amount_cents, e.1 + 1);
+                acc
+            },
+        );
         Ok(by_account
             .into_iter()
             .map(|(account_id, (open_ar_cents, open_count))| AccountOpenAr {
@@ -228,15 +234,24 @@ impl CommerceRepository for InMemoryCommerce {
 
     async fn invoice_summary(
         &self,
-        _today: chrono::NaiveDate,
+        today: chrono::NaiveDate,
     ) -> Result<InvoiceSummary, CommerceError> {
+        // Revenue here is GL-sourced on Pg and has no in-memory
+        // analogue; the AR aging is invoices alone, so it is computed
+        // with the same owed filter and bucketing rule as Pg.
+        let ar_aging = ArAgingBucket::age(
+            self.owed_invoices()?
+                .into_iter()
+                .map(|i| ((today - i.due_on).num_days(), 1, i.amount_cents)),
+        );
+        let total_outstanding_cents = ar_aging.iter().map(|b| b.total_cents).sum();
         Ok(InvoiceSummary {
             revenue_ttm: Vec::new(),
             total_revenue_ttm_cents: 0,
             total_cogs_ttm_cents: 0,
             total_gross_margin_ttm_cents: 0,
-            ar_aging: Vec::new(),
-            total_outstanding_cents: 0,
+            ar_aging,
+            total_outstanding_cents,
             total_invoice_count: self.invoices.len() as i64,
             revenue_by_month: Vec::new(),
             currency: "USD".to_string(),
@@ -304,5 +319,65 @@ mod tests {
     async fn invoice_by_id_not_found() {
         let repo = test_repo();
         assert!(repo.invoice_by_id("inv-999").await.unwrap().is_none());
+    }
+
+    /// The summary's AR aging is the owed invoices and nothing else
+    /// (backlog 926d64a3): paid is out, and so is written-off — both a
+    /// row that arrives written off and one flipped by
+    /// `mark_invoice_written_off`, which this adapter keeps as an
+    /// overlay. Same definition, same answer as the Pg adapter's
+    /// `summary_ar_aging_excludes_written_off_invoices`.
+    #[tokio::test]
+    async fn summary_ar_aging_counts_only_owed_invoices() {
+        let day = |y, m, d| chrono::NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        let inv = |id: &str, cents: i64, status: &str, due_on: chrono::NaiveDate| {
+            let mut i = test_invoice(id);
+            i.amount_cents = cents;
+            i.line_items[0].amount_cents = cents;
+            i.status = status.into();
+            i.due_on = due_on;
+            i
+        };
+        let repo = InMemoryCommerce::new(vec![
+            inv(
+                "inv-1",
+                125_000,
+                InvoiceStatus::OUTSTANDING,
+                day(2025, 6, 10),
+            ),
+            inv("inv-2", 2_550, InvoiceStatus::PAST_DUE, day(2025, 4, 1)),
+            inv("inv-3", 5_000, InvoiceStatus::PAID, day(2025, 4, 1)),
+            inv("inv-4", 9_900, InvoiceStatus::WRITTEN_OFF, day(2025, 4, 1)),
+            inv("inv-5", 800, InvoiceStatus::PAST_DUE, day(2025, 1, 1)),
+        ]);
+        let stamp = EventStamp::new(
+            "commerce",
+            boss_core::actor::ActorId::Automation("test".into()),
+        );
+        assert!(
+            repo.mark_invoice_written_off("inv-5", &stamp)
+                .await
+                .unwrap()
+        );
+
+        let summary = repo.invoice_summary(day(2025, 6, 1)).await.unwrap();
+        let bucket = |label: &str, count, total_cents| ArAgingBucket {
+            label: label.into(),
+            count,
+            total_cents,
+        };
+        assert_eq!(
+            summary.ar_aging,
+            vec![
+                bucket("current", 1, 125_000),
+                bucket("1-30", 0, 0),
+                bucket("31-60", 0, 0),
+                bucket("61-90", 1, 2_550),
+                bucket("90+", 0, 0),
+            ],
+            "paid and written-off are not owed, so neither ages"
+        );
+        assert_eq!(summary.total_outstanding_cents, 127_550);
+        assert_eq!(summary.total_invoice_count, 5, "the count is every status");
     }
 }

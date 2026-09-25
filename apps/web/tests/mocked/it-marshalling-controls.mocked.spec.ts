@@ -44,8 +44,9 @@
 //   7  f9b75688  open    — WORKING (claimed vs ready) is not shown
 //   8  18683a0a  FIXED   — the waits count line
 //   9  fdc0ea0b  open    — no station opens its queue
-//   10 c3e4edcc  item closed by a sweep that did not reach this page —
-//                         a malformed 200 still paints as a clear yard
+//   10 67825067  FIXED   — a malformed 200 from any board read is its
+//                         failure line (c3e4edcc's sweep had closed
+//                         without reaching this page)
 //   11 8dcd28ce  open    — a denied scope (server) paints as a clear yard
 //   12 371aa184  open    — the failure lines are pinned HERE (that half is
 //                         this car's); the envelope's window_hours and
@@ -591,14 +592,47 @@ test.describe('/it/operate/marshalling — the empty leg and every failure line'
     await expectClearPaint(page);
   });
 
-  test('CURRENT, gap 10 (c3e4edcc, closed without reaching this page): a malformed 200 from all three board reads paints as clear', async ({ page }) => {
+  // Gap 10, FIXED by 67825067: each board read's parse goes through the
+  // shared envelope reader (src/data/shape.ts), so a 200 that is not
+  // the envelope is a failed read — the same failure line as a 500, with
+  // the read named and what came back said.
+  const NOT_THE_SHAPE = (path: string) =>
+    `${path}: HTTP 200, but the body is an object with no data list, not a {data: [...]} envelope`;
+
+  test('gap 10 (67825067): a malformed 200 from all three board reads is a failure line, never a clear yard', async ({ page }) => {
     await install(page, {
       load: (r) => json(r, { error: 'not the shape' }),
       flow: (r) => json(r, { error: 'not the shape' }),
       waits: (r) => json(r, { error: 'not the shape' }),
     });
     await mountPage(page, PATH, TITLE);
-    await expectClearPaint(page);
+    await expect(board(page).locator('.my-fail.load-failed')).toHaveText(
+      `The station load did not answer: ${NOT_THE_SHAPE('/api/stations/load')}. An unreachable read is not an empty yard, so this page shows nothing rather than a clear one.`,
+    );
+    await expect(board(page)).not.toContainText('Every watched station is clear.');
+    await expect(board(page).locator('.my-quiet')).toHaveCount(0);
+    await expect(board(page).locator('.my-section')).toHaveCount(0);
+    expect(await svgWhy(page)).toContain('the queues cannot be read — /api/stations/load: HTTP 200, but the body is');
+  });
+
+  test('gap 10 (67825067): a malformed 200 from the station flow alone is its failure line, and no constraint is named', async ({ page }) => {
+    await install(page, { flow: (r) => json(r, []) });
+    await mountPage(page, PATH, TITLE);
+    await expect(board(page).locator('.my-fail.load-failed')).toHaveText(
+      'The station flow did not answer: /api/stations/flow: HTTP 200, but the body is a list, not a {data: [...]} envelope. Depth without a rate cannot say whether anything is forming, so the constraint is not named.',
+    );
+    await expect(board(page).locator('.my-constraint')).toHaveCount(0);
+    await expect(board(page).locator('.my-quiet')).toHaveCount(0);
+  });
+
+  test('gap 10 (67825067): a malformed 200 from the queue-age lens alone is its failure line, never "Nothing is outstanding."', async ({ page }) => {
+    await install(page, { waits: (r) => json(r, { error: 'not the shape' }) });
+    await mountPage(page, PATH, TITLE);
+    await expect(board(page).locator('.my-fail.load-failed')).toHaveText(
+      `The queue-age lens did not answer: ${NOT_THE_SHAPE('/api/jobs/queue-age')}.`,
+    );
+    await expect(board(page)).not.toContainText('Nothing is outstanding.');
+    await expect(sidingRows(page)).toHaveCount(4);
   });
 
   test('a failed regions read is said, and the HUD says when; the board still reads its own', async ({ page }) => {

@@ -50,8 +50,9 @@ impl InvoiceStatus {
     /// the write-off credits 1100 A/R, so the receivable is gone even
     /// though no cash came in. Every other status, a tenant's own
     /// included, is still owed. One list, read by both adapters of
-    /// `open_ar_by_account` (backlog 5257bfa9) — the SPA's Finance
-    /// InvoicesTab draws "outstanding" with the same two out.
+    /// `open_ar_by_account` (backlog 5257bfa9) and of the summary's
+    /// AR aging (backlog 926d64a3) — the SPA's Finance InvoicesTab
+    /// draws "outstanding" with the same two out.
     pub const NOT_OWED: [&'static str; 2] = [Self::PAID, Self::WRITTEN_OFF];
 
     /// True while the invoice is still a receivable.
@@ -264,6 +265,52 @@ pub struct ArAgingBucket {
     pub total_cents: i64,
 }
 
+impl ArAgingBucket {
+    /// Every label, in the order the summary emits them — all five
+    /// even when empty, so the frontend always sees the same shape.
+    pub const LABELS: [&'static str; 5] = ["current", "1-30", "31-60", "61-90", "90+"];
+
+    /// The bucket an owed invoice falls in, by days past its due date.
+    /// `current` is due in the future or due today.
+    pub fn label_for(days_past_due: i64) -> &'static str {
+        match days_past_due {
+            ..=0 => "current",
+            1..=30 => "1-30",
+            31..=60 => "31-60",
+            61..=90 => "61-90",
+            _ => "90+",
+        }
+    }
+
+    /// Age `(days_past_due, count, total_cents)` rows into the five
+    /// buckets. The one bucketing rule both adapters of
+    /// `invoice_summary` read (backlog 926d64a3): the Pg adapter used
+    /// to spell the thresholds in a SQL `CASE` while the in-memory one
+    /// returned no aging at all. The rows are the OWED invoices only —
+    /// `InvoiceStatus::is_owed` decides which, never a status literal.
+    pub fn age(rows: impl IntoIterator<Item = (i64, i64, i64)>) -> Vec<ArAgingBucket> {
+        let sums = rows.into_iter().fold(
+            std::collections::HashMap::<&str, (i64, i64)>::new(),
+            |mut acc, (days, count, cents)| {
+                let e = acc.entry(Self::label_for(days)).or_default();
+                *e = (e.0 + count, e.1 + cents);
+                acc
+            },
+        );
+        Self::LABELS
+            .iter()
+            .map(|label| {
+                let (count, total_cents) = sums.get(label).copied().unwrap_or_default();
+                ArAgingBucket {
+                    label: label.to_string(),
+                    count,
+                    total_cents,
+                }
+            })
+            .collect()
+    }
+}
+
 /// Per-category revenue + COGS + margin rollup. COGS percentages are
 /// applied on the server so the Finance page doesn't have to hardcode
 /// them client-side.
@@ -298,8 +345,9 @@ pub struct InvoiceSummary {
     pub total_revenue_ttm_cents: i64,
     pub total_cogs_ttm_cents: i64,
     pub total_gross_margin_ttm_cents: i64,
-    /// AR aging on every unpaid invoice in the system (not just the last
-    /// 12 months). Drives the receivables card and the overview table.
+    /// AR aging on every owed invoice in the system (not just the last
+    /// 12 months) — `InvoiceStatus::is_owed`, so paid and written-off
+    /// are out. Drives the receivables card and the overview table.
     pub ar_aging: Vec<ArAgingBucket>,
     pub total_outstanding_cents: i64,
     /// Total invoice count across all statuses. Lets the list view show
@@ -312,6 +360,50 @@ pub struct InvoiceSummary {
     /// Reporting currency for all `*_cents` fields in this summary.
     #[serde(default = "default_currency")]
     pub currency: String,
+}
+
+#[cfg(test)]
+mod ar_aging_tests {
+    use super::*;
+
+    /// The boundaries the Pg `CASE` used to spell (`<= 0`, `<= 30`,
+    /// `<= 60`, `<= 90`, else), now the one Rust rule.
+    #[test]
+    fn label_for_matches_the_bucket_boundaries() {
+        let cases = [
+            (-5, "current"),
+            (0, "current"),
+            (1, "1-30"),
+            (30, "1-30"),
+            (31, "31-60"),
+            (60, "31-60"),
+            (61, "61-90"),
+            (90, "61-90"),
+            (91, "90+"),
+        ];
+        for (days, label) in cases {
+            assert_eq!(ArAgingBucket::label_for(days), label, "{days} days");
+        }
+    }
+
+    #[test]
+    fn age_sums_rows_into_all_five_buckets_in_order() {
+        let aging = ArAgingBucket::age([(0, 1, 100), (-3, 2, 50), (45, 1, 7), (400, 3, 9)]);
+        let got: Vec<(&str, i64, i64)> = aging
+            .iter()
+            .map(|b| (b.label.as_str(), b.count, b.total_cents))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("current", 3, 150),
+                ("1-30", 0, 0),
+                ("31-60", 1, 7),
+                ("61-90", 0, 0),
+                ("90+", 3, 9),
+            ]
+        );
+    }
 }
 
 #[cfg(test)]

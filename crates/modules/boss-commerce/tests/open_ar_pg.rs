@@ -109,3 +109,68 @@ async fn open_ar_by_account_sums_what_is_still_owed() {
         "paid and written-off are not owed; an account with nothing open has no row"
     );
 }
+
+/// The summary's AR aging reads the same one definition of owed
+/// (backlog 926d64a3). It filtered `status <> 'paid'`, so a write-off
+/// — which credits 1100 A/R — stayed in `total_outstanding_cents`
+/// and disagreed with the ledger, the open-AR read above and the
+/// Finance InvoicesTab.
+#[tokio::test]
+async fn summary_ar_aging_excludes_written_off_invoices() {
+    let db = TestDb::new().await;
+    let repo = PgCommerce::new(db.pool.clone());
+    let due = |y, m, d| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+    let with_due = |mut inv: Invoice, due_on: NaiveDate| {
+        inv.issued_on = due_on - chrono::Days::new(30);
+        inv.due_on = due_on;
+        inv
+    };
+    for inv in [
+        with_due(
+            invoice("inv-sum-1", "acct-sum", 125_000, InvoiceStatus::OUTSTANDING),
+            due(2025, 6, 10),
+        ),
+        with_due(
+            invoice("inv-sum-2", "acct-sum", 2_550, InvoiceStatus::PAST_DUE),
+            due(2025, 4, 1),
+        ),
+        with_due(
+            invoice("inv-sum-3", "acct-sum", 5_000, InvoiceStatus::OUTSTANDING),
+            due(2025, 4, 1),
+        ),
+        with_due(
+            invoice("inv-sum-4", "acct-sum", 9_900, InvoiceStatus::PAST_DUE),
+            due(2025, 4, 1),
+        ),
+    ] {
+        repo.create_invoice(&inv).await.unwrap();
+    }
+    repo.mark_invoice_paid_at("inv-sum-3", due(2025, 5, 1), &stamp())
+        .await
+        .unwrap();
+    assert!(
+        repo.mark_invoice_written_off("inv-sum-4", &stamp())
+            .await
+            .unwrap()
+    );
+
+    let summary = repo.invoice_summary(due(2025, 6, 1)).await.unwrap();
+    let bucket = |label: &str, count, total_cents| ArAgingBucket {
+        label: label.into(),
+        count,
+        total_cents,
+    };
+    assert_eq!(
+        summary.ar_aging,
+        vec![
+            bucket("current", 1, 125_000),
+            bucket("1-30", 0, 0),
+            bucket("31-60", 0, 0),
+            bucket("61-90", 1, 2_550),
+            bucket("90+", 0, 0),
+        ],
+        "paid and written-off are not owed, so neither ages"
+    );
+    assert_eq!(summary.total_outstanding_cents, 127_550);
+    assert_eq!(summary.total_invoice_count, 4, "the count is every status");
+}

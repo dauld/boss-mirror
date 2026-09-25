@@ -792,47 +792,32 @@ impl CommerceRepository for PgCommerce {
 
         let total_gross_margin_ttm_cents: i64 = total_revenue_ttm_cents - total_cogs_ttm_cents;
 
-        // AR aging: every unpaid invoice bucketed by how many days past its
-        // due date. `current` means "due in the future or due today".
-        let aging_rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        // AR aging: every OWED invoice, summed here per days-past-due
+        // and bucketed by `ArAgingBucket::age`. It filtered
+        // `status <> 'paid'` and so aged written-off invoices as
+        // outstanding (backlog 926d64a3); the not-owed statuses are now
+        // bound from the one Rust list, as `open_ar_by_account` binds
+        // them. One row per distinct due date, so the sum stays exact
+        // at any volume.
+        let not_owed: Vec<String> = InvoiceStatus::NOT_OWED
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let aging_rows: Vec<(i64, i64, i64)> = sqlx::query_as(
             "SELECT \
-                CASE \
-                    WHEN $1::date - due_on <= 0 THEN 'current' \
-                    WHEN $1::date - due_on <= 30 THEN '1-30' \
-                    WHEN $1::date - due_on <= 60 THEN '31-60' \
-                    WHEN $1::date - due_on <= 90 THEN '61-90' \
-                    ELSE '90+' \
-                END as label, \
-                COUNT(*)::bigint as count, \
-                COALESCE(SUM(amount_cents), 0)::bigint as total_cents \
+                ($1::date - due_on)::bigint AS days_past_due, \
+                COUNT(*)::bigint, \
+                COALESCE(SUM(amount_cents), 0)::bigint \
              FROM invoices \
-             WHERE status <> 'paid' \
+             WHERE status <> ALL($2) \
              GROUP BY 1",
         )
         .bind(today)
+        .bind(&not_owed)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| CommerceError::Storage(e.to_string()))?;
-
-        // Emit the buckets in canonical order even when some are empty, so
-        // the frontend always sees the same 5-row shape.
-        let mut ar_map: std::collections::HashMap<String, (i64, i64)> =
-            std::collections::HashMap::new();
-        for (label, count, total_cents) in aging_rows {
-            ar_map.insert(label, (count, total_cents));
-        }
-        let canonical_order = ["current", "1-30", "31-60", "61-90", "90+"];
-        let ar_aging: Vec<ArAgingBucket> = canonical_order
-            .iter()
-            .map(|label| {
-                let (count, total_cents) = ar_map.get(*label).copied().unwrap_or((0, 0));
-                ArAgingBucket {
-                    label: label.to_string(),
-                    count,
-                    total_cents,
-                }
-            })
-            .collect();
+        let ar_aging = ArAgingBucket::age(aging_rows);
 
         let total_outstanding_cents: i64 = ar_aging.iter().map(|b| b.total_cents).sum();
 

@@ -48,10 +48,11 @@
 //   8  c11e9d3c  FIXED server-side — a failed steps read is a 500 now,
 //                          not a shorter queue. Invisible to a mocked page.
 //   9  6bef2baa  this file
-// Found while pinning, and not owned by any open item (UNFILED):
-//   U1  a malformed 200 from either station read paints the honest
-//       empty state rather than a failure line (the /it/operate/
-//       marshalling twin is 67825067)
+// Found while pinning:
+//   U1  67825067  FIXED — a malformed 200 from either station read is
+//       that read's failure line, not the honest empty state (the item
+//       filed for the /it/operate/marshalling twin took both pages)
+// and not owned by any open item (UNFILED):
 //   U2  a failed review-queue read hides the decided panel: its
 //       independent read is never made
 //   U3  the eyebrow names "System Model", on an IT page, in both lens
@@ -580,22 +581,33 @@ test.describe('/it/design — empty, failed and malformed reads', () => {
     await expect(page.locator('.app-shell').getByRole('button', { name: /retry|try again|reload/i })).toHaveCount(0);
   });
 
-  test('CURRENT, U1 (UNFILED): a malformed 200 from the review queue paints "Nothing is waiting", not a failure', async ({ page }) => {
-    // A list where the envelope is due, which is what the api floor's
-    // catch-all answers. The page takes it as an envelope with no data.
+  // U1, FIXED by 67825067: both station reads parse through the shared
+  // envelope reader (src/data/shape.ts), so a 200 that is not the
+  // envelope is the read's failure line, naming the read and what came
+  // back. Neither line offers a Retry because the page offers none (U4).
+  test('U1 (67825067): a malformed 200 from the review queue is the failure line, never "Nothing is waiting"', async ({ page }) => {
+    // A list where the envelope is due — what an api floor's catch-all
+    // answers, and what the page used to take as an envelope with no data.
     await install(page, { queue: (r) => json(r, []) });
     await mountPage(page, PATH, TITLE);
-    await expect(sectionTitles(page).first()).toHaveText('Waiting on a decision (0)');
-    await expect(page.getByText('Nothing is waiting on a decision.', { exact: false })).toBeVisible();
-    await expect(page.locator('p.design-error')).toHaveCount(0);
+    const line = page.locator('p.design-error.load-failed');
+    await expect(line).toHaveText(
+      'The review queue could not be read: /api/stations/design-review/queue: HTTP 200, but the body is a list, not a {data: [...]} envelope. This is not an empty queue.',
+    );
+    await expect(line).toHaveAttribute('role', 'alert');
+    await expect(page.getByText('Nothing is waiting on a decision.', { exact: false })).toHaveCount(0);
+    await expect(sectionTitles(page)).toHaveCount(0);
   });
 
-  test('CURRENT, U1 (UNFILED): a malformed 200 from the decided station paints both empty lines, not a failure', async ({ page }) => {
+  test('U1 (67825067): a malformed 200 from the decided station is its own failure line, and the review queue still renders', async ({ page }) => {
     await install(page, { decided: (r) => json(r, { unexpected: true }) });
     await mountPage(page, PATH, TITLE);
-    await expect(page.getByText('Nothing decided is waiting to be folded.')).toBeVisible();
-    await expect(page.getByText('Nothing settled in this window.')).toBeVisible();
-    await expect(sectionTitles(page)).toHaveText(['Waiting on a decision (3)', 'Decided, being folded (0)', 'Settled (0)']);
-    await expect(failures(page)).toHaveCount(0);
+    await expect(page.locator(`${FAILURE_MARKER}[role="alert"]`)).toHaveText(
+      'Could not read the decided designs: /api/stations/design-decided/queue: HTTP 200, but the body is an object with no data list, not a {data: [...]} envelope',
+    );
+    await expect(page.getByText('Nothing decided is waiting to be folded.')).toHaveCount(0);
+    await expect(page.getByText('Nothing settled in this window.')).toHaveCount(0);
+    await expect(sectionTitles(page)).toHaveText(['Waiting on a decision (3)']);
+    await expect(queueTable(page).locator('tbody tr')).toHaveCount(3);
   });
 });

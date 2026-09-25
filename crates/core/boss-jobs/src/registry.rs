@@ -1288,7 +1288,9 @@ where
             completed_at: None,
             metadata,
             notes: None,
-            // Snapshot is taken on INSERT in postgres::add_step.
+            // Materialisation stays pure: the admission handler stamps
+            // the active plugin version before it builds STEP_CREATED,
+            // so the event and the row carry one value (aba364fe).
             step_plugin_version: 0,
             embedded_job: None,
         });

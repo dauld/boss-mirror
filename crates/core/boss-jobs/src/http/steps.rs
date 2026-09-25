@@ -311,6 +311,11 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
         step.completed_by = Some(actor);
         step.completed_at = Some(stamp.timestamp);
     }
+    // The plugin version the row will be stored at, stamped before the
+    // event is built so the event carries it (backlog aba364fe).
+    if let Err(e) = stamp_step_plugin_version(state.jobs.as_ref(), &mut step).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+    }
     let step_event = stamp.event(events::STEP_CREATED, events::step_state_payload(&step));
     if let Err(e) = state
         .jobs

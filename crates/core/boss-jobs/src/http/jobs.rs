@@ -1108,7 +1108,17 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // rebuilder at boss-jobs/src/rebuild.rs reconstructs the step
     // rows from exactly these events, so a step without one would
     // make the projection diverge from the log.
-    let steps = materialized_steps.unwrap_or_default();
+    //
+    // So each step is stamped with its plugin version FIRST, and its
+    // event built from the stamped step (backlog aba364fe). The event
+    // used to carry materialisation's 0 while the insert stamped the
+    // row, and a step never updated after admission rebuilt at 0.
+    let mut steps = materialized_steps.unwrap_or_default();
+    for step in &mut steps {
+        if let Err(e) = stamp_step_plugin_version(state.jobs.as_ref(), step).await {
+            return persist_error_response(e);
+        }
+    }
     let step_events: Vec<_> = steps
         .iter()
         .map(|step| job_stamp.event(events::STEP_CREATED, events::step_state_payload(step)))

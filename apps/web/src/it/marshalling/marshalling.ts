@@ -23,6 +23,7 @@
 // reads as "nothing is waiting". Such a station is also never named
 // the constraint: naming it would be asserting a rate nobody counted.
 
+import { readEnvelope } from '../../data/shape';
 import { fetchRemote, type Remote } from '../../data/remote';
 import { partitionOf, type Partition } from '@boss/web-kit/ui/packet-card';
 
@@ -75,13 +76,19 @@ export type StationFlowEnvelope = Readonly<{
 
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
-const rows = (raw: unknown): ReadonlyArray<Record<string, unknown>> => {
-  const data = (raw as { data?: unknown } | null)?.data;
-  return Array.isArray(data) ? (data as ReadonlyArray<Record<string, unknown>>) : [];
-};
+
+// The three board reads. Each parse names its own read, because a body
+// that is not the envelope is refused by the shared reader (backlog
+// 67825067): until then `rows` coerced it to no rows, and no rows is
+// what the board paints as "Every watched station is clear." The
+// refusal is a throw, which fetchRemote hands the page as its failure
+// line — the same line a 500 paints.
+const LOAD_PATH = '/api/stations/load';
+const FLOW_PATH = '/api/stations/flow';
+const QUEUE_AGE_PATH = '/api/jobs/queue-age';
 
 export function parseStationLoad(raw: unknown): ReadonlyArray<StationLoadRow> {
-  return rows(raw)
+  return readEnvelope(LOAD_PATH, raw).data
     .map((r) => ({
       station: str(r.station) ?? '',
       kind: str(r.kind) ?? '',
@@ -100,7 +107,7 @@ export function parseStationLoad(raw: unknown): ReadonlyArray<StationLoadRow> {
 export function parseStationLoadEnvelope(raw: unknown): StationLoadEnvelope {
   return {
     rows: parseStationLoad(raw),
-    distinctPackets: num((raw as { distinct_packets?: unknown } | null)?.distinct_packets),
+    distinctPackets: num(readEnvelope(LOAD_PATH, raw).body.distinct_packets),
   };
 }
 
@@ -141,8 +148,9 @@ export function overlapLine(load: StationLoadEnvelope): string | null {
 }
 
 export function parseStationFlow(raw: unknown): StationFlowEnvelope {
+  const { body, data } = readEnvelope(FLOW_PATH, raw);
   return {
-    rows: rows(raw)
+    rows: data
       .map((r) => ({
         station: str(r.station) ?? '',
         basis: r.basis === 'step-events' ? ('step-events' as const) : ('unavailable' as const),
@@ -152,8 +160,8 @@ export function parseStationFlow(raw: unknown): StationFlowEnvelope {
         unavailableReason: str(r.unavailable_reason),
       }))
       .filter((r) => r.station !== ''),
-    windowHours: num((raw as { window_hours?: unknown } | null)?.window_hours),
-    asOf: str((raw as { as_of?: unknown } | null)?.as_of),
+    windowHours: num(body.window_hours),
+    asOf: str(body.as_of),
   };
 }
 
@@ -384,8 +392,9 @@ export function parseQueueAge(raw: unknown): Readonly<{
   waits: ReadonlyArray<Wait>;
   now: string | null;
 }> {
+  const { body, data } = readEnvelope(QUEUE_AGE_PATH, raw);
   return {
-    waits: rows(raw)
+    waits: data
       .map((r) => ({
         jobId: str(r.job_id) ?? '',
         jobKind: str(r.job_kind) ?? '',
@@ -400,7 +409,7 @@ export function parseQueueAge(raw: unknown): Readonly<{
         simulated: partitionOf(r) !== 'real',
       }))
       .filter((w) => w.jobId !== ''),
-    now: str((raw as { now?: unknown } | null)?.now),
+    now: str(body.now),
   };
 }
 
@@ -458,17 +467,17 @@ export function waitText(w: Wait): string {
 // ---------------------------------------------------------------------
 
 export function loadStations(): Promise<Exclude<Remote<StationLoadEnvelope>, { kind: 'loading' }>> {
-  return fetchRemote('/api/stations/load', parseStationLoadEnvelope);
+  return fetchRemote(LOAD_PATH, parseStationLoadEnvelope);
 }
 
 export function loadFlow(
   windowHours: number,
 ): Promise<Exclude<Remote<StationFlowEnvelope>, { kind: 'loading' }>> {
-  return fetchRemote(`/api/stations/flow?window_hours=${windowHours}`, parseStationFlow);
+  return fetchRemote(`${FLOW_PATH}?window_hours=${windowHours}`, parseStationFlow);
 }
 
 export function loadWaits(): Promise<
   Exclude<Remote<ReturnType<typeof parseQueueAge>>, { kind: 'loading' }>
 > {
-  return fetchRemote('/api/jobs/queue-age', parseQueueAge);
+  return fetchRemote(QUEUE_AGE_PATH, parseQueueAge);
 }

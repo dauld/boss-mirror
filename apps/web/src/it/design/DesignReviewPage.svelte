@@ -31,11 +31,14 @@
   import {
     pageHeader,
     panelsFor,
+    parseDesignQueue,
     progressLabel,
     queueRows,
     relTime,
     reviewHref,
+    REVIEW_STATION,
     REVIEW_STEP_KIND,
+    stationQueuePath,
     type DesignQueueEnvelope,
     type ReviewPacket,
   } from './designLens';
@@ -55,9 +58,11 @@
       // One read, and it is the queue. If it fails the surface has
       // nothing honest to show, so it throws rather than rendering an
       // empty table that reads as "nothing to review".
-      const resp = await fetch('/api/stations/design-review/queue');
+      // A 200 that is not the envelope throws too (67825067): the cast
+      // this replaced read a list as a queue with nothing waiting.
+      const resp = await fetch(stationQueuePath(REVIEW_STATION));
       if (!resp.ok) throw new Error(`queue: HTTP ${resp.status}`);
-      queue = (await resp.json()) as DesignQueueEnvelope;
+      queue = parseDesignQueue(await resp.json());
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

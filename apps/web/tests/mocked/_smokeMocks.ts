@@ -211,6 +211,15 @@ export const EVENTS_STREAM = /\/api\/events\/stream(\?|$)/;
 /// .toLocaleString()` and every statement's `revenue.length` throw.
 export const COMMERCE_SUMMARY = /\/api\/commerce\/summary$/;
 export const AP_AGING = /\/api\/inventory\/ap-aging$/;
+/// The `{ data: [...] }` envelopes the marshalling board and /it/design
+/// read through the shared envelope reader (src/data/shape.ts,
+/// backlog 67825067): a bare `[]` there is a malformed read the page
+/// paints as its failure line, which is right for a broken backend and
+/// wrong for the empty leg.
+export const STATIONS_LOAD = /\/api\/stations\/load$/;
+export const STATIONS_FLOW = /\/api\/stations\/flow(\?|$)/;
+export const QUEUE_AGE = /\/api\/jobs\/queue-age$/;
+export const DESIGN_STATION_QUEUES = /\/api\/stations\/design-(review|decided)\/queue$/;
 export const LEDGER_STATEMENTS =
   /\/api\/ledger\/(income-statement|balance-sheet|cash-flow|trial-balance|deferred-revenue-runoff|tax-liability)(\?|$)/;
 export const EMPTY_COMMERCE_SUMMARY = {
@@ -280,6 +289,7 @@ export const OBJECT_ENDPOINTS: ReadonlyArray<RegExp> = [
   JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, YARD_REGIONS, YARD_BORDERS, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
   MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL, EVENTS_STATS, RISK_SCORES, EVENTS_STREAM,
   COMMERCE_SUMMARY, AP_AGING, LEDGER_STATEMENTS,
+  STATIONS_LOAD, STATIONS_FLOW, QUEUE_AGE, DESIGN_STATION_QUEUES,
   // `{data, total}`, not a list: a bare `[]` here is the shape a wrong
   // endpoint answers, and the bar reads it as a failed roster rather
   // than an empty one — deliberately, so the org chart cannot go
@@ -408,6 +418,16 @@ export async function installApiFloor(page: Page): Promise<void> {
   await page.route(COMMERCE_SUMMARY, (r) => json(r, EMPTY_COMMERCE_SUMMARY));
   await page.route(AP_AGING, (r) => json(r, EMPTY_AP_AGING));
   await page.route(LEDGER_STATEMENTS, (r) => json(r, emptyLedgerStatement(r.request().url())));
+  // The envelope reads, well-formed and empty: every station answered
+  // and nothing stands, so the board paints its clear state and the
+  // design page its two empty lines (backlog 67825067).
+  await page.route(STATIONS_LOAD, (r) => json(r, { data: [], total: 0, distinct_packets: 0 }));
+  await page.route(STATIONS_FLOW, (r) => json(r, { window_hours: 24, as_of: '2026-09-03T12:00:00Z', data: [] }));
+  await page.route(QUEUE_AGE, (r) => json(r, { data: [], total: 0, now: '2026-09-03T12:00:00Z' }));
+  await page.route(DESIGN_STATION_QUEUES, (r) => {
+    const station = /design-(review|decided)/.exec(r.request().url())?.[0] ?? 'design-review';
+    return json(r, { station, kind: 'batch', discipline: [], total: 0, data: [], steps: {} });
+  });
   for (const detail of [WORKFLOW_DETAIL, MARKETING_ASSET_DETAIL, SHIPMENT_DETAIL, VIEW_RESULTS]) {
     await page.route(detail, (r) => json(r, 'not found', 404));
   }

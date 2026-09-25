@@ -12,6 +12,7 @@
   import InvoiceStatusChip from './InvoiceStatusChip.svelte';
   import {
     PAYMENT_METHOD_LABEL,
+    isOwed,
     type Invoice,
     type InvoiceStatus,
     type PaymentMethod,
@@ -65,9 +66,8 @@
   // "Unpaid" = genuinely awaiting collection (outstanding + past-due).
   // Written-off invoices are uncollectable, not unpaid — they get their own
   // bucket so the operator sees real receivables vs historical write-offs.
-  let unpaid = $derived(
-    invoices.filter((i) => i.status !== 'paid' && i.status !== 'written-off'),
-  );
+  // `isOwed` is the server's one definition of owed (backlog 926d64a3).
+  let unpaid = $derived(invoices.filter((i) => isOwed(i.status)));
   let pastDue = $derived(invoices.filter((i) => i.status === 'past-due'));
   let writtenOff = $derived(invoices.filter((i) => i.status === 'written-off'));
 
@@ -87,11 +87,7 @@
 
   let visible = $derived(
     invoices.filter((i) => {
-      if (
-        statusFilter === 'unpaid' &&
-        (i.status === 'paid' || i.status === 'written-off')
-      )
-        return false;
+      if (statusFilter === 'unpaid' && !isOwed(i.status)) return false;
       if (
         statusFilter !== 'all' &&
         statusFilter !== 'unpaid' &&

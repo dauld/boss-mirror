@@ -22,6 +22,8 @@
 // in 119: the row declares it, the queue echoes it, the lens renders
 // whatever the row says.
 
+import { readEnvelope } from '../../data/shape';
+
 /** Page context declared on the station row (`stations.lens`,
  *  138-station-lens.sql; `StationLens` in boss-jobs). Optional on the
  *  wire — a cluster whose registry predates the column omits it. */
@@ -238,6 +240,23 @@ export const REVIEW_STEP_KIND = 'review-design';
  *  panel's one read (infra/platform/stations/design-decided.toml). */
 export const DECIDED_STATION = 'design-decided';
 
+/** The station this page is the lens of — the `queue` panel's read. */
+export const REVIEW_STATION = 'design-review';
+
+/** A station's evaluated queue — the one read shape both panels make. */
+export const stationQueuePath = (station: string): string => `/api/stations/${station}/queue`;
+
+/** The review queue's envelope, or a throw naming the read (backlog
+ *  67825067). The page cast the body to the envelope, so a list where
+ *  the envelope was due read as a queue with no `data` and painted
+ *  "Nothing is waiting on a decision."; the page's catch now paints the
+ *  throw as its failure line. The envelope's own fields beyond `data`
+ *  stay as the server sent them — each has a reader that tolerates its
+ *  absence (`pageHeader`, `panelsFor`, `queueRows`). */
+export function parseDesignQueue(raw: unknown): DesignQueueEnvelope {
+  return readEnvelope(stationQueuePath(REVIEW_STATION), raw).body as unknown as DesignQueueEnvelope;
+}
+
 function reviewStepOf(steps: readonly LensStep[] | undefined): LensStep | undefined {
   return steps?.find((s) => s.kind === REVIEW_STEP_KIND);
 }
@@ -306,15 +325,17 @@ export type DecidedRow = Readonly<{
 /** The decided station's members, split into WORKING (open: decided,
  *  folding) and OUT (closed inside the station's terminal window),
  *  each in the order the station handed them over. Takes `unknown`
- *  because it is the body of a read: anything that is not an envelope
- *  is no rows, never a throw. */
+ *  because it is the body of a read, and a body that is not an
+ *  envelope THROWS (backlog 67825067): it used to be no rows, which the
+ *  panel painted as "Nothing decided is waiting to be folded." and
+ *  Settled (0). The panel's catch paints the throw as its failure line. */
 export function decidedRows(body: unknown): Readonly<{
   working: readonly DecidedRow[];
   settled: readonly DecidedRow[];
 }> {
-  const env = record(body);
-  const data = Array.isArray(env.data) ? (env.data as readonly QueuePacket[]) : [];
-  const steps = record(env.steps) as Readonly<Record<string, readonly LensStep[]>>;
+  const env = readEnvelope(stationQueuePath(DECIDED_STATION), body);
+  const data = env.data as unknown as readonly QueuePacket[];
+  const steps = record(env.body.steps) as Readonly<Record<string, readonly LensStep[]>>;
   const rows = data.map((p) => {
     const s = Array.isArray(steps[p.id]) ? steps[p.id] : undefined;
     const fold = stepOf(s, 'fold');

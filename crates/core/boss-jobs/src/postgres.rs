@@ -342,7 +342,18 @@ async fn insert_step_in_tx(
     // so republishing the plugin later doesn't retroactively change
     // which bundle the step is pinned against. Caller-supplied
     // non-zero values win (bulk replay seeding its own versions);
-    // zero triggers the lookup.
+    // zero triggers the lookup. Every writer that records a
+    // STEP_CREATED stamps BEFORE building it, through
+    // `active_step_plugin_version` (the same query), so the event
+    // carries the row's value (backlog aba364fe); this lookup is what a
+    // step written with no event gets.
+    //
+    // RESIDUAL: a handler's stamp is read outside this transaction.
+    // A kind with NO active plugin that gets its first one published
+    // between that read and this INSERT is written here at the new
+    // version while its event says 0 — milliseconds wide, and only
+    // on a kind's first publish (a republish moves an already
+    // non-zero stamp nowhere).
     let version = if step.step_plugin_version != 0 {
         step.step_plugin_version
     } else {
@@ -1174,11 +1185,20 @@ impl JobsRepository for PgJobs {
             ));
         }
 
+        // Each inserted row is stamped with its plugin version HERE, in
+        // the move's transaction, and its STEP_CREATED is built from the
+        // stamped step — the event carries what the row stores, so a
+        // replay rebuilds it (backlog aba364fe). The insert's own stamp
+        // then keeps the non-zero value it is handed.
         for s in &plan.inserted {
-            if insert_step_in_tx(&mut tx, s, stamp.timestamp).await? > 0 {
+            let mut s = s.clone();
+            if s.step_plugin_version == 0 {
+                s.step_plugin_version = active_plugin_version(&mut *tx, &s.kind).await?;
+            }
+            if insert_step_in_tx(&mut tx, &s, stamp.timestamp).await? > 0 {
                 events.push(stamp.event(
                     crate::events::STEP_CREATED,
-                    crate::events::step_state_payload(s),
+                    crate::events::step_state_payload(&s),
                 ));
             }
         }
@@ -1786,6 +1806,10 @@ impl JobsRepository for PgJobs {
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
         Ok(())
+    }
+
+    async fn active_step_plugin_version(&self, kind: &str) -> Result<i32, JobsError> {
+        active_plugin_version(&self.pool, kind).await
     }
 
     async fn record_events(&self, events: &[boss_core::event::Event]) -> Result<(), JobsError> {

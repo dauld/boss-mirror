@@ -11,7 +11,14 @@
   // its own data (StationLens in boss-jobs), so this read is the panel's
   // and its failure is the panel's, painted where the rows would be.
   import Section from '@boss/web-kit/ui/Section.svelte';
-  import { DECIDED_STATION, decidedRows, foldLabel, relTime, type DecidedRow } from './designLens';
+  import {
+    DECIDED_STATION,
+    decidedRows,
+    foldLabel,
+    relTime,
+    stationQueuePath,
+    type DecidedRow,
+  } from './designLens';
 
   type Panel =
     | { kind: 'loading' }
@@ -27,7 +34,9 @@
 
   async function load(): Promise<void> {
     try {
-      const resp = await fetch(`/api/stations/${DECIDED_STATION}/queue`);
+      // decidedRows throws on a 200 that is not the envelope (67825067),
+      // and that throw is this panel's failure line, not its empty one.
+      const resp = await fetch(stationQueuePath(DECIDED_STATION));
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const body: unknown = await resp.json();
       const days = (body as { terminal_window_days?: unknown } | null)?.terminal_window_days;

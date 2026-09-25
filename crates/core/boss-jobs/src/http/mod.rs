@@ -504,6 +504,25 @@ async fn health<R: JobsRepository, B: EventBus>(
 }
 
 // ---------------------------------------------------------------------------
+// Step plugin stamp (shared by create_job and add_step)
+// ---------------------------------------------------------------------------
+
+/// Stamp `step` with the plugin version its row will be stored at,
+/// BEFORE its STEP_CREATED is built, so the event carries what the row
+/// stores and a replay rebuilds it (backlog aba364fe, determinism). A
+/// non-zero version the caller supplied is kept, as the insert keeps
+/// it; a zero asks the port the same question the insert would.
+pub(super) async fn stamp_step_plugin_version<R: JobsRepository>(
+    jobs: &R,
+    step: &mut Step,
+) -> Result<(), crate::port::JobsError> {
+    if step.step_plugin_version == 0 {
+        step.step_plugin_version = jobs.active_step_plugin_version(&step.kind).await?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Subject validation (shared by create_job / update_job and the kinds path)
 // ---------------------------------------------------------------------------
 

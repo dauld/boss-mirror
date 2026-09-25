@@ -54,6 +54,7 @@ mod running;
 mod scratch_target;
 mod script;
 mod steps;
+mod strike_release;
 mod tenant;
 mod tenant_export;
 mod tenant_publish;

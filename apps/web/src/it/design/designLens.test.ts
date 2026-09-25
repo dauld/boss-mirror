@@ -6,6 +6,7 @@ import {
   decidedRows,
   foldLabel,
   pageHeader,
+  parseDesignQueue,
   panelsFor,
   progressLabel,
   queueRows,
@@ -218,6 +219,20 @@ describe('queueRows with steps', () => {
   });
 });
 
+describe('parseDesignQueue — the review queue read, or its refusal (67825067)', () => {
+  test('an envelope is the queue, rows and all', () => {
+    const body = { station: 'design-review', discipline: [], total: 1, data: [packet({})] };
+    expect(parseDesignQueue(body)).toEqual(body);
+  });
+
+  test('a list, or an object with no data list, is refused rather than read as nothing waiting', () => {
+    expect(() => parseDesignQueue([])).toThrow(
+      '/api/stations/design-review/queue: HTTP 200, but the body is a list',
+    );
+    expect(() => parseDesignQueue({ station: 'design-review' })).toThrow('an object with no data list');
+  });
+});
+
 describe('decidedRows — WORKING and OUT', () => {
   const fold = (status: string, folded_into?: string): LensStep => ({
     id: 'f',
@@ -256,10 +271,20 @@ describe('decidedRows — WORKING and OUT', () => {
     expect(settled[1]!.decided_on).toBeNull();
   });
 
-  test('a body that is not an envelope yields no rows rather than throwing', () => {
-    // The mocked catch-all answers `[]`; an old gateway could answer anything.
-    expect(decidedRows([] as unknown)).toEqual({ working: [], settled: [] });
-    expect(decidedRows(null)).toEqual({ working: [], settled: [] });
+  // Until 67825067 this yielded no rows, and no rows is what the panel
+  // paints as "Nothing decided is waiting to be folded." with Settled (0).
+  // A body that is not the envelope is a failed read, and the throw is
+  // what the panel's catch paints as its failure line.
+  test('a body that is not an envelope is refused, naming the read, never read as no rows', () => {
+    expect(() => decidedRows([] as unknown)).toThrow(
+      '/api/stations/design-decided/queue: HTTP 200, but the body is a list',
+    );
+    expect(() => decidedRows({ unexpected: true })).toThrow('an object with no data list');
+    expect(() => decidedRows(null)).toThrow('the body is null');
+  });
+
+  test('an envelope with no rows is the only empty', () => {
+    expect(decidedRows({ data: [] })).toEqual({ working: [], settled: [] });
   });
 
   test('fold labels say where the fold has got to', () => {

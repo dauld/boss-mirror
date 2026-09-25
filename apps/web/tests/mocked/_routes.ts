@@ -94,10 +94,11 @@ export const ROUTES: ReadonlyArray<string> = [
   '/it/yard/garage',
   // The Marshalling Yard — the upstream third, a REGION of the world
   // since car 4 of design d2154293: the territory draws a platform per
-  // station and the board mounts under it. Under the mock's `[]`
-  // catch-all, /api/stations/load and /api/stations/flow come back as
-  // collections with no rows, so it renders its "every watched station
-  // is clear" state. The drift test in route-smoke.mocked.spec.ts
+  // station and the board mounts under it. The api floor answers
+  // /api/stations/load, /api/stations/flow and /api/jobs/queue-age with
+  // well-formed empty envelopes, so it renders its "every watched station
+  // is clear" state; a bare `[]` there is a malformed read, painted as
+  // the failure line since 67825067. The drift test in route-smoke.mocked.spec.ts
   // enforces the catalog row's path, which is this one.
   '/it/yard/marshalling',
   // The Receiving Yard — the intake floor, a region beside it. Its

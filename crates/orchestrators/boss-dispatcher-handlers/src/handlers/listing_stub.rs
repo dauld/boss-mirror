@@ -97,6 +97,17 @@ pub(crate) async fn serve(answers: Vec<(&'static str, Value)>) -> Stub {
                         .push(format!("{method} {} (409)", uri.path()));
                     return refused;
                 }
+                // So is a job PUT carrying metadata: the stale whole-row
+                // write (9e7000f6), routed to the job merge door.
+                if method == Method::PUT
+                    && let Some(id) = job_path(uri.path())
+                    && let Some(refused) = whole_job_row_put(id, &parsed)
+                {
+                    log.lock()
+                        .unwrap()
+                        .push(format!("{method} {} (409)", uri.path()));
+                    return refused;
+                }
                 log.lock().unwrap().push(format!("{method} {}", uri.path()));
                 bodies
                     .lock()
@@ -122,6 +133,12 @@ fn step_path(path: &str) -> Option<(&str, &str)> {
     let rest = path.strip_prefix("/api/jobs/")?;
     let (id, sid) = rest.split_once("/steps/")?;
     (!id.is_empty() && !sid.is_empty() && !sid.contains('/')).then_some((id, sid))
+}
+
+/// `/api/jobs/{id}` — the job row itself, nothing under it.
+fn job_path(path: &str) -> Option<&str> {
+    let id = path.strip_prefix("/api/jobs/")?;
+    (!id.is_empty() && !id.contains('/')).then_some(id)
 }
 
 /// Every packet row the stub's fixtures answer with. A fixture with no
@@ -207,6 +224,36 @@ pub(crate) fn end_state_step_put(id: &str, sid: &str, body: &Value) -> Option<Re
                           merge door, then PUT the status alone",
                 "step_id": sid,
                 "merge_door": format!("/api/jobs/{id}/steps/{sid}/metadata"),
+            })),
+        )
+            .into_response(),
+    )
+}
+
+/// The job PUT a handler must not send: a body carrying `metadata`,
+/// which is the whole row sent back from a copy the handler READ. It is
+/// REFUSED 409 and routed to the job merge door, `PATCH
+/// /api/jobs/{id}/metadata` (top-level keys merge, `null` deletes).
+/// `None` for a body with no metadata.
+///
+/// WHY (backlog 9e7000f6). The live job PUT accepts the row and
+/// replaces what it is sent, so a handler that listed a job, changed
+/// one key and PUT the listing's copy back reverted every write that
+/// landed between its read and its PUT — `jobs.clear_waiting` did
+/// exactly that, and its stub-free tests could not see it. This is the
+/// job-level twin of [`end_state_step_put`]: a stub that accepted the
+/// row would pin handlers to the stale-copy write, so every stub here
+/// refuses it.
+pub(crate) fn whole_job_row_put(id: &str, body: &Value) -> Option<Response> {
+    body.get("metadata")?;
+    Some(
+        (
+            StatusCode::CONFLICT,
+            axum::Json(json!({
+                "error": "a handler never PUTs a job row back — merge the keys it \
+                          decided through the job merge door",
+                "job_id": id,
+                "merge_door": format!("/api/jobs/{id}/metadata"),
             })),
         )
             .into_response(),
@@ -350,6 +397,39 @@ mod tests {
                 "PUT /api/jobs/j1/steps/j1-build (409)".to_string(),
                 "PATCH /api/jobs/j1/steps/j1-build/metadata".to_string(),
                 "PUT /api/jobs/j1/steps/j1-build".to_string(),
+            ]
+        );
+    }
+
+    /// And a job PUT carrying metadata — the whole row sent back from a
+    /// read — is a 409 naming the job merge door (9e7000f6), while the
+    /// merge door itself is accepted.
+    #[tokio::test]
+    async fn a_job_put_carrying_metadata_is_refused_409_naming_the_job_merge_door() {
+        let stub = serve(vec![]).await;
+        let client = reqwest::Client::new();
+        let url = format!("{}/api/jobs/j1", stub.base);
+        let refused = client
+            .put(&url)
+            .json(&json!({ "id": "j1", "status": "open", "metadata": { "waiting_on": "" } }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 409);
+        let why: Value = refused.json().await.unwrap();
+        assert_eq!(why["merge_door"], "/api/jobs/j1/metadata");
+        let merged = client
+            .patch(format!("{url}/metadata"))
+            .json(&json!({ "waiting_on": "" }))
+            .send()
+            .await
+            .unwrap();
+        assert!(merged.status().is_success());
+        assert_eq!(
+            stub.writes(),
+            vec![
+                "PUT /api/jobs/j1 (409)".to_string(),
+                "PATCH /api/jobs/j1/metadata".to_string(),
             ]
         );
     }

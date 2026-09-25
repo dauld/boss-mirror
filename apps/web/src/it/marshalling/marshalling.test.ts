@@ -111,10 +111,24 @@ function sidings(): ReadonlyArray<Siding> {
 }
 
 describe('parseStationLoad / parseStationFlow', () => {
-  test('a payload that is not the expected shape parses to nothing, never to a guess', () => {
-    expect(parseStationLoad({ data: 'nope' })).toEqual([]);
-    expect(parseStationLoad(null).length).toBe(0);
-    const flow = parseStationFlow({ nope: true });
+  // Until 67825067 these parsed to NO ROWS, and no rows is what the
+  // board paints as "Every watched station is clear." A body that is not
+  // the envelope is a failed read, so the parse throws and fetchRemote
+  // hands the page its failure line.
+  test('a payload that is not the expected shape is refused, never read as no rows', () => {
+    expect(() => parseStationLoad({ data: 'nope' })).toThrow(
+      '/api/stations/load: HTTP 200, but the body is an object with no data list',
+    );
+    expect(() => parseStationLoad(null)).toThrow('/api/stations/load: HTTP 200, but the body is null');
+    expect(() => parseStationLoadEnvelope([])).toThrow('/api/stations/load: HTTP 200, but the body is a list');
+    expect(() => parseStationFlow({ nope: true })).toThrow(
+      '/api/stations/flow: HTTP 200, but the body is an object with no data list',
+    );
+  });
+
+  test('a well-formed envelope with no rows is the only empty', () => {
+    expect(parseStationLoad({ data: [], total: 0 })).toEqual([]);
+    const flow = parseStationFlow({ data: [] });
     expect(flow.rows.length).toBe(0);
     expect(flow.windowHours).toBeNull();
   });
@@ -356,9 +370,12 @@ describe('parseQueueAge / longestWaits', () => {
     expect(lens.waits[0]?.exact).toBe(false);
   });
 
-  test('a payload that is not the expected shape parses to nothing', () => {
-    expect(parseQueueAge({ data: 7 }).waits).toEqual([]);
-    expect(parseQueueAge(null).now).toBeNull();
+  test('a payload that is not the expected shape is refused (67825067), not read as nothing outstanding', () => {
+    expect(() => parseQueueAge({ data: 7 })).toThrow(
+      '/api/jobs/queue-age: HTTP 200, but the body is an object with no data list',
+    );
+    expect(() => parseQueueAge(null)).toThrow('/api/jobs/queue-age: HTTP 200, but the body is null');
+    expect(parseQueueAge({ data: [] }).now).toBeNull();
   });
 
   test('simulated obligations are not this board’s queue', () => {
