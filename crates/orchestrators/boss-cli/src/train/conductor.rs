@@ -22,6 +22,62 @@ pub(super) struct Conductor {
     policy: DeliveryPolicy,
 }
 
+/// What one walk of the dock found (`Conductor::candidates`).
+pub(super) struct DockPass {
+    /// Cars that may board now, with their branch.
+    pub(super) boardable: Vec<(Value, String)>,
+    /// The left-behind record for every car held this pass.
+    pub(super) left_behind: Vec<Value>,
+    /// The dock's re-gates in flight — what a departure may wait for
+    /// (`dock_regate::departure_hold`).
+    pub(super) round: Vec<dock_regate::InRound>,
+}
+
+/// A car the dock holds this pass: why, the `base_regate` stamp to
+/// record when this pass launched or refused a re-gate, and the re-gate
+/// it has in flight, if it has one.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct DockHold {
+    pub(super) reason: String,
+    pub(super) stamp: Option<Value>,
+    pub(super) in_round: Option<dock_regate::InRound>,
+}
+
+impl DockHold {
+    /// A hold that records nothing but its reason.
+    fn plain(reason: String) -> Self {
+        DockHold {
+            reason,
+            stamp: None,
+            in_round: None,
+        }
+    }
+}
+
+/// Does the car already carry every one of these metadata values? A hold
+/// that says what the car already says is not written again (the dock is
+/// walked every two minutes, design 42279fb2); a new value, or a key the
+/// car lacks, is.
+pub(crate) fn metadata_already(car: &Value, kv: &[(&str, Value)]) -> bool {
+    kv.iter().all(|(k, v)| {
+        car.get("metadata")
+            .and_then(|m| m.get(*k))
+            .is_some_and(|have| have == v)
+    })
+}
+
+/// The refresh's one journal line: what the walk found, so a two-minute
+/// verb is never silent about whether it did anything.
+fn refresh_line(pass: &DockPass) -> String {
+    format!(
+        "refresh: {} car(s) boardable, {} held, {} re-gate(s) in flight — nothing assembled, \
+         nothing departed",
+        pass.boardable.len(),
+        pass.left_behind.len(),
+        pass.round.len()
+    )
+}
+
 impl Conductor {
     pub(super) fn new(cfg: Config, forge: Box<dyn Forge>) -> Result<Self> {
         let http = reqwest::Client::builder()
@@ -2857,10 +2913,17 @@ impl Conductor {
     /// The parked-ready cars whose branch is actually on the fork,
     /// plus the left-behind record for the ones whose branch is not
     /// — each of those gets its `skip_reason` stamped (the yard's
-    /// "LEFT BEHIND" chip) and an entry for the train's own books.
-    async fn candidates(&self) -> Result<(Vec<(Value, String)>, Vec<Value>)> {
+    /// "LEFT BEHIND" chip) and an entry for the train's own books — and
+    /// the dock's re-gates in flight, which a departure may wait for.
+    ///
+    /// ONE DEFINITION OF THE DOCK'S JUDGEMENT, for two callers: `board`
+    /// departs what it returns, and `refresh` (design 42279fb2) walks the
+    /// dock between departures for the re-gates it launches and nothing
+    /// else.
+    async fn candidates(&self) -> Result<DockPass> {
         let mut out = Vec::new();
         let mut left_behind = Vec::new();
+        let mut round = Vec::new();
         // EVERY open car, not just page one. A car opened days ago but
         // parked today sorts to the tail (`ORDER BY opened_on DESC`), so
         // a bare `limit=` boards nothing from the tail once the backlog
@@ -3021,7 +3084,7 @@ impl Conductor {
                 Some(reason) => Some(
                     match boards.as_deref().and_then(|b| dock_regate::pending(&j, b)) {
                         Some(stamp) => self.regate_in_flight(&j, &jid, &branch, stamp).await,
-                        None => (reason, None),
+                        None => DockHold::plain(reason),
                     },
                 ),
                 None => match boards.as_deref() {
@@ -3029,21 +3092,38 @@ impl Conductor {
                     None => None,
                 },
             };
-            if let Some((reason, stamp)) = hold {
+            if let Some(DockHold {
+                reason,
+                stamp,
+                in_round,
+            }) = hold
+            {
                 log(format!("{}: {reason} — leaving behind", id8(&jid)));
                 left_behind.push(json!({"car_id_short": id8(&jid), "reason": reason.as_str()}));
+                round.extend(in_round);
                 if !self.cfg.dry {
                     let mut kv = vec![("skip_reason", json!(reason))];
                     if let Some(stamp) = stamp {
                         kv.push((dock_regate::BASE_REGATE, stamp));
                     }
-                    self.merge_job_metadata(&jid, kv).await?;
+                    // Only a CHANGED hold is written: the dock is walked
+                    // every two minutes by the refresh as well as on every
+                    // board (design 42279fb2), and a reason the car already
+                    // carries is not a new fact — it would be a full job
+                    // PUT and an event for nothing.
+                    if !metadata_already(&j, &kv) {
+                        self.merge_job_metadata(&jid, kv).await?;
+                    }
                 }
                 continue;
             }
             out.push((j, branch));
         }
-        Ok((out, left_behind))
+        Ok(DockPass {
+            boardable: out,
+            left_behind,
+            round,
+        })
     }
 
     /// Does this car's DECLARED ORDERING EDGE hold it back?
@@ -3101,7 +3181,7 @@ impl Conductor {
         jid: &str,
         branch: &str,
         head: &str,
-    ) -> Option<(String, Option<Value>)> {
+    ) -> Option<DockHold> {
         let reading = match dock_regate::read_base(&self.cfg.clone, head) {
             Ok(r) => r,
             Err(e) => {
@@ -3143,7 +3223,7 @@ impl Conductor {
                 } else {
                     dock_regate::refused_reason(jid, &stamp)
                 };
-                Some((reason, None))
+                Some(DockHold::plain(reason))
             }
             dock_regate::DockBase::Touched {
                 launch: true,
@@ -3166,7 +3246,7 @@ impl Conductor {
         branch: &str,
         reading: &dock_regate::BaseReading,
         touched: &[String],
-    ) -> Option<(String, Option<Value>)> {
+    ) -> Option<DockHold> {
         let stamp = dock_regate::RegateStamp {
             base: reading.base.clone(),
             ..dock_regate::RegateStamp::for_main(&reading.main, touched)
@@ -3178,7 +3258,9 @@ impl Conductor {
                 id8(jid),
                 touched.len()
             ));
-            return Some((dock_regate::busy_reason("dry run", reading, touched), None));
+            return Some(DockHold::plain(dock_regate::busy_reason(
+                "dry run", reading, touched,
+            )));
         }
         // A SLOT, AND THE MEANS TO USE IT, BEFORE THE BRANCH MOVES. A
         // replayed branch no longer matches its receipt, so a car moved
@@ -3196,7 +3278,9 @@ impl Conductor {
             Ok((live, max)) if crate::gate::admits(live, max, crate::gate::Requester::Car) => {}
             Ok((live, max)) => {
                 let why = format!("{live} gate(s) running of {max}");
-                return Some((dock_regate::busy_reason(&why, reading, touched), None));
+                return Some(DockHold::plain(dock_regate::busy_reason(
+                    &why, reading, touched,
+                )));
             }
             Err(e) => {
                 log(format!(
@@ -3215,10 +3299,11 @@ impl Conductor {
                     refused: refused.lines().next().unwrap_or_default().to_string(),
                     ..stamp
                 };
-                return Some((
-                    dock_regate::refused_reason(jid, &stamp),
-                    Some(stamp.to_value(Utc::now())),
-                ));
+                return Some(DockHold {
+                    reason: dock_regate::refused_reason(jid, &stamp),
+                    stamp: Some(stamp.to_value(Utc::now())),
+                    in_round: None,
+                });
             }
             Err(e) => {
                 log(format!(
@@ -3253,8 +3338,9 @@ impl Conductor {
         jid: &str,
         branch: &str,
         stamp: dock_regate::RegateStamp,
-    ) -> (String, Option<Value>) {
+    ) -> DockHold {
         let marks = dock_regate::marks(car, jid, &stamp.main);
+        let at = Utc::now();
         match self
             .launch_gate(branch, &stamp.head, crate::gate::Requester::Car, marks)
             .await
@@ -3264,16 +3350,131 @@ impl Conductor {
                     gate_run: run,
                     ..stamp
                 };
-                (
-                    dock_regate::launched_reason(&stamp),
-                    Some(stamp.to_value(Utc::now())),
-                )
+                DockHold {
+                    reason: dock_regate::launched_reason(&stamp),
+                    stamp: Some(stamp.to_value(at)),
+                    // A gate is running for it now: this departure's round.
+                    in_round: Some(dock_regate::InRound {
+                        main: stamp.main.clone(),
+                        since: at,
+                    }),
+                }
             }
-            Err(e) => (
-                dock_regate::unfiled_reason(&stamp, &format!("{e:#}")),
-                Some(stamp.to_value(Utc::now())),
-            ),
+            // No gate is running for it, so nothing will turn it green
+            // before the next pass files it: no departure waits on it.
+            Err(e) => DockHold {
+                reason: dock_regate::unfiled_reason(&stamp, &format!("{e:#}")),
+                stamp: Some(stamp.to_value(at)),
+                in_round: None,
+            },
         }
+    }
+
+    /// Is the track held? The name of the pre-merge train holding it, or
+    /// `None` when it is clear — one read for `board` and `refresh`, so
+    /// the dock and a departure can never disagree about the track.
+    ///
+    /// Every page: the list rows carry `steps` (http/jobs.rs enriches
+    /// each row), which is what the predicate reads, and the one
+    /// pre-merge train that matters may sit behind merged ones waiting
+    /// to converge — a limit is not a filter.
+    async fn track_occupant(&self) -> Result<Option<String>> {
+        let on_track = list_all_pages(|offset| async move {
+            self.api(
+                Method::GET,
+                &format!("/api/jobs?kind=pr-train&status=open&limit={PAGE_LIMIT}&offset={offset}"),
+                None,
+            )
+            .await
+        })
+        .await?;
+        Ok(track_occupied_by(&on_track))
+    }
+
+    /// The dock between departures (D1 of design 42279fb2, backlog
+    /// 4890165b): the same per-car judgement boarding runs — and so the
+    /// same re-gates launched, stamped and bounded — with nothing
+    /// assembled and nothing departed. Fired every two minutes by the
+    /// `train-dock-refresh` cadence rule.
+    ///
+    /// ONLY WHILE THE TRACK IS CLEAR. Main moves only when a train
+    /// merges; a re-gate launched while one holds the track is launched
+    /// against a main about to be replaced — the measured waste this
+    /// verb exists to remove (19:26 on 2026-09-25: a car replayed onto
+    /// 22c1a876 in the pass that departed train #686, whose merge changed
+    /// four of its files). A round launched on a clear track stays valid
+    /// until the next departure, and `board` holds that departure for it.
+    ///
+    /// Before this, re-gates launched only inside `board`, which fires at
+    /// most once per cooldown after a departure: 42 of 58 left-behind rows
+    /// over ten trains read "waiting for a gate slot".
+    pub(super) async fn refresh(&self) -> Result<()> {
+        if let Some(occupant) = self.track_occupant().await? {
+            log(format!(
+                "REFRESH HELD — track occupied by {occupant}; a re-gate launched now would \
+                 test a main that train is about to replace"
+            ));
+            return Ok(());
+        }
+        self.ensure_clone()?;
+        let pass = self.candidates().await?;
+        log(refresh_line(&pass));
+        Ok(())
+    }
+
+    /// Does this departure wait for the dock's re-gate round? `None` =
+    /// depart. The rule is `dock_regate::departure_hold`; this reads its
+    /// two inputs — the main in the clone, and the bound from the cadence
+    /// registry (`cadence::regate_hold_minutes`).
+    ///
+    /// INFALLIBLE BY SIGNATURE, for `edge_hold`'s reason: this runs inside
+    /// the loop that boards every train, and a hold nobody can read is not
+    /// a reason to stop landing. Either read failing departs, and says so.
+    async fn departure_hold(
+        &self,
+        round: &[dock_regate::InRound],
+        now: DateTime<Utc>,
+    ) -> Option<dock_regate::RoundHold> {
+        if round.is_empty() {
+            return None;
+        }
+        let main = match sh(&[
+            "git",
+            "-C",
+            &self.cfg.clone,
+            "rev-parse",
+            "--verify",
+            "origin/main",
+        ]) {
+            Ok(out) => stdout_str(&out).trim().to_string(),
+            Err(e) => {
+                log(format!(
+                    "{} re-gate(s) in flight, but main could not be read ({e:#}) — departing \
+                     without waiting for them",
+                    round.len()
+                ));
+                return None;
+            }
+        };
+        let rules = match self.api(Method::GET, "/api/cadence/rules", None).await {
+            Ok(v) => serde_json::from_value::<Vec<boss_jobs::cadence::CadenceRuleRow>>(
+                v.unwrap_or(Value::Null),
+            )
+            .context("parsing /api/cadence/rules"),
+            Err(e) => Err(e),
+        };
+        let minutes = match rules {
+            Ok(rows) => crate::cadence::regate_hold_minutes(&rows),
+            Err(e) => {
+                log(format!(
+                    "{} re-gate(s) in flight, but the cadence registry could not be read \
+                     ({e:#}) — departing without waiting for them",
+                    round.len()
+                ));
+                return None;
+            }
+        };
+        dock_regate::departure_hold(round, &main, now, minutes)
     }
 
     /// A car the dock replayed, whose receipt has not caught up: where its
@@ -3285,12 +3486,12 @@ impl Conductor {
         jid: &str,
         branch: &str,
         stamp: dock_regate::RegateStamp,
-    ) -> (String, Option<Value>) {
+    ) -> DockHold {
         if stamp.gate_run.is_empty() {
             if self.cfg.dry {
                 let r =
                     dock_regate::in_flight_reason(jid, &stamp, &dock_regate::InFlight::FileGate);
-                return (r, None);
+                return DockHold::plain(r);
             }
             return self.file_regate(car, jid, branch, stamp).await;
         }
@@ -3306,7 +3507,23 @@ impl Conductor {
             }
         };
         let standing = dock_regate::in_flight(&stamp, verdict.as_deref());
-        (dock_regate::in_flight_reason(jid, &stamp, &standing), None)
+        // Still running: part of the round a departure on its main waits
+        // for, dated from the launch its stamp recorded. A verdict already
+        // in — green not yet copied, or red — is nothing to wait for.
+        let in_round = match standing {
+            dock_regate::InFlight::Running => {
+                dock_regate::launched_at(car).map(|since| dock_regate::InRound {
+                    main: stamp.main.clone(),
+                    since,
+                })
+            }
+            _ => None,
+        };
+        DockHold {
+            reason: dock_regate::in_flight_reason(jid, &stamp, &standing),
+            stamp: None,
+            in_round,
+        }
     }
 
     async fn open_train_job(&self, train_branch: &str, window: &str) -> Result<Option<Value>> {
@@ -3438,21 +3655,7 @@ impl Conductor {
         // 2026-09-07 (f3796323). No packet is opened for a hold — it is
         // not a refusal, the yard is not empty, and the next tick after
         // the track clears departs.
-        //
-        // Every page: the list rows carry `steps` (http/jobs.rs enriches
-        // each row), which is what the predicate reads, and the one
-        // pre-merge train that matters may sit behind merged ones
-        // waiting to converge — a limit is not a filter.
-        let on_track = list_all_pages(|offset| async move {
-            self.api(
-                Method::GET,
-                &format!("/api/jobs?kind=pr-train&status=open&limit={PAGE_LIMIT}&offset={offset}"),
-                None,
-            )
-            .await
-        })
-        .await?;
-        if let Some(occupant) = track_occupied_by(&on_track) {
+        if let Some(occupant) = self.track_occupant().await? {
             log(format!("BOARDING HELD — track occupied by {occupant}"));
             return Ok(());
         }
@@ -3496,7 +3699,11 @@ impl Conductor {
         }
 
         self.ensure_clone()?;
-        let (cands, mut left_behind) = self.candidates().await?;
+        let DockPass {
+            boardable: cands,
+            mut left_behind,
+            round,
+        } = self.candidates().await?;
         if self.cfg.dry {
             log(format!("DRY: candidates: {}", py_pairs(&cands)));
             log(format!(
@@ -3514,6 +3721,26 @@ impl Conductor {
             // what an operator reads the line to learn.
             self.record_no_departure(&empty_dock_refusal(&left_behind))
                 .await?;
+            return Ok(());
+        }
+
+        // THE ROUND A DEPARTURE WAITS FOR (D2 of design 42279fb2; the
+        // rule is `dock_regate::departure_hold`). Cars are ready, but the
+        // dock has re-gates in flight on the main this train would move:
+        // departing now re-stales every one of them. Hold — bounded by the
+        // registry's `regate_hold_minutes` from the OLDEST re-gate — and
+        // the next board, a minute away, departs with every car the round
+        // turned green. A held board boards nothing, so the cadence loop
+        // records it idle and the cooldown does not start from it.
+        if let Some(hold) = self.departure_hold(&round, now).await {
+            self.record_no_departure(&NoDeparture::AwaitingRegates {
+                cars: cands.len(),
+                in_flight: hold.in_flight,
+                main: hold.main,
+                oldest_minutes: hold.oldest_minutes,
+                hold_minutes: hold.hold_minutes,
+            })
+            .await?;
             return Ok(());
         }
 
@@ -4344,6 +4571,52 @@ fn completes_by_hand(step: &Value) -> bool {
 mod tests {
     use super::*;
     use crate::train::test_support::*;
+
+    // -- a held car is written when its hold CHANGES -----------------------
+
+    /// D1 of design 42279fb2 walks the dock every two minutes as well as
+    /// on every board, and each held car's reason is a full job PUT and
+    /// an event. A hold that says the same thing it said last pass is
+    /// not a new fact, so it is not written again; a new reason, or any
+    /// stamp (a launch is always new), is.
+    #[test]
+    fn a_hold_that_has_not_changed_is_not_written_again() {
+        let car = json!({"metadata": {
+            "skip_reason": "waiting for a gate slot (3 gate(s) running of 3)",
+            "branch": "feat/x",
+        }});
+        assert!(metadata_already(
+            &car,
+            &[(
+                "skip_reason",
+                json!("waiting for a gate slot (3 gate(s) running of 3)")
+            )]
+        ));
+        assert!(!metadata_already(
+            &car,
+            &[(
+                "skip_reason",
+                json!("waiting for a gate slot (2 gate(s) running of 3)")
+            )]
+        ));
+        assert!(
+            !metadata_already(
+                &car,
+                &[
+                    (
+                        "skip_reason",
+                        json!("waiting for a gate slot (3 gate(s) running of 3)")
+                    ),
+                    (dock_regate::BASE_REGATE, json!({"main": "m"})),
+                ]
+            ),
+            "a stamp the car does not carry is written"
+        );
+        assert!(!metadata_already(
+            &json!({}),
+            &[("skip_reason", json!("anything"))]
+        ));
+    }
 
     // -- the arrival branch cleanup ----------------------------------------
     //
@@ -6270,12 +6543,20 @@ mod tests {
             dock_regate::BASE_REGATE: stamp.to_value(Utc::now()),
         }});
         let c = dock_conductor(&clone);
-        let (reason, write) = c
+        let DockHold {
+            reason,
+            stamp: write,
+            in_round,
+        } = c
             .base_hold(&car, "car-g-000", "feat/g", &head)
             .await
             .expect("held");
         assert!(reason.contains("boss rerail car-g-00"), "{reason}");
         assert!(write.is_none(), "the recorded answer is not rewritten");
+        assert!(
+            in_round.is_none(),
+            "a refused replay has no gate running, so no departure waits for it"
+        );
         assert_eq!(forge_branch(&clone, "feat/g"), head);
     }
 
@@ -6307,6 +6588,33 @@ mod tests {
         assert!(
             parked_ready(&unheld),
             "control: the same car unheld is parked"
+        );
+    }
+
+    /// D2's hold must never freeze a landing: with a re-gate in flight on
+    /// the very main in the clone, a cadence registry that cannot be read
+    /// departs rather than waits — the bound it would wait against is a
+    /// number nobody could read. And an empty round reads nothing at all.
+    #[tokio::test]
+    async fn a_departure_whose_hold_cannot_be_read_departs() {
+        let (_g, clone) = clone_fixture("dock-hold-unreadable");
+        let main = rev(&clone, "origin/main");
+        let c = dock_conductor(&clone);
+        let now = Utc::now();
+        assert_eq!(c.departure_hold(&[], now).await, None);
+        let round = [dock_regate::InRound {
+            main: main.clone(),
+            since: now,
+        }];
+        assert_eq!(
+            dock_regate::departure_hold(&round, &main, now, 15).map(|h| h.in_flight),
+            Some(1),
+            "control: the same round, with a readable bound, holds"
+        );
+        assert_eq!(
+            c.departure_hold(&round, now).await,
+            None,
+            "the registry is unreachable (jobs.invalid): depart, loudly"
         );
     }
 

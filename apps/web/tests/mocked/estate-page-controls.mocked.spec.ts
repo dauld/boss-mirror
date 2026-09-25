@@ -77,8 +77,10 @@ const NODES = [
 const envelope = (payload: Record<string, unknown>) => ({ payload });
 
 /// Newest first: a host-units row (the page discards the scope), the
-/// cluster's row, forge's host row, then an OLDER boss-gcp host row the
-/// newest-per-scope collapse hides.
+/// cluster's row, forge's two host rows, then an OLDER boss-gcp host row
+/// — the live shape, each row naming only the host it was taken on
+/// (observe-host.sh). Newest-per-scope hid boss-gcp's 13 G until
+/// 3d1678ba keyed the series per host.
 const observations = () => [
   envelope({ scope: 'host-units', observer: 'boss-estate-observe-units', observed_at: ago(1), nodes: [{ id: 'boss-gcp' }] }),
   envelope({
@@ -87,7 +89,11 @@ const observations = () => [
   }),
   envelope({
     scope: 'host', observer: 'boss-estate-observe-host', observed_at: ago(180),
-    nodes: [{ id: 'forge', disk_free_gb: 210 }, { id: 'boss-gcp' }],
+    nodes: [{ id: 'forge', disk_free_gb: 210 }],
+  }),
+  envelope({
+    scope: 'host', observer: 'boss-estate-observe-host', observed_at: ago(190),
+    nodes: [{ id: 'forge', disk_free_gb: 211 }],
   }),
   envelope({
     scope: 'host', observer: 'boss-estate-observe-host', observed_at: ago(200),
@@ -324,31 +330,53 @@ test.describe('/it/estate — 00 THE MACHINES', () => {
 });
 
 test.describe('/it/estate — 01 OBSERVED vs DECLARED', () => {
-  // CURRENT, gap 2 (3d1678ba): the newest row per scope wins, so the
-  // older boss-gcp host row — 13G free — never shows.
+  // Gap 2 (3d1678ba), FIXED: the newest row per SCOPE won, so this test
+  // asserted boss-gcp's older host row — 13G free — never showed. The
+  // host series is now keyed per host, one line each.
   // CURRENT, gap 3 (d5efb80d): the host-units row is read and discarded.
   // CURRENT, gap 8 (e1eb34bc): a 3-hour-old row and a 3-minute-old one
   // both read "today".
-  test('one row per rendered scope, free space per machine; CURRENT, gaps 2, 3 and 8', async ({ page }) => {
+  test('the cluster row and one host row per host, free space per machine; gap 2 fixed, CURRENT gaps 3 and 8', async ({ page }) => {
     await install(page);
     await mountPage(page, PATH, TITLE);
 
-    // Two observation scopes, the cluster comparison, and one host
-    // comparison per host (gap 1, pinned below).
-    await expect(obsRows(page)).toHaveCount(5);
+    // The cluster scope, one observation line per host, the cluster
+    // comparison, and one host comparison per host (gap 1, pinned below).
+    await expect(obsRows(page)).toHaveCount(6);
     await expect(obsRow(page, 'kubernetes-nodes').locator('span')).toHaveText([
       'kubernetes-nodes',
       '2 machines seen by boss-estate-observe — cp-1: 40G free — w-1: free space unread',
       'today',
     ]);
-    // A host with no reading is skipped silently, unlike the cluster row.
-    await expect(obsRow(page, 'host').locator('span')).toHaveText([
+    // Each host's NEWEST reading, in host order: forge's older 211G row
+    // is hidden by its newer one, and boss-gcp's daily row — older than
+    // both — keeps a line of its own.
+    const hosts = obsRow(page, 'host');
+    await expect(hosts).toHaveCount(2);
+    await expect(hosts.nth(0).locator('span')).toHaveText([
       'host',
-      '2 hosts seen by boss-estate-observe-host — forge: 210G free',
+      'boss-gcp: 13G free — seen by boss-estate-observe-host',
       'today',
     ]);
-    await expect(page.locator('.estate-obs').getByText('13G free')).toHaveCount(0);
+    await expect(hosts.nth(1).locator('span')).toHaveText([
+      'host',
+      'forge: 210G free — seen by boss-estate-observe-host',
+      'today',
+    ]);
+    await expect(page.locator('.estate-obs').getByText(/211G/)).toHaveCount(0);
     await expect(page.locator('.estate-obs').getByText(/units/)).toHaveCount(0);
+  });
+
+  test('gap 2: a host whose row carries no free-space reading says so, like a cluster node', async ({ page }) => {
+    await install(page);
+    await page.route(OBS_READ, (r) => json(r, [
+      envelope({ scope: 'host', observer: 'boss-estate-observe-host', observed_at: ago(5), nodes: [{ id: 'forge' }] }),
+    ]));
+    await mountPage(page, PATH, TITLE);
+
+    await expect(obsRow(page, 'host').locator('span').nth(1)).toHaveText(
+      'forge: free space unread — seen by boss-estate-observe-host',
+    );
   });
 
   test('a clean cluster comparison reads green "no drift"', async ({ page }) => {
@@ -527,9 +555,10 @@ test.describe('/it/estate — 01 OBSERVED vs DECLARED', () => {
     await expect(page.locator(`p.estate-fail${FAILURE_MARKER}`)).toHaveText([
       'Comparisons unavailable: /api/estate/comparisons?limit=20: HTTP 503',
     ]);
-    // The two scopes, plus the host lines: their series is its own read,
-    // and it answered.
-    await expect(obsRows(page)).toHaveCount(4);
+    // The cluster scope and one observation line per host (3d1678ba),
+    // plus the host comparison lines: their series is its own read, and
+    // it answered.
+    await expect(obsRows(page)).toHaveCount(5);
     await expect(hostRows(page)).toHaveCount(2);
     await expect(page.getByText(/no drift/)).toHaveCount(0);
   });

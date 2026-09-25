@@ -16,7 +16,7 @@
 // anyone remembering to.
 //
 // THE SESSION. The playground offers guest access (instances.toml
-// `guest = true`): `POST /api/auth/guest` mints a read-only session
+// `guest = "audit"`): `POST /api/auth/guest` mints a read-only session
 // with no employee behind it — the same session a stranger clicking
 // "Browse as a guest" gets. That is the crawl's identity on purpose:
 // public data, a read-only role, nothing it can write.
@@ -87,7 +87,7 @@ async function guestSession(page: import('@playwright/test').Page, origin: strin
   expect(
     minted.ok(),
     `POST /api/auth/guest answered ${minted.status()} — the instance at ${origin} does not offer ` +
-      'guest access (instances.toml guest = true), so there is no session to crawl as',
+      'guest access (instances.toml guest = "audit"), so there is no session to crawl as',
   ).toBe(true);
   const setCookie = minted
     .headersArray()

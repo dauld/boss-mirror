@@ -39,7 +39,7 @@ fn storage(e: sqlx::Error) -> CadenceError {
 /// the loop cannot read, and (since the bundle seed reads the same
 /// list) a column the equality pin cannot compare.
 const RULE_COLUMNS: &str = "name, verb, basis, every_minutes, at_times, min_dock_depth, \
-     cooldown_minutes, cadence, anchor_date, business_calendar";
+     cooldown_minutes, cadence, anchor_date, business_calendar, regate_hold_minutes";
 
 fn rule_of(row: &PgRow) -> Result<CadenceRuleRow, CadenceError> {
     Ok(CadenceRuleRow {
@@ -53,6 +53,7 @@ fn rule_of(row: &PgRow) -> Result<CadenceRuleRow, CadenceError> {
         cadence: row.try_get("cadence").map_err(storage)?,
         anchor_date: row.try_get("anchor_date").map_err(storage)?,
         business_calendar: row.try_get("business_calendar").map_err(storage)?,
+        regate_hold_minutes: row.try_get("regate_hold_minutes").map_err(storage)?,
     })
 }
 
@@ -201,7 +202,7 @@ impl CadenceRegistry for PgCadence {
         let r = &spec.row;
         sqlx::query(&format!(
             "INSERT INTO cadence_rules (version, status, created_at, {RULE_COLUMNS}) \
-             VALUES ($1, 'active', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"
+             VALUES ($1, 'active', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"
         ))
         .bind(spec.version)
         .bind(spec.created_at)
@@ -215,6 +216,7 @@ impl CadenceRegistry for PgCadence {
         .bind(&r.cadence)
         .bind(r.anchor_date)
         .bind(&r.business_calendar)
+        .bind(r.regate_hold_minutes)
         .execute(&mut *tx)
         .await
         .map_err(storage)?;

@@ -63,6 +63,19 @@ pub(crate) enum NoDeparture {
     /// the line has to answer that and not merely report a hold
     /// (d3320278).
     HeldOnEdges { cars: String, needs_human: String },
+    /// Cars were ready, and the departure WAITED for the dock's re-gate
+    /// round on the current main (D2 of design 42279fb2): `in_flight`
+    /// re-gates launched on `main`, the oldest `oldest_minutes` in,
+    /// against a hold of `hold_minutes` read from the cadence registry.
+    /// Bounded by construction — once the oldest reaches the hold, the
+    /// next board departs with what is green.
+    AwaitingRegates {
+        cars: usize,
+        in_flight: usize,
+        main: String,
+        oldest_minutes: i64,
+        hold_minutes: u32,
+    },
 }
 
 /// Will this refusal still be here on the next window, unchanged?
@@ -93,6 +106,8 @@ pub(crate) enum NoDeparture {
 ///   itself once the car it named has landed.
 /// - `HostShort` — an infrastructure refusal that clears when the host
 ///   does, and which says nothing about any branch.
+/// - `AwaitingRegates` — a departure waiting for the dock's re-gate
+///   round, bounded by `regate_hold_minutes` from the oldest re-gate.
 ///
 /// against the three that repeat identically until a person acts:
 ///
@@ -104,7 +119,9 @@ pub(crate) enum NoDeparture {
 ///   satisfied; the window refuses identically forever.
 pub(crate) fn refusal_persists(refusal: &NoDeparture) -> bool {
     match refusal {
-        NoDeparture::NothingParked | NoDeparture::HostShort { .. } => false,
+        NoDeparture::NothingParked
+        | NoDeparture::HostShort { .. }
+        | NoDeparture::AwaitingRegates { .. } => false,
         NoDeparture::HeldOnEdges { needs_human, .. } => !needs_human.is_empty(),
         NoDeparture::AllConflicted { .. } | NoDeparture::ConsistRefused { .. } => true,
     }
@@ -255,6 +272,22 @@ pub(crate) fn no_departure_line(refusal: &NoDeparture) -> String {
              declared: {cars}. No train packet opened. A HUMAN IS NEEDED for {needs_human}: \
              that edge can never be satisfied, so this window will refuse identically until \
              someone clears it — each car's own skip_reason names which."
+        ),
+        NoDeparture::AwaitingRegates {
+            cars,
+            in_flight,
+            main,
+            oldest_minutes,
+            hold_minutes,
+        } => format!(
+            "BOARDING HELD — {in_flight} re-gate(s) on main {} in flight, oldest \
+             {oldest_minutes} min: {cars} car(s) are ready and wait for the round, up to \
+             {} more min (regate_hold_minutes={hold_minutes}), so one departure carries \
+             every car it turns green and main moves once. No train packet opened.",
+            &main[..8.min(main.len())],
+            i64::from(*hold_minutes)
+                .saturating_sub(*oldest_minutes)
+                .max(0),
         ),
     }
 }
@@ -649,6 +682,37 @@ mod persistence_tests {
             }),
             "an edge that can never be satisfied refuses identically forever"
         );
+    }
+
+    /// D2 of design 42279fb2: a departure held for the dock's re-gate
+    /// round is BOUNDED by construction — it departs once the oldest
+    /// re-gate in the round reaches the hold — so it is never a stall,
+    /// and its line says what it waits for, on which main, and for how
+    /// much longer at most.
+    #[test]
+    fn a_departure_held_for_the_regate_round_clears_itself_and_says_how() {
+        let held = NoDeparture::AwaitingRegates {
+            cars: 2,
+            in_flight: 5,
+            main: "22c1a876aaaa".into(),
+            oldest_minutes: 6,
+            hold_minutes: 15,
+        };
+        assert!(
+            !refusal_persists(&held),
+            "a bounded hold clears itself — alarming on it is noise"
+        );
+        let line = no_departure_line(&held);
+        for want in [
+            "BOARDING HELD",
+            "5 re-gate(s) on main 22c1a876 in flight",
+            "oldest 6 min",
+            "2 car(s)",
+            "up to 9 more min",
+            "No train packet opened",
+        ] {
+            assert!(line.contains(want), "{want}: {line}");
+        }
     }
 
     /// The same variant falls on BOTH sides depending on its content,

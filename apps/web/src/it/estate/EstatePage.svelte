@@ -17,6 +17,7 @@
     hostLines,
     latestByScope,
     latestComparison,
+    latestHostReadings,
     LOOP_OK_OUTCOMES,
     loopAge,
     loopHost,
@@ -46,8 +47,11 @@
   const clusterObs = $derived(
     estate?.observations.kind === 'ready' ? (latestByScope(estate.observations.data).get('kubernetes-nodes') ?? null) : null,
   );
-  const hostObs = $derived(
-    estate?.observations.kind === 'ready' ? (latestByScope(estate.observations.data).get('host') ?? null) : null,
+  // Per HOST, not per scope (3d1678ba): one scope-wide row let forge's
+  // fifteen-minute reading hide boss-gcp's daily one, 13 G free under a
+  // 17 G floor.
+  const hostReadings = $derived(
+    estate?.observations.kind === 'ready' ? latestHostReadings(estate.observations.data) : [],
   );
   const clusterCmp = $derived(
     estate?.comparisons.kind === 'ready' ? latestComparison(estate.comparisons.data, 'kubernetes-nodes') : null,
@@ -116,22 +120,19 @@
         {:else}
           <div class="estate-obs-row"><span class="estate-scope">kubernetes-nodes</span><span>no observation recorded yet</span></div>
         {/if}
-        {#if hostObs}
+        {#each hostReadings as hr (hr.host)}
+          <!-- One line per host, each its own newest reading and its own
+               age; a missing reading says so, the cluster row's idiom. -->
           <div class="estate-obs-row">
             <span class="estate-scope">host</span>
             <span>
-              {hostObs.nodes.length} host{hostObs.nodes.length === 1 ? '' : 's'} seen by {hostObs.observer}
-              {#each hostObs.nodes as hn (hn.id)}
-                {#if hn.disk_free_gb != null}
-                  — {hn.id}: {hn.disk_free_gb}G free
-                {/if}
-              {/each}
+              {hr.host}: {hr.node.disk_free_gb != null ? `${hr.node.disk_free_gb}G free` : 'free space unread'} — seen by {hr.observer}
             </span>
-            <span class="estate-when">{formatRelative(hostObs.observed_at, loadedAt)}</span>
+            <span class="estate-when">{formatRelative(hr.observed_at, loadedAt)}</span>
           </div>
         {:else}
           <div class="estate-obs-row"><span class="estate-scope">host</span><span>no observation recorded yet</span></div>
-        {/if}
+        {/each}
         {#if estate.comparisons.kind === 'failed'}
           <p class="estate-fail load-failed">Comparisons unavailable: {estate.comparisons.error}</p>
         {:else if clusterCmp}

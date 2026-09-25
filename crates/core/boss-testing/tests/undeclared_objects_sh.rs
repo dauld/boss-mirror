@@ -418,7 +418,7 @@ fn a_repo_sourced_instances_delivered_tenant_is_exempt_by_derivation_and_never_s
     // reads clean.
     std::fs::write(
         c.tree.join("infra/cluster/instances.toml"),
-        "source = \"prod\"\n\n[prod]\nnamespace = \"boss\"\ntenant_repo = \"david/algedonic-llc\"\ntenant_ref = \"main\"\nsim = false\nhostname = \"h.example\"\nguest = false\n\n[playground]\nnamespace = \"boss-playground\"\ntenant_dir = \"examples/brewery\"\nsim = true\nhostname = \"p.example\"\nguest = true\n",
+        "source = \"prod\"\n\n[prod]\nnamespace = \"boss\"\ntenant_repo = \"david/algedonic-llc\"\ntenant_ref = \"main\"\nsim = false\nhostname = \"h.example\"\nguest = false\n\n[playground]\nnamespace = \"boss-playground\"\ntenant_dir = \"examples/brewery\"\nsim = true\nhostname = \"p.example\"\nguest = \"audit\"\n",
     )
     .unwrap();
     let (rc, derived, all) = c.run(&["--exemptions-derived"]);

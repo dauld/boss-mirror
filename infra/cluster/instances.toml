@@ -41,17 +41,28 @@
 #              TLS is the edge's: since 21c17ebc (2026-09-17) no TLS
 #              front and no certificate exist in the cluster.
 #   guest      BOSS_GUEST_ACCESS — whether an anonymous visitor gets a
-#              synthetic read-only session (the "Browse as a guest"
-#              button; the gateway reads "1" as on, anything else as
-#              off). Right for the public example, wrong for the
-#              operating company's site behind Access (backlog
-#              0d2d7daa, 2026-09-16): true renders "1", false renders
-#              "0". Required, like sim — an instance that inherited the
-#              manifest's "1" by silence would hand strangers the
-#              company's read-only view. Prod keeps true until the flip
-#              car sets it false here AND writes "0" into boss.yaml
-#              (prod is the source; the byte-identity test holds them
-#              equal).
+#              read-only session (the "Browse as a guest" button), and
+#              WHICH read (design 2830b6b7, decided 2026-09-25: one key,
+#              three answers, because two keys admit pairs that mean
+#              nothing):
+#                false    no guest; renders "0"
+#                "basic"  a `visitor` session — reads only what the
+#                         install's policy grants that role, the OSS
+#                         default; renders "basic"
+#                "audit"  an `audit-readonly` session — Read on every
+#                         shipped resource, the system-audit read an
+#                         instance opts into; renders "audit"
+#              A guest never writes under either. Right for the public
+#              example, wrong for the operating company's site behind
+#              Access (backlog 0d2d7daa, 2026-09-16; David 2026-09-25:
+#              the operating site "won't support any guests", and the
+#              playground "will support anonymous guests with the
+#              system-audit policy grant"). Required, like sim — an
+#              instance that inherited a guest by silence would hand
+#              strangers the company's read-only view — and `true` is
+#              REFUSED by name: it does not say which read. Prod is the
+#              source, so its line and boss.yaml's BOSS_GUEST_ACCESS
+#              change together; the byte-identity test holds them equal.
 #   site       OPTIONAL — a second public hostname the instance's
 #              gateway answers from the tenant repository's site/
 #              directory, with no session (design b64c4377, decided
@@ -189,7 +200,10 @@ namespace = "boss-playground"
 tenant_dir = "examples/brewery"
 sim = true
 hostname = "playground.algedonic.dev"
-guest = true
+# Anonymous guests with the system-audit read (David, 2026-09-25;
+# design 2830b6b7): the playground is the public example, so a stranger
+# may read all of it — and write none of it.
+guest = "audit"
 # The playground pulls the same images and sends mail as the same
 # sender: its shared Secrets are prod's, copied.
 shares_with = "prod"

@@ -546,7 +546,7 @@ mod tests {
             session_key: vec![9u8; 32],
             http: reqwest::Client::new(),
             audit,
-            guest_access: false,
+            guest_access: crate::local_auth::GuestAccess::Off,
             oidc: Some(OidcRuntime::new(OidcConfig {
                 issuer: issuer.to_string(),
                 client_id: "boss".into(),

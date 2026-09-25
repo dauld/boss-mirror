@@ -16,8 +16,8 @@
 //! (`infra/surface-usage.sh`, a 24-hour window, filed as `measured`)
 //! and the Codebase page's Surfaces section (a 7-day window) with the
 //! same GROUP BY, so the two cannot disagree by summing differently.
-//! Readable by any signed-in session except the gateway's guest
-//! (`audit-readonly` at user tier): the rows are an operator's own
+//! Readable by any signed-in session except the gateway's guest (a
+//! read-only-floor role at user tier): the rows are an operator's own
 //! attention, and the Codebase page that shows them is readable by any
 //! operator already. The operator and auditor tiers (the recorded-probe
 //! reader) read too; a request with no identity header does not.
@@ -53,18 +53,21 @@ pub struct SurfaceOpensApiState {
 // operator door admits (839335b7). The read below is deliberately WIDER
 // than `crate::trust::can_read`, and says why.
 
-/// Everyone but the gateway's guest session, which arrives as
-/// `audit-readonly` at USER tier (`POST /api/auth/guest`), and a
-/// request that carried no identity at all. An employee's ordinary
-/// session (user tier, their own role) reads: the page that renders
-/// this sits in a department any operator opens.
+/// Everyone but the gateway's guest session, which arrives at USER tier
+/// carrying a read-only-floor role (`POST /api/auth/guest`: `visitor`,
+/// or `audit-readonly` where the instance opts in — design 2830b6b7),
+/// and a request that carried no identity at all. The floor predicate,
+/// not the name `audit-readonly`, which the new `visitor` passed. An
+/// employee's ordinary session (user tier, their own role) reads: the
+/// page that renders this sits in a department any operator opens.
 ///
 /// A BLOCKLIST, so the anonymous caller has to be named in it: until
 /// 2026-09-25 it was not, and a headerless request read every
 /// operator's attention (backlog e84de48e — the same allowance
 /// `trust::is_trusted` held by name, held here by omission).
 fn can_read(user: &User) -> bool {
-    !(user.is_anonymous() || user.access_tier == AccessTier::User && user.role == "audit-readonly")
+    !(user.is_anonymous()
+        || user.access_tier == AccessTier::User && boss_core::roles::is_read_only_floor(&user.role))
 }
 
 pub fn router(state: SurfaceOpensApiState) -> Router {
@@ -382,6 +385,27 @@ mod tests {
         ] {
             let (status, body) = send(app(&repo), "GET", path, None, user.clone()).await;
             assert_eq!(status, StatusCode::OK, "{user:?}: {body}");
+        }
+    }
+
+    /// Design 2830b6b7: the OSS guest arrives as `visitor` at user tier,
+    /// and the refusal is the read-only floor predicate's, not the name
+    /// `audit-readonly` — keyed on the name, a guest under the new role
+    /// read an operator's own attention.
+    #[tokio::test]
+    async fn the_rollup_is_refused_to_every_read_only_floor_session() {
+        let repo = Arc::new(InMemorySurfaceOpens::new());
+        let path = "/api/surface-opens/rollup?since=2026-09-16T00:00:00Z";
+        for role in boss_core::roles::READ_ONLY_FLOOR_ROLES {
+            let (status, body) = send(
+                app(&repo),
+                "GET",
+                path,
+                None,
+                Some(header("guest@algedonic.dev", role, AccessTier::User)),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{role}: {body}");
         }
     }
 

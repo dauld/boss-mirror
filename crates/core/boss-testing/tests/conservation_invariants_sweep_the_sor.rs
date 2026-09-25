@@ -415,7 +415,7 @@ fn the_cronjob_is_the_audit_integrity_chores_shape_on_every_instance() {
             "examples/brewery",
             "true",
             "playground.example",
-            "true",
+            "audit",
         ])
         .current_dir(repo_root())
         .output()

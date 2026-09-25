@@ -793,6 +793,8 @@ struct CadenceRuleToml {
     anchor_date: Option<chrono::NaiveDate>,
     #[serde(default)]
     business_calendar: Option<String>,
+    #[serde(default)]
+    regate_hold_minutes: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -883,6 +885,7 @@ fn cadence_toml_to_spec(
             cadence: toml.cadence,
             anchor_date: toml.anchor_date,
             business_calendar: toml.business_calendar,
+            regate_hold_minutes: toml.regate_hold_minutes,
         },
         // Not a declaration — see `station_toml_to_spec`.
         created_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,

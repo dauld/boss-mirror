@@ -7,11 +7,15 @@ use super::*;
 /// python argv flags (`--preflight`, `--reconcile-only`) selected.
 /// `Cancel` is the operator's judgment call on a train that will not
 /// arrive — close the PR unmerged, release the cars, record why.
+/// `Refresh` is the dock's own pass between departures (design
+/// 42279fb2): the per-car judgement boarding runs, and the re-gates it
+/// owes, with nothing assembled and nothing departed.
 pub enum Phase {
     Preflight,
     Reconcile,
     Board,
     Run,
+    Refresh,
     Cancel { handle: String, reason: String },
 }
 
@@ -26,6 +30,9 @@ pub(crate) enum Work {
     DrainPublishRequests,
     Reconcile,
     Board,
+    /// Walk the dock and launch the re-gates it owes while the track is
+    /// clear — `Conductor::refresh`.
+    Refresh,
 }
 
 /// What each phase of the standing loop does, in order.
@@ -46,6 +53,7 @@ pub(crate) fn loop_work(phase: &Phase) -> &'static [Work] {
         Phase::Reconcile => &[Work::DrainPublishRequests, Work::Reconcile],
         Phase::Board => &[Work::Board],
         Phase::Run => &[Work::DrainPublishRequests, Work::Reconcile, Work::Board],
+        Phase::Refresh => &[Work::Refresh],
         Phase::Preflight | Phase::Cancel { .. } => &[],
     }
 }
@@ -87,7 +95,12 @@ pub(crate) fn contended(phase: &Phase) -> Contended {
              No car was released and the PR is still open — re-run the cancel once \
              the run in progress finishes."
         )),
-        Phase::Preflight | Phase::Reconcile | Phase::Board | Phase::Run => Contended::Covered,
+        // A refresh abandons nothing either: the holder is a board (which
+        // runs the same dock judgement) or a reconcile, and the next
+        // refresh is two minutes away.
+        Phase::Preflight | Phase::Reconcile | Phase::Board | Phase::Run | Phase::Refresh => {
+            Contended::Covered
+        }
     }
 }
 
@@ -178,8 +191,10 @@ pub(crate) fn lock_wait_budget(phase: &Phase) -> Duration {
         // A board has its own retry one tick later, and must not queue
         // behind a long reconcile. Preflight proves nothing a running
         // conductor has not already proved. A cancel is an operator
-        // standing at the prompt, who can see the line and re-run.
-        Phase::Preflight | Phase::Board | Phase::Cancel { .. } => Duration::ZERO,
+        // standing at the prompt, who can see the line and re-run. A
+        // refresh re-asks in two minutes and must never make a board or
+        // a reconcile queue behind the dock (design 42279fb2).
+        Phase::Preflight | Phase::Board | Phase::Refresh | Phase::Cancel { .. } => Duration::ZERO,
     }
 }
 
@@ -317,6 +332,7 @@ pub async fn run(phase: Phase, dry: bool, now: DateTime<Utc>) -> Result<()> {
             Work::DrainPublishRequests => drain_publish_requests(&conductor, dry, now).await,
             Work::Reconcile => conductor.reconcile(now).await?,
             Work::Board => conductor.board(now).await?,
+            Work::Refresh => conductor.refresh().await?,
         }
     }
     Ok(())
@@ -394,6 +410,19 @@ mod tests {
     /// `Covered` is about abandonment, not about the exit code: a
     /// reconcile that spent its whole budget is still covered by the
     /// holder, and exits [`LOCK_CONTENDED_EXIT`] because it never ran.
+    /// D1 of design 42279fb2: the dock's refresh is its own phase. It
+    /// walks the dock and nothing else — no drain, no reconcile, no
+    /// departure — and it never waits for the lock: a refresh that finds
+    /// it held leaves at once, because the next one is two minutes away
+    /// and a held lock is a board or a reconcile that must not queue
+    /// behind the dock.
+    #[test]
+    fn a_refresh_walks_the_dock_and_never_waits_for_the_lock() {
+        assert_eq!(loop_work(&Phase::Refresh), &[Work::Refresh]);
+        assert_eq!(lock_wait_budget(&Phase::Refresh), Duration::ZERO);
+        assert_eq!(contended(&Phase::Refresh), Contended::Covered);
+    }
+
     #[test]
     fn the_standing_loop_leaves_quietly_because_the_holder_covers_it() {
         for phase in [Phase::Preflight, Phase::Reconcile, Phase::Board, Phase::Run] {

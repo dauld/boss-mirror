@@ -12,9 +12,11 @@
 //! `the_cadence_rules_bundle_is_the_migrations_pg.rs`; this file holds
 //! the rules that need no database and range over every file.
 //!
-//! The three names below are the migrations' active rules less
+//! The names below are the migrations' active rules less
 //! `protocol-retro-daily`, retired by decision the same day (the pin
-//! names why); a rule added later is a file dropped in and a line here.
+//! names why), plus the rules born in the bundle since; a rule added
+//! later is a file dropped in and a line here (`train-dock-refresh`,
+//! design 42279fb2, was the first).
 
 use boss_jobs::cadence::{CadenceRegistry, CadenceRepository, CadenceRuleSpec, InMemoryCadence};
 use boss_jobs::cadence_seed::platform_cadence_path;
@@ -52,10 +54,12 @@ fn the_bundle_is_one_file_per_rule() {
         names,
         [
             "train-board-on-dock-depth",
+            "train-dock-refresh",
             "train-reconcile",
             "train-window"
         ],
-        "the three platform cadence rules the migrations seeded and nobody retired, and no other"
+        "the three platform cadence rules the migrations seeded and nobody retired, plus \
+         train-dock-refresh, the first rule born in the bundle (design 42279fb2), and no other"
     );
 }
 
@@ -118,12 +122,14 @@ async fn every_bundled_rule_is_publishable_at_its_declared_version() {
                 row.min_dock_depth,
                 row.cooldown_minutes,
                 row.every_minutes,
+                row.regate_hold_minutes,
                 row.verb.as_str()
             ),
             (
                 declared.row.min_dock_depth,
                 declared.row.cooldown_minutes,
                 declared.row.every_minutes,
+                declared.row.regate_hold_minutes,
                 declared.row.verb.as_str()
             ),
             "{}: the served row must carry what its bundle file declares",
@@ -193,4 +199,52 @@ anchor_date = \"2026-08-28\"
     assert_eq!(row.at_times, Some(serde_json::json!(["06:10"])));
     assert_eq!(row.cadence.as_deref(), Some("daily"));
     assert_eq!(row.business_calendar, None);
+    assert_eq!(row.regate_hold_minutes, None, "absent means no hold");
+}
+
+/// THE DOCK'S TWO RULES (design 42279fb2, backlog 4890165b). The boarding
+/// rule carries the bound a departure waits for the dock's re-gate round
+/// — and ONLY a departing rule may carry one, which the table's own CHECK
+/// refuses too — and the dock refreshes on a wall clock of its own, short
+/// enough to relaunch re-gates between departures rather than once per
+/// departure window.
+#[test]
+fn the_dock_refreshes_on_its_own_clock_and_a_departure_declares_its_hold() {
+    let rules = bundle();
+    let board = rules
+        .iter()
+        .find(|s| s.name() == "train-board-on-dock-depth")
+        .expect("the boarding rule is declared");
+    assert!(
+        board.row.regate_hold_minutes.is_some_and(|m| m > 0),
+        "the boarding rule declares how long a departure waits for the re-gate round: {:?}",
+        board.row
+    );
+    for s in &rules {
+        if s.row.regate_hold_minutes.is_some() {
+            assert!(
+                boss_jobs::cadence::departs_a_train(&s.row.verb),
+                "{}: only a rule that departs a train can hold a departure",
+                s.name()
+            );
+        }
+    }
+    let refresh = rules
+        .iter()
+        .find(|s| s.name() == "train-dock-refresh")
+        .expect("the dock's refresh rule is declared");
+    assert_eq!(refresh.row.verb, "refresh");
+    assert_eq!(refresh.row.basis, "wall");
+    assert!(
+        !boss_jobs::cadence::departs_a_train(&refresh.row.verb),
+        "a refresh departs nothing, so the loop never holds it for the track"
+    );
+    assert!(
+        refresh
+            .row
+            .every_minutes
+            .is_some_and(|m| (1..5).contains(&m)),
+        "the refresh re-asks within a few minutes, not once per departure window: {:?}",
+        refresh.row.every_minutes
+    );
 }

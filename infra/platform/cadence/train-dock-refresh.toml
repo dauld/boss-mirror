@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# train-dock-refresh — the dock re-gates its parked cars between
+# departures: every two minutes, while no train holds the track, the
+# conductor runs the same per-car judgement boarding runs and launches the
+# re-gates it owes. It assembles nothing and departs nothing.
+#
+# Version 1, and the first rule BORN in this bundle rather than in a
+# migration (backlog 4890165b, design 42279fb2, approved 2026-09-25).
+#
+# WHY IT EXISTS. A parked car whose files main moved into is replayed
+# onto main and re-gated before it boards (backlog 969a1092). Until this
+# rule, those re-gates launched only inside `board`: once per departure
+# window, into whatever gate slots happened to be free at that instant,
+# while builder gates re-poll the line every 30 s and took every bay that
+# freed in between. Measured on the item's triage over the ten trains to
+# 19:26Z: 42 of 58 left-behind rows read "waiting for a gate slot".
+#
+# WHY WHILE THE TRACK IS CLEAR, AND NOT ALWAYS. Main moves only when a
+# train merges. A re-gate launched while a train holds the track is
+# launched against a main about to be replaced — the measured waste this
+# rule removes — so the verb itself returns without a pass while a
+# pre-merge train is on the track (the same predicate boarding uses).
+# A round launched on a clear track stays valid until the next departure,
+# and train-board-on-dock-depth's `regate_hold_minutes` makes that
+# departure wait for it.
+#
+# WHY TWO MINUTES. The train-reconcile wall rule is ten, which is most of
+# a gate (median 13.9 min for a dock re-gate that day) spent waiting to
+# launch. Two re-asks well inside a gate slot's turnover without contending
+# for the conductor's lock more than the 60-second board already does; a
+# refresh that finds the lock held leaves at once and the next window
+# re-asks.
+#
+# `wall` basis: fires every `every_minutes` on the wall clock, the window
+# stamp a pure function of (rule, window) so a restarted loop cannot
+# double-fire.
+#
+# To change this rule, bump `version` — and check the LIVE lineage first
+# (`GET /api/cadence/rules/<name>/versions`), not just this file.
+# ---------------------------------------------------------------------------
+
+[[cadence_rule]]
+name = "train-dock-refresh"
+version = 1
+status = "active"
+verb = "refresh"
+basis = "wall"
+every_minutes = 2

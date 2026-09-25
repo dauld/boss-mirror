@@ -7,9 +7,13 @@ whose `name` is the file name, carrying every column of the
 `verb`, `basis`, and the basis's own columns — `every_minutes` (wall),
 `at_times` (clock, calendar), `min_dock_depth` + `cooldown_minutes`
 (queue-depth), `cadence` + `anchor_date` + `business_calendar`
-(calendar). A column the basis does not use is simply absent — TOML has
-no null. **Adding a rule is dropping a file in.** Changing one is
-bumping its `version`.
+(calendar), and `regate_hold_minutes` on a rule that departs a train
+(`board`, `run`: how long a departure waits for the dock's re-gate
+round, `20260925200737`). A column the basis does not use is simply
+absent — TOML has no null. **Adding a rule is dropping a file in.**
+Changing one is bumping its `version`. `train-dock-refresh` (design
+42279fb2, 2026-09-25) was the first rule born here rather than in a
+migration; the equality pin counts such rules as born in the bundle.
 
 Since 2026-09-18 (backlog 393d3234, consolidation H4, car 3) this
 directory is where a cadence rule is DECLARED. Before it, nine

@@ -12,6 +12,7 @@ import {
   hostPageIsWhole,
   latestByScope,
   latestComparison,
+  latestHostReadings,
   latestPerHost,
   loopAge,
   loopHost,
@@ -82,6 +83,30 @@ describe('observations and comparisons', () => {
     const byScope = latestByScope(rows);
     expect(byScope.get('kubernetes-nodes')?.nodes).toHaveLength(2);
     expect(byScope.get('host')?.observed_at).toBe('2026-08-31T10:25:00Z');
+  });
+
+  test('the host series keeps the newest reading per HOST, not per scope (3d1678ba)', () => {
+    // The live shape of 2026-09-23: forge observes itself every ~15
+    // minutes, boss-gcp once a day, each row naming only itself
+    // (observe-host.sh). Newest per scope showed forge's row alone, so
+    // boss-gcp's 13 G free — below its 17 G floor — never rendered.
+    const readings = latestHostReadings(parseObservations([
+      obsEvent('kubernetes-nodes', '2026-09-23T16:20:00Z', [{ id: 'cp-1', disk_free_gb: 40 }]),
+      obsEvent('host', '2026-09-23T16:17:00Z', [{ id: 'forge', disk_free_gb: 210 }]),
+      obsEvent('host', '2026-09-23T16:02:00Z', [{ id: 'forge', disk_free_gb: 211 }]),
+      obsEvent('host', '2026-09-23T10:25:00Z', [{ id: 'boss-gcp', disk_free_gb: 13 }]),
+    ]));
+    expect(readings.map((r) => [r.host, r.observed_at, r.node.disk_free_gb ?? null])).toEqual([
+      ['boss-gcp', '2026-09-23T10:25:00Z', 13],
+      ['forge', '2026-09-23T16:17:00Z', 210],
+    ]);
+  });
+
+  test('no host rows, no host readings — the cluster series is not a host', () => {
+    const readings = latestHostReadings(parseObservations([
+      obsEvent('kubernetes-nodes', '2026-09-23T16:20:00Z', [{ id: 'cp-1' }]),
+    ]));
+    expect(readings).toEqual([]);
   });
 
   test('zero drift renders as the good state, with the counts said plainly', () => {
