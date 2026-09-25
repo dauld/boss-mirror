@@ -2194,6 +2194,87 @@ floor out one region at a time, `RegionMap` draws its slice through
 and with it the wagon plates' `interiorLayout` that nothing read once
 the region map drew the floor.
 
+**The map's meaning is fixed before its drawing: three state words, a
+partition, the order a car walks, borders drawn** (design `62de32ae`,
+"The IT map, round 3", David 2026-09-24, its one question accepted as
+proposed; the build rode as parts of feedback `c3105b2a`). A fresh-eyes
+review that day, by an agent that had not seen the map's history and
+rendered it against live reads at 1440 and 390 px, found the
+foundations right — one shared world, flow-ordered territories, the
+one server read `boss orient` prints too, unknown drawn as unknown, the
+view swap at `/it/yard/<region>`, all kept — and the map failing the
+five-second test: six of ten regions the same amber BUSY, the one red
+that was ours buried in a 700-character sentence, the borders' best
+content in hover titles, the dock drawn before the gates, the middle
+third the thinnest part, and no phone view. Decided: (1) **one state
+vocabulary, regions and borders alike — clear, attention, troubled** —
+clear is flowing within declared bounds, busy-and-healthy included, so
+a dock with a train due is clear; attention is a declared band crossed;
+troubled is ours and not moving (the shed's rule, `3881f5c9`, on every
+region) or a reading that could not be taken; every non-clear state
+names the band that decided it ("oldest 7d > 3d band"). `busy` is gone
+rather than aliased, so a paragraph above that says a region "stays
+busy" now reads attention, and Enamel's busy plate is the attention
+plate; (2) **hysteresis on the server, read from the record**: a band's
+condition changes the state only after holding for the band's declared
+period, measured from the instant the record says it began, so the
+judgement is a pure function of the rows across restarts, replicas and
+scopes ("troubled for 16m"); a remembered-state layer was rejected for
+exactly that. As built it damps ONSET only — a condition clears at
+once, because the record holds when a condition began and mostly not
+when it last held — and one whose onset is unrecorded is stated at once
+with no duration; (3) **the line is the order a car walks it** —
+receiving → marshalling → shop floor → gates → dock → track → arrivals
+→ shed, the garage a siding under gates..track and publish off
+arrivals — with the rails redefined to match (a gate-run opened, parked
+on green, boarded, judged red); the old line put the dock before the
+gates and a car walked backwards through two regions; (4) **the
+regions are a partition**: a packet stands in receiving until its first
+step after the trigger completes and in marshalling only after, the
+eight named regions claim first and those two take the remainder, one
+server test (`no_job_id_is_counted_in_two_regions`) pins it, and
+receiving reads past its 500-row page instead of flooring — the world's
+"669 waiting at the borders" had counted about 260 backlog items twice;
+(5) **every KPI states its unit and every interior draws its header's
+count or names what it leaves out**, with a bound declared as
+`capacity` or `threshold` (the dock's "6 / 1" was six cars against a
+boarding threshold of one, not a space for one); (6) **borders are
+drawn, not tooltipped**: the rails leave the territories and run along
+a line above them with room to write the machine's name and lamp on the
+rail and the rate beneath, rail width follows the logarithm of the rate
+(`railWidth`, presentation only — the number is printed), and a click
+opens the crossing inline under the map; (7) **a region owns its page**:
+"IT · Dock" under a breadcrumb, the world's summary line replaced by the
+region's own in and out rails, and the departure board and alerts strip
+scoped to the region, with what they leave to other regions counted
+rather than dropped (`region-page.ts`) — folded into `fe77a1d2`'s third
+car rather than moving the deck whole; (8) **the shop floor draws agents
+as actors** — an identity heading its sessions, a lamp per session with
+its idle age, a lamp per run labelled with run, item and step, and a
+run no session claims drawn on a "no open session" row, never dropped;
+(9) **one KPI per region**, the server's sentence and unit, which the
+map prints and never builds; (11) **machinery that serves every region
+stands in none**: the host runners move to a plant strip along the
+world's edge (`plant` on `/api/yard/regions`), and stations the server
+cannot judge are counted in marshalling's header ("2 stations
+unjudged") rather than drawn clear; (12) **a phone gets
+a vertical strip map**, one row per region in flow order under the
+server's thirds, each row the state, the KPI and the rail coming in,
+and the SVG world is not shrunk. The question — the strip before 1.0.0
+or after — was answered as proposed: after cars A–D, as car G.
+Decision (10), a one-line HUD, was replaced by its own design, the HUD
+frame (`00774ca8`, one row per third), which is folded on its own
+packet. Built, 2026-09-24, every car: B the partition (#628), A the
+states, bands, hysteresis and units (`region_states.rs`, #629), C the
+order and the drawn borders (#630), F the HUD frame and the server's
+`thirds` (#632), E the actors, the plant strip and the rest of (5)
+(#634, with the region pages of (7)), and G the phone strip
+(`PhoneStrip.svelte`, #637). Not built: the second half of receiving's
+KPI, the share whose channel is unrecorded — the channel rule lives
+only in the client (`receiving.ts::channelOf`), and a server copy
+needs its own equality pin (CLAUDE.md §9a), so it stays named residue on
+`c3105b2a` rather than a copy ported unpinned.
+
 **The map moves only where the record says work is moving, so
 stillness is the stall signal** (design `31bade8f`, "The IT map moves",
 David 2026-09-24, both questions accepted as proposed; answers backlog
