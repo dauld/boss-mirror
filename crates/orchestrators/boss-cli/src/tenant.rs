@@ -337,7 +337,10 @@ pub const CONTRACT: &[Entry] = &[
                   included, one `department.updated` per changed row. GET /api/departments reads \
                   the live rows back: the chrome bar's tabs and the weekly retro rule (backlog \
                   7edf0e97; until 2026-09-25 the roster was the 13 rows a migration seeded into \
-                  every instance, and nothing could change them)",
+                  every instance, and nothing could change them. Those 13 are the demo tenant's, \
+                  declared in its seeds/departments.toml under examples/, so a company's instance \
+                  evicts them at its first start and keeps only the roster its own file declares \
+                  — infra/postgres/example-reference-rows.sh)",
         shape: "`[[department]]` rows: code (a lowercase slug — the department's URL root \
                 segment, never one of crates/core/boss-jobs/src/department/reserved-root-\
                 segments.txt), display_name, function (a Class code under (department, \

@@ -323,6 +323,37 @@ pub struct User {
 }
 
 impl User {
+    /// The id [`crate::CurrentUser`] gives a request that carried no
+    /// `x-boss-user` header at all.
+    pub const ANONYMOUS_ID: &'static str = "anonymous";
+
+    /// The role [`crate::CurrentUser`] gives that request. Named once
+    /// so a door can refuse it by name rather than by spelling it
+    /// (backlog e84de48e: two doors admitted it by spelling it).
+    pub const ANONYMOUS_ROLE: &'static str = "guest";
+
+    /// The caller a request with no identity header is: nobody, at
+    /// user tier. No door trusts it (David, 2026-09-25: "Agreed on
+    /// not trusting requests without the identity header"); a policy
+    /// rule may still grant the `guest` role something explicitly, as
+    /// the defaults grant it a workflow read.
+    pub fn anonymous() -> User {
+        User {
+            id: Self::ANONYMOUS_ID.to_string(),
+            role: Self::ANONYMOUS_ROLE.to_string(),
+            access_tier: AccessTier::User,
+            territory_account_ids: vec![],
+            direct_report_ids: vec![],
+            department: None,
+        }
+    }
+
+    /// Whether this is the [`User::anonymous`] caller — or one whose
+    /// header claims its role, which is no more of an identity.
+    pub fn is_anonymous(&self) -> bool {
+        self.role == Self::ANONYMOUS_ROLE
+    }
+
     /// The ambient [`ActorId`](boss_core::actor::ActorId) this request
     /// acts as — used by the request-context middleware as the default
     /// actor for any event a handler emits without naming one. Keyed on
@@ -343,7 +374,7 @@ impl User {
     pub fn ambient_actor(&self) -> Option<boss_core::actor::ActorId> {
         use boss_core::actor::ActorId;
         let id = self.id.as_str();
-        if id == "anonymous" {
+        if id == Self::ANONYMOUS_ID {
             return None;
         }
         // Already a typed automation (`automation:<slug>`).

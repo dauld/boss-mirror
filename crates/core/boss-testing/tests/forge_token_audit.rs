@@ -385,6 +385,79 @@ fn an_unreachable_registry_makes_the_run_honestly_partial() {
     );
 }
 
+/// THE REGISTRY READ IS SIGNED (backlog e84de48e). The jobs API stopped
+/// trusting a request with no `x-boss-user` on 2026-09-25, and this read
+/// was the one caller of `/api/credentials` that relied on it — the unit
+/// file even said so. A one-shot socket stands in for the jobs API, the
+/// way its door does: it answers 403 to an unsigned read and the rows to
+/// one signed at the auditor tier, so the run is clean only if the
+/// script presents the identity.
+#[test]
+fn the_registry_read_is_signed_as_the_audits_own_reader() {
+    use std::io::{Read, Write};
+    let dir = scratch("reg-signed");
+    let db = forge_db(&dir, &[("boss-gcp", "write:repository", NOW - 3600)]);
+    let decl = declaration(&dir, &[("boss-gcp", "the conductor", "write:repository")]);
+    let rows =
+        std::fs::read_to_string(registry(&dir, &[("boss-gcp", &["write:repository"])])).unwrap();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut req = Vec::new();
+        let mut buf = [0u8; 4096];
+        while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = conn.read(&mut buf).unwrap();
+            if n == 0 {
+                break;
+            }
+            req.extend_from_slice(&buf[..n]);
+        }
+        let req = String::from_utf8_lossy(&req).to_string();
+        let user = req
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("x-boss-user")
+                    .then(|| v.trim().to_string())
+            })
+            .and_then(|v| serde_json::from_str::<serde_json::Value>(&v).ok());
+        let signed = user.as_ref().is_some_and(|u| {
+            u["id"] == "automation:forge-token-audit" && u["access_tier"] == "auditor"
+        });
+        let (status, body) = if signed {
+            ("200 OK", rows)
+        } else {
+            ("403 Forbidden", String::new())
+        };
+        write!(
+            conn,
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        (req, user)
+    });
+
+    let (code, out) = run_args(&db, &decl, NOW, &["--registry-url".as_ref(), url.as_ref()]);
+    let (req, user) = server.join().unwrap();
+    assert!(
+        req.starts_with("GET /api/credentials "),
+        "the read goes to the registry: {req}"
+    );
+    let user = user.unwrap_or_else(|| panic!("the read carried no x-boss-user:\n{req}"));
+    assert_eq!(user["id"], "automation:forge-token-audit", "{user}");
+    assert_eq!(
+        user["access_tier"], "auditor",
+        "a reader, never an operator: {user}"
+    );
+    assert_eq!(
+        code, 0,
+        "a signed read of an agreeing registry is clean:\n{out}"
+    );
+}
+
 #[test]
 fn no_credential_material_reaches_the_output() {
     // THE PROPERTY THAT LETS THIS SCRIPT EXIST. It reads a table whose other

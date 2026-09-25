@@ -16,6 +16,11 @@
 //! two frontend files, never typed, and the actual set is read from a
 //! database with every migration applied.
 //!
+//! WHOSE ROSTER IT IS (backlog 7edf0e97, 2026-09-25): these rows are
+//! the brewery's, declared in its seeds/departments.toml and held equal
+//! to the migration below, so a company's instance evicts them at its
+//! first start and holds only the roster its own tenant publishes.
+//!
 //! WHICH ROSTER THE RUNNING SPA ASKS is the third test below (backlog
 //! dc5788ba). Equal rosters prove nothing if the chrome bar reads a
 //! different registry than the one pinned here, and until that car it
@@ -153,6 +158,66 @@ fn the_spa_reads_the_departments_registry_and_not_the_employee_drawer() {
         "{DRAWER} exports a departments roster again — the employee Class drawer is the values \
          an employee's `department` column may take, which is a different question with a \
          different answer ({LOADER} is the one that answers this one)"
+    );
+}
+
+/// THE ROSTER IS THE BREWERY'S, AND IT LIVES TWICE (backlog 7edf0e97,
+/// CLAUDE.md §9a). The thirteen rows above are what the migration
+/// writes into every database — history, which migrate.sh refuses to
+/// see edited — and `examples/brewery/seeds/departments.toml` declares
+/// them as that tenant's roster, which is what makes them example
+/// reference rows: infra/postgres/example-reference-rows.sh reads the
+/// file, so a company's instance evicts them at its first start and
+/// keeps only the roster its own tenant declares. The two must stay
+/// equal field for field: a row the file lacks would stay on every
+/// company's instance as nobody's department, and a row that differs
+/// would have the brewery's publish KEEP the migration's version and
+/// name the field, on the one instance where the brewery is the tenant.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_brewery_declares_exactly_the_rows_the_migration_seeds() {
+    const SEED: &str = "examples/brewery/seeds/departments.toml";
+    let file: toml::Value = toml::from_str(&read(SEED)).expect("the brewery's roster parses");
+    let declared: BTreeSet<(String, String, String, i64, bool)> = file["department"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{SEED} declares no [[department]] rows"))
+        .iter()
+        .map(|d| {
+            (
+                d["code"].as_str().unwrap().to_string(),
+                d["display_name"].as_str().unwrap().to_string(),
+                d["function"].as_str().unwrap().to_string(),
+                d.get("sort_order")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(0),
+                d.get("retired").and_then(|v| v.as_bool()).unwrap_or(false),
+            )
+        })
+        .collect();
+
+    let db = TestDb::new().await;
+    let seeded: BTreeSet<(String, String, String, i64, bool)> = sqlx::query(
+        "SELECT id, label, function, sort_order, retired_at IS NOT NULL FROM departments",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .expect("query")
+    .iter()
+    .map(|r| {
+        (
+            r.get::<String, _>(0),
+            r.get::<String, _>(1),
+            r.get::<String, _>(2),
+            i64::from(r.get::<i32, _>(3)),
+            r.get::<bool, _>(4),
+        )
+    })
+    .collect();
+    assert_eq!(seeded.len(), 13, "the migration seeds thirteen rows");
+    assert_eq!(
+        declared, seeded,
+        "{SEED} and migration 20260919181324 disagree — the file is the brewery's declaration \
+         of the migration's rows, and example-reference-rows.sh evicts from a company's \
+         instance exactly what it names"
     );
 }
 

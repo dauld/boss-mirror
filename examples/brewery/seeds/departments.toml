@@ -1,0 +1,114 @@
+# Algedonic Ales — the departments this tenant runs
+# (backlog 7edf0e97; design 8c3e9599, car 0).
+#
+# These are the thirteen rows migration
+# 20260919181324-a-department-is-a-subject.sql seeded into the
+# `departments` registry on EVERY instance: the demo tenant's shape —
+# production, warehouse, distribution, maintenance — served as the
+# roster of every company, until 2026-09-25 with no write that could
+# change it. They are this tenant's roster, not the product's, so they
+# live here: published by `boss tenant publish` through
+# POST /api/departments/batch (insert-if-absent by code), and evicted
+# from a company's instance with the rest of the example reference
+# rows (infra/postgres/example-reference-rows.sh reads this file — at
+# a fresh instance's first start whose tenant is not an example, and
+# through the retire-example-reference-rows verb on one already
+# running). A company declares its own roster in its own
+# seeds/departments.toml; a code it declares is never a candidate.
+#
+# Every row is exactly as the migration seeds it — code, display name,
+# function and sort order — so on an instance that ran the migration
+# the publish finds each one already as declared.
+# crates/core/boss-testing/tests/a_department_is_a_subject_sql.rs holds
+# the two equal (CLAUDE.md §9a).
+#
+# Each [[department]] is one row. Schema (docs/tenant-contract.md):
+#   code          — a lowercase slug: the department's URL root segment
+#                   (/<code>) and the value a packet carries in
+#                   metadata.department; never a reserved root segment
+#                   (crates/core/boss-jobs/src/department/
+#                   reserved-root-segments.txt)
+#   display_name  — the tab's label
+#   function      — a Class code under (department, function):
+#                   operations | revenue | support | governance
+#   sort_order    — tab order (default 0)
+#   retired       — true withdraws the row on this instance (default
+#                   false)
+
+[[department]]
+code = "it"
+display_name = "IT"
+function = "operations"
+sort_order = 1
+
+[[department]]
+code = "executive"
+display_name = "Executive"
+function = "governance"
+sort_order = 10
+
+[[department]]
+code = "finance"
+display_name = "Finance"
+function = "governance"
+sort_order = 20
+
+[[department]]
+code = "qa"
+display_name = "QA"
+function = "governance"
+sort_order = 30
+
+[[department]]
+code = "sales"
+display_name = "Sales"
+function = "revenue"
+sort_order = 40
+
+[[department]]
+code = "marketing"
+display_name = "Marketing"
+function = "revenue"
+sort_order = 50
+
+[[department]]
+code = "support"
+display_name = "Support"
+function = "support"
+sort_order = 60
+
+[[department]]
+code = "service"
+display_name = "Service"
+function = "support"
+sort_order = 70
+
+[[department]]
+code = "people"
+display_name = "People"
+function = "support"
+sort_order = 80
+
+[[department]]
+code = "production"
+display_name = "Production"
+function = "operations"
+sort_order = 90
+
+[[department]]
+code = "warehouse"
+display_name = "Warehouse"
+function = "operations"
+sort_order = 100
+
+[[department]]
+code = "distribution"
+display_name = "Distribution"
+function = "operations"
+sort_order = 110
+
+[[department]]
+code = "maintenance"
+display_name = "Maintenance"
+function = "operations"
+sort_order = 120

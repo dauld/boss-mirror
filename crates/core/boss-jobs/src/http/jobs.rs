@@ -341,16 +341,40 @@ pub(super) struct AssignmentsQuery {
 /// `{ data: [AssignmentRow], total }`.
 pub(super) async fn list_assignments<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<AssignmentsQuery>,
 ) -> Response {
+    // Each row names a packet and carries its step, so the queue is a
+    // packet read: refused to a caller denied Read on job, and cut to
+    // the rows inside the caller's scope (backlog 046832d3 — until then
+    // `all_assigned=true` handed the whole backlog to anyone, and
+    // `assignee_id=` anybody's queue).
+    let scope = match job_read_scope(&state, &user).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
+    // A limit is on the rows the caller is HANDED: a caller whose scope
+    // cuts rows asks the store for the ceiling and takes its limit from
+    // what survives the cut, or the limit is spent on rows it never sees
+    // (review of 0c0405ac, finding #6).
+    let cut = !matches!(scope, boss_policy_client::Scope::All);
+    let fetch = |limit: i64, ceiling: i64| if cut { ceiling } else { limit };
     // Bulk path: the whole assigned backlog in one query (sim workforce).
     if q.all_assigned {
         let limit = q
             .limit
             .unwrap_or(BULK_ASSIGNED_LIMIT)
             .clamp(1, BULK_ASSIGNED_LIMIT);
-        return match state.jobs.list_assigned_workable(limit).await {
+        return match state
+            .jobs
+            .list_assigned_workable(fetch(limit, BULK_ASSIGNED_LIMIT))
+            .await
+        {
             Ok(rows) => {
+                let rows = match assignments_in_scope(&state, &user, &scope, rows, limit).await {
+                    Ok(rows) => rows,
+                    Err(refusal) => return refusal,
+                };
                 let total = rows.len();
                 Json(serde_json::json!({ "data": rows, "total": total })).into_response()
             }
@@ -371,10 +395,14 @@ pub(super) async fn list_assignments<R: JobsRepository + 'static, B: EventBus + 
     }
     match state
         .jobs
-        .list_assignments(q.assignee_id.as_deref(), &roles, limit)
+        .list_assignments(q.assignee_id.as_deref(), &roles, fetch(limit, MAX_LIMIT))
         .await
     {
         Ok(rows) => {
+            let rows = match assignments_in_scope(&state, &user, &scope, rows, limit).await {
+                Ok(rows) => rows,
+                Err(refusal) => return refusal,
+            };
             let total = rows.len();
             let data: Vec<serde_json::Value> = rows
                 .iter()
@@ -384,6 +412,36 @@ pub(super) async fn list_assignments<R: JobsRepository + 'static, B: EventBus + 
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// The first `limit` assignment rows `user` may see: those on a packet
+/// inside `scope`, and those whose step is the caller's own work —
+/// handed to them, or claimable by the role they hold
+/// ([`step_is_callers`]) — even on a packet they do not own. It is the
+/// rule the single-packet reads admit a packet by, so every row here
+/// names a packet the caller can open. The packets of the other rows
+/// are read in one batch ([`readable_job_ids`]).
+#[allow(
+    clippy::result_large_err,
+    reason = "idiomatic axum Response error; crate-wide Box<Response> cleanup tracked separately"
+)]
+async fn assignments_in_scope<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &JobsApiState<R, B>,
+    user: &boss_policy_client::User,
+    scope: &boss_policy_client::Scope,
+    rows: Vec<crate::port::AssignmentRow>,
+    limit: i64,
+) -> Result<Vec<crate::port::AssignmentRow>, Response> {
+    let others = rows
+        .iter()
+        .filter(|r| !step_is_callers(user, &r.step))
+        .map(|r| r.job_id);
+    let readable = readable_job_ids(state, user, scope, others).await?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| readable.contains(&r.job_id) || step_is_callers(user, &r.step))
+        .take(usize::try_from(limit).unwrap_or(usize::MAX))
+        .collect())
 }
 
 /// One assignment row, plus the completion contract of its step kind.
@@ -1241,29 +1299,29 @@ fn is_id_prefix(s: &str) -> bool {
     (8..=36).contains(&s.len()) && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
-async fn job_detail_response<R: JobsRepository + 'static, B: EventBus + 'static>(
-    state: &JobsApiState<R, B>,
-    job_id: &boss_core::job::JobId,
-) -> Response {
-    match state.jobs.get_job(job_id).await {
-        // A packet whose steps cannot be read is not a packet with no
-        // steps: the detail page would draw it empty (f6c97006).
-        Ok(Some(job)) => match state.jobs.list_steps(job_id).await {
-            Ok(steps) => Json(JobDetail::new(job, steps)).into_response(),
-            Err(e) => steps_unreadable(job_id, &e),
-        },
-        Ok(None) => (StatusCode::NOT_FOUND, "job not found").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
-}
-
+/// `GET /api/jobs/{id}` — the packet and every step, for a caller whose
+/// read scope reaches it (backlog 046832d3; see `job_read_scope`). The
+/// scope is asked BEFORE the id is resolved, so a denied caller learns
+/// nothing about the id, not even whether a short one is ambiguous.
 pub(super) async fn get_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
-    match resolve_path_job_id(&state, &id).await {
-        Ok(job_id) => job_detail_response(&state, &job_id).await,
-        Err(refusal) => refusal,
+    let scope = match job_read_scope(&state, &user).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
+    let job = match readable_path_job(&state, &user, &scope, &id).await {
+        Ok(job) => job,
+        Err(refusal) => return refusal,
+    };
+    let job_id = job.id;
+    // A packet whose steps cannot be read is not a packet with no
+    // steps: the detail page would draw it empty (f6c97006).
+    match state.jobs.list_steps(&job_id).await {
+        Ok(steps) => Json(JobDetail::new(job, steps)).into_response(),
+        Err(e) => steps_unreadable(&job_id, &e),
     }
 }
 
@@ -1322,6 +1380,36 @@ pub(super) async fn resolve_path_job_id<R: JobsRepository + 'static, B: EventBus
     }
 }
 
+/// The packet a `{id}` path segment names, for a READ under `scope`:
+/// [`resolve_path_job_id`], then [`readable_job`]. One difference from
+/// the bare resolver: for a caller whose scope is narrower than every
+/// packet, an ambiguous short id answers the SAME 404 an absent one
+/// does, because "two packets share this prefix" is a fact about
+/// packets the caller may not be able to read (review of 0c0405ac,
+/// finding #4). A caller who reads everything is still told 409.
+#[allow(
+    clippy::result_large_err,
+    reason = "idiomatic axum Response error; crate-wide Box<Response> cleanup tracked separately"
+)]
+pub(super) async fn readable_path_job<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &JobsApiState<R, B>,
+    user: &boss_policy_client::User,
+    scope: &boss_policy_client::Scope,
+    id: &str,
+) -> Result<Job, Response> {
+    let job_id = match resolve_path_job_id(state, id).await {
+        Ok(job_id) => job_id,
+        Err(refusal)
+            if refusal.status() == StatusCode::CONFLICT
+                && !matches!(scope, boss_policy_client::Scope::All) =>
+        {
+            return Err(packet_not_found());
+        }
+        Err(refusal) => return Err(refusal),
+    };
+    readable_job(state, user, scope, &job_id).await
+}
+
 #[derive(Debug, serde::Deserialize, Default)]
 pub(super) struct JobEventsQuery {
     /// Max rows. Clamped to [1, 1000]; default 200. The NEWEST rows of
@@ -1342,11 +1430,18 @@ pub(super) struct JobEventsQuery {
 /// convenience and not a second instrument.
 pub(super) async fn list_job_events<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
     Query(q): Query<JobEventsQuery>,
 ) -> Response {
-    let job_id = match resolve_path_job_id(&state, &id).await {
-        Ok(job_id) => job_id,
+    // The packet's history is the packet: the same read scope as its
+    // detail (backlog 046832d3).
+    let scope = match job_read_scope(&state, &user).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
+    let job_id = match readable_path_job(&state, &user, &scope, &id).await {
+        Ok(job) => job.id,
         Err(refusal) => return refusal,
     };
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
@@ -1388,11 +1483,22 @@ pub(super) async fn list_job_events<R: JobsRepository + 'static, B: EventBus + '
 /// the dedupe keeps push volume low (most ticks hold steady).
 pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
-) -> impl axum::response::IntoResponse {
+) -> Response {
     use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
     use std::convert::Infallible;
     use std::time::Duration;
+
+    // The stream pushes the same JobDetail as the detail read, so it
+    // asks the same read scope (backlog 046832d3). A denied caller is
+    // refused before a stream opens; a packet outside a granted scope
+    // gets the frame an absent packet gets, and a packet that LEAVES
+    // scope mid-stream (its owner changed) ends as a vanished one does.
+    let scope = match job_read_scope(&state, &user).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
 
     // Parse upfront; on invalid id the stream emits one `error`
     // frame and exits. Keeping a single stream type lets `Sse::new`
@@ -1457,10 +1563,12 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
         // read on a later tick pushes an `unavailable` frame and keeps
         // the last true signature, so the page holds what it last knew
         // rather than drawing the packet empty until the next good read.
-        let initial = state.jobs.get_job(&job_id).await;
-        let mut last_sig: JobSig = if let Ok(Some(job)) = initial {
-            let steps = match state.jobs.list_steps(&job_id).await {
-                Ok(steps) => steps,
+        // Admitted as the detail read admits (`packet_readable`): inside
+        // the scope, or carrying a step that is the caller's own work —
+        // which is why the steps are read before the packet is judged.
+        let initial = match state.jobs.get_job(&job_id).await {
+            Ok(Some(job)) => match state.jobs.list_steps(&job_id).await {
+                Ok(steps) => packet_readable(&user, &scope, &job, &steps).then_some((job, steps)),
                 Err(e) => {
                     yield Ok::<_, Infallible>(
                         SseEvent::default()
@@ -1469,7 +1577,10 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
                     );
                     return;
                 }
-            };
+            },
+            _ => None,
+        };
+        let mut last_sig: JobSig = if let Some((job, steps)) = initial {
             let sig = signature(&job, &steps);
             let detail = JobDetail::new(job, steps);
             if let Ok(json) = serde_json::to_string(&detail) {
@@ -1507,6 +1618,15 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
                     continue;
                 }
             };
+            if !packet_readable(&user, &scope, &job, &steps) {
+                // The packet left the caller's read: its owner changed,
+                // or the caller's step was completed by someone else or
+                // handed on. It ends as a vanished packet does.
+                yield Ok::<_, Infallible>(
+                    SseEvent::default().event("gone").data(""),
+                );
+                break;
+            }
             let sig = signature(&job, &steps);
             if last_sig != sig {
                 let detail = JobDetail::new(job, steps);
@@ -1518,7 +1638,9 @@ pub(super) async fn job_stream<R: JobsRepository + 'static, B: EventBus + 'stati
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// The door the job PUT's protocol refusal names (backlog b433bdf3).
@@ -2050,40 +2172,55 @@ async fn judge_move<R: JobsRepository + 'static, B: EventBus + 'static>(
     action: Action,
 ) -> Result<JudgedMove, NoMove> {
     let answer = |r: Response| NoMove::Answer(r);
-    let job_id = resolve_path_job_id(state, id).await.map_err(answer)?;
-    let existing = match state.jobs.get_job(&job_id).await {
-        Ok(Some(j)) => j,
-        Ok(None) => {
+    // THE PREVIEW IS A PACKET READ, and answers as the detail read does
+    // (review of 0c0405ac, finding #1): the read scope is asked before
+    // the id is resolved, so a denied caller is refused in the same
+    // words for a real packet and an absent one, and a packet outside
+    // the scope is the same 404 an absent one is — by full id and by
+    // short one. It used to look the packet up first and answer 404 for
+    // an absent id but 403 for a real one: an existence oracle.
+    let existing = if action == Action::Read {
+        let scope = job_read_scope(state, user).await.map_err(answer)?;
+        readable_path_job(state, user, &scope, id)
+            .await
+            .map_err(answer)?
+    } else {
+        // The move itself: the write's own check, still asked before
+        // the lookup, and a packet outside its scope is refused as the
+        // job writes refuse one.
+        let scope = match state.policy.check(user, action, Resource::job()).await {
+            Ok(Decision::Allow { scope }) => scope,
+            Ok(Decision::Deny { reason }) => {
+                return Err(answer((StatusCode::FORBIDDEN, reason).into_response()));
+            }
+            Err(e) => {
+                return Err(answer(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("policy check failed: {e}"),
+                    )
+                        .into_response(),
+                ));
+            }
+        };
+        let job_id = resolve_path_job_id(state, id).await.map_err(answer)?;
+        let existing = match state.jobs.get_job(&job_id).await {
+            Ok(Some(j)) => j,
+            Ok(None) => return Err(answer(packet_not_found())),
+            Err(e) => {
+                return Err(answer(
+                    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+                ));
+            }
+        };
+        if !scope_matches(user, &scope, &existing) {
             return Err(answer(
-                (StatusCode::NOT_FOUND, "job not found").into_response(),
+                (StatusCode::FORBIDDEN, "job is outside your scope").into_response(),
             ));
         }
-        Err(e) => {
-            return Err(answer(
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-            ));
-        }
+        existing
     };
-    let scope = match state.policy.check(user, action, Resource::job()).await {
-        Ok(Decision::Allow { scope }) => scope,
-        Ok(Decision::Deny { reason }) => {
-            return Err(answer((StatusCode::FORBIDDEN, reason).into_response()));
-        }
-        Err(e) => {
-            return Err(answer(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("policy check failed: {e}"),
-                )
-                    .into_response(),
-            ));
-        }
-    };
-    if !scope_matches(user, &scope, &existing) {
-        return Err(answer(
-            (StatusCode::FORBIDDEN, "job is outside your scope").into_response(),
-        ));
-    }
+    let job_id = existing.id;
 
     let Some(ref reg) = state.kind_registry else {
         return Err(answer(
@@ -2342,9 +2479,9 @@ pub(super) async fn list_estate_nodes<R: JobsRepository + 'static, B: EventBus +
 /// Until this door the estate reached a database only as a migration,
 /// so every fresh OSS database booted with this LAN's seven machines.
 ///
-/// Operator TIER, like the observation door — not `is_trusted`, whose
-/// headerless-guest allowance exists for reads: a caller with no
-/// identity must not be able to declare hardware. The same
+/// Operator TIER, like the observation door: a caller with no identity
+/// must not be able to declare hardware. (`is_trusted` is the same
+/// test since it stopped admitting the headerless guest, e84de48e.) The same
 /// `validate_estate_node` the file loader runs refuses the whole batch
 /// (422, naming the node) on the first bad row.
 pub(super) async fn declare_estate_nodes<R: JobsRepository + 'static, B: EventBus + 'static>(

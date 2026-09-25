@@ -15,8 +15,10 @@ Type=oneshot
 # --registry-url adds the credentials-registry direction (packet
 # 7ee101aa second leg): live forge tokens vs registry rows of kind
 # forgejo-access-token, both ways. That read also needs no credential -
-# the jobs API's internal address trusts header-less callers for this
-# read-only, values-free surface - and when the registry is unreachable
+# it is signed as the audit's own reader (automation:forge-token-audit
+# at the auditor tier) on a read-only, values-free surface; the jobs API
+# stopped trusting a header-less caller on 2026-09-25 (backlog
+# e84de48e) - and when the registry is unreachable
 # the run reports exactly what it could not check and exits 1 rather
 # than passing as complete.
 #

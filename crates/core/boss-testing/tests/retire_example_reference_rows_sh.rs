@@ -111,7 +111,8 @@ impl Case {
         // tag line: the plan (the after-plan once a delete was served),
         // or the delete lines (four tables in this stub's answer; the
         // real derivation adds the two tax tables, 7f163e58, and the
-        // verb sums whatever tables the answer names).
+        // departments, 7edf0e97, and the verb sums whatever tables the
+        // answer names).
         write_exec(
             &bin.join("kubectl"),
             r#"#!/usr/bin/env bash
@@ -231,7 +232,7 @@ fn a_dry_run_prints_the_verdict_first_and_deletes_nothing() {
     );
     assert_eq!(
         record["declared_by_tenant"],
-        serde_json::json!({"classes": ["employee:sales"], "locations": [], "gl_accounts": [], "companies": [], "tax_kinds": [], "sales_tax_rates": []}),
+        serde_json::json!({"classes": ["employee:sales"], "locations": [], "gl_accounts": [], "companies": [], "tax_kinds": [], "sales_tax_rates": [], "departments": []}),
         "what the tenant declares under an example's key, and only that:\n{out}"
     );
     assert!(
@@ -410,12 +411,12 @@ fn a_real_run_evicts_per_table_and_reads_the_plan_back() {
         .collect();
     assert_eq!(
         tags.len(),
-        6,
-        "companies, locations, tax_kinds, sales_tax_rates, gl_accounts, classes"
+        7,
+        "companies, locations, departments, tax_kinds, sales_tax_rates, gl_accounts, classes"
     );
     assert_eq!(
         evict.matches("\nBEGIN;\n").count(),
-        6,
+        7,
         "one transaction per table"
     );
     let readback = stdin.split("=== stdin ===").nth(2).unwrap();

@@ -6,8 +6,9 @@
 //! **Reads admit `crate::trust::can_read`** — operator machinery and
 //! the auditor tier, the recorded-probe reader (`boss-sor-read
 //! /api/agents` is how the car for this surface is proved). **Writes
-//! admit `crate::trust::is_trusted`** — operator tier or a trusted
-//! internal sibling, the tier `boss tenant publish` signs with.
+//! admit `crate::trust::is_trusted`** — operator tier, the tier
+//! `boss tenant publish` signs with. A request with no identity header
+//! is refused on both (e84de48e).
 //!
 //! `POST /api/agents/batch[?mode=insert-if-absent|take]` takes a bare
 //! JSON array of `AgentInput` (the classes and locations batch shape),
@@ -604,12 +605,18 @@ mod tests {
         assert!(registry.list().await.unwrap().is_empty());
     }
 
-    /// The probe reader and a header-less sibling read; a user-tier
-    /// session writes nothing; the auditor reads and cannot write.
+    /// The probe reader reads; a request with no identity header does
+    /// not (backlog e84de48e, 2026-09-25 — the roster, aliases and all,
+    /// was one of the fifteen reads a headerless caller was trusted
+    /// with); a user-tier session writes nothing; the auditor reads and
+    /// cannot write.
     #[tokio::test]
     async fn reads_admit_the_probe_reader_and_writes_are_operator_machinery() {
         let registry = Arc::new(InMemoryAgents::new());
-        for (user, want) in [(probe_reader(), StatusCode::OK), (None, StatusCode::OK)] {
+        for (user, want) in [
+            (probe_reader(), StatusCode::OK),
+            (None, StatusCode::FORBIDDEN),
+        ] {
             let (status, _) = send(app(&registry), "GET", "/api/agents", None, user.clone()).await;
             assert_eq!(status, want, "{user:?}");
         }

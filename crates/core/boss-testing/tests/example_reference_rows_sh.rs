@@ -9,7 +9,10 @@
 //!
 //!   * THE CANDIDATE SET IS READ FROM THE SEEDS: every class row in
 //!     examples/*/seeds/classes.{json,toml}, every `[[location]]` id,
-//!     every `[[account]]` code, every tenant id — counted here by an
+//!     every `[[account]]` code, every `[[department]]` code (backlog
+//!     7edf0e97: the thirteen rows migration 20260919181324 seeds into
+//!     every instance are the brewery's roster), every tenant id —
+//!     counted here by an
 //!     independent read of the same files, so an extraction that
 //!     silently dropped a file would show as a count. The same goes
 //!     for infra/postgres/retired-examples/*/, the rows a RETIRED
@@ -194,6 +197,15 @@ fn seeds_is_the_example_tenants_own_rows_counted_independently() {
         "sales_tax_rates = the brewery's [[sales_tax_rate]] states"
     );
     assert_eq!(v["sales_tax_rates"].as_array().unwrap().len(), 27);
+    // The department roster (backlog 7edf0e97): the brewery's
+    // departments.toml carries the thirteen rows migration
+    // 20260919181324 seeds into every instance.
+    assert_eq!(
+        v["departments"].as_array().unwrap().len(),
+        toml_headers(&brewery.join("departments.toml"), "department"),
+        "departments = the brewery's [[department]] codes"
+    );
+    assert_eq!(v["departments"].as_array().unwrap().len(), 13);
     let sources: Vec<&str> = v["sources"]
         .as_array()
         .unwrap()
@@ -205,6 +217,7 @@ fn seeds_is_the_example_tenants_own_rows_counted_independently() {
         "brewery/seeds/locations.toml",
         "brewery/seeds/chart_of_accounts.toml",
         "brewery/seeds/tax.toml",
+        "brewery/seeds/departments.toml",
         "retired-examples/used-device-shop/seeds/classes.toml",
     ] {
         assert!(sources.contains(&s), "sources names {s}: {sources:?}");
@@ -523,6 +536,10 @@ fn an_attribute_the_script_cannot_judge_is_a_refusal() {
         &t.join("seeds/tax.toml"),
         "[[tax_kind]]\nkind = \"sales\"\nliability_account = \"1000\"\n\n[[sales_tax_rate]]\nstate = \"CA\"\njurisdiction = \"US-CA\"\nrate_bps = 725\n",
     );
+    write(
+        &t.join("seeds/departments.toml"),
+        "[[department]]\ncode = \"cellar\"\ndisplay_name = \"Cellar\"\nfunction = \"operations\"\n",
+    );
     let (rc, out, _) = run(&["seeds"], Some(&examples));
     assert_eq!(rc, 0, "seeds reads the set: {out}");
     let tenant = plain_tenant("unmapped");
@@ -563,6 +580,7 @@ fn the_sql_shapes_are_a_read_only_plan_and_one_transaction_per_table() {
         [
             "-- retire-example-reference-rows:delete companies",
             "-- retire-example-reference-rows:delete locations",
+            "-- retire-example-reference-rows:delete departments",
             "-- retire-example-reference-rows:delete tax_kinds",
             "-- retire-example-reference-rows:delete sales_tax_rates",
             "-- retire-example-reference-rows:delete gl_accounts",
@@ -572,13 +590,14 @@ fn the_sql_shapes_are_a_read_only_plan_and_one_transaction_per_table() {
     );
     assert_eq!(
         del.matches("\nBEGIN;\n").count(),
-        6,
+        7,
         "one transaction per table"
     );
-    assert_eq!(del.matches("\nCOMMIT;\n").count(), 6);
+    assert_eq!(del.matches("\nCOMMIT;\n").count(), 7);
     for t in [
         "companies",
         "locations",
+        "departments",
         "tax_kinds",
         "sales_tax_rate_by_state",
         "gl_accounts",
@@ -606,6 +625,8 @@ fn the_sql_shapes_are_a_read_only_plan_and_one_transaction_per_table() {
         "tax_kinds",
         "tax_filings.kind",
         "gl_posting_rules.lines",
+        "jobs.metadata.department",
+        "workflows.metadata.department",
     ] {
         assert!(
             plan.contains(&format!("'{reason}'")),
@@ -693,8 +714,8 @@ fn the_two_doors_call_the_one_derivation() {
 /// The measured hole (86835bf9): a tenant declaring a code an example
 /// also declares. The fixture re-declares the retired device shop's
 /// `sales` department (a candidate through infra/postgres/
-/// retired-examples/ since car 7), the brewery's taproom location and its
-/// `1100` account
+/// retired-examples/ since car 7), the brewery's taproom location, its
+/// `1100` account and its `it` department (backlog 7edf0e97)
 /// — beside its own rows, which are no example's and change nothing.
 fn redeclaring_tenant(name: &str) -> PathBuf {
     let t = scratch_dir(&format!("example-reference-rows-redeclares-{name}"));
@@ -722,6 +743,13 @@ fn redeclaring_tenant(name: &str) -> PathBuf {
     write(
         &t.join("seeds/tax.toml"),
         "[[tax_kind]]\nkind = \"sales\"\nliability_account = \"1100\"\n\n[[tax_kind]]\nkind = \"gross-receipts\"\nliability_account = \"1100\"\n\n[[sales_tax_rate]]\nstate = \"CA\"\njurisdiction = \"US-CA\"\nrate_bps = 725\n\n[[sales_tax_rate]]\nstate = \"HI\"\njurisdiction = \"US-HI\"\nrate_bps = 400\n",
+    );
+    // The brewery's `it` department, and a retired `warehouse` —
+    // a code the tenant declares withdrawn is still its declaration,
+    // never residue (backlog 7edf0e97) — beside `hosting`, no example's.
+    write(
+        &t.join("seeds/departments.toml"),
+        "[[department]]\ncode = \"it\"\ndisplay_name = \"IT\"\nfunction = \"operations\"\n\n[[department]]\ncode = \"warehouse\"\ndisplay_name = \"Warehouse\"\nfunction = \"operations\"\nretired = true\n\n[[department]]\ncode = \"hosting\"\ndisplay_name = \"Hosting\"\nfunction = \"operations\"\n",
     );
     t
 }
@@ -779,6 +807,13 @@ fn a_row_the_tenant_declares_leaves_the_candidate_set_and_is_named() {
     assert!(strs(&v, "tax_kinds").contains(&"income".to_string()));
     assert!(!strs(&v, "sales_tax_rates").contains(&"CA".to_string()));
     assert!(strs(&v, "sales_tax_rates").contains(&"TX".to_string()));
+    assert!(!strs(&v, "departments").contains(&"it".to_string()));
+    assert!(!strs(&v, "departments").contains(&"warehouse".to_string()));
+    assert!(strs(&v, "departments").contains(&"production".to_string()));
+    assert_eq!(
+        strs(&v, "departments").len(),
+        strs(&plain, "departments").len() - 2
+    );
 
     let d = &v["declared_by_tenant"];
     assert_eq!(
@@ -795,6 +830,7 @@ fn a_row_the_tenant_declares_leaves_the_candidate_set_and_is_named() {
     assert_eq!(strs(d, "companies"), Vec::<String>::new());
     assert_eq!(strs(d, "tax_kinds"), ["sales"]);
     assert_eq!(strs(d, "sales_tax_rates"), ["CA"]);
+    assert_eq!(strs(d, "departments"), ["it", "warehouse"]);
     assert_eq!(d["directory"], tenant);
     assert!(
         plain["declared_by_tenant"].is_null(),
@@ -828,6 +864,17 @@ fn a_row_the_tenant_declares_leaves_the_candidate_set_and_is_named() {
         assert!(
             !kinds.contains(r#""sales""#) && kinds.contains(r#""income""#),
             "the re-declared kind is not a candidate: {kinds}"
+        );
+        let departments = sql
+            .split(r#""departments":["#)
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .expect("the SQL embeds the departments candidates");
+        assert!(
+            !departments.contains(r#""it""#)
+                && !departments.contains(r#""warehouse""#)
+                && departments.contains(r#""production""#),
+            "a department the tenant declares, retired or live, is not a candidate: {departments}"
         );
     }
     // A tenant declaring nothing an example does leaves the set whole.

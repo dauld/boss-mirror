@@ -257,6 +257,10 @@ name = "a_day_of_jobs_lists_newest_first_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "a_set_of_packets_reads_in_one_query_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "a_node_declares_its_roles_pg"
 required-features = ["postgres"]
 

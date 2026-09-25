@@ -68,6 +68,10 @@ fn allow_update() -> Arc<dyn PolicyClient> {
                 Resource::job(),
                 Scope::All,
             )
+            // The platform default the operator reads packets under: the
+            // step list and the refusal table are packet reads, scoped by
+            // policy Read on job since backlog 046832d3.
+            .allow("platform-admin", Action::Read, Resource::job(), Scope::All)
             .build(),
     )
 }

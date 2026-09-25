@@ -190,11 +190,27 @@ def audit(declared, live, stale_days, now):
     return findings, unknown
 
 
+# Who the registry read is signed as: this audit's own automation at the
+# auditor tier — the tier `boss_jobs::trust::can_read` admits on an operator
+# door's read and refuses on its write. The read went out with NO identity
+# until 2026-09-25, when the jobs API stopped trusting a request without the
+# `x-boss-user` header (backlog e84de48e); unsigned, this direction would have
+# answered 403 and the run would have reported itself partial every night.
+READER = json.dumps({
+    "id": "automation:forge-token-audit",
+    "role": "audit-readonly",
+    "access_tier": "auditor",
+    "territory_account_ids": [],
+    "direct_report_ids": [],
+    "department": "platform",
+}, separators=(",", ":"))
+
+
 def load_registry(registry_json, registry_url):
     """Return (rows, limit_message). rows is None when the registry was not
     read; limit_message says why when a configured source failed. Neither
-    source needs a credential: the fixture is a file, and the jobs API's
-    internal address trusts header-less callers for this read-only surface.
+    source needs a credential: the fixture is a file, and the registry read
+    is a values-free surface the auditor tier may read, signed as READER.
     """
     if registry_json:
         try:
@@ -204,8 +220,9 @@ def load_registry(registry_json, registry_url):
             return None, "cannot read registry fixture %s: %s" % (registry_json, e)
     if registry_url:
         url = registry_url.rstrip("/") + "/api/credentials"
+        req = urllib.request.Request(url, headers={"x-boss-user": READER})
         try:
-            with urllib.request.urlopen(url, timeout=10) as resp:
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read().decode("utf-8")), None
         except (OSError, ValueError) as e:
             # URLError (and its HTTPError subclass) are OSErrors; a

@@ -18,20 +18,21 @@ use boss_policy_client::CurrentUser;
 use crate::port::{MessageError, MessageRepository};
 use crate::types::{EntityRef, Message, MessageKind};
 
-/// Gate used by the scoped message endpoints. Two categories pass:
+/// Gate used by the scoped message endpoints: **operator-tier callers**
+/// — explicit elevation (an operator inspecting someone else's inbox,
+/// the dispatcher's rule actor, a sibling service's automation) —
+/// bypass the match. Everyone else has to match the `employee_id` /
+/// `sender_id` they claim.
 ///
-/// 1. **Trusted internal callers** — no `x-boss-user` header means the
-///    request arrived over loopback from a sibling service (escalation,
-///    inventory, etc.) or from a test harness. These get `role=guest`
-///    from the extractor's default; we treat them as internal.
-/// 2. **Operator-tier callers** — explicit elevation (e.g., an
-///    operator inspecting someone else's inbox) bypasses the match.
-///
-/// Everyone else has to match the `employee_id` / `sender_id` they
-/// claim. The gateway always injects `x-boss-user` for external
-/// requests, so real sessions never land in the trusted-internal path.
+/// A request with no `x-boss-user` header is NOT trusted (backlog
+/// e84de48e; David, 2026-09-25). It was, as "a sibling over loopback
+/// or a test harness", until the same allowance in the jobs API was
+/// found reachable from outside: the gateway sets the header only
+/// inside a session, so a sessionless route arrives headerless. The
+/// siblings that relied on it — the jobs API's escalation router and
+/// inventory's low-stock alert — now sign as their own automation.
 fn is_trusted(user: &User) -> bool {
-    user.role == "guest" || user.access_tier == AccessTier::Operator
+    user.access_tier == AccessTier::Operator
 }
 
 pub struct MessageApiState<R: MessageRepository> {
@@ -481,17 +482,92 @@ mod tests {
         })
     }
 
+    /// The `x-boss-user` a caller presents: `id` at `tier`.
+    fn as_user(id: &str, tier: AccessTier) -> String {
+        serde_json::to_string(&User {
+            id: id.into(),
+            role: "platform-admin".into(),
+            access_tier: tier,
+            territory_account_ids: vec![],
+            direct_report_ids: vec![],
+            department: None,
+        })
+        .unwrap()
+    }
+
+    /// A send as an operator-tier automation — the shape every sibling
+    /// that sends on another's behalf now signs with (e84de48e).
     async fn post_send(app: Router, body: serde_json::Value) -> axum::http::Response<Body> {
         app.oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/messages/send")
                 .header("content-type", "application/json")
+                .header(
+                    "x-boss-user",
+                    as_user("automation:escalation-router", AccessTier::Operator),
+                )
                 .body(Body::from(body.to_string()))
                 .unwrap(),
         )
         .await
         .unwrap()
+    }
+
+    /// A REQUEST WITH NO IDENTITY IS NOT TRUSTED (backlog e84de48e;
+    /// David, 2026-09-25). Every scoped door refuses it: reading
+    /// someone's inbox or unread count, expiring signals across every
+    /// recipient, and sending as anybody. Until this it was taken for a
+    /// loopback sibling and admitted to all four.
+    #[tokio::test]
+    async fn a_request_without_the_identity_header_is_refused() {
+        let send = serde_json::json!({
+            "sender_id": "automation:escalation-router",
+            "recipient_id": "emp-001",
+            "subject": "s",
+            "body": "b",
+        });
+        let expire = serde_json::json!({ "entity_path_prefix": "/jobs/j1" });
+        for (method, uri, body) in [
+            ("GET", "/api/messages/inbox/emp-001", None),
+            ("GET", "/api/messages/unread/emp-001", None),
+            ("POST", "/api/messages/send", Some(send)),
+            ("POST", "/api/messages/expire", Some(expire)),
+        ] {
+            let mut req = Request::builder().method(method).uri(uri);
+            if body.is_some() {
+                req = req.header("content-type", "application/json");
+            }
+            let body = body.map(|b| Body::from(b.to_string())).unwrap_or_default();
+            let resp = test_app().oneshot(req.body(body).unwrap()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+        }
+    }
+
+    /// The machinery that does sign reads anyone's inbox and sends as a
+    /// named automation; a session reads only its own.
+    #[tokio::test]
+    async fn an_operator_reads_any_inbox_and_a_session_only_its_own() {
+        for (user, want) in [
+            (
+                as_user("automation:dispatcher", AccessTier::Operator),
+                StatusCode::OK,
+            ),
+            (as_user("emp-001", AccessTier::User), StatusCode::OK),
+            (as_user("emp-002", AccessTier::User), StatusCode::FORBIDDEN),
+        ] {
+            let resp = test_app()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/messages/inbox/emp-001")
+                        .header("x-boss-user", user.clone())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), want, "{user}");
+        }
     }
 
     #[tokio::test]
@@ -588,6 +664,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/messages/inbox/emp-001")
+                    .header("x-boss-user", as_user("emp-001", AccessTier::User))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -607,6 +684,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/messages/unread/emp-001")
+                    .header("x-boss-user", as_user("emp-001", AccessTier::User))
                     .body(Body::empty())
                     .unwrap(),
             )

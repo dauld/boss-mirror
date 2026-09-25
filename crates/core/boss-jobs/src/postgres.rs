@@ -795,6 +795,25 @@ impl JobsRepository for PgJobs {
         Ok(row.map(row_to_job))
     }
 
+    /// One query for the set, not one per packet: the scope cut of a
+    /// 50,000-row `all_assigned` read judges every row's packet
+    /// (backlog 046832d3, review finding #6). Same columns as
+    /// [`Self::get_job`], so a packet reads the same either way.
+    async fn get_jobs(&self, ids: &[JobId]) -> Result<Vec<Job>, JobsError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let uuids: Vec<uuid::Uuid> = ids.iter().map(|id| *id.inner().as_uuid()).collect();
+        let rows = sqlx::query_as::<_, JobRow>(
+            "SELECT id, kind, workflow_version, subject_kind, subject_id, title, owner_id, status, priority, opened_on, opened_at, due_on, closed_on, metadata, tags, partition FROM jobs WHERE id = ANY($1)",
+        )
+        .bind(&uuids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(rows.into_iter().map(row_to_job).collect())
+    }
+
     /// One ordered `LIMIT 1` instead of the default's walk over every
     /// closed packet of the kind: `closed_on` is a DATE, so the
     /// admission instant then id break the tie the way `list_jobs`

@@ -10,6 +10,11 @@ use boss_testing::TestRequest;
 use common::{MessageTestApp, message_fixture};
 use serde_json::json;
 
+/// The machinery that sends, reads and expires on others' behalf signs
+/// as an operator-tier automation: a request with no `x-boss-user` is
+/// refused by every scoped door since backlog e84de48e (2026-09-25).
+const OPERATOR: &str = r#"{"id":"automation:messages-test","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}"#;
+
 // ---------------------------------------------------------------------------
 // POST /api/messages/send — compose
 // ---------------------------------------------------------------------------
@@ -26,6 +31,7 @@ async fn post_send_returns_201_created() {
     });
 
     let resp = TestRequest::post("/api/messages/send")
+        .header("x-boss-user", OPERATOR)
         .json(&body)
         .send(&app.router)
         .await;
@@ -45,6 +51,7 @@ async fn post_send_emits_message_sent_event() {
     });
 
     TestRequest::post("/api/messages/send")
+        .header("x-boss-user", OPERATOR)
         .json(&body)
         .send(&app.router)
         .await
@@ -65,6 +72,7 @@ async fn post_send_returns_new_message_id() {
     });
 
     let resp = TestRequest::post("/api/messages/send")
+        .header("x-boss-user", OPERATOR)
         .json(&body)
         .send(&app.router)
         .await;
@@ -265,6 +273,7 @@ async fn compose_with_reply_to_creates_reply() {
     });
 
     let resp = TestRequest::post("/api/messages/send")
+        .header("x-boss-user", OPERATOR)
         .json(&body)
         .send(&app.router)
         .await;
@@ -298,6 +307,7 @@ async fn get_inbox_returns_messages_for_recipient() {
     let app = MessageTestApp::with_messages(vec![m1, m2, m3]);
 
     let resp = TestRequest::get("/api/messages/inbox/emp-42")
+        .header("x-boss-user", OPERATOR)
         .send(&app.router)
         .await;
     resp.assert_status(StatusCode::OK);
@@ -312,6 +322,7 @@ async fn get_inbox_for_unknown_employee_returns_empty_list() {
     let app = MessageTestApp::new();
 
     let resp = TestRequest::get("/api/messages/inbox/emp-ghost")
+        .header("x-boss-user", OPERATOR)
         .send(&app.router)
         .await;
     resp.assert_status(StatusCode::OK);
@@ -341,6 +352,7 @@ async fn get_inbox_leaves_out_archived_rows() {
     let app = MessageTestApp::with_messages(archived_and_kept("emp-42"));
 
     let resp = TestRequest::get("/api/messages/inbox/emp-42")
+        .header("x-boss-user", OPERATOR)
         .send(&app.router)
         .await;
     resp.assert_status(StatusCode::OK);
@@ -355,6 +367,7 @@ async fn get_inbox_with_include_archived_returns_them_too() {
     let app = MessageTestApp::with_messages(archived_and_kept("emp-42"));
 
     let resp = TestRequest::get("/api/messages/inbox/emp-42?include_archived=true")
+        .header("x-boss-user", OPERATOR)
         .send(&app.router)
         .await;
     resp.assert_status(StatusCode::OK);
@@ -380,6 +393,7 @@ async fn an_archived_message_leaves_the_inbox_read_and_records_its_event() {
     app.assert_recorded("messages.message.archived");
 
     let resp = TestRequest::get("/api/messages/inbox/emp-42")
+        .header("x-boss-user", OPERATOR)
         .send(&app.router)
         .await;
     resp.assert_status(StatusCode::OK);
@@ -395,7 +409,10 @@ async fn get_unread_leaves_out_archived_rows_unless_asked_by_kind() {
     let app = MessageTestApp::with_messages(archived_and_kept("emp-42"));
 
     let count = |uri: &'static str, router: axum::Router| async move {
-        let resp = TestRequest::get(uri).send(&router).await;
+        let resp = TestRequest::get(uri)
+            .header("x-boss-user", OPERATOR)
+            .send(&router)
+            .await;
         resp.assert_status(StatusCode::OK);
         let v: serde_json::Value = resp.assert_json();
         v["count"].as_u64().unwrap()
@@ -455,6 +472,7 @@ async fn post_expire_with_an_id_prefix_retires_a_steps_direct_notice() {
 
     let unread_direct = |router: axum::Router| async move {
         let resp = TestRequest::get("/api/messages/unread/emp-d?kind=direct")
+            .header("x-boss-user", OPERATOR)
             .send(&router)
             .await;
         resp.assert_status(StatusCode::OK);
@@ -464,6 +482,7 @@ async fn post_expire_with_an_id_prefix_retires_a_steps_direct_notice() {
     assert_eq!(unread_direct(app.router.clone()).await, 2);
 
     let resp = TestRequest::post("/api/messages/expire")
+        .header("x-boss-user", OPERATOR)
         .json(&json!({ "entity_path_prefix": step, "id_prefix": "notify:" }))
         .send(&app.router)
         .await;
@@ -490,6 +509,7 @@ async fn post_expire_refuses_an_empty_id_prefix() {
     let app = MessageTestApp::with_messages(vec![step_notice("notify:s1:emp-d", "emp-d", step)]);
 
     let resp = TestRequest::post("/api/messages/expire")
+        .header("x-boss-user", OPERATOR)
         .json(&json!({ "entity_path_prefix": step, "id_prefix": " " }))
         .send(&app.router)
         .await;
@@ -505,6 +525,7 @@ async fn post_expire_without_an_id_prefix_still_leaves_a_direct() {
     let app = MessageTestApp::with_messages(vec![step_notice("notify:s1:emp-d", "emp-d", step)]);
 
     let resp = TestRequest::post("/api/messages/expire")
+        .header("x-boss-user", OPERATOR)
         .json(&json!({ "entity_path_prefix": "/jobs/job-1" }))
         .send(&app.router)
         .await;

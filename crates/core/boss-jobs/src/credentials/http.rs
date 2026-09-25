@@ -7,13 +7,13 @@
 //! secret value exists anywhere behind it. The registry knows
 //! *about* credentials; possession stays in Secrets.
 //!
-//! Read access mirrors `delivery::http`: operator machinery. Trusted
-//! internal callers (the extractor defaults to `role=guest` when no
-//! `x-boss-user` header arrived — the forge-host audit reads through
-//! this path) and operator-tier callers (`boss credential list`, the
-//! session actor via boss-api). The gateway always injects the header
-//! for external requests, so a browser session never lands here as
-//! guest.
+//! Read access mirrors `delivery::http`: `crate::trust::can_read` —
+//! operator-tier callers (`boss credential list`, the session actor
+//! via boss-api) and the auditor tier (the forge-host audit, which
+//! signs as `automation:forge-token-audit`). A request with no
+//! `x-boss-user` header is refused: it was trusted here until
+//! 2026-09-25 (backlog e84de48e), when the audit was the one reader
+//! that relied on it.
 //!
 //! An unknown id is a 404 that names it — unlike the delivery door,
 //! there is no fallback for a missing credential row; an absent row
@@ -30,8 +30,8 @@
 //! observed the effects — identifiers (token name/id, Secret path,
 //! value length) and observed effects only, NEVER a value — and a
 //! door that second-guesses its instrument is a second instrument.
-//! Operator tier only, and no guest trust here: this is a WRITE, and
-//! the headerless-internal-caller allowance exists for reads.
+//! Operator tier only: this is a WRITE. (No door here trusts a
+//! headerless caller since e84de48e, 2026-09-25.)
 
 use std::sync::Arc;
 
@@ -329,20 +329,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_headerless_internal_caller_is_trusted() {
-        // The forge-host audit reads the registry over the internal
-        // address with no x-boss-user header; the extractor defaults
-        // to role=guest, which this door trusts like delivery's does.
+    async fn a_headerless_caller_is_refused() {
+        // Until 2026-09-25 this door trusted a caller with no
+        // x-boss-user (the extractor's role=guest) — the forge-host
+        // audit read it that way. A request without the identity
+        // header is not trusted (backlog e84de48e): the audit now
+        // signs as its own reader, and silence is a 403.
         let app = app(vec![row("boss-dev-forge-token")]);
-        let resp = app
-            .oneshot(
-                Request::get("/api/credentials")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        for path in ["/api/credentials", "/api/credentials/boss-dev-forge-token"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{path}");
+        }
     }
 
     fn probe_reader_header() -> String {
@@ -612,10 +613,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_rotation_door_refuses_below_operator_tier_including_guest() {
-        // The READ doors trust a headerless internal caller (guest);
-        // the WRITE door must not — that allowance exists for the
-        // forge-host audit's reads, and a write with no presented
-        // identity would record an unattributable rotation.
+        // A write with no presented identity would record an
+        // unattributable rotation. (The READ doors refused a headerless
+        // caller only from 2026-09-25, e84de48e; this one always did.)
         let (app, registry) = rotation_app(vec![row("boss-dev-forge-token")]);
         let user_resp = app
             .clone()

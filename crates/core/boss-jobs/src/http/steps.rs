@@ -32,12 +32,22 @@ fn status_word(s: StepStatus) -> &'static str {
 
 pub(super) async fn list_steps<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
+    // Every step's metadata is the packet's content: the detail's read
+    // scope, asked before the id is parsed (backlog 046832d3).
+    let scope = match job_read_scope(&state, &user).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
     let job_id = match parse_job_id(&id) {
         Some(id) => id,
         None => return (StatusCode::BAD_REQUEST, "invalid job id").into_response(),
     };
+    if let Err(refusal) = readable_job(&state, &user, &scope, &job_id).await {
+        return refusal;
+    }
 
     match state.jobs.list_steps(&job_id).await {
         Ok(steps) => Json(steps).into_response(),

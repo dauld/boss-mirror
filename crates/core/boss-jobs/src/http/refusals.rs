@@ -122,15 +122,43 @@ pub(super) struct RefusalQuery {
 
 /// The read door. Without it the table is a black hole and "let's try
 /// it for a while and see how it goes" has nothing to look at.
+///
+/// A row carries the refused caller's id, the path and the refusal's
+/// words about the packet, so it is read under the packet's scope
+/// (backlog 046832d3): refused to a caller denied Read on job, and cut
+/// to the rows on packets inside the caller's scope. A row whose id
+/// never parsed names no packet, so only a caller who reads every
+/// packet sees it.
 pub(super) async fn list_step_write_refusals<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<RefusalQuery>,
 ) -> Response {
+    let scope = match job_read_scope(&state, &user).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
-    match state.jobs.step_write_refusals(limit).await {
-        Ok(rows) => Json(serde_json::json!({ "total": rows.len(), "data": rows })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    let rows = match state.jobs.step_write_refusals(limit).await {
+        Ok(rows) => rows,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let packet = |r: &crate::refusals::RecordedRefusal| {
+        r.refusal.job_id.map(boss_core::job::JobId::from_uuid)
+    };
+    let rows = if matches!(scope, boss_policy_client::Scope::All) {
+        rows
+    } else {
+        let readable =
+            match readable_job_ids(&state, &user, &scope, rows.iter().filter_map(packet)).await {
+                Ok(ids) => ids,
+                Err(refusal) => return refusal,
+            };
+        rows.into_iter()
+            .filter(|r| packet(r).is_some_and(|id| readable.contains(&id)))
+            .collect()
+    };
+    Json(serde_json::json!({ "total": rows.len(), "data": rows })).into_response()
 }
 
 #[cfg(test)]

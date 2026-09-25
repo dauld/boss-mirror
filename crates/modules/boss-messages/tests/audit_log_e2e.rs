@@ -15,6 +15,11 @@ use boss_messages::http::{MessageApiState, router};
 use boss_testing::{RecordingEventBus, TestDb, TestRequest};
 use sqlx::PgPool;
 
+/// The machinery that sends, reads and expires on others' behalf signs
+/// as an operator-tier automation: a request with no `x-boss-user` is
+/// refused by every scoped door since backlog e84de48e (2026-09-25).
+const OPERATOR: &str = r#"{"id":"automation:messages-test","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}"#;
+
 fn build_app(pool: PgPool) -> Router {
     // No publisher: the handler stamp falls back to source="messages"
     // and the event records on the outbox.
@@ -39,6 +44,7 @@ async fn send_message_lands_in_audit_log() {
         "kind": "direct",
     });
     TestRequest::post("/api/messages/send")
+        .header("x-boss-user", OPERATOR)
         .json(&body)
         .send(&app)
         .await

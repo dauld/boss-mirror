@@ -20,14 +20,22 @@
 
 use boss_policy_client::{AccessTier, User};
 
-/// Machinery: an operator-tier caller, or a trusted internal one — the
-/// extractor defaults to `role=guest` when no `x-boss-user` header
-/// arrived, i.e. a loopback sibling or a test harness. The gateway
-/// always injects the header for external requests, so a browser
-/// session never lands in the trusted-internal path. Every WRITE on
-/// an operator door asks this and nothing wider.
+/// Machinery: an operator-tier caller, and nothing else. Every WRITE
+/// on an operator door asks this and nothing wider.
+///
+/// A caller that sent NO `x-boss-user` is not machinery (backlog
+/// e84de48e; David, 2026-09-25: "Agreed on not trusting requests
+/// without the identity header"). This used to admit `role == guest`
+/// — the user the extractor makes of silence — on the theory that
+/// only a loopback sibling or a test harness arrives headerless. The
+/// theory was false at the door that mattered: the gateway strips
+/// x-boss-* and sets it only inside a session, so a sessionless route
+/// reached these doors headerless and was read as trusted. Every
+/// internal caller signs as its own `automation:<x>` at operator tier
+/// (the dispatcher, the conductor, the cadence loop, the gateway's
+/// own writes, the sim); one that does not is refused, loudly.
 pub fn is_trusted(user: &User) -> bool {
-    user.role == "guest" || user.access_tier == AccessTier::Operator
+    user.access_tier == AccessTier::Operator
 }
 
 /// A READ on an operator door admits one more caller than a write: the
@@ -69,13 +77,34 @@ mod tests {
     }
 
     #[test]
-    fn an_operator_and_a_headerless_sibling_do_both() {
-        for u in [
-            user("platform-admin", AccessTier::Operator),
-            user("guest", AccessTier::User),
-        ] {
-            assert!(is_trusted(&u), "{}", u.role);
-            assert!(can_read(&u), "{}", u.role);
-        }
+    fn an_operator_does_both() {
+        let u = user("platform-admin", AccessTier::Operator);
+        assert!(is_trusted(&u));
+        assert!(can_read(&u));
+    }
+
+    /// A REQUEST WITH NO IDENTITY IS NOT TRUSTED (backlog e84de48e;
+    /// David, 2026-09-25). The user is built by the real extractor
+    /// from a request carrying no `x-boss-user`, so the pin holds the
+    /// two halves of the defect together: whatever `CurrentUser` makes
+    /// of silence, neither door may admit it. Until this, it made
+    /// `role=guest` and `is_trusted` admitted `guest` by name — so a
+    /// sessionless route through the gateway (which strips x-boss-*
+    /// and sets it only for a session) read fifteen operator surfaces
+    /// as trusted machinery.
+    #[tokio::test]
+    async fn a_request_without_the_identity_header_is_refused_on_both() {
+        use axum::extract::FromRequestParts;
+        let (mut parts, _) = axum::http::Request::builder()
+            .uri("/api/agents")
+            .body(())
+            .unwrap()
+            .into_parts();
+        let boss_policy_client::CurrentUser(anonymous) =
+            boss_policy_client::CurrentUser::from_request_parts(&mut parts, &())
+                .await
+                .unwrap_or_else(|_| panic!("the extractor refused a headerless request"));
+        assert!(!can_read(&anonymous), "{anonymous:?}");
+        assert!(!is_trusted(&anonymous), "{anonymous:?}");
     }
 }

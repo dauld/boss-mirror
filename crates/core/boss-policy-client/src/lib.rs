@@ -42,8 +42,11 @@ use serde::Serialize;
 /// Axum extractor that reads the `User` from the `X-Boss-User` header.
 /// The gateway populates this header per-request from the session;
 /// tests pass a manually-constructed `User` JSON. Missing header
-/// yields a guest user that every rule denies, so the default
-/// behaviour is "locked down."
+/// yields [`User::anonymous`] — the `guest` role at user tier, which
+/// only the defaults' workflow read grants anything and which no door
+/// trusts (backlog e84de48e), so the default behaviour is "locked
+/// down." A sibling service is not anonymous: it signs as its own
+/// `automation:<x>`.
 pub struct CurrentUser(pub User);
 
 impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CurrentUser {
@@ -69,14 +72,7 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CurrentUser {
             })?;
             Ok(CurrentUser(user))
         } else {
-            Ok(CurrentUser(User {
-                id: "anonymous".to_string(),
-                role: "guest".to_string(),
-                access_tier: AccessTier::User,
-                territory_account_ids: vec![],
-                direct_report_ids: vec![],
-                department: None,
-            }))
+            Ok(CurrentUser(User::anonymous()))
         }
     }
 }

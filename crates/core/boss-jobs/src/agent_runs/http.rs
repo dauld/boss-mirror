@@ -5,16 +5,12 @@
 //! not in `boss-cybernetics`: a record written somewhere nothing
 //! deploys is a record nobody can file.
 //!
-//! **Every route, the POST included, admits the same two categories as
-//! the cadence surface: operator tier, or a trusted internal caller** —
-//! and the three reads admit the auditor tier besides ([`can_read`]).
-//! An internal caller is one that arrived with no `x-boss-user` header
-//! at all, which the extractor reports as `role=guest` — a loopback
-//! sibling or a test harness, never a browser, because the gateway
-//! injects the header for everything external and refuses a
-//! session-less request before it forwards. A POST from such a caller
-//! is attributed to `automation:platform` rather than to a person; see
-//! [`record_run`].
+//! **Every route, the POST included, admits what the cadence surface
+//! admits: operator tier** — and the three reads admit the auditor
+//! tier besides ([`can_read`]). A caller with no `x-boss-user` header
+//! is refused on every route (backlog e84de48e, 2026-09-25): it was
+//! once read as a trusted loopback sibling, and a sessionless route
+//! through the gateway arrives exactly that way.
 //!
 //! The two GET paths under `/api/agent-runs` are proxied at the human
 //! door (`boss-gateway`, backlog 48bb0200); `/api/agent-rate-card` and
@@ -209,8 +205,8 @@ mod tests {
     //! the gate gets a test before the door gets traffic.
     //!
     //! Note what is NOT here: a `PolicyClient` call. This surface
-    //! consults no policy rule; it admits operator tier (and a
-    //! header-less internal sibling) and refuses everything else. A
+    //! consults no policy rule; it admits operator tier (the reads,
+    //! the auditor tier too) and refuses everything else. A
     //! guest session is the case that matters, because the gateway
     //! mints one for anyone who asks: it carries `role=audit-readonly`
     //! and `access_tier=user`, so it lands in `a_browser_guest_is_refused`
@@ -355,9 +351,9 @@ mod tests {
     /// The leak this door exists to refuse. A guest session is what the
     /// gateway hands anyone who asks (`POST /api/auth/guest`), and it
     /// arrives here as `audit-readonly` at user tier — NOT as the
-    /// `guest` role, which only a header-less internal sibling
-    /// produces. `audit-readonly` holds Read at `Scope::All` on every
-    /// resource the policy defaults declare, and per-actor spend is not
+    /// `guest` role, which the extractor makes of a request with no
+    /// header at all (refused too, `a_headerless_caller_is_refused`).
+    /// `audit-readonly` holds Read at `Scope::All` on every resource the policy defaults declare, and per-actor spend is not
     /// one of them; whether it should be is a privilege decision, and
     /// until it is made the answer is 403 rather than the rows.
     #[tokio::test]
@@ -418,16 +414,17 @@ mod tests {
         }
     }
 
-    /// A header-less caller is a loopback sibling or a test harness —
-    /// the gateway always injects `x-boss-user` for anything arriving
-    /// from outside, and `proxy::handle` refuses a session-less request
-    /// with a 401 before it forwards. Same stance as the cadence and
-    /// credential doors.
+    /// A header-less caller is refused (backlog e84de48e, David
+    /// 2026-09-25). It used to be read as a loopback sibling, on the
+    /// belief that the gateway injects `x-boss-user` for everything
+    /// from outside; it sets the header only inside a session, so a
+    /// sessionless route arrived here headerless and read per-actor
+    /// spend. Every sibling signs as its own automation now.
     #[tokio::test]
-    async fn a_headerless_internal_caller_is_trusted() {
+    async fn a_headerless_caller_is_refused() {
         for path in READS {
             let (status, body) = get(path, None).await;
-            assert_eq!(status, StatusCode::OK, "`{path}`: {body}");
+            assert_eq!(status, StatusCode::FORBIDDEN, "`{path}`: {body}");
         }
     }
 

@@ -618,6 +618,170 @@ pub(super) fn job_scope_from_predicate(
     }
 }
 
+/// The scope within which this caller may READ packets: policy Read on
+/// `job`, the same question the list's `scope_predicate` asks, answered
+/// as a `Scope` so a single row can be judged by [`scope_matches`] the
+/// way every job write judges its row.
+///
+/// WHY EVERY PACKET READ ASKS IT (backlog 046832d3, found by the triage
+/// of e5f7b51e). The list scoped its rows and every write checked its
+/// row, but the detail, its events, its stream, its steps, the
+/// assignments queue and the refusal table took no caller at all — so
+/// an anonymous request read every packet it could name. A caller the
+/// policy DENIES is refused here, 403, before any id is looked up, so
+/// the refusal is the same for a real packet and an absent one. That
+/// includes a request with no `x-boss-user`: the extractor makes it
+/// `guest`, which the platform grants only `workflow` Read — the same
+/// caller the list hands nothing. Whether a headerless sibling should
+/// be trusted instead is e84de48e's decision, not this door's.
+#[allow(
+    clippy::result_large_err,
+    reason = "idiomatic axum Response error; crate-wide Box<Response> cleanup tracked separately"
+)]
+pub(super) async fn job_read_scope<R: JobsRepository, B: EventBus>(
+    state: &JobsApiState<R, B>,
+    user: &boss_policy_client::User,
+) -> Result<boss_policy_client::Scope, Response> {
+    match state
+        .policy
+        .check(user, Action::Read, Resource::job())
+        .await
+    {
+        Ok(Decision::Allow { scope }) => Ok(scope),
+        Ok(Decision::Deny { reason }) => Err((
+            StatusCode::FORBIDDEN,
+            format!("reading packets is refused: {reason}"),
+        )
+            .into_response()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("policy check failed: {e}"),
+        )
+            .into_response()),
+    }
+}
+
+/// The 404 a packet read answers both for a packet that does not exist
+/// and for one outside the caller's scope — ONE value, so the two can
+/// never drift into telling a scoped caller which ids are real.
+pub(super) fn packet_not_found() -> Response {
+    (StatusCode::NOT_FOUND, "job not found").into_response()
+}
+
+/// Whether `step` is the caller's own work: handed to them, or
+/// claimable by the role they HOLD — the same rule the assignments
+/// queue's `roles=` selector applies (unassigned, or already Active, and
+/// workable), keyed on `user.role` rather than on a role the request
+/// names. Only an identified caller has work of its own.
+///
+/// WHY A PACKET READ ASKS IT (review of 0c0405ac, 2026-09-25). A
+/// `self`- or territory-scoped role works steps on packets it does not
+/// own: a role's claimable steps sit on packets its manager owns. The first cut of 046832d3 kept only assigned rows in the queue
+/// and admitted no such packet to the single reads, so My Day's
+/// claimable pool vanished and the rows it kept named a packet that
+/// answered 404 — the web opens a step THROUGH the packet read. One
+/// predicate for both, so the queue never shows a row the caller then
+/// cannot open.
+///
+/// A step handed to the caller counts at any status, so the packet
+/// still opens after the caller completes it (the page re-reads it);
+/// a role's claim counts only while the step is workable.
+pub(super) fn step_is_callers(user: &boss_policy_client::User, step: &Step) -> bool {
+    let Some(me) = self_id(user) else {
+        return false;
+    };
+    if step.assignee_id.as_deref() == Some(me) {
+        return true;
+    }
+    let workable = matches!(step.status, StepStatus::Ready | StepStatus::Active);
+    let claimable = step.assignee_id.is_none() || step.status == StepStatus::Active;
+    workable
+        && claimable
+        && step
+            .metadata
+            .get("authority_role")
+            .and_then(serde_json::Value::as_str)
+            == Some(user.role.as_str())
+}
+
+/// Whether `user` may read this packet: it is inside `scope`, or one of
+/// its steps is the caller's own work ([`step_is_callers`]).
+pub(super) fn packet_readable(
+    user: &boss_policy_client::User,
+    scope: &boss_policy_client::Scope,
+    job: &Job,
+    steps: &[Step],
+) -> bool {
+    scope_matches(user, scope, job) || steps.iter().any(|s| step_is_callers(user, s))
+}
+
+/// The packet `job_id` names, if `user` may read it under `scope`
+/// ([`packet_readable`]); otherwise [`packet_not_found`], exactly as if
+/// it did not exist. The steps are read only when the scope alone does
+/// not admit the packet.
+#[allow(
+    clippy::result_large_err,
+    reason = "idiomatic axum Response error; crate-wide Box<Response> cleanup tracked separately"
+)]
+pub(super) async fn readable_job<R: JobsRepository, B: EventBus>(
+    state: &JobsApiState<R, B>,
+    user: &boss_policy_client::User,
+    scope: &boss_policy_client::Scope,
+    job_id: &boss_core::job::JobId,
+) -> Result<Job, Response> {
+    let job = match state.jobs.get_job(job_id).await {
+        Ok(Some(job)) => job,
+        Ok(None) => return Err(packet_not_found()),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
+    };
+    if scope_matches(user, scope, &job) {
+        return Ok(job);
+    }
+    if self_id(user).is_none() {
+        return Err(packet_not_found());
+    }
+    match state.jobs.list_steps(job_id).await {
+        Ok(steps) if packet_readable(user, scope, &job, &steps) => Ok(job),
+        Ok(_) => Err(packet_not_found()),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
+    }
+}
+
+/// Which of these packets `user` may read under `scope` — the per-row
+/// filter a collection read applies (the assignments queue, the refusal
+/// table), judged by the same [`scope_matches`] as a single row.
+/// `Scope::All` reads none; otherwise the whole set is read at once
+/// (`JobsRepository::get_jobs`), because `all_assigned` answers up to
+/// 50,000 rows and the first cut read each packet separately (review
+/// of 0c0405ac, finding #6).
+#[allow(
+    clippy::result_large_err,
+    reason = "idiomatic axum Response error; crate-wide Box<Response> cleanup tracked separately"
+)]
+pub(super) async fn readable_job_ids<R: JobsRepository, B: EventBus>(
+    state: &JobsApiState<R, B>,
+    user: &boss_policy_client::User,
+    scope: &boss_policy_client::Scope,
+    ids: impl IntoIterator<Item = boss_core::job::JobId>,
+) -> Result<std::collections::HashSet<boss_core::job::JobId>, Response> {
+    let ids: std::collections::HashSet<_> = ids.into_iter().collect();
+    if matches!(scope, boss_policy_client::Scope::All) {
+        return Ok(ids);
+    }
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    let ids: Vec<_> = ids.into_iter().collect();
+    match state.jobs.get_jobs(&ids).await {
+        Ok(jobs) => Ok(jobs
+            .iter()
+            .filter(|job| scope_matches(user, scope, job))
+            .map(|job| job.id)
+            .collect()),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
+    }
+}
+
 /// The id a station predicate's [`crate::station_queue::SELF`]
 /// placeholder binds to for this request, or `None` when the caller is
 /// not an identified actor.

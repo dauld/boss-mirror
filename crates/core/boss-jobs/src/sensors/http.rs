@@ -10,8 +10,8 @@
 //! **Reads admit `crate::trust::can_read`** — operator machinery and
 //! the auditor tier, the recorded-probe reader (`boss-sor-read
 //! /api/sensors` is how the car for this surface is proved). **Writes
-//! admit `crate::trust::is_trusted`** — operator tier or a trusted
-//! internal sibling. Nothing here is a session's surface; the registry
+//! admit `crate::trust::is_trusted`** — operator tier; a request with
+//! no identity header is refused on both (e84de48e). Nothing here is a session's surface; the registry
 //! page, when there is one, reads through the same door.
 //!
 //! `POST /api/sensors/batch` validates every row with the same
@@ -605,14 +605,15 @@ mod tests {
         assert!(body.contains("tenant_id"), "{body}");
     }
 
-    /// The probe reader and a header-less sibling read; the gateway's
-    /// guest session does not; a user-tier session writes nothing.
+    /// The probe reader reads; a request with no identity header does
+    /// not (backlog e84de48e, 2026-09-25), nor does the gateway's guest
+    /// session; a user-tier session writes nothing.
     #[tokio::test]
     async fn reads_admit_the_probe_reader_and_writes_are_operator_machinery() {
         let repo = Arc::new(InMemorySensors::new());
         for (user, want) in [
             (probe_reader(), StatusCode::OK),
-            (None, StatusCode::OK),
+            (None, StatusCode::FORBIDDEN),
             (guest_session(), StatusCode::FORBIDDEN),
         ] {
             let (status, _) = send(app(&repo), "GET", "/api/sensors", None, user.clone()).await;

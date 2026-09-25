@@ -852,6 +852,26 @@ pub trait JobsRepository: Send + Sync {
 
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError>;
 
+    /// The packets `ids` name, in no particular order; an id that names
+    /// no packet is simply absent from the answer, and a repeated id is
+    /// one packet. The collection reads that cut their rows to a
+    /// caller's scope judge every row's packet with it (backlog
+    /// 046832d3). The default reads each one; the Postgres adapter
+    /// overrides it with one `= ANY($1)` query.
+    async fn get_jobs(&self, ids: &[JobId]) -> Result<Vec<Job>, JobsError> {
+        let mut seen = std::collections::HashSet::with_capacity(ids.len());
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            if !seen.insert(*id) {
+                continue;
+            }
+            if let Some(job) = self.get_job(id).await? {
+                out.push(job);
+            }
+        }
+        Ok(out)
+    }
+
     /// Resolve a lowercase hex id prefix to the ids it matches, capped
     /// at two — enough for the caller to tell none from one from many
     /// without scanning the whole table. The prefix is the canonical

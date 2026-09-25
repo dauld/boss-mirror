@@ -34,6 +34,18 @@ async fn a_caller_without_broad_account_access_is_refused_not_handed_an_empty_li
     );
 }
 
+/// A request with no `x-boss-user` is nobody, and nobody sees the
+/// watchlist (backlog 2f4be936 / e84de48e, 2026-09-25). It used to be
+/// the one caller admitted by name — `role=guest` — while the field
+/// role above was refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_without_the_identity_header_is_refused() {
+    let db = TestDb::new().await;
+    let app = risk_scores_router(db.pool.clone());
+    let resp = TestRequest::get(PATH).send(&app).await;
+    resp.assert_status(StatusCode::FORBIDDEN);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_admitted_caller_with_nothing_scored_gets_an_empty_200() {
     let db = TestDb::new().await;

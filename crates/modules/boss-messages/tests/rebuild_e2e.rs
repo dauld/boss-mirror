@@ -18,6 +18,11 @@ use boss_messages::rebuild_messages;
 use boss_testing::{RecordingEventBus, TestDb, TestRequest};
 use chrono::{DateTime, Utc};
 
+/// The machinery that sends, reads and expires on others' behalf signs
+/// as an operator-tier automation: a request with no `x-boss-user` is
+/// refused by every scoped door since backlog e84de48e (2026-09-25).
+const OPERATOR: &str = r#"{"id":"automation:messages-test","role":"platform-admin","access_tier":"operator","territory_account_ids":[],"direct_report_ids":[],"department":"platform"}"#;
+
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 struct MessageRow {
     id: String,
@@ -67,6 +72,7 @@ async fn drain_outbox(pool: &sqlx::PgPool) -> u64 {
 
 async fn send_message(router: &Router, sender: &str, recipient: &str, subject: &str) -> String {
     let resp = TestRequest::post("/api/messages/send")
+        .header("x-boss-user", OPERATOR)
         .json(&serde_json::json!({
             "sender_id": sender,
             "recipient_id": recipient,
@@ -127,7 +133,10 @@ async fn rebuild_reproduces_projection_after_drop() {
     // The archived row has left emp-b's inbox read, and is still there
     // for a reader that asks for it (backlog 8578b91e / 5963a322).
     async fn inbox_ids(router: &Router, uri: &str) -> Vec<String> {
-        let resp = TestRequest::get(uri).send(router).await;
+        let resp = TestRequest::get(uri)
+            .header("x-boss-user", OPERATOR)
+            .send(router)
+            .await;
         resp.assert_status(StatusCode::OK);
         let rows: Vec<serde_json::Value> = resp.assert_json();
         let mut ids: Vec<String> = rows
@@ -277,6 +286,7 @@ async fn a_retired_step_notice_leaves_the_badge_and_rebuilds() {
         ("msg-from-a-person", "emp-colleague"),
     ] {
         TestRequest::post("/api/messages/send")
+            .header("x-boss-user", OPERATOR)
             .json(&serde_json::json!({
                 "id": id,
                 "sender_id": sender,
@@ -297,6 +307,7 @@ async fn a_retired_step_notice_leaves_the_badge_and_rebuilds() {
 
     async fn unread_direct(router: &Router) -> u64 {
         let resp = TestRequest::get("/api/messages/unread/emp_d?kind=direct")
+            .header("x-boss-user", OPERATOR)
             .send(router)
             .await;
         resp.assert_status(StatusCode::OK);
@@ -308,6 +319,7 @@ async fn a_retired_step_notice_leaves_the_badge_and_rebuilds() {
     // `notify_` would match `notify:` under LIKE, where `_` is a
     // wildcard; the adapter compares the prefix literally.
     let resp = TestRequest::post("/api/messages/expire")
+        .header("x-boss-user", OPERATOR)
         .json(&serde_json::json!({ "entity_path_prefix": step, "id_prefix": "notify_" }))
         .send(&router)
         .await;
@@ -316,6 +328,7 @@ async fn a_retired_step_notice_leaves_the_badge_and_rebuilds() {
     assert_eq!(v["expired"], 0, "the id prefix is literal, not a pattern");
 
     let resp = TestRequest::post("/api/messages/expire")
+        .header("x-boss-user", OPERATOR)
         .json(&serde_json::json!({ "entity_path_prefix": step, "id_prefix": "notify:" }))
         .send(&router)
         .await;

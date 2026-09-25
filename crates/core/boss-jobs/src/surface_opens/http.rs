@@ -19,13 +19,13 @@
 //! Readable by any signed-in session except the gateway's guest
 //! (`audit-readonly` at user tier): the rows are an operator's own
 //! attention, and the Codebase page that shows them is readable by any
-//! operator already. Trusted internal callers and the auditor tier (the
-//! recorded-probe reader) read too.
+//! operator already. The operator and auditor tiers (the recorded-probe
+//! reader) read too; a request with no identity header does not.
 //!
 //! **The sweep is operator machinery.** `POST /api/surface-opens/sweep`
 //! deletes rows older than [`super::RETENTION_DAYS`] and answers with
 //! the count and the cutoff, so the chore's row can state what the
-//! sweep did rather than that it ran. Operator tier or trusted internal.
+//! sweep did rather than that it ran. Operator tier.
 
 use std::sync::Arc;
 
@@ -54,11 +54,17 @@ pub struct SurfaceOpensApiState {
 // than `crate::trust::can_read`, and says why.
 
 /// Everyone but the gateway's guest session, which arrives as
-/// `audit-readonly` at USER tier (`POST /api/auth/guest`). An
-/// employee's ordinary session (user tier, their own role) reads: the
-/// page that renders this sits in a department any operator opens.
+/// `audit-readonly` at USER tier (`POST /api/auth/guest`), and a
+/// request that carried no identity at all. An employee's ordinary
+/// session (user tier, their own role) reads: the page that renders
+/// this sits in a department any operator opens.
+///
+/// A BLOCKLIST, so the anonymous caller has to be named in it: until
+/// 2026-09-25 it was not, and a headerless request read every
+/// operator's attention (backlog e84de48e — the same allowance
+/// `trust::is_trusted` held by name, held here by omission).
 fn can_read(user: &User) -> bool {
-    !(user.access_tier == AccessTier::User && user.role == "audit-readonly")
+    !(user.is_anonymous() || user.access_tier == AccessTier::User && user.role == "audit-readonly")
 }
 
 pub fn router(state: SurfaceOpensApiState) -> Router {
@@ -82,10 +88,9 @@ async fn record_open(
     CurrentUser(user): CurrentUser,
     Json(body): Json<NewSurfaceOpen>,
 ) -> Response {
-    // A header-less caller is a sibling service or a harness: there is
-    // no session to credit, and crediting the extractor's `anonymous`
-    // would be a row about nobody.
-    if user.role == "guest" {
+    // A header-less caller has no session to credit, and crediting the
+    // extractor's `anonymous` would be a row about nobody.
+    if user.is_anonymous() {
         return (
             StatusCode::BAD_REQUEST,
             "no session actor — a surface open is credited to the signed-in session, \
@@ -348,26 +353,25 @@ mod tests {
         assert!(repo.rows().await[0].at >= before);
     }
 
-    /// The gateway's guest is the one reader refused; an employee at
-    /// user tier, the auditor tier (the probe reader) and a header-less
-    /// sibling all read.
+    /// The gateway's guest and a request with no identity header are
+    /// the readers refused (the second since e84de48e, 2026-09-25); an
+    /// employee at user tier and the auditor tier (the probe reader)
+    /// read.
     #[tokio::test]
-    async fn the_rollup_reads_for_everyone_but_the_gateway_guest() {
+    async fn the_rollup_reads_for_everyone_but_the_gateway_guest_and_the_anonymous() {
         let repo = Arc::new(InMemorySurfaceOpens::new());
         let path = "/api/surface-opens/rollup?since=2026-09-16T00:00:00Z";
-        let (status, _) = send(
-            app(&repo),
-            "GET",
-            path,
-            None,
+        for refused in [
             Some(header(
                 "guest@algedonic.dev",
                 "audit-readonly",
                 AccessTier::User,
             )),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+            None,
+        ] {
+            let (status, _) = send(app(&repo), "GET", path, None, refused.clone()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{refused:?}");
+        }
         for user in [
             david(),
             Some(header(
@@ -375,7 +379,6 @@ mod tests {
                 "audit-readonly",
                 AccessTier::Auditor,
             )),
-            None,
         ] {
             let (status, body) = send(app(&repo), "GET", path, None, user.clone()).await;
             assert_eq!(status, StatusCode::OK, "{user:?}: {body}");

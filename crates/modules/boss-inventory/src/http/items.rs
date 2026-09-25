@@ -220,11 +220,24 @@ pub(super) async fn consume_part<R: InventoryRepository + 'static>(
         .into_response()
 }
 
-/// Send a low-stock system signal to the warehouse manager's inbox.
-async fn send_low_stock_alert(part_sku: &str, body: &str) -> Result<(), String> {
-    let client = reqwest::Client::new();
+/// Who the alert is from — its `sender_id`, and the `x-boss-user` it
+/// is sent under.
+const ALERT_ACTOR: &str = "automation:inventory";
+
+/// The alert's request, unsent — pure, so what goes on the wire is
+/// pinned without a socket. It is SIGNED as [`ALERT_ACTOR`]: the
+/// messages door stopped trusting a request with no `x-boss-user` on
+/// 2026-09-25 (backlog e84de48e), and this call sent none, so it relied
+/// on exactly the allowance that was removed. The identity it presents
+/// is the sender it claims, so the door's sender match admits it with
+/// no operator tier needed.
+fn low_stock_alert(
+    client: &reqwest::Client,
+    part_sku: &str,
+    body: &str,
+) -> reqwest::RequestBuilder {
     let msg = serde_json::json!({
-        "sender_id": "automation:inventory",
+        "sender_id": ALERT_ACTOR,
         "recipient_id": "emp-091-mgr",
         "subject": format!("Low stock alert: {part_sku}"),
         "body": body,
@@ -235,9 +248,48 @@ async fn send_low_stock_alert(part_sku: &str, body: &str) -> Result<(), String> 
             "entity_path": format!("/parts/{part_sku}"),
         },
     });
-    let resp = client
+    let user = serde_json::json!({
+        "id": ALERT_ACTOR,
+        "role": "system",
+        "access_tier": "user",
+        "territory_account_ids": [],
+        "direct_report_ids": [],
+        "department": null,
+    });
+    client
         .post("http://127.0.0.1:7200/api/messages/send")
+        .header("x-boss-user", user.to_string())
         .json(&msg)
+}
+
+#[cfg(test)]
+mod low_stock_alert_tests {
+    use super::*;
+
+    #[test]
+    fn the_alert_is_signed_as_the_sender_it_claims() {
+        let req = low_stock_alert(&reqwest::Client::new(), "P-1", "b")
+            .build()
+            .expect("the request builds");
+        let user: boss_policy_client::User = serde_json::from_str(
+            req.headers()
+                .get("x-boss-user")
+                .expect("the alert carried no x-boss-user")
+                .to_str()
+                .unwrap(),
+        )
+        .expect("the header is a User");
+        let body: serde_json::Value =
+            serde_json::from_slice(req.body().and_then(|b| b.as_bytes()).unwrap()).unwrap();
+        assert_eq!(user.id, ALERT_ACTOR);
+        assert_eq!(body["sender_id"], user.id.as_str());
+    }
+}
+
+/// Send a low-stock system signal to the warehouse manager's inbox.
+async fn send_low_stock_alert(part_sku: &str, body: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let resp = low_stock_alert(&client, part_sku, body)
         .send()
         .await
         .map_err(|e| e.to_string())?;

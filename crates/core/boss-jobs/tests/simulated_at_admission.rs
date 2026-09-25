@@ -73,6 +73,9 @@ fn app_with_clock(
             .allow("ceo", Action::Create, Resource::job(), Scope::All)
             .allow("ceo", Action::Update, Resource::job(), Scope::All)
             .allow("ceo", Action::Update, Resource::step(), Scope::All)
+            // The detail read is scoped by policy Read on job since
+            // backlog 046832d3; the brewery seed grants the ceo it at all.
+            .allow("ceo", Action::Read, Resource::job(), Scope::All)
             .build(),
     );
     let bus = RecordingEventBus::new();

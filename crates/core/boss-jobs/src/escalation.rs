@@ -97,14 +97,51 @@ struct Employee {
 /// cannot be opened (no JetStream on this deployment), the router
 /// degrades loudly to the old at-most-once subscription rather than
 /// disabling itself.
+/// Who the router is on the wire. Its signals are sent AS this id
+/// (`signal_payload`'s `sender_id`), and every call it makes — the
+/// account and roster reads, the sends — carries it as `x-boss-user`.
+const ACTOR_ID: &str = "automation:escalation-router";
+
+/// The router's `x-boss-user`: its own automation at operator tier,
+/// the shape the dispatcher's rule actor and the gateway's own writes
+/// sign with. It sent NO header until 2026-09-25, and the messages door
+/// admitted it only because it trusted a headerless caller; that
+/// allowance is gone (backlog e84de48e: "a request without the
+/// identity header is not trusted"), so an unsigned router would have
+/// been refused on every signal — silently, being fire-and-forget.
+fn actor_header() -> String {
+    serde_json::json!({
+        "id": ACTOR_ID,
+        "role": "platform-admin",
+        "access_tier": "operator",
+        "territory_account_ids": [],
+        "direct_report_ids": [],
+        "department": "platform",
+    })
+    .to_string()
+}
+
+/// The router's HTTP client: its identity rides as a DEFAULT header, so
+/// no call it makes can go out unsigned (the assignment dispatcher's
+/// shape, `boss_dispatcher::Dispatcher::new`).
+fn client(timeout: Duration) -> Result<reqwest::Client, String> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    let value = reqwest::header::HeaderValue::from_str(&actor_header())
+        .map_err(|e| format!("x-boss-user header value: {e}"))?;
+    headers.insert("x-boss-user", value);
+    boss_core::machine_token::attach(&mut headers);
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .default_headers(headers)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 pub fn spawn_router(
     bus: Arc<boss_nats::NatsEventBus>,
     config: EscalationConfig,
 ) -> tokio::task::JoinHandle<()> {
-    let client = match reqwest::Client::builder()
-        .timeout(config.request_timeout)
-        .build()
-    {
+    let client = match client(config.request_timeout) {
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, "escalation router: failed to build http client; disabled");
@@ -362,7 +399,7 @@ fn signal_payload(
 ) -> serde_json::Value {
     serde_json::json!({
         "id": format!("escalation:{job_id}:{recipient_id}"),
-        "sender_id": "automation:escalation-router",
+        "sender_id": ACTOR_ID,
         "recipient_id": recipient_id,
         "subject": subject,
         "body": body,
@@ -462,6 +499,56 @@ mod tests {
         assert_eq!(p["recipient_id"], "emp-ceo");
         assert_eq!(p["kind"], "signal");
         assert_eq!(p["entity_ref"]["entity_id"], "job-123");
+    }
+
+    /// EVERY CALL THE ROUTER MAKES IS SIGNED (backlog e84de48e). The
+    /// messages door stopped trusting a request with no `x-boss-user`
+    /// on 2026-09-25, and the router sent none. A stub messages service
+    /// records what arrives on a real socket: the send carries the
+    /// router's own automation at operator tier, and that identity is
+    /// the sender the signal claims to be — so it passes the door's
+    /// sender match even without the operator tier.
+    #[tokio::test]
+    async fn a_signal_is_sent_signed_as_the_router() {
+        use axum::http::HeaderMap;
+        use std::sync::Mutex;
+        type Seen = Arc<Mutex<Vec<(Option<String>, serde_json::Value)>>>;
+        let seen: Seen = Arc::default();
+        let app = axum::Router::new().route(
+            "/api/messages/send",
+            axum::routing::post({
+                let seen = seen.clone();
+                move |headers: HeaderMap, axum::Json(body): axum::Json<serde_json::Value>| {
+                    let seen = seen.clone();
+                    async move {
+                        let user = headers
+                            .get("x-boss-user")
+                            .and_then(|v| v.to_str().ok())
+                            .map(str::to_string);
+                        seen.lock().unwrap().push((user, body));
+                        axum::http::StatusCode::CREATED
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let http = client(Duration::from_secs(5)).expect("the client builds");
+        send_signal(&http, &base, "emp-ceo", "subj", "body", "job-1")
+            .await
+            .expect("the stub accepts the signal");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let (user, body) = &seen[0];
+        let user: boss_policy_client::User =
+            serde_json::from_str(user.as_deref().expect("the send carried no x-boss-user"))
+                .expect("the header is a User");
+        assert_eq!(user.id, ACTOR_ID);
+        assert_eq!(user.access_tier, boss_policy_client::AccessTier::Operator);
+        assert_eq!(body["sender_id"], user.id.as_str());
     }
 
     /// The dispatcher shipped a consumer whose filter named a subject

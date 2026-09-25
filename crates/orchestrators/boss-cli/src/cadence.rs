@@ -3148,12 +3148,15 @@ mod db_tests {
                 .unwrap()
         );
 
-        // The operator's read: the public observability surface.
+        // The operator's read: the public observability surface —
+        // signed, because the door refuses a request with no identity
+        // header (backlog e84de48e).
         let body: Value = http
             .get(format!(
                 "{base}/api/cadence/rules/{}/last-firing",
                 rule.name
             ))
+            .header("x-boss-user", train::boss_user())
             .send()
             .await
             .unwrap()
@@ -3177,6 +3180,7 @@ mod db_tests {
         let base = serve_cadence_api(sor.pool.clone()).await;
         let body = reqwest::Client::new()
             .get(format!("{base}/api/cadence/rules/train-window/last-firing"))
+            .header("x-boss-user", train::boss_user())
             .send()
             .await
             .unwrap()

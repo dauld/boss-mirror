@@ -47,10 +47,25 @@ use sqlx::PgPool;
 /// `boss-ml::bootstrap::seed_phase_two_candidates`.
 const CHURN_RISK_MODEL_ID: &str = "mdl-account-churn-risk-v1";
 
+/// Operator tier, or a role with broad account access. NOT a request
+/// with no `x-boss-user`: that arrives as `role=guest` and was admitted
+/// by name here — the full watchlist for nobody, while a signed-in
+/// service tech was refused (backlog 2f4be936; decided under e84de48e,
+/// David 2026-09-25: a request without the identity header is not
+/// trusted).
 fn is_trusted_or_broad(user: &User) -> bool {
-    user.role == "guest"
-        || user.access_tier == AccessTier::Operator
+    user.access_tier == AccessTier::Operator
         || boss_core::roles::has_broad_account_access(&user.role)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_without_the_identity_header_is_refused() {
+        assert!(!is_trusted_or_broad(&User::anonymous()));
+    }
 }
 
 #[derive(Clone)]
