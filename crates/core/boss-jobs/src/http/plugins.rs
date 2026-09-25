@@ -222,3 +222,55 @@ pub(super) async fn in_flight_plugin_count<R: JobsRepository + 'static, B: Event
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
+
+/// `GET /api/jobs/repairs/step-plugin-version` — the dry run of the
+/// one-time repair (backlog 5a670a71): every step whose log-derived
+/// plugin version differs from its row, and what the write would do
+/// with each, with nothing written. `POST` below is the write.
+///
+/// Both halves take `publish` on `step_plugin`, the authority that
+/// decides which plugin version a step is stamped with
+/// (`platform-admin` in the core defaults): the dry run lists every
+/// packet's divergent steps, so it is the repair's reader, not a
+/// general one. The contract is `crate::plugin_version_repair`.
+pub(super) async fn preview_plugin_version_repair<
+    R: JobsRepository + 'static,
+    B: EventBus + 'static,
+>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
+) -> Response {
+    plugin_version_repair(&state, &user, false).await
+}
+
+/// `POST /api/jobs/repairs/step-plugin-version` — append ONE correcting
+/// STEP_UPDATED, built from the stored row and signed as the caller,
+/// for each step whose divergence is exactly the version-0 STEP_CREATED
+/// defect; refuse and list the rest. A second call writes nothing.
+pub(super) async fn run_plugin_version_repair<
+    R: JobsRepository + 'static,
+    B: EventBus + 'static,
+>(
+    State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
+) -> Response {
+    plugin_version_repair(&state, &user, true).await
+}
+
+async fn plugin_version_repair<R: JobsRepository, B: EventBus>(
+    state: &JobsApiState<R, B>,
+    user: &boss_policy_client::User,
+    write: bool,
+) -> Response {
+    if let Err(r) = plugin_policy_check(state, user, Action::Publish).await {
+        return r;
+    }
+    let actor = user
+        .ambient_actor()
+        .unwrap_or_else(|| boss_core::actor::ActorId::Automation("platform".into()));
+    let stamp = state.publisher.stamp_with_actor(actor).await;
+    match state.jobs.repair_step_plugin_versions(write, &stamp).await {
+        Ok(report) => Json(report).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}

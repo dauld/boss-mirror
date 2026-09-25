@@ -250,7 +250,12 @@ impl Conductor {
     }
 
     /// Complete `step` on `job` with evidence fields (None values are
-    /// dropped, matching the python kwargs filter).
+    /// dropped, matching the python kwargs filter): the fields through
+    /// the step's merge door, then the status alone
+    /// ([`step_completion_writes`] says why, backlog e39a9d2a). The
+    /// step's stored keys are not read and not re-sent — the merge door
+    /// keeps them, and a key another writer added since this pass read
+    /// the train is kept too, rather than refused.
     async fn complete_step(
         &self,
         job: &Value,
@@ -262,7 +267,7 @@ impl Conductor {
         }
         let jid = job_id(job)?;
         let step = step.ok_or_else(|| anyhow!("step missing on job {}", id8(jid)))?;
-        let mut md = metadata_map(step);
+        let mut md = Map::new();
         for (k, v) in fields {
             if let Some(v) = v {
                 md.insert((*k).to_string(), json!(v));
@@ -288,12 +293,9 @@ impl Conductor {
             "completed_at".to_string(),
             json!(crate::gate::stamp(Utc::now())),
         );
-        self.api(
-            Method::PUT,
-            &format!("/api/jobs/{jid}/steps/{sid}"),
-            Some(json!({"status": "completed", "metadata": md})),
-        )
-        .await?;
+        for (method, path, body) in step_completion_writes(jid, sid, md) {
+            self.api(method, &path, Some(body)).await?;
+        }
         log(completion_log_line(
             &step_label(step),
             id8(jid).as_str(),
@@ -718,9 +720,36 @@ impl Conductor {
             .await?,
         )?;
         for r0 in runs {
-            let rid = job_id(&r0)?.to_string();
-            let run = self.get_job(&rid).await?;
+            // EACH RUN IS ITS OWN SCOPE (review of car 2ca8c7e9). A bare
+            // `?` on this read ended the pass at the first row the API
+            // would not return — closed or deleted since the list, a
+            // refused scope — so every run after it waited on a pass that
+            // stopped at the same row each time.
+            let run = match job_id(&r0) {
+                Ok(rid) => self.get_job(rid).await.map(|run| (rid.to_string(), run)),
+                Err(e) => Err(e),
+            };
+            let (rid, run) = match run {
+                Ok(read) => read,
+                Err(e) => {
+                    log(format!(
+                        "reconcile: gate-run {} unreadable this pass (retries next): {e:#}",
+                        r0.get("id")
+                            .and_then(Value::as_str)
+                            .map_or("(no id)".into(), id8)
+                    ));
+                    continue;
+                }
+            };
             let Some(hours) = dead_gate_run_hours(&run, now) else {
+                // One refused settle must not cost the rest of the pass
+                // (the clock settles below still owe their runs).
+                if let Err(e) = self.settle_orphaned_gate_run(&rid, &run, now).await {
+                    log(format!(
+                        "reconcile: orphaned gate-run {} not settled this pass (retries next): {e:#}",
+                        id8(&rid)
+                    ));
+                }
                 continue;
             };
             let branch = metadata_map(&run)
@@ -734,27 +763,127 @@ impl Conductor {
                 id8(&rid)
             ));
             let verdict_step = find_step(&run, "record-verdict", "Record the gate verdict");
-            self.complete_step(
-                &run,
-                verdict_step,
-                &[
-                    ("verdict", Some("lost".to_string())),
-                    (
-                        "receipt",
-                        Some(format!(
-                            "NO VERDICT WAS PRODUCED. Active {hours}h with none recorded, past \
-                             the gate Job's {GATE_DEADLINE_HOURS}h activeDeadlineSeconds, so the \
-                             pod is gone and the checks never finished. Settled as LOST by the \
-                             conductor's reconcile: this run says nothing about {branch}, and an \
-                             infrastructure death is not a consist failure. Re-gate for a real \
-                             verdict."
-                        )),
-                    ),
-                ],
+            // Per run, like the read above: one refused write is logged
+            // and the rest of the list is still settled.
+            if let Err(e) = self
+                .complete_step(
+                    &run,
+                    verdict_step,
+                    &[
+                        ("verdict", Some("lost".to_string())),
+                        (
+                            "receipt",
+                            Some(format!(
+                                "NO VERDICT WAS PRODUCED. Active {hours}h with none recorded, \
+                                 past the gate Job's {GATE_DEADLINE_HOURS}h \
+                                 activeDeadlineSeconds, so the pod is gone and the checks never \
+                                 finished. Settled as LOST by the conductor's reconcile: this run \
+                                 says nothing about {branch}, and an infrastructure death is not \
+                                 a consist failure. Re-gate for a real verdict."
+                            )),
+                        ),
+                    ],
+                )
+                .await
+            {
+                log(format!(
+                    "reconcile: gate-run {} not settled this pass (retries next): {e:#}",
+                    id8(&rid)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Settle a gate-run NO JOB CARRIES and nothing has held for the
+    /// orphan window — `lost`, with the evidence on the packet — instead
+    /// of leaving it open to the three-hour clock (backlog 137c176d).
+    ///
+    /// WHY HERE. This is the one place gate-runs are settled by time, and
+    /// since design 128b5496 (2026-09-12) the conductor holds the gates
+    /// Role — it launches the train's gate — so it can now read the one
+    /// fact the clock stood in for: whether any Job exists. The estate
+    /// observer settles the OTHER dead class, a runner Job Kubernetes
+    /// marked Failed, from that Job's condition; a packet with no Job at
+    /// all was invisible to it. The two reads are disjoint by
+    /// construction: any Job, in any state, makes this pass leave the
+    /// packet alone.
+    ///
+    /// WHAT IT UNBLOCKS. The observer's dead-host pass will not end a
+    /// builder run while a gate-run naming it is open, because a runner
+    /// Job outlives the dev pod that launched it. Measured 2026-09-24: an
+    /// eviction at 01:27Z killed six runs, five ended on the first pass,
+    /// and the sixth waited until 04:45Z behind gate-run 91594262 — a
+    /// queued run whose waiter died with the pod, so no Job ever existed.
+    /// Closed here, that run ends on the observer's next pass.
+    ///
+    /// ORDER, FOR THE RACE THAT REMAINS. The cluster is read first and the
+    /// packet re-read after it, then judged again: a waiter that launched
+    /// in between either shows its Job or has refreshed its beat, which
+    /// `queue_clear_patch` now keeps. A re-gate that reuses this packet
+    /// after the re-read can still lose it to this write — no atomic claim
+    /// on a gate-run exists (gate.rs, 76d41004) — and its runner's report
+    /// is then refused loudly by the completed step, never silently.
+    ///
+    /// FAILS CLOSED: a cluster that cannot be read is logged and the run
+    /// is left to the clock, never settled on an absence nobody observed.
+    async fn settle_orphaned_gate_run(
+        &self,
+        rid: &str,
+        run: &Value,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        if orphaned_gate_run(run, now).is_none() {
+            return Ok(());
+        }
+        let ns = self.cfg.gate_namespace.clone();
+        match crate::gate::gate_jobs_for_packet(&ns, rid) {
+            Ok(jobs) if jobs.is_empty() => {}
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                log(format!(
+                    "reconcile: gate-run {} has no verdict and nothing has held it for \
+                     {ORPHAN_GATE_RUN_MINUTES} min, but the gate Jobs in {ns} could not be \
+                     read ({e:#}) — left for the {GATE_DEADLINE_HOURS}h clock",
+                    id8(rid)
+                ));
+                return Ok(());
+            }
+        }
+        let run = self.get_job(rid).await?;
+        let Some(orphan) = orphaned_gate_run(&run, now) else {
+            return Ok(());
+        };
+        let branch = metadata_map(&run)
+            .get("branch")
+            .and_then(Value::as_str)
+            .unwrap_or("(no branch)")
+            .to_string();
+        log(format!(
+            "reconcile: gate-run {} ({branch}) has no gate Job in {ns} and nothing has held it \
+             for {} min (last: {} {}) — settling as lost",
+            id8(rid),
+            orphan.idle_minutes,
+            orphan.last_alive_key,
+            orphan.last_alive,
+        ));
+        if !self.cfg.dry {
+            self.merge_job_metadata(
+                rid,
+                vec![("orphaned_gate_run", orphan_evidence(&orphan, rid, &ns, now))],
             )
             .await?;
         }
-        Ok(())
+        let verdict_step = find_step(&run, "record-verdict", "Record the gate verdict");
+        self.complete_step(
+            &run,
+            verdict_step,
+            &[
+                ("verdict", Some("lost".to_string())),
+                ("receipt", Some(orphan_receipt(&orphan, &branch, &ns))),
+            ],
+        )
+        .await
     }
 
     /// A change that landed buries its own verdicts. A closed gate-run
@@ -1411,9 +1540,12 @@ impl Conductor {
         // is the listener, and it belongs in reconcile because reconcile
         // IS the verb that makes the record match reality.
         //
-        // Settling requires no cluster access, only a clock: past the
+        // The ceiling needs no cluster access, only a clock: past the
         // gate Job's own activeDeadlineSeconds, Kubernetes has already
         // killed the Job, so a packet still claiming to gate cannot be.
+        // Under it, a run NO Job carries and nothing has held for
+        // ORPHAN_GATE_RUN_MINUTES is settled from a read of the gates
+        // Role this conductor already holds (backlog 137c176d).
         if let Err(e) = self.reap_dead_gate_runs(now).await {
             log(format!("reconcile: gate-run reap failed (non-fatal): {e}"));
         }
@@ -2094,13 +2226,11 @@ impl Conductor {
             let Some(step_id) = step.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            let existing = metadata_map(step);
-            self.api(
-                Method::PUT,
-                &format!("/api/jobs/{id}/steps/{step_id}"),
-                Some(stranded_clear_step_body(&existing, &branch, &why)),
-            )
-            .await?;
+            for (method, path, body) in
+                step_completion_writes(&id, step_id, stranded_clear_writes(&branch, &why))
+            {
+                self.api(method, &path, Some(body)).await?;
+            }
         }
         Ok(())
     }
@@ -4589,6 +4719,151 @@ mod tests {
         );
     }
 
+    /// ONE UNREADABLE RUN DOES NOT COST THE PASS (review of car 2ca8c7e9,
+    /// 2026-09-25). The reap reads every open gate-run in turn; a bare
+    /// `?` on that read made the first row the API would not return —
+    /// a packet deleted or closed between the list and the read, a 404,
+    /// a refused policy scope — end the whole pass, so every run after
+    /// it in the list waited for a pass that would stop at the same row.
+    /// Driven against an in-process jobs server: the first row answers
+    /// 404, the second is four hours past its deadline, and the second is
+    /// still settled.
+    ///
+    /// THE STUB MODELS THE STEP WRITES THE LIVE API TAKES, NOT ONE
+    /// WRITER'S SHAPE (train 07:48, gate 8dd901ac). It served only the
+    /// step PUT, so once car 6a647c88 moved `complete_step` onto the
+    /// merge door followed by a status-only PUT (backlog e39a9d2a), the
+    /// PATCH answered 404, the settle was refused, and the assembled
+    /// tree went red on this test with nothing wrong in either car. It
+    /// now holds the step's state and serves both doors the way the jobs
+    /// API does: the merge door merges keys (a `null` deletes one), and
+    /// the PUT overlays its body but refuses 409 a `metadata` that OMITS
+    /// a stored key (stage 1, on main). The assertion is on the step's
+    /// resulting state, so it holds under either writer.
+    #[tokio::test]
+    async fn one_unreadable_gate_run_does_not_stop_the_reap_pass() {
+        use axum::extract::Path;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::{get, patch, put};
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let now = Utc::now();
+        let step = Arc::new(Mutex::new(json!({
+            "id": "s-v", "spec_slug": "record-verdict", "title": "Record the gate verdict",
+            "status": "ready", "metadata": {}
+        })));
+        let dead = json!({
+            "id": "dead", "kind": "gate-run", "status": "open",
+            "metadata": { "branch": "fix/x",
+                          "opened_at": (now - chrono::Duration::hours(4)).to_rfc3339() },
+        });
+        let listed = json!({ "data": [{"id": "gone"}, {"id": "dead"}] });
+        let (step_get, step_merge, step_put) = (step.clone(), step.clone(), step.clone());
+        let app = Router::new()
+            .route(
+                "/api/jobs",
+                get(move || {
+                    let l = listed.clone();
+                    async move { Json(l) }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(id): Path<String>| {
+                    let mut d = dead.clone();
+                    d["steps"] = json!([step_get.lock().unwrap().clone()]);
+                    async move {
+                        if id == "dead" {
+                            Json(d).into_response()
+                        } else {
+                            (StatusCode::NOT_FOUND, "job not found").into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{sid}/metadata",
+                patch(
+                    move |Path((id, sid)): Path<(String, String)>, Json(b): Json<Value>| {
+                        let step = step_merge.clone();
+                        async move {
+                            if id != "dead" || sid != "s-v" {
+                                return (StatusCode::NOT_FOUND, "step not found").into_response();
+                            }
+                            let mut s = step.lock().unwrap();
+                            let md = s["metadata"].as_object_mut().unwrap();
+                            for (k, v) in b.as_object().cloned().unwrap_or_default() {
+                                if v.is_null() {
+                                    md.remove(&k);
+                                } else {
+                                    md.insert(k, v);
+                                }
+                            }
+                            Json(s.clone()).into_response()
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{sid}",
+                put(
+                    move |Path((id, sid)): Path<(String, String)>, Json(b): Json<Value>| {
+                        let step = step_put.clone();
+                        async move {
+                            if id != "dead" || sid != "s-v" {
+                                return (StatusCode::NOT_FOUND, "step not found").into_response();
+                            }
+                            let mut s = step.lock().unwrap();
+                            if let Some(md) = b.get("metadata") {
+                                let omitted: Vec<String> = s["metadata"]
+                                    .as_object()
+                                    .map(|m| {
+                                        m.keys().filter(|k| md.get(*k).is_none()).cloned().collect()
+                                    })
+                                    .unwrap_or_default();
+                                if !omitted.is_empty() {
+                                    return (
+                                        StatusCode::CONFLICT,
+                                        Json(json!({"error": "metadata omits stored keys",
+                                                    "keys": omitted})),
+                                    )
+                                        .into_response();
+                                }
+                            }
+                            for (k, v) in b.as_object().cloned().unwrap_or_default() {
+                                s[k.as_str()] = v;
+                            }
+                            Json(s.clone()).into_response()
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut c = cleanup_conductor(
+            "forgejo",
+            Box::new(FakeForge {
+                deleted: Arc::new(Mutex::new(Vec::new())),
+                fail_deletes: false,
+            }),
+        );
+        c.cfg.jobs = format!("http://{addr}");
+
+        c.reap_dead_gate_runs(now)
+            .await
+            .expect("a row that cannot be read is logged, not fatal");
+        let settled = step.lock().unwrap().clone();
+        assert_eq!(
+            (&settled["status"], &settled["metadata"]["verdict"]),
+            (&json!("completed"), &json!("lost")),
+            "the run after the unreadable one is still settled: {settled}"
+        );
+    }
+
     /// f2ba226e: pr-train 06e5610f was admitted with nine of its ten
     /// steps — the `cancelled` terminal never written — and `boss train
     /// cancel` refused with "step missing on job", AFTER it had already
@@ -4605,7 +4880,7 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .retain(|s| s["spec_slug"] != "cancelled");
-        let (jobs, job_puts, step_puts) =
+        let (jobs, job_puts, step_puts, step_patches) =
             cancel_request_jobs_api(train, struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
@@ -4637,7 +4912,7 @@ mod tests {
         );
         assert!(job_puts.lock().unwrap().is_empty(), "no car was released");
         assert!(
-            step_puts.lock().unwrap().is_empty(),
+            step_puts.lock().unwrap().is_empty() && step_patches.lock().unwrap().is_empty(),
             "no step was completed"
         );
     }
@@ -4661,7 +4936,7 @@ mod tests {
                 s["metadata"] = json!({});
             }
         }
-        let (jobs, job_puts, step_puts) =
+        let (jobs, job_puts, step_puts, step_patches) =
             cancel_request_jobs_api(train, struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
@@ -4684,7 +4959,7 @@ mod tests {
         );
         assert!(job_puts.lock().unwrap().is_empty(), "no car was released");
         assert!(
-            step_puts.lock().unwrap().is_empty(),
+            step_puts.lock().unwrap().is_empty() && step_patches.lock().unwrap().is_empty(),
             "no step was completed"
         );
     }
@@ -4700,7 +4975,7 @@ mod tests {
                 s["metadata"] = json!({ "outcome_kind": "aborted" });
             }
         }
-        let (jobs, job_puts, step_puts) =
+        let (jobs, job_puts, step_puts, _) =
             cancel_request_jobs_api(train, struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
@@ -4795,19 +5070,38 @@ mod tests {
     type JobPuts = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
     type StepPuts = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>;
 
+    /// The step PUT as David's decided end state has it (design
+    /// 93d2bddb, backlog e39a9d2a): a body carrying `metadata` is
+    /// REFUSED 409, and the fields go through the merge door. The stubs
+    /// below answer this way so the conductor's completions are pinned
+    /// to the form that survives the tighten, not only to today's
+    /// omission rule.
+    fn end_state_step_put(body: &Value) -> Option<(axum::http::StatusCode, axum::Json<Value>)> {
+        body.get("metadata").map(|_| {
+            (
+                axum::http::StatusCode::CONFLICT,
+                axum::Json(json!({"error": "a step PUT carries no metadata; use the merge door"})),
+            )
+        })
+    }
+
     /// An in-process jobs API holding one train and one car, recording
     /// every write. Serves the open pr-train list and both fetches;
     /// every other list answers empty.
-    async fn cancel_request_jobs_api(train: Value, car: Value) -> (String, JobPuts, StepPuts) {
+    async fn cancel_request_jobs_api(
+        train: Value,
+        car: Value,
+    ) -> (String, JobPuts, StepPuts, StepPatches) {
         use axum::extract::{Path, RawQuery};
-        use axum::routing::{get, put};
+        use axum::routing::{get, patch, put};
         use axum::{Json, Router};
         use std::sync::{Arc, Mutex};
 
         let job_puts: JobPuts = Arc::new(Mutex::new(Vec::new()));
         let step_puts: StepPuts = Arc::new(Mutex::new(Vec::new()));
+        let step_patches: StepPatches = Arc::new(Mutex::new(Vec::new()));
         let (train_list, train_one) = (train.clone(), train);
-        let (jp, sp) = (job_puts.clone(), step_puts.clone());
+        let (jp, sp, spp) = (job_puts.clone(), step_puts.clone(), step_patches.clone());
         let app = Router::new()
             .route(
                 "/api/jobs",
@@ -4841,7 +5135,22 @@ mod tests {
                     move |Path((id, sid)): Path<(String, String)>, Json(body): Json<Value>| {
                         let sp = sp.clone();
                         async move {
+                            if let Some(refused) = end_state_step_put(&body) {
+                                return refused;
+                            }
                             sp.lock().unwrap().push((id, sid, body));
+                            (axum::http::StatusCode::OK, Json(json!({})))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{sid}/metadata",
+                patch(
+                    move |Path((id, sid)): Path<(String, String)>, Json(body): Json<Value>| {
+                        let spp = spp.clone();
+                        async move {
+                            spp.lock().unwrap().push((id, sid, body));
                             Json(json!({}))
                         }
                     },
@@ -4850,7 +5159,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (format!("http://{addr}"), job_puts, step_puts)
+        (format!("http://{addr}"), job_puts, step_puts, step_patches)
     }
 
     fn cancel_request_conductor(
@@ -4876,7 +5185,7 @@ mod tests {
     /// reason — and the request claims the train's pass.
     #[tokio::test]
     async fn a_cancel_request_on_an_open_train_releases_its_cars_unstruck() {
-        let (jobs, job_puts, step_puts) =
+        let (jobs, job_puts, step_puts, step_patches) =
             cancel_request_jobs_api(requested_open_train(), struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
@@ -4906,15 +5215,23 @@ mod tests {
             "an operator's cancel strikes no car"
         );
 
+        // The reason lands through the merge door, and the flip that
+        // completes the terminal carries the status alone (e39a9d2a).
+        let patches = step_patches.lock().unwrap();
+        let (_, _, reason) = patches
+            .iter()
+            .find(|(id, sid, _)| id == "t1" && sid == "s-cancelled")
+            .expect("the cancelled terminal's reason went through the merge door");
+        assert_eq!(
+            reason["reason"],
+            json!("operator cancel: bad consist (by emp-david)")
+        );
         let steps = step_puts.lock().unwrap();
         let (_, _, cancelled) = steps
             .iter()
             .find(|(id, sid, _)| id == "t1" && sid == "s-cancelled")
             .expect("the cancelled terminal was completed");
-        assert_eq!(
-            cancelled["metadata"]["reason"],
-            json!("operator cancel: bad consist (by emp-david)")
-        );
+        assert_eq!(cancelled, &json!({"status": "completed"}));
     }
 
     /// The forge refuses the close: the train stays intact — no car
@@ -4924,7 +5241,7 @@ mod tests {
     /// loop has nothing to `?` and the other trains continue.
     #[tokio::test]
     async fn a_forge_failure_leaves_the_train_intact_and_the_pass_alive() {
-        let (jobs, job_puts, step_puts) =
+        let (jobs, job_puts, step_puts, step_patches) =
             cancel_request_jobs_api(requested_open_train(), struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, false);
 
@@ -4938,8 +5255,8 @@ mod tests {
             "no car released, nothing stamped — a retry next pass is clean"
         );
         assert!(
-            step_puts.lock().unwrap().is_empty(),
-            "no terminal completed"
+            step_puts.lock().unwrap().is_empty() && step_patches.lock().unwrap().is_empty(),
+            "no terminal completed, nothing merged onto it"
         );
     }
 
@@ -4951,14 +5268,14 @@ mod tests {
         let mut train = requested_open_train();
         train["steps"][3]["status"] = json!("completed");
         train["steps"][3]["metadata"]["merge_ref"] = json!("abc1234def56");
-        let (jobs, job_puts, step_puts) =
+        let (jobs, job_puts, step_puts, step_patches) =
             cancel_request_jobs_api(train.clone(), struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
         assert!(!c.honour_cancel_request(&train, "t1", Some("MERGED")).await);
         assert!(!*close_called.lock().unwrap(), "nothing closed");
         assert!(
-            step_puts.lock().unwrap().is_empty(),
+            step_puts.lock().unwrap().is_empty() && step_patches.lock().unwrap().is_empty(),
             "no terminal completed"
         );
         let puts = job_puts.lock().unwrap();
@@ -4981,7 +5298,7 @@ mod tests {
     #[tokio::test]
     async fn a_bad_car_does_not_orphan_the_rest_of_the_train() {
         use axum::extract::Path;
-        use axum::routing::{get, put};
+        use axum::routing::{get, patch, put};
         use axum::{Json, Router};
         use std::sync::{Arc, Mutex};
 
@@ -5001,6 +5318,7 @@ mod tests {
         let cars_get = cars.clone();
         let writes_step = writes.clone();
         let writes_meta = writes.clone();
+        let writes_merge = writes.clone();
         let app = Router::new()
             .route(
                 "/api/jobs/{id}",
@@ -5025,11 +5343,26 @@ mod tests {
                 }),
             )
             .route(
+                "/api/jobs/{id}/steps/{sid}/metadata",
+                patch(
+                    move |Path((id, _sid)): Path<(String, String)>, _b: Json<Value>| {
+                        let writes = writes_merge.clone();
+                        async move {
+                            writes.lock().unwrap().push((id, "merge".into()));
+                            Json(json!({}))
+                        }
+                    },
+                ),
+            )
+            .route(
                 "/api/jobs/{id}/steps/{sid}",
                 put(
-                    move |Path((id, _sid)): Path<(String, String)>, _b: Json<Value>| {
+                    move |Path((id, _sid)): Path<(String, String)>, Json(b): Json<Value>| {
                         let writes = writes_step.clone();
                         async move {
+                            if let Some(refused) = end_state_step_put(&b) {
+                                return refused;
+                            }
                             if id == "c2" {
                                 return (
                                     axum::http::StatusCode::UNPROCESSABLE_ENTITY,
@@ -5087,7 +5420,7 @@ mod tests {
     #[tokio::test]
     async fn a_partial_close_retries_the_failed_car_idempotently() {
         use axum::extract::Path;
-        use axum::routing::{get, put};
+        use axum::routing::{get, patch, put};
         use axum::{Json, Router};
         use std::collections::HashSet;
         use std::sync::{Arc, Mutex};
@@ -5106,6 +5439,7 @@ mod tests {
         let heal_step = heal_c2.clone();
         let writes_step = writes.clone();
         let writes_meta = writes.clone();
+        let writes_merge = writes.clone();
         let app = Router::new()
             .route(
                 "/api/jobs/{id}",
@@ -5140,11 +5474,26 @@ mod tests {
                 }),
             )
             .route(
+                "/api/jobs/{id}/steps/{sid}/metadata",
+                patch(
+                    move |Path((id, _sid)): Path<(String, String)>, _b: Json<Value>| {
+                        let writes = writes_merge.clone();
+                        async move {
+                            writes.lock().unwrap().push((id, "merge".into()));
+                            Json(json!({}))
+                        }
+                    },
+                ),
+            )
+            .route(
                 "/api/jobs/{id}/steps/{sid}",
                 put(
-                    move |Path((id, _sid)): Path<(String, String)>, _b: Json<Value>| {
+                    move |Path((id, _sid)): Path<(String, String)>, Json(b): Json<Value>| {
                         let (reviewed, writes) = (reviewed_step.clone(), writes_step.clone());
                         async move {
+                            if let Some(refused) = end_state_step_put(&b) {
+                                return refused;
+                            }
                             writes.lock().unwrap().push((id.clone(), "review".into()));
                             reviewed.lock().unwrap().insert(id);
                             (axum::http::StatusCode::OK, Json(json!({})))

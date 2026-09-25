@@ -464,8 +464,8 @@ spec:
                   # its verdict (cp-2 and w-1 together, 2026-09-11 18:58Z,
                   # incident a398c4d3): Kubernetes marks the Job Failed
                   # that second, but the only reader of a gate Job was
-                  # the Job, and the conductor that reaps dead runs has no
-                  # Kubernetes access by design, so it reaps by CLOCK —
+                  # the Job, and the conductor that reaps dead runs then
+                  # had no Kubernetes access, so it reaps by CLOCK —
                   # three hours after opened_at — while the yard draws
                   # the corpse as a healthy run and a re-gate shows two
                   # rows for one branch. This observer has kubectl AND a
@@ -475,6 +475,9 @@ spec:
                   # verdict the gate-run protocol already has for "the
                   # environment died" — naming the Job and its Failed
                   # condition, because a verdict must name what failed.
+                  # (Since 2026-09-12 it holds the gates Role, and since
+                  # backlog 137c176d it settles the class this pass cannot
+                  # see — a run NO Job carries; a Failed Job stays here.)
                   # A Job that failed AFTER reporting (a red gate's runner
                   # exits non-zero) already carries its verdict and is
                   # left alone: the report is the truth, the exit code is
@@ -625,7 +628,15 @@ spec:
                   # going: an open gate-run naming the run, or a GREEN one
                   # (agent-run-lands-on-gate-green lands it), is left to
                   # that verdict and said out loud. A red gate with no
-                  # builder left to repair it is an ended run.
+                  # builder left to repair it is an ended run. An open
+                  # gate-run NO Job carries is not work still going: the
+                  # conductor's reconcile settles it `lost` once nothing
+                  # has held it for ORPHAN_GATE_RUN_MINUTES (15), with the
+                  # empty Job read and last sign of life on the packet, and the
+                  # next pass here ends the run. Until 2026-09-25 only
+                  # the 3h clock closed one, so an eviction held run
+                  # 260320ba three hours behind gate-run 91594262
+                  # (backlog 137c176d).
                   #
                   # WHAT IT WRITES: `building` completed with
                   # `result = died` — the run's own terminal, the same

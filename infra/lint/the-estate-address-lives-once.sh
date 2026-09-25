@@ -103,7 +103,6 @@ infra/cluster/talos/patches/cp-2.yaml	machine.registries.mirrors, as above
 infra/cluster/talos/patches/cp-3.yaml	machine.registries.mirrors, as above
 infra/cluster/talos/patches/w-1.yaml	machine.registries.mirrors, as above
 infra/forge/boss-ci/Dockerfile	FROM lines pull mirrored bases by registry tag; a Dockerfile reads no env
-infra/gate-runner/gate-runner-local.yaml	the gate Job's images (a manifest rendered by gate.rs)
 infra/gate-runner/gate-runner.yaml	the gate Job's images (a manifest rendered by gate.rs)
 infra/gate-runner/run.sh	runs in a cluster Job before it has a checkout or a host file; gate.rs rendering both addresses from the source is the follow-up
 infra/lint/ci-checks-out-from-the-forge.sh	the expected checkout line it holds ci.yml to

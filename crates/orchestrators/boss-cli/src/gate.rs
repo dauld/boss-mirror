@@ -629,8 +629,31 @@ pub(crate) fn queue_place_patch(now: chrono::DateTime<chrono::Utc>) -> Value {
 /// Release the place. `null` DELETES the key on a metadata PATCH, and
 /// that matters: a blank string reads as a queued run, which would hide
 /// a genuinely running gate from the yard's bays.
+///
+/// THE LAST BEAT STAYS (backlog 137c176d). Only the marker goes: the
+/// heartbeat is left as the last instant this process said it held the
+/// run, because the conductor settles a gate-run `lost` once nothing has
+/// said so for a window and no gate Job carries it
+/// (`train::orphaned_gate_run`). Deleted, a run leaving an hour-long
+/// wait to launch would be dated from its filing — an hour idle, with its
+/// Job a second from existing. The line and the abandoned list both read
+/// `queued_at` first, so a beat with no marker is in neither.
 pub(crate) fn queue_clear_patch() -> Value {
-    json!({ QUEUED_AT: Value::Null, QUEUE_HEARTBEAT_AT: Value::Null })
+    json!({ QUEUED_AT: Value::Null })
+}
+
+/// The instant this process began launching a REUSED gate-run — a sign
+/// of life the conductor's orphan judgement reads beside `opened_at` and
+/// the queue stamps (`train::orphaned_gate_run`; review of car 2ca8c7e9,
+/// backlog 137c176d). A reused packet was filed by an earlier run, so its
+/// own stamps can be an hour old while this one rebases, judges and
+/// admits before `kubectl create`; without a fresh stamp it reads as an
+/// orphan through that whole gap.
+pub(crate) const LAUNCHING_AT: &str = "launching_at";
+
+/// Stamp a reused packet alive at launch. See [`LAUNCHING_AT`].
+pub(crate) fn launching_patch(at: chrono::DateTime<chrono::Utc>) -> Value {
+    json!({ LAUNCHING_AT: stamp(at) })
 }
 
 /// A place in the gate queue that NO LIVE PROCESS HOLDS — a gate-run
@@ -783,7 +806,41 @@ pub(crate) fn check_placeholders(manifest: &str) -> Result<()> {
             );
         }
     }
+    if !job_carries_packet_label(&job_document(manifest)?) {
+        bail!(
+            "runner manifest's Job does not carry the label `{PACKET_LABEL}: \
+             {PACKET_PLACEHOLDER}` on its own metadata. Every reader that asks the cluster \
+             whether a gate-run is being gated selects on it — the attach check, and the \
+             conductor's orphan settle, which would settle this Job's run `lost` under it \
+             fifteen minutes in. A pod-template label does not label the Job."
+        );
+    }
     Ok(())
+}
+
+/// The label that ties a gate Job to its gate-run packet. Selected on by
+/// [`live_gate_for_packet`], [`gate_jobs_for_packet`] and the estate
+/// observer's Failed-Job pass.
+const PACKET_LABEL: &str = "boss.dev/packet";
+
+/// Does the Job document label ITSELF with its packet — the label on the
+/// top-level `metadata:` block, flow or block style, not in a comment and
+/// not on the pod template (review of car 2ca8c7e9, backlog 137c176d).
+/// Hand-scanned for the same reason as the workspace-shape guard: no
+/// YAML parser in this crate, and the shape needed is one block deep.
+fn job_carries_packet_label(job: &str) -> bool {
+    let wanted = format!("{PACKET_LABEL}: {PACKET_PLACEHOLDER}");
+    let mut in_metadata = false;
+    job.lines().any(|line| {
+        let top_level = !line.starts_with([' ', '\t', '#']) && !line.trim().is_empty();
+        if top_level {
+            in_metadata = line.starts_with("metadata:");
+        }
+        let code = line.split(" #").next().unwrap_or_default();
+        in_metadata
+            && !code.trim_start().starts_with('#')
+            && code.replace(['"', '\''], "").contains(&wanted)
+    })
 }
 
 /// The `kind: Job` document of the multi-document runner manifest.
@@ -2773,6 +2830,8 @@ pub async fn run(
     hold: Option<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
+    // Carries `now` forward to a stamp written later in this verb.
+    let verb_started = std::time::Instant::now();
     let manifest_path =
         manifest.unwrap_or_else(|| PathBuf::from("infra/gate-runner/gate-runner.yaml"));
     let manifest_text = std::fs::read_to_string(&manifest_path)
@@ -2998,6 +3057,31 @@ pub async fn run(
              `boss gate {branch} --wait`, which attaches."
         );
         return Ok(());
+    }
+
+    // A REUSED PACKET IS STAMPED ALIVE BEFORE ITS LAUNCH (review of car
+    // 2ca8c7e9, backlog 137c176d). Its own stamps belong to the run that
+    // filed it — an hour old, if that run's waiter died — and what follows
+    // (the rebase, the bundle and prior reads, admission) can take minutes
+    // before `kubectl create`. The conductor settles a gate-run `lost`
+    // when no Job carries it and nothing has held it for
+    // `train::ORPHAN_GATE_RUN_MINUTES`, so without this stamp a reconcile
+    // in that gap closes the packet under a launch a second from its Job.
+    // Dated now, not at this verb's start: `now` advanced by the monotonic
+    // time since (the no-wallclock rule). A refusal here files nothing —
+    // the packet already exists and stays reusable — so it is a plain `?`.
+    if let Some(id) = reuse.as_deref().filter(|_| !dry) {
+        let at = now
+            + chrono::Duration::from_std(verb_started.elapsed())
+                .unwrap_or_else(|_| chrono::Duration::zero());
+        api(
+            &http,
+            reqwest::Method::PATCH,
+            &format!("/api/jobs/{id}/metadata"),
+            Some(launching_patch(at)),
+        )
+        .await
+        .context("stamping the reused gate-run alive before launching it")?;
     }
 
     // NOR IS A BASE THAT IS NOT CURRENT. Same admission law as the two
@@ -4244,6 +4328,30 @@ fn live_gate_for_packet(namespace: &str, packet: &str) -> Result<Option<String>>
             )
         })?;
     Ok(live_gates(&table).into_iter().next())
+}
+
+/// Every gate Job carrying this packet, in ANY state, by name — the
+/// cluster half of an orphan (backlog 137c176d; `train::orphaned_gate_run`
+/// is the record half). Live, Failed or Succeeded, a Job that exists
+/// means the run is not an orphan: a live one is still gating and a
+/// Failed one is settled by the estate observer from its condition.
+///
+/// FAILS CLOSED (via [`gate_jobs_table`]): the act it guards is writing
+/// `lost`, and an unreadable cluster must never read as "no Job".
+pub(crate) fn gate_jobs_for_packet(namespace: &str, packet: &str) -> Result<Vec<String>> {
+    Ok(job_names(&gate_jobs_table(
+        namespace,
+        &format!("boss.dev/packet={packet}"),
+    )?))
+}
+
+/// The NAME column of a [`gate_jobs_table`], every row.
+fn job_names(table: &str) -> Vec<String> {
+    table
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -5920,7 +6028,7 @@ mod tests {
             "---",
             "apiVersion: batch/v1",
             "kind: Job",
-            "metadata: {generateName: gate-$GATE_NAME_HINT-}",
+            "metadata: {generateName: gate-$GATE_NAME_HINT-, labels: {boss.dev/packet: $GATE_RUN_JOB_ID}}",
             "spec:",
             "  template:",
             "    spec:",
@@ -6069,6 +6177,49 @@ mod tests {
             queue_order(&open, now, QUEUE_PLACE_TTL_SECS),
             vec!["earlier".to_string(), "later".to_string()]
         );
+    }
+
+    /// EVERY JOB IS COUNTED, IN ANY STATE. The orphan settle asks whether
+    /// ANY gate Job carries a packet — a live one is still gating, a
+    /// Failed one is the observer's to settle from its condition — so the
+    /// read names every row, not only the live ones `live_gates` keeps.
+    /// kubectl says "No resources found" on stderr, so none is an empty
+    /// stdout.
+    #[test]
+    fn every_job_row_is_named_whatever_its_state() {
+        let table = "gate-fix-a-x7k2p   1        <none>\n\ngate-fix-a-9qz4m   <none>   1\n\
+                     gate-fix-a-live1   <none>   <none>\n";
+        assert_eq!(
+            job_names(table),
+            vec!["gate-fix-a-x7k2p", "gate-fix-a-9qz4m", "gate-fix-a-live1"]
+        );
+        assert!(job_names("").is_empty());
+        assert!(job_names("\n  \n").is_empty());
+    }
+
+    /// RELEASING A PLACE KEEPS ITS LAST BEAT (backlog 137c176d). The
+    /// conductor settles a gate-run `lost` once nothing has said it is
+    /// alive for a window AND no gate Job carries it, dating "alive" from
+    /// the latest stamp on the packet. A run that queued for an hour and
+    /// is now launching has only its `opened_at` if the release deletes
+    /// the beat — an hour old, with the Job a second from existing — so
+    /// the release drops the MARKER and leaves the beat. Nothing reads
+    /// the beat without the marker: the line and the abandoned list both
+    /// key on `queued_at` first.
+    #[test]
+    fn releasing_a_place_drops_the_marker_and_keeps_the_last_beat() {
+        let clear = queue_clear_patch();
+        assert_eq!(clear.get(QUEUED_AT), Some(&Value::Null));
+        assert_eq!(
+            clear.get(QUEUE_HEARTBEAT_AT),
+            None,
+            "the last beat is kept, not deleted: {clear}"
+        );
+        let now = at("2026-09-08T20:00:00Z");
+        let released = json!({ "id": "launching",
+            "metadata": { "branch": "feat/x", QUEUE_HEARTBEAT_AT: "2026-09-08T19:59:40Z" } });
+        assert!(queue_order(std::slice::from_ref(&released), now, QUEUE_PLACE_TTL_SECS).is_empty());
+        assert!(abandoned_places(&[released], now, QUEUE_PLACE_TTL_SECS).is_empty());
     }
 
     /// A PLACE HELD BY A DEAD SESSION EXPIRES. This is the orphan the
@@ -6767,7 +6918,7 @@ mod tests {
     const MANIFEST: &str = "\
 apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk\n\
 ---\napiVersion: batch/v1\nkind: Job\nmetadata:\n  generateName: gate-$GATE_NAME_HINT-\n\
-  labels: {boss.dev/branch: $GATE_NAME_HINT}\nspec:\n  template:\n\
+\x20 labels: {boss.dev/packet: $GATE_RUN_JOB_ID, boss.dev/branch: $GATE_NAME_HINT}\nspec:\n  template:\n\
     spec:\n      containers:\n        - name: gate\n          env:\n\
             - {name: GATE_BRANCH, value: $GATE_BRANCH}\n\
             - {name: GATE_RUN_JOB_ID, value: $GATE_RUN_JOB_ID}\n\
@@ -6834,6 +6985,50 @@ apiVersion: v1\nkind: PersistentVolumeClaim\nmetadata:\n  name: gate-runner-disk
                 "$GATE_MODE_OVERRIDE".to_string()
             ]
         );
+    }
+
+    /// A JOB THE CLUSTER CANNOT TIE TO ITS PACKET IS REFUSED (review of
+    /// car 2ca8c7e9, 2026-09-25). The conductor settles a gate-run `lost`
+    /// when no gate Job carries `boss.dev/packet=<id>` — so a Job rendered
+    /// WITHOUT that label is invisible to the read, and its live run would
+    /// be settled under it fifteen minutes in. The attach check
+    /// (`live_gate_for_packet`) reads the same label. The label must sit
+    /// on the JOB's own metadata: the pod template's labels do not label
+    /// the Job, and a comment labels nothing.
+    #[test]
+    fn a_job_without_the_packet_label_is_refused() {
+        let unlabelled = MANIFEST.replace("boss.dev/packet: $GATE_RUN_JOB_ID, ", "");
+        let err = render_job(&unlabelled, "b", "p", "full").expect_err("must refuse");
+        assert!(format!("{err}").contains("boss.dev/packet"), "{err}");
+        assert!(
+            check_placeholders(&unlabelled).is_err(),
+            "the pre-flight too"
+        );
+
+        // On the pod template only: still unlabelled, as a Job.
+        let on_the_pod = unlabelled.replace(
+            "  template:\n",
+            "  template:\n    metadata:\n      labels: {boss.dev/packet: $GATE_RUN_JOB_ID}\n",
+        );
+        assert!(render_job(&on_the_pod, "b", "p", "full").is_err());
+
+        // In a comment on the Job's metadata: still unlabelled.
+        let commented = unlabelled.replace(
+            "  generateName:",
+            "  # boss.dev/packet: $GATE_RUN_JOB_ID\n  generateName:",
+        );
+        assert!(render_job(&commented, "b", "p", "full").is_err());
+
+        // Block style, as the shipped manifest spells it, is accepted.
+        let block = unlabelled.replace(
+            "  labels: {boss.dev/branch: $GATE_NAME_HINT}\n",
+            "  labels:\n    boss.dev/packet: $GATE_RUN_JOB_ID\n    boss.dev/branch: $GATE_NAME_HINT\n",
+        );
+        let job = render_job(&block, "b", "pkt-9", "full").expect("block-style label renders");
+        assert!(job.contains("boss.dev/packet: pkt-9"), "{job}");
+        // And the flow style both fixtures use.
+        assert!(render_job(MANIFEST, "b", "p", "full").is_ok());
+        assert!(render_job(&parallel_manifest(), "b", "p", "full").is_ok());
     }
 
     #[test]

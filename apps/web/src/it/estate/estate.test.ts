@@ -7,6 +7,9 @@ import {
   ESTATE_LOOPS,
   fetchEstate,
   HOST_COMPARISONS_READ,
+  hostCoverText,
+  hostLines,
+  hostPageIsWhole,
   latestByScope,
   latestComparison,
   latestPerHost,
@@ -15,6 +18,7 @@ import {
   loopPlan,
   loopQueries,
   LOOP_OK_OUTCOMES,
+  missingHostText,
   OPS_REQUEST_KIND,
   OPS_RUNNER_ROLE,
   parseComparisons,
@@ -224,7 +228,7 @@ describe('the host comparison', () => {
     expect(v.text).toBe('1 observed but not declared');
   });
 
-  test('the scoped read keeps host rows, its total and the oldest instant it reached', () => {
+  test('the grouped read keeps host rows and its total, which counts hosts', () => {
     const page = parseHostComparisons({
       data: [
         hostCmp('forge', '2026-09-23T16:15:00Z'),
@@ -233,14 +237,72 @@ describe('the host comparison', () => {
         { payload: { scope: 'host-units', observed_at: '2026-09-23T16:14:00Z', host: 'forge', counts: {} } },
         hostCmp('boss-gcp', '2026-09-23T10:25:00Z'),
       ],
-      total: 612,
+      total: 2,
     });
     expect(page.rows.map((r) => r.host)).toEqual(['forge', 'boss-gcp']);
-    expect(page.total).toBe(612);
-    expect(page.oldest).toBe('2026-09-23T10:25:00Z');
+    expect(page.total).toBe(2);
+    expect(hostPageIsWhole(page)).toBe(true);
   });
 
-  test('fetchEstate reads the host series scoped, apart from the unscoped page of 20', async () => {
+  // Backlog 725532ab: the page used to take a scoped page of 50 rows
+  // and say how far back it reached, because boss-gcp's daily row fell
+  // off it about half of every day. The read now groups per host on
+  // the server, and the page owes a line to every DECLARED host.
+  test('every declared host outside the cluster gets a line — one with no comparison says so', () => {
+    const nodes = {
+      kind: 'ready' as const,
+      data: parseNodes([
+        node({ id: 'forge', role: 'forge' }),
+        node({ id: 'boss-gcp', role: 'bastion' }),
+        node({ id: 'lab-1', role: 'lab-host' }),
+        node({ id: 'w-1', role: 'talos-worker' }),
+        node({ id: 'old-host', role: 'forge', retired: true }),
+      ]),
+    };
+    const page = parseHostComparisons({
+      data: [hostCmp('forge', '2026-09-25T07:45:00Z', { drift: 1 }), hostCmp('boss-gcp', '2026-09-25T10:25:00Z')],
+      total: 2,
+    });
+    const lines = hostLines(nodes, page);
+    expect(lines.map((l) => [l.host, l.cmp?.observed_at ?? null])).toEqual([
+      ['boss-gcp', '2026-09-25T10:25:00Z'],
+      ['forge', '2026-09-25T07:45:00Z'],
+      // Declared, outside the cluster, live — and no comparison: a line.
+      ['lab-1', null],
+    ]);
+    expect(missingHostText(page)).toBe('no host comparison recorded');
+  });
+
+  test('a host that compared without being declared keeps its line; an unread registry leaves only the rows', () => {
+    const page = parseHostComparisons({ data: [hostCmp('mystery-box', '2026-09-25T10:00:00Z')], total: 1 });
+    const failed = { kind: 'failed' as const, error: 'HTTP 503' };
+    expect(hostLines(failed, page).map((l) => l.host)).toEqual(['mystery-box']);
+    const declared = { kind: 'ready' as const, data: parseNodes([node({ id: 'forge', role: 'forge' })]) };
+    expect(hostLines(declared, page).map((l) => l.host)).toEqual(['forge', 'mystery-box']);
+  });
+
+  test('a read that is not whole never tells a declared host it has no comparison', () => {
+    // More hosts than the page held (rows < total), or a server that
+    // did not count: the absence is of the READ, not of the host.
+    const truncated = parseHostComparisons({ data: [hostCmp('forge', '2026-09-25T07:45:00Z')], total: 3 });
+    expect(hostPageIsWhole(truncated)).toBe(false);
+    expect(missingHostText(truncated)).toBe('not among the 1 of 3 hosts this read returned');
+    expect(hostCoverText(truncated)).toBe('The host read returned 1 of 3 hosts: a host past it has no comparison shown here.');
+    const uncounted = parseHostComparisons([hostCmp('forge', '2026-09-25T07:45:00Z')]);
+    expect(hostPageIsWhole(uncounted)).toBe(false);
+    // An older reader that ignored latest_per answers a scoped page of
+    // one host's rows with the SERIES total: 1 host held, not whole.
+    const ungrouped = parseHostComparisons({
+      data: [hostCmp('forge', '2026-09-25T07:45:00Z'), hostCmp('forge', '2026-09-25T07:30:00Z')],
+      total: 768,
+    });
+    expect(hostCoverText(ungrouped)).toBe('The host read returned 1 of 768 hosts: a host past it has no comparison shown here.');
+    // Nothing at all is a whole answer, counted or not.
+    expect(hostPageIsWhole(parseHostComparisons([]))).toBe(true);
+    expect(hostCoverText(parseHostComparisons({ data: [hostCmp('forge', '2026-09-25T07:45:00Z')], total: 1 }))).toBeNull();
+  });
+
+  test('fetchEstate reads the host series grouped per host, apart from the unscoped page of 20', async () => {
     const asked: string[] = [];
     globalThis.fetch = (async (url: RequestInfo | URL) => {
       const u = String(url);
@@ -251,7 +313,7 @@ describe('the host comparison', () => {
       return new Response(JSON.stringify(body), { status: 200 });
     }) as unknown as typeof fetch;
     const s = await fetchEstate();
-    expect(HOST_COMPARISONS_READ).toBe('/api/estate/comparisons?scope=host&limit=50');
+    expect(HOST_COMPARISONS_READ).toBe('/api/estate/comparisons?scope=host&latest_per=host&limit=50');
     expect(asked).toContain(HOST_COMPARISONS_READ);
     expect(s.hostComparisons.kind).toBe('ready');
     if (s.hostComparisons.kind === 'ready') {

@@ -623,11 +623,21 @@ pub struct EstateBatchOutcome {
 /// reads: an exact payload `scope`, and a half-open `[since, until)`
 /// window on the event's timestamp — every filter applied where the
 /// limit is. All absent reads the whole kind.
+///
+/// `latest_per` names a top-level payload key: set, the window answers
+/// only the NEWEST row of each distinct value of that key (a row
+/// without the key is one group of its own), grouped inside the window
+/// and before the limit, and the page's `total` counts GROUPS. Backlog
+/// 725532ab: `scope=host` still let forge's fifteen-minute rows spend
+/// the whole page, so boss-gcp's daily comparison was unreadable about
+/// half of every day; "the newest word from each host" is a question
+/// about hosts, and only a read that groups by host answers it whole.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventWindow {
     pub scope: Option<String>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
+    pub latest_per: Option<String>,
 }
 
 /// One page of an event series, newest first, as the raw rows
@@ -1167,6 +1177,29 @@ pub trait JobsRepository: Send + Sync {
     /// STEP_UPDATED would have rebuilt at 0 from rows at 1 or 3.
     /// Pinned by `tests/a_created_step_replays_at_its_plugin_version_pg.rs`.
     async fn active_step_plugin_version(&self, kind: &str) -> Result<i32, JobsError>;
+
+    /// The one-time repair door for steps whose log says plugin version
+    /// 0 while the row holds the stamped one (backlog 5a670a71; the
+    /// contract is [`crate::plugin_version_repair`]). Scans every step
+    /// whose log-derived version differs from its row, judges each
+    /// under the row's lock, and — only when `write` — appends ONE
+    /// STEP_UPDATED built from the row for each step whose divergence
+    /// is exactly that defect, stamped by `stamp`. Everything else is
+    /// listed as refused and left alone.
+    ///
+    /// Default: refused. An adapter that keeps no event log has no
+    /// divergence to find, and an empty report would read as "the log
+    /// agrees" — a confident answer to a question it cannot ask.
+    async fn repair_step_plugin_versions(
+        &self,
+        write: bool,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<crate::plugin_version_repair::RepairReport, JobsError> {
+        let _ = (write, stamp);
+        Err(JobsError::Storage(
+            "this adapter keeps no event log, so it cannot compare one with its rows".into(),
+        ))
+    }
 
     async fn list_steps(&self, job_id: &JobId) -> Result<Vec<Step>, JobsError>;
 

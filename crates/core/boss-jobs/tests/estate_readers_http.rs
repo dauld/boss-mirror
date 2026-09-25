@@ -19,7 +19,10 @@
 //!   the property that makes a slow-cadence scope readable at all;
 //! - `?since=` / `?until=` bound a half-open window in the same WHERE
 //!   clause, `until=` pages back past the cap, and `total` counts the
-//!   window — the properties a post-mortem needs (bf362f25).
+//!   window — the properties a post-mortem needs (bf362f25);
+//! - `?latest_per=host` answers the newest row of EACH host, grouped
+//!   before the limit, with `total` counting hosts — so a daily host is
+//!   not spent off the page by a fifteen-minute one (725532ab).
 
 use boss_policy_client::types::{AccessTier, User};
 use std::sync::Arc;
@@ -406,4 +409,98 @@ async fn an_unreadable_instant_is_refused_not_ignored() {
         let (status, _) = get_as_guest(&app, uri).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} is refused");
     }
+}
+
+/// Record `n` host comparisons for one host through the port, one
+/// minute apart from `start`, oldest first — the shape compare_host
+/// stamps (estate_compare.rs): `scope: host` and the `host` it is about.
+async fn record_host_comparisons(jobs: &InMemoryJobs, host: &str, start: &str, n: i64) {
+    let t0: chrono::DateTime<chrono::Utc> = start.parse().expect("an RFC 3339 instant");
+    let events: Vec<boss_core::event::Event> = (0..n)
+        .map(|i| {
+            boss_core::event::Event::new(
+                "jobs",
+                boss_jobs::events::ESTATE_COMPARED,
+                serde_json::json!({"scope": "host", "host": host, "marker": format!("{host}-{i}")}),
+                t0 + chrono::Duration::minutes(i),
+            )
+        })
+        .collect();
+    jobs.record_events(&events).await.expect("events record");
+}
+
+/// THE DAILY HOST, REPRODUCED (backlog 725532ab, measured 2026-09-25
+/// 07:50Z by run 34a5f90a): `?scope=host&limit=50` returned 50 of 768
+/// host rows, every one of them forge's — forge compares every 15
+/// minutes, boss-gcp once a day, so the scope filter alone still lets
+/// the fast host spend the page and boss-gcp's 10:25Z row was gone
+/// within ~12 hours. /it/estate rendered a coverage line saying so.
+///
+/// `latest_per=host` is the read that question actually asks: the
+/// newest row of EACH host, grouped where the limit is, and `total`
+/// counting hosts — so the answer is complete whenever rows == total,
+/// and a limit below the host count is visible as rows < total rather
+/// than a page presented as whole.
+#[tokio::test]
+async fn latest_per_host_answers_every_host_however_slow_its_cadence() {
+    let (app, jobs) = app();
+    record_host_comparisons(&jobs, "boss-gcp", "2026-09-24T10:25:00Z", 1).await;
+    record_host_comparisons(&jobs, "forge", "2026-09-24T11:00:00Z", 60).await;
+
+    // Precondition: the scope alone is spent by the fast host.
+    let (_, scoped) = get_as_guest(&app, "/api/estate/comparisons?scope=host&limit=50").await;
+    assert!(
+        !markers(&scoped).contains(&"boss-gcp-0".to_string()),
+        "precondition: forge fills the whole scoped page"
+    );
+    assert_eq!(scoped["total"], 61);
+
+    let (status, latest) = get_as_guest(
+        &app,
+        "/api/estate/comparisons?scope=host&latest_per=host&limit=50",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "latest_per is guest-readable");
+    assert_eq!(
+        markers(&latest),
+        vec!["forge-59", "boss-gcp-0"],
+        "one row per host, each its newest, newest first"
+    );
+    assert_eq!(latest["total"], 2, "total counts HOSTS under latest_per");
+
+    // A limit below the host count stays honest: rows < total.
+    let (_, one) = get_as_guest(
+        &app,
+        "/api/estate/comparisons?scope=host&latest_per=host&limit=1",
+    )
+    .await;
+    assert_eq!(markers(&one), vec!["forge-59"]);
+    assert_eq!(one["total"], 2, "the truncation is visible, not hidden");
+
+    // The window composes: before forge's first row, boss-gcp alone.
+    let (_, before) = get_as_guest(
+        &app,
+        "/api/estate/comparisons?scope=host&latest_per=host&until=2026-09-24T11:00:00Z",
+    )
+    .await;
+    assert_eq!(markers(&before), vec!["boss-gcp-0"]);
+    assert_eq!(before["total"], 1);
+}
+
+/// A grouping key the reader does not serve is REFUSED, never ignored:
+/// an ignored `latest_per` answers the plain newest page — the very
+/// answer this read exists to replace — and a reader could not tell.
+#[tokio::test]
+async fn an_unknown_latest_per_key_is_refused_not_ignored() {
+    let (app, _) = app();
+    let (status, body) = get_as_guest(
+        &app,
+        "/api/estate/comparisons?scope=host&latest_per=nonesuch",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.to_string().contains("host"),
+        "the refusal names the key it serves: {body}"
+    );
 }

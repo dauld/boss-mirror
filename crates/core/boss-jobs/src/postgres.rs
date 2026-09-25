@@ -85,7 +85,7 @@ struct JobRow {
 }
 
 #[derive(sqlx::FromRow)]
-struct StepRow {
+pub(crate) struct StepRow {
     id: uuid::Uuid,
     job_id: uuid::Uuid,
     kind: String,
@@ -161,11 +161,11 @@ fn row_to_job(r: JobRow) -> Job {
 /// (20260915221611) makes an unknown word unreachable; if one ever
 /// arrives it reads as the SIMULATED company, never real — the one
 /// direction a partition read is allowed to be wrong in.
-fn parse_partition(s: &str) -> Partition {
+pub(crate) fn parse_partition(s: &str) -> Partition {
     s.parse().unwrap_or(Partition::Simulated)
 }
 
-fn row_to_step(r: StepRow) -> Result<Step, JobsError> {
+pub(crate) fn row_to_step(r: StepRow) -> Result<Step, JobsError> {
     Ok(Step {
         id: StepId::from_uuid(r.id),
         job_id: JobId::from_uuid(r.job_id),
@@ -233,7 +233,7 @@ fn parse_subject(kind: &str, ref_id: &str) -> Subject {
 /// (20260924123307) admits exactly these four words — `blocked` and
 /// `pending-sign-off` were retired with their enum variants (backlog
 /// 3c3dc8f3) — so the fallback arm is unreachable from a real row.
-fn parse_job_status(s: &str) -> JobStatus {
+pub(crate) fn parse_job_status(s: &str) -> JobStatus {
     match s {
         "draft" => JobStatus::Draft,
         "open" => JobStatus::Open,
@@ -1010,6 +1010,7 @@ impl JobsRepository for PgJobs {
                 scope: window.scope.as_deref(),
                 since: window.since,
                 until: window.until,
+                latest_per: window.latest_per.as_deref(),
             },
             limit,
         )
@@ -1810,6 +1811,14 @@ impl JobsRepository for PgJobs {
 
     async fn active_step_plugin_version(&self, kind: &str) -> Result<i32, JobsError> {
         active_plugin_version(&self.pool, kind).await
+    }
+
+    async fn repair_step_plugin_versions(
+        &self,
+        write: bool,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<crate::plugin_version_repair::RepairReport, JobsError> {
+        crate::plugin_version_repair::pg::repair(&self.pool, write, stamp).await
     }
 
     async fn record_events(&self, events: &[boss_core::event::Event]) -> Result<(), JobsError> {

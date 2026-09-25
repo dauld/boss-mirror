@@ -462,3 +462,209 @@ async fn the_sign_offs_own_ticket_completes_the_step_and_the_stamp_alone_does_no
     assert!(status.is_success(), "{status}: {body}");
     assert_eq!(stored(&jobs, SIGNED).await.status, StepStatus::Completed);
 }
+
+// ---------------------------------------------------------------------
+// THE CONTENT JUDGED IS THE CONTENT COMPLETED (backlog c0b56fd9,
+// adversarial review of car 5b30ccf9, 2026-09-25).
+//
+// A genuine ticket binds step, person and the step's shape hash, and
+// `update_step` judged it against the step BEFORE the PUT's overlay. So
+// on a presence step with no sign-off roles a valid ticket completed the
+// step while the same PUT replaced the plan it had been minted over:
+// 204, the stored plan replaced, and nobody's passkey ever saw the bytes
+// that were completed. (On a sign-off step the same body was caught only
+// incidentally, by the stale-stamp 409.) Every test below is the real
+// ticket the gateway would have issued — the forgery is not the point.
+// ---------------------------------------------------------------------
+
+async fn put(app: &Router, id: &str, presence: Option<&str>, body: &str) -> (StatusCode, String) {
+    send(
+        app,
+        "PUT",
+        format!("/api/jobs/{JOB}/steps/{id}"),
+        presence,
+        body,
+    )
+    .await
+}
+
+/// THE BUG: the ceremony is over plan A, the completion carries plan B.
+#[tokio::test]
+async fn a_presence_ticket_cannot_complete_a_step_while_the_same_put_rewrites_its_plan() {
+    let (app, jobs) = seed(Some(GATEWAY_KEY)).await;
+    let t = ticket(GUARDED, GATEWAY_KEY, now_epoch() + 60);
+
+    let (status, body) = put(
+        &app,
+        GUARDED,
+        Some(&t),
+        r#"{"status":"completed","metadata":{"plan":"{\"verb\":\"wipe-the-system-disk\"}"}}"#,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a ticket minted over one plan must not complete another; body: {body}"
+    );
+    assert!(
+        body.contains(&format!("/api/jobs/{JOB}/steps/{GUARDED}/metadata")),
+        "the refusal names the merge door the content goes through first: {body}"
+    );
+    let after = stored(&jobs, GUARDED).await;
+    assert_eq!(after.status, StepStatus::Ready);
+    assert_eq!(
+        after.metadata,
+        step(GUARDED, None, false).metadata,
+        "a refused completion writes nothing — the plan the ceremony saw stays"
+    );
+
+    // The same body is refused on the sign-off step too — by this rule,
+    // not by the stale-stamp check it used to fall to by accident.
+    let s = ticket(SIGNED, GATEWAY_KEY, now_epoch() + 60);
+    let (status, body) = sign_off(&app, Some(&s)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let (status, body) = put(
+        &app,
+        SIGNED,
+        Some(&s),
+        r#"{"status":"completed","metadata":{"plan":"{\"verb\":\"wipe-the-system-disk\"}"}}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert!(body.contains("/metadata"), "{body}");
+    assert_eq!(stored(&jobs, SIGNED).await.status, StepStatus::Ready);
+
+    // Scope control: a step that asks only for a session is not judged
+    // by this rule, so a completion PUT may still carry its metadata.
+    let (status, body) = put(
+        &app,
+        ORDINARY,
+        None,
+        r#"{"status":"completed","metadata":{"plan":"rewritten at completion"}}"#,
+    )
+    .await;
+    assert!(status.is_success(), "{status}: {body}");
+}
+
+/// The title is half the shape hash, and a PUT may write it: the same
+/// hole through the other input.
+#[tokio::test]
+async fn a_presence_ticket_cannot_complete_a_step_while_the_same_put_retitles_it() {
+    let (app, jobs) = seed(Some(GATEWAY_KEY)).await;
+    let t = ticket(GUARDED, GATEWAY_KEY, now_epoch() + 60);
+
+    let (status, body) = put(
+        &app,
+        GUARDED,
+        Some(&t),
+        r#"{"status":"completed","title":"Approve something nobody read"}"#,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    let after = stored(&jobs, GUARDED).await;
+    assert_eq!(after.status, StepStatus::Ready);
+    assert_eq!(after.title, "Approve the plan");
+}
+
+/// What must keep working: the status-only completion car 5b30ccf9's
+/// surfaces send with the ceremony's ticket, and a read-merge-write
+/// body that sends every stored key back UNCHANGED — the rule is about
+/// a change, not about the key being present.
+#[tokio::test]
+async fn a_completion_that_changes_nothing_it_was_judged_on_still_completes() {
+    let (app, jobs) = seed(Some(GATEWAY_KEY)).await;
+
+    // The sign-off surface: stamp with the ticket, then complete with
+    // `{status:'completed'}` alone and the same ticket.
+    let s = ticket(SIGNED, GATEWAY_KEY, now_epoch() + 60);
+    let (status, body) = sign_off(&app, Some(&s)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let (status, body) = complete(&app, SIGNED, Some(&s)).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(stored(&jobs, SIGNED).await.status, StepStatus::Completed);
+
+    // A read-merge-write writer re-sends the plan exactly as stored.
+    let t = ticket(GUARDED, GATEWAY_KEY, now_epoch() + 60);
+    let resent = serde_json::json!({
+        "status": "completed",
+        "title": "Approve the plan",
+        "metadata": step(GUARDED, None, false).metadata,
+    })
+    .to_string();
+    let (status, body) = put(&app, GUARDED, Some(&t), &resent).await;
+    assert!(status.is_success(), "{status}: {body}");
+    assert_eq!(stored(&jobs, GUARDED).await.status, StepStatus::Completed);
+}
+
+/// DECIDED: a presence-gated step is not skipped through the PUT, with
+/// or without a ticket. A skip satisfies `steps.<slug>.done` exactly as
+/// a completion does (ops-request's `execute` waits on
+/// `steps.approve.done`), but it walks round the completion contract —
+/// the required-at-done `plan` and the sign-off stamps are judged only
+/// on `completed`. The ticket carries no verb (step, person, shape,
+/// nonce, expiry), so no fresh ticket could say "skip" rather than
+/// "approve": the only safe skip is none. Declining is not a skip — it
+/// is leaving the step open, or cancelling the packet.
+#[tokio::test]
+async fn a_presence_ticket_cannot_skip_the_step_it_was_minted_for() {
+    let (app, jobs) = seed(Some(GATEWAY_KEY)).await;
+
+    let t = ticket(GUARDED, GATEWAY_KEY, now_epoch() + 60);
+    let (status, body) = put(&app, GUARDED, Some(&t), r#"{"status":"skipped"}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(stored(&jobs, GUARDED).await.status, StepStatus::Ready);
+
+    // The ticket that stamped the sign-off step cannot skip it either —
+    // a skip would bypass the stamp the completion checks.
+    let s = ticket(SIGNED, GATEWAY_KEY, now_epoch() + 60);
+    let (status, body) = sign_off(&app, Some(&s)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let (status, body) = put(&app, SIGNED, Some(&s), r#"{"status":"skipped"}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
+    assert_eq!(stored(&jobs, SIGNED).await.status, StepStatus::Ready);
+
+    // Scope control: an ordinary step still skips.
+    let (status, body) = put(&app, ORDINARY, None, r#"{"status":"skipped"}"#).await;
+    assert!(status.is_success(), "{status}: {body}");
+}
+
+/// DECIDED, AND PINNED: re-sending a ticket to the sign-off door writes
+/// no second stamp and does not move the first one's time. The door's
+/// idempotence is keyed on (role, current shape hash), so a re-send of
+/// the same ticket — or a second ceremony over the same content — is
+/// answered with the stamp already on the record. A new stamp needs new
+/// CONTENT (the old one goes stale), never merely a new ticket.
+#[tokio::test]
+async fn re_sending_a_ticket_to_the_sign_off_door_does_not_re_stamp() {
+    let (app, jobs) = seed(Some(GATEWAY_KEY)).await;
+
+    let t = ticket(SIGNED, GATEWAY_KEY, now_epoch() + 60);
+    let (status, body) = sign_off(&app, Some(&t)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let first = stored(&jobs, SIGNED).await.sign_offs;
+    assert_eq!(first.len(), 1);
+
+    // The same ticket again, then a second ceremony's ticket.
+    let (status, body) = sign_off(&app, Some(&t)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let (step_id, shape_hash) = binding(SIGNED);
+    let second = PresenceTicket {
+        i: "emp-david".into(),
+        s: step_id,
+        h: shape_hash,
+        n: "ceremony-nonce-8".into(),
+        e: now_epoch() + 60,
+    }
+    .encode(GATEWAY_KEY)
+    .expect("a ticket signs");
+    let (status, body) = sign_off(&app, Some(&second)).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let after = stored(&jobs, SIGNED).await.sign_offs;
+    assert_eq!(
+        after, first,
+        "the first stamp stands: same time, same nonce"
+    );
+}

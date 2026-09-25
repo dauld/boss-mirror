@@ -632,6 +632,28 @@ impl JobsRepository for InMemoryJobs {
             .filter(|e| window.since.is_none_or(|since| e.timestamp >= since))
             .filter(|e| window.until.is_none_or(|until| e.timestamp < until))
             .collect();
+        // `latest_per` (backlog 725532ab): the first row of each group
+        // is its newest, because `matched` is already newest-first —
+        // and it runs before `take`, as `DISTINCT ON` runs before the
+        // Pg LIMIT. The group is the key's value as `->>` reads it: a
+        // JSON null or an absent key is the one NULL group.
+        let matched: Vec<boss_core::event::Event> = match window.latest_per.as_deref() {
+            None => matched,
+            Some(key) => {
+                let mut seen = std::collections::HashSet::new();
+                matched
+                    .into_iter()
+                    .filter(|e| {
+                        let group = match e.payload.get(key) {
+                            None | Some(serde_json::Value::Null) => None,
+                            Some(serde_json::Value::String(s)) => Some(s.clone()),
+                            Some(other) => Some(other.to_string()),
+                        };
+                        seen.insert(group)
+                    })
+                    .collect()
+            }
+        };
         let total = matched.len() as i64;
         let rows = matched
             .into_iter()

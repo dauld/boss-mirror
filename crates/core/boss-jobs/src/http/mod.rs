@@ -467,6 +467,13 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
             "/api/jobs/step-plugins/{kind}/in-flight-count",
             get(in_flight_plugin_count::<R, B>),
         )
+        // The one-time repair for steps whose STEP_CREATED said plugin
+        // version 0 under a stamped row (backlog 5a670a71): GET is the
+        // dry run, POST appends one correcting STEP_UPDATED per step.
+        .route(
+            "/api/jobs/repairs/step-plugin-version",
+            get(preview_plugin_version_repair::<R, B>).post(run_plugin_version_repair::<R, B>),
+        )
         .with_state(shared)
         .layer(refusals)
 }

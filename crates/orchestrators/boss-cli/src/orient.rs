@@ -533,15 +533,16 @@ fn abandoned_report(places: &[AbandonedPlace], landed: &BTreeMap<String, String>
             &p.packet[..8.min(p.packet.len())],
         ));
         if let Some(how) = landed.get(&p.packet) {
-            // Closed by the conductor's reap of a gate-run past its Job
-            // deadline, measured on opened_at — the one path that closed
-            // both of 2026-09-24's (as lost, 04:30Z). Named, not run:
-            // this verb is read-only.
+            // Closed by the conductor's orphan settle: no gate Job carries
+            // it and nothing has held it for the window (backlog
+            // 137c176d). Both of 2026-09-24's waited for the three-hour
+            // clock instead (as lost, 04:30Z). Named, not run: this verb
+            // is read-only.
             out.push(format!(
                 "      LANDED — {how}: superseded, nothing to recover. Do not re-gate it \
                  (with park intent that files a twin car); the conductor settles the packet \
-                 as lost once it is {}h old.",
-                crate::train::GATE_DEADLINE_HOURS
+                 as lost once no gate Job carries it and nothing has held it for {} min.",
+                crate::train::ORPHAN_GATE_RUN_MINUTES
             ));
         } else if !p.branch.is_empty() {
             out.push(format!(
@@ -3063,9 +3064,15 @@ mod tests {
             !all.contains("recover:"),
             "no re-gate for landed work: {all}"
         );
+        // What closes it is the orphan settle now (backlog 137c176d), a
+        // window after its last beat — not the three-hour clock.
         assert!(
-            all.contains(&format!("{}h", crate::train::GATE_DEADLINE_HOURS)),
+            all.contains(&format!("{} min", crate::train::ORPHAN_GATE_RUN_MINUTES)),
             "names what closes it: {all}"
+        );
+        assert!(
+            !all.contains(&format!("{}h old", crate::train::GATE_DEADLINE_HOURS)),
+            "and no longer the Job-deadline clock: {all}"
         );
     }
 

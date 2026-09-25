@@ -590,6 +590,148 @@ pub(crate) fn dead_gate_run_hours(run: &Value, now: DateTime<Utc>) -> Option<i64
     (hours >= GATE_DEADLINE_HOURS).then_some(hours)
 }
 
+/// How long a gate-run may go with nothing saying it is alive before the
+/// conductor asks the cluster whether any Job carries it (backlog
+/// 137c176d). Three times a queue place's TTL
+/// (`gate::QUEUE_PLACE_TTL_SECS`, 300s), so a waiter between beats — or
+/// riding out an SoR roll, which it abandons after three minutes anyway
+/// (`gate::ABSENCE_TOLERANCE`) — never reads as gone; and a twelfth of
+/// the Job deadline it stands in for.
+pub(crate) const ORPHAN_GATE_RUN_MINUTES: i64 = 15;
+
+// Both bounds are held at compile time, so neither constant can move
+// past the other without the build saying so: the window outlasts a
+// place in line, and stays well under the deadline it stands in for.
+const _: () = assert!(ORPHAN_GATE_RUN_MINUTES * 60 > crate::gate::QUEUE_PLACE_TTL_SECS);
+const _: () = assert!(ORPHAN_GATE_RUN_MINUTES < GATE_DEADLINE_HOURS * 60 / 4);
+
+/// The stamps on a gate-run that each say "a process held this run at
+/// this instant", in the order they are written: filed, queued, the
+/// waiter's beat (kept on release, so a run leaving the line to launch
+/// is dated from its last beat, not from its filing), and the launch of
+/// a REUSED packet, whose other stamps belong to an earlier run.
+///
+/// THREE CLOCKS MEET HERE. `opened_at` is the jobs API's clock, stamped
+/// by its create handler; the queue stamps and `launching_at` are the
+/// clock of the host running `boss gate` (the dev pod for a builder, the
+/// conductor for a train gate — `now` minted once, carried forward by
+/// monotonic time); and the `now` they are judged against is the
+/// conductor's. All are cluster hosts on synchronised UTC, so their skew
+/// is seconds against a fifteen-minute window — and a skew of minutes
+/// would shorten or lengthen the window by exactly that much, never
+/// settle a run a Job carries, because the cluster read decides that.
+const ALIVE_STAMPS: [&str; 4] = [
+    "opened_at",
+    crate::gate::QUEUED_AT,
+    crate::gate::QUEUE_HEARTBEAT_AT,
+    crate::gate::LAUNCHING_AT,
+];
+
+/// A gate-run with no verdict that nothing has held for the window —
+/// the half of an orphan the system of record can see. The other half,
+/// that no gate Job carries it, is a cluster fact the adapter reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrphanCandidate {
+    /// Which stamp was the latest sign of life, and its value verbatim.
+    pub last_alive_key: &'static str,
+    pub last_alive: String,
+    /// Whole minutes since then.
+    pub idle_minutes: i64,
+    /// The place in line it held, if it ever queued.
+    pub queued_at: Option<String>,
+}
+
+/// Is this open gate-run a candidate orphan — `None` means leave it.
+///
+/// WHY (backlog 137c176d). Gate-run 91594262 was queued at 01:26:24 on
+/// 2026-09-24; its waiter's last beat was 01:26:54, the dev pod was
+/// evicted at 01:27, and no Job was ever created. It stayed open until
+/// [`dead_gate_run_hours`] closed it at 04:30:45, and because the
+/// estate observer's dead-host pass defers to an open gate-run, the
+/// builder run it belonged to stayed `building` for the same three
+/// hours. The clock is a ceiling for a Job that EXISTS and might still
+/// be running; a run no Job carries is not running at all.
+///
+/// Pure, like its neighbour: the run has not reported, its `opened_at`
+/// parses (no stamp, no claim), and the latest readable of
+/// [`ALIVE_STAMPS`] is at least [`ORPHAN_GATE_RUN_MINUTES`] old. A stamp
+/// that does not parse is skipped — never a reason to call a run older
+/// than it is.
+///
+/// NOT READ: the verdict step's `heartbeat_at`. gate-run.toml defaults it
+/// to "" and nothing writes it — run.sh does not heartbeat — so a rule
+/// on it was always true and a receipt citing it claimed a reading
+/// nobody took (review of car 2ca8c7e9). The runner lives inside the
+/// Job, so the cluster read the adapter makes is the heartbeat.
+pub(crate) fn orphaned_gate_run(run: &Value, now: DateTime<Utc>) -> Option<OrphanCandidate> {
+    let verdict_step = find_step(run, "record-verdict", "Record the gate verdict")?;
+    if step_done(Some(verdict_step)) {
+        return None;
+    }
+    let md = metadata_map(run);
+    let instant = |key: &str| {
+        md.get(key)
+            .and_then(Value::as_str)
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(|t| (s, t)))
+            .map(|(s, t)| (s.to_string(), t.with_timezone(&Utc)))
+    };
+    instant("opened_at")?;
+    let (last_alive_key, (last_alive, at)) = ALIVE_STAMPS
+        .iter()
+        .filter_map(|k| instant(k).map(|v| (*k, v)))
+        .max_by_key(|(_, (_, t))| *t)?;
+    let idle_minutes = (now - at).num_minutes();
+    (idle_minutes >= ORPHAN_GATE_RUN_MINUTES).then(|| OrphanCandidate {
+        last_alive_key,
+        last_alive,
+        idle_minutes,
+        queued_at: md
+            .get("queued_at")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    })
+}
+
+/// The evidence an orphan settle leaves on the packet, as data: the
+/// cluster read that came back empty and the last sign of life.
+pub(crate) fn orphan_evidence(
+    o: &OrphanCandidate,
+    packet: &str,
+    namespace: &str,
+    now: DateTime<Utc>,
+) -> Value {
+    serde_json::json!({
+        "runner_jobs": 0,
+        "namespace": namespace,
+        "selector": format!("boss.dev/packet={packet}"),
+        "last_alive_key": o.last_alive_key,
+        "last_alive": o.last_alive,
+        "idle_minutes": o.idle_minutes,
+        "queued_at": o.queued_at,
+        "observed_at": crate::gate::stamp(now),
+        "observer": "boss train cadence (conductor reconcile)",
+    })
+}
+
+/// The receipt an orphan settle writes: what was read, what it means,
+/// and what a re-gate needs that this packet cannot carry forward.
+pub(crate) fn orphan_receipt(o: &OrphanCandidate, branch: &str, namespace: &str) -> String {
+    format!(
+        "NO VERDICT WAS PRODUCED. The cluster holds no gate Job for this packet (namespace \
+         {namespace}, label boss.dev/packet), and nothing has held it since {key} {at} — {mins} min, past the {ORPHAN_GATE_RUN_MINUTES} \
+         min window. No runner exists to report, so the checks never ran or never finished. \
+         Settled as LOST by the conductor's reconcile: this run says nothing about {branch}, \
+         and an infrastructure death is not a consist failure. Re-gate for a real verdict — \
+         with its --park-* flags (or --park-file), because a closed packet is not reused and \
+         its park intent does not carry to the new one. Evidence: the packet's \
+         orphaned_gate_run.",
+        key = o.last_alive_key,
+        at = o.last_alive,
+        mins = o.idle_minutes,
+    )
+}
+
 /// Should this closed gate-run's verdict be buried if its sha landed?
 /// Returns the (sha, verdict) to check when the run is closed with a
 /// `failed` or `lost` verdict, names a sha, is not already superseded,
@@ -639,6 +781,48 @@ pub(crate) fn metadata_map(v: &Value) -> Map<String, Value> {
         Some(Value::Object(m)) => m.clone(),
         _ => Map::new(),
     }
+}
+
+/// The writes that complete step `sid` on packet `jid` carrying
+/// `writes`, in order: the fields through the step's MERGE door, then
+/// the status alone through the PUT. An empty `writes` is the flip
+/// alone. Pure, so the shape is pinned without a socket.
+///
+/// WHY TWO WRITES AND NOT THE ONE PUT THESE USED TO BE (backlog
+/// e39a9d2a, stage 2 of design 93d2bddb). The conductor and the
+/// publish-request drain completed a step with one PUT of `{status,
+/// metadata}`, the metadata a read-merge-write of the step AS THE PASS
+/// READ IT. The live rule refuses only a body that omits a stored key,
+/// so that works today — until a concurrent writer adds a key between
+/// the pass's read and its PUT, when it is refused 409 instead of kept
+/// (the conductor's read can be minutes old: a reconcile reads the
+/// train once and completes steps along the way). David's decided end
+/// state refuses ANY metadata body on the PUT. The merge door lands the
+/// keys against the row as it stands, in one transaction, so it can
+/// neither race nor shed a key it does not name. It goes FIRST because
+/// required-at-done fields are judged when the step flips. If the flip
+/// is then refused, the step stays open carrying the fields, and the
+/// next pass re-merges them — the same outcome a refused PUT left.
+pub(crate) fn step_completion_writes(
+    jid: &str,
+    sid: &str,
+    writes: Map<String, Value>,
+) -> Vec<(Method, String, Value)> {
+    let merge = (!writes.is_empty()).then(|| {
+        (
+            Method::PATCH,
+            format!("/api/jobs/{jid}/steps/{sid}/metadata"),
+            Value::Object(writes),
+        )
+    });
+    merge
+        .into_iter()
+        .chain(std::iter::once((
+            Method::PUT,
+            format!("/api/jobs/{jid}/steps/{sid}"),
+            json!({"status": "completed"}),
+        )))
+        .collect()
 }
 
 /// The overlay half of `merge_job_metadata`, pure: jobs-api's PATCH
@@ -866,6 +1050,45 @@ mod tests {
     use crate::train::test_support::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    /// A completion is the fields through the merge door, then a PUT
+    /// carrying the status and NOTHING else — the only form that
+    /// survives the step PUT refusing any metadata body (e39a9d2a).
+    #[test]
+    fn a_step_completes_as_a_merge_then_a_status_only_put() {
+        let mut fields = Map::new();
+        fields.insert("merge_ref".into(), json!("abcdef123456"));
+        let writes = step_completion_writes("j1", "s1", fields.clone());
+        assert_eq!(
+            writes,
+            vec![
+                (
+                    Method::PATCH,
+                    "/api/jobs/j1/steps/s1/metadata".to_string(),
+                    Value::Object(fields),
+                ),
+                (
+                    Method::PUT,
+                    "/api/jobs/j1/steps/s1".to_string(),
+                    json!({"status": "completed"}),
+                ),
+            ]
+        );
+    }
+
+    /// Nothing to record sends no empty merge — the flip alone.
+    #[test]
+    fn a_completion_with_no_fields_is_the_flip_alone() {
+        let writes = step_completion_writes("j1", "s1", Map::new());
+        assert_eq!(
+            writes,
+            vec![(
+                Method::PUT,
+                "/api/jobs/j1/steps/s1".to_string(),
+                json!({"status": "completed"}),
+            )]
+        );
+    }
+
     /// Both list shapes read, and an empty array stays an honest zero.
     #[test]
     fn rows_reads_a_bare_array_and_the_envelope() {
@@ -958,6 +1181,185 @@ mod tests {
             "steps": [{"spec_slug":"record-verdict","title":"Record the gate verdict","status":"ready","metadata":{}}]
         });
         assert_eq!(dead_gate_run_hours(&unstamped, now), None);
+    }
+
+    /// Gate-run 91594262 as it stood on 2026-09-24: queued at 01:26:24,
+    /// filed 01:26:33, its waiter's last queue beat at 01:26:54 — then
+    /// the dev pod was evicted at 01:27 and nothing ever launched a Job.
+    /// The verdict step's `heartbeat_at` is the registry's empty default,
+    /// and nothing ever writes it (run.sh does not heartbeat).
+    fn stranded_run(verdict_status: &str, heartbeat_at: &str) -> Value {
+        serde_json::json!({
+            "id": "91594262-4f4a-4aee-988e-4c7d2c492de7",
+            "metadata": {
+                "branch": "fix/boss-prove-and-the-observer-settle-write-through-the-step-merge-door",
+                "opened_at": "2026-09-24T01:26:33.216272518+00:00",
+                "queued_at": "2026-09-24T01:26:24Z",
+                "queue_heartbeat_at": "2026-09-24T01:26:54Z"
+            },
+            "steps": [{
+                "spec_slug": "record-verdict",
+                "title": "Record the gate verdict",
+                "status": verdict_status,
+                "metadata": { "heartbeat_at": heartbeat_at }
+            }]
+        })
+    }
+
+    fn at(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    /// Backlog 137c176d. The run above held its builder's agent-run for
+    /// three hours — the dead-host pass defers to an open gate-run, and
+    /// the only thing that closed this one was the 3h clock, at 04:30Z.
+    /// Everything that could ever have said it was alive had stopped by
+    /// 01:26:54. It is judged from THAT instant, so it is a candidate a
+    /// window later rather than three hours later.
+    #[test]
+    fn a_gate_run_nothing_has_held_for_the_window_is_an_orphan_candidate() {
+        let run = stranded_run("ready", "");
+        // Thirteen minutes after the last beat: still inside the window.
+        assert_eq!(orphaned_gate_run(&run, at("2026-09-24T01:40:00Z")), None);
+        // Past it: a candidate, dated from the waiter's last beat — the
+        // LATEST sign of life, not the filing.
+        let o = orphaned_gate_run(&run, at("2026-09-24T01:45:00Z"))
+            .expect("nothing has held it for the window");
+        assert_eq!(o.last_alive_key, "queue_heartbeat_at");
+        assert_eq!(o.last_alive, "2026-09-24T01:26:54Z");
+        assert_eq!(o.idle_minutes, 18);
+        assert_eq!(o.queued_at.as_deref(), Some("2026-09-24T01:26:24Z"));
+        // A run that REPORTED is never ours to touch.
+        assert_eq!(
+            orphaned_gate_run(&stranded_run("completed", ""), at("2026-09-24T04:00:00Z")),
+            None
+        );
+    }
+
+    /// NOTHING WRITES THE VERDICT STEP'S `heartbeat_at` (review of car
+    /// 2ca8c7e9, 2026-09-25): gate-run.toml defaults it to "" and run.sh
+    /// never stamps it, so a rule keyed on it being empty was a rule that
+    /// was always true — and a receipt that said so claimed a measurement
+    /// nobody took. The runner lives INSIDE the Job, so the cluster read
+    /// already answers what a heartbeat would: a run whose runner is
+    /// alive has a Job. The field is therefore not read at all, and a
+    /// value in it changes nothing.
+    #[test]
+    fn the_verdict_steps_heartbeat_at_is_not_read() {
+        let now = at("2026-09-24T01:45:00Z");
+        assert_eq!(
+            orphaned_gate_run(&stranded_run("ready", "2026-09-24T01:30:00Z"), now),
+            orphaned_gate_run(&stranded_run("ready", ""), now),
+        );
+        let o = orphaned_gate_run(&stranded_run("ready", ""), now).unwrap();
+        let ev = orphan_evidence(&o, "91594262-4f4a-4aee-988e-4c7d2c492de7", "boss-dev", now);
+        assert!(
+            ev.get("heartbeat_at").is_none(),
+            "the evidence must not carry a field nothing writes: {ev}"
+        );
+        let receipt = orphan_receipt(&o, "fix/x", "boss-dev");
+        // (`queue_heartbeat_at` is a different stamp, and legitimately
+        // named when it was the last sign of life.)
+        assert!(
+            !receipt.contains("step's heartbeat_at"),
+            "the receipt must not claim the verdict step's heartbeat was read: {receipt}"
+        );
+    }
+
+    /// A REUSED PACKET IS STAMPED ALIVE AT LAUNCH (review of car 2ca8c7e9,
+    /// 2026-09-25). `boss gate` reuses an open packet for the same branch
+    /// and head — one filed an hour ago, whose waiter died — and then
+    /// spends up to minutes rebasing, judging and admitting before
+    /// `kubectl create`. Dated only from its old stamps, that packet is an
+    /// orphan the whole time; a reconcile landing in the gap would settle
+    /// it `lost` with its Job seconds from existing. The launch writes
+    /// `launching_at`, and the judgement reads it like any other sign of
+    /// life.
+    #[test]
+    fn a_reused_packet_stamped_at_launch_is_not_an_orphan() {
+        let mut run = stranded_run("ready", "");
+        let launch = crate::gate::launching_patch(at("2026-09-24T03:00:00Z"));
+        for (k, v) in launch.as_object().expect("a metadata patch is an object") {
+            run["metadata"][k] = v.clone();
+        }
+        // Minutes after the relaunch — two hours after the old beat.
+        assert_eq!(orphaned_gate_run(&run, at("2026-09-24T03:05:00Z")), None);
+        // A launch that then never made a Job is an orphan in its turn,
+        // dated from the launch.
+        let o = orphaned_gate_run(&run, at("2026-09-24T03:16:00Z")).expect("16 min, no Job");
+        assert_eq!(o.last_alive_key, crate::gate::LAUNCHING_AT);
+        assert_eq!(o.last_alive, "2026-09-24T03:00:00Z");
+        assert_eq!(o.idle_minutes, 16);
+    }
+
+    /// A run launched straight onto a free slot has no queue keys; it is
+    /// dated from `opened_at`. A stamp that does not parse is no stamp —
+    /// never a reason to call a run older than it is, and no `opened_at`
+    /// at all is no claim (the `dead_gate_run_hours` rule).
+    #[test]
+    fn an_orphan_is_dated_from_its_latest_readable_stamp() {
+        let launched = serde_json::json!({
+            "id": "33333333-3333-3333-3333-333333333333",
+            "metadata": { "branch": "feat/z", "opened_at": "2026-09-24T10:00:00Z",
+                          "queue_heartbeat_at": "not a time" },
+            "steps": [{"spec_slug":"record-verdict","title":"Record the gate verdict",
+                       "status":"ready","metadata":{"heartbeat_at":""}}]
+        });
+        let o = orphaned_gate_run(&launched, at("2026-09-24T10:20:00Z")).expect("20m, no Job");
+        assert_eq!(o.last_alive_key, "opened_at");
+        assert_eq!(o.idle_minutes, 20);
+        assert_eq!(o.queued_at, None);
+        assert_eq!(
+            orphaned_gate_run(&launched, at("2026-09-24T10:05:00Z")),
+            None
+        );
+        let unstamped = serde_json::json!({
+            "id": "44444444-4444-4444-4444-444444444444",
+            "metadata": { "branch": "feat/w", "queue_heartbeat_at": "2026-09-24T01:00:00Z" },
+            "steps": [{"spec_slug":"record-verdict","title":"Record the gate verdict",
+                       "status":"ready","metadata":{}}]
+        });
+        assert_eq!(
+            orphaned_gate_run(&unstamped, at("2026-09-24T04:00:00Z")),
+            None
+        );
+    }
+
+    /// The evidence rides the packet as data, not only as prose: the Job
+    /// read that came back empty (namespace + selector + count) and the
+    /// last sign of life, beside the instant it was judged.
+    #[test]
+    fn an_orphan_settle_records_the_absent_job_and_the_last_sign_of_life() {
+        let now = at("2026-09-24T01:45:00Z");
+        let run = stranded_run("ready", "");
+        let o = orphaned_gate_run(&run, now).unwrap();
+        let ev = orphan_evidence(&o, "91594262-4f4a-4aee-988e-4c7d2c492de7", "boss-dev", now);
+        assert_eq!(ev["runner_jobs"], 0);
+        assert_eq!(ev["namespace"], "boss-dev");
+        assert_eq!(
+            ev["selector"],
+            "boss.dev/packet=91594262-4f4a-4aee-988e-4c7d2c492de7"
+        );
+        assert_eq!(ev["last_alive_key"], "queue_heartbeat_at");
+        assert_eq!(ev["last_alive"], "2026-09-24T01:26:54Z");
+        assert_eq!(ev["idle_minutes"], 18);
+        assert_eq!(ev["queued_at"], "2026-09-24T01:26:24Z");
+        assert_eq!(ev["observed_at"], "2026-09-24T01:45:00Z");
+        let receipt = orphan_receipt(&o, "fix/x", "boss-dev");
+        for needle in [
+            "NO VERDICT WAS PRODUCED",
+            "no gate Job",
+            "boss-dev",
+            "queue_heartbeat_at 2026-09-24T01:26:54Z",
+            "18 min",
+            "fix/x",
+            "--park-",
+        ] {
+            assert!(
+                receipt.contains(needle),
+                "{needle:?} missing from: {receipt}"
+            );
+        }
     }
 
     // -- the conductor reads all its cars, not just page one -----------

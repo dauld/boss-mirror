@@ -13,12 +13,14 @@
     DEV_DOOR_HOST,
     devDoorSteps,
     fetchEstate,
+    hostCoverText,
+    hostLines,
     latestByScope,
     latestComparison,
-    latestPerHost,
     LOOP_OK_OUTCOMES,
     loopAge,
     loopHost,
+    missingHostText,
     type EstateState,
   } from './estate';
 
@@ -148,20 +150,32 @@
           <p class="estate-fail load-failed">Host comparisons unavailable: {estate.hostComparisons.error}</p>
         {:else if estate.hostComparisons.kind === 'ready'}
           {@const hc = estate.hostComparisons.data}
-          {#each latestPerHost(hc.rows) as c (c.host ?? '')}
-            {@const v = comparisonVerdict(c)}
-            <div class="estate-obs-row">
-              <span class="estate-scope">host comparison</span>
-              <span class={v.ok ? 'estate-ok' : 'estate-drift'}>{c.host ?? 'host not named on the row'}: {v.text}</span>
-              <span class="estate-when">{formatRelative(c.observed_at, loadedAt)}</span>
-            </div>
+          <!-- Every declared host gets its line (backlog 725532ab): the
+               read is grouped per host on the server, so a daily host is
+               no longer spent off the page by a fifteen-minute one, and a
+               declared host with no row says so in amber. -->
+          {#each hostLines(estate.nodes, hc) as l (l.host ?? '')}
+            {#if l.cmp}
+              {@const v = comparisonVerdict(l.cmp)}
+              <div class="estate-obs-row">
+                <span class="estate-scope">host comparison</span>
+                <span class={v.ok ? 'estate-ok' : 'estate-drift'}>{l.host ?? 'host not named on the row'}: {v.text}</span>
+                <span class="estate-when">{formatRelative(l.cmp.observed_at, loadedAt)}</span>
+              </div>
+            {:else}
+              <div class="estate-obs-row">
+                <span class="estate-scope">host comparison</span>
+                <span class="estate-drift">{l.host}: {missingHostText(hc)}</span>
+              </div>
+            {/if}
           {:else}
             <div class="estate-obs-row"><span class="estate-scope">host comparison</span><span>no host comparison recorded yet</span></div>
           {/each}
-          {#if hc.total != null && hc.total > hc.rows.length}
-            <!-- A limit is not a filter: the reader caps a page at 50 and a
-                 daily host falls off it, so say how far back this one reached. -->
-            <p class="estate-cover">The newest {hc.rows.length} of {hc.total} host comparisons, back to {loopAge(hc.oldest, loadedAt)}: a host whose last comparison is older has no line here.</p>
+          {@const cover = hostCoverText(hc)}
+          {#if cover}
+            <!-- A limit is not a filter: a read that is not every host
+                 says how much of the series it holds. -->
+            <p class="estate-cover">{cover}</p>
           {/if}
         {/if}
       </div>

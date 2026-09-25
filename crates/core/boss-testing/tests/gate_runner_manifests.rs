@@ -18,13 +18,15 @@
 //!
 //! THE MANIFEST WAS NEVER TRACKED AT ALL. The variant that made six
 //! concurrent gates possible existed only in an agent job's scratch
-//! directory — one `rm -rf` from taking the capability with it. It is
-//! `gate-runner-local.yaml` now.
-//!
-//! What these tests defend is the DIFFERENCE between the two manifests.
-//! It looks like duplication and invites unification, and unifying them
-//! is exactly the mistake: a claimed workspace cannot be shared, and a
-//! per-pod one is the only reason gates can run side by side.
+//! directory — one `rm -rf` from taking the capability with it. It was
+//! tracked as `gate-runner-local.yaml`, and on 2026-09-03 its per-pod
+//! workspace became the shape of `gate-runner.yaml` itself (packet
+//! 28de3845), which left the sibling a copy nothing launched: `boss
+//! gate` renders `gate-runner.yaml` and the conductor its installed
+//! copy, and the sibling had drifted to carry no `boss.dev/packet`
+//! label — a Job every cluster read of a gate-run would miss. Deleted
+//! 2026-09-25 (review of car 2ca8c7e9, backlog 137c176d); `boss gate`
+//! now refuses any manifest whose Job lacks that label.
 
 use boss_testing::repo_root;
 
@@ -34,7 +36,6 @@ fn read(rel: &str) -> String {
 }
 
 const SHARED: &str = "infra/gate-runner/gate-runner.yaml";
-const LOCAL: &str = "infra/gate-runner/gate-runner-local.yaml";
 /// The dev pod: its `postgres` sidecar is the harness database every
 /// builder's local suite runs against.
 const DEV: &str = "infra/cluster/manifests/boss-dev.yaml";
@@ -43,29 +44,12 @@ const CONFIGMAP: &str = "gate-runner-script";
 
 /// The per-pod workspace is the whole reason concurrent gates are safe.
 #[test]
-fn the_local_runner_keeps_its_workspace_per_pod() {
-    let local = read(LOCAL);
+fn the_runner_keeps_its_workspace_per_pod() {
     assert!(
-        local.contains("emptyDir: {sizeLimit:"),
-        "{LOCAL} must give /gate-target an emptyDir. A claimed workspace cannot be shared \
+        read(SHARED).contains("emptyDir: {sizeLimit:"),
+        "{SHARED} must give /gate-target an emptyDir. A claimed workspace cannot be shared \
          by two gates: each `git checkout -f -B` yanks the tree from under the other and \
          both write the same receipt path, which crossed three verdicts on 2026-08-24."
-    );
-    assert!(
-        !local.contains("persistentVolumeClaim"),
-        "{LOCAL} must not claim a volume — that is what {SHARED} is for"
-    );
-}
-
-/// And the sibling must stay distinguishable, or someone unifies them
-/// and quietly deletes the reason both exist.
-#[test]
-fn the_shared_runner_still_claims_its_disk() {
-    assert!(
-        read(SHARED).contains("persistentVolumeClaim"),
-        "{SHARED} is the variant whose workspace outlives the Job. If it no longer claims \
-         a volume, the two manifests have collapsed into one and the choice they encode \
-         has been lost."
     );
 }
 
@@ -77,19 +61,17 @@ fn the_shared_runner_still_claims_its_disk() {
 /// node and stopped gating entirely; preferred affinity degrades to a
 /// slower build on a control plane instead of no build at all.
 #[test]
-fn neither_runner_pins_a_hostname() {
-    for rel in [SHARED, LOCAL] {
-        let text = read(rel);
-        assert!(
-            !text.contains("kubernetes.io/hostname"),
-            "{rel} pins a specific node. Replacing the build machine must be a label move, \
-             not a car."
-        );
-        assert!(
-            text.contains("boss.dev/purpose"),
-            "{rel} must select the build node by role label"
-        );
-    }
+fn the_runner_pins_no_hostname() {
+    let text = read(SHARED);
+    assert!(
+        !text.contains("kubernetes.io/hostname"),
+        "{SHARED} pins a specific node. Replacing the build machine must be a label move, \
+         not a car."
+    );
+    assert!(
+        text.contains("boss.dev/purpose"),
+        "{SHARED} must select the build node by role label"
+    );
 }
 
 /// The pair that actually drifted: the ConfigMap the Jobs mount and the
@@ -101,14 +83,12 @@ fn the_script_configmap_has_one_name_everywhere() {
         apply.contains(CONFIGMAP),
         "{APPLY} must create the ConfigMap named {CONFIGMAP}"
     );
-    for rel in [SHARED, LOCAL] {
-        assert!(
-            read(rel).contains(CONFIGMAP),
-            "{rel} mounts a script ConfigMap that {APPLY} does not create — the gate would \
-             run whatever happened to be in the cluster, which is the failure this file \
-             exists for"
-        );
-    }
+    assert!(
+        read(SHARED).contains(CONFIGMAP),
+        "{SHARED} mounts a script ConfigMap that {APPLY} does not create — the gate would \
+         run whatever happened to be in the cluster, which is the failure this file \
+         exists for"
+    );
 }
 
 /// The mechanism has to be runnable, not merely present. A regeneration
@@ -137,18 +117,16 @@ fn the_apply_script_is_executable_and_offers_a_drift_check() {
     }
 }
 
-/// The manifests must stop TELLING people to regenerate the ConfigMap
+/// The manifest must stop TELLING people to regenerate the ConfigMap
 /// by hand and point at the thing that does it.
 #[test]
-fn the_manifests_point_at_the_mechanism_not_at_a_ritual() {
-    for rel in [SHARED, LOCAL] {
-        assert!(
-            read(rel).contains("apply-script-configmap.sh"),
-            "{rel} must name {APPLY} where it explains how the script reaches the pod. It \
-             used to inline the kubectl command as a comment, and the copy in the cluster \
-             drifted to an unlanded branch's version without anyone noticing."
-        );
-    }
+fn the_manifest_points_at_the_mechanism_not_at_a_ritual() {
+    assert!(
+        read(SHARED).contains("apply-script-configmap.sh"),
+        "{SHARED} must name {APPLY} where it explains how the script reaches the pod. It \
+         used to inline the kubectl command as a comment, and the copy in the cluster \
+         drifted to an unlanded branch's version without anyone noticing."
+    );
 }
 
 /// Container blocks of the pod spec, as (name, block text).
@@ -206,53 +184,52 @@ fn pod_containers(text: &str) -> Vec<(String, String)> {
 /// read. It asserts the properties, not their formatting, so the
 /// manifests stay free to explain themselves.
 #[test]
-fn both_runners_meet_the_restricted_profile() {
-    for rel in [SHARED, LOCAL] {
-        let text = read(rel);
-        assert!(
-            text.contains("runAsNonRoot: true"),
-            "{rel} must set runAsNonRoot: true on the POD, so a container added later \
+fn the_runner_meets_the_restricted_profile() {
+    let rel = SHARED;
+    let text = read(rel);
+    assert!(
+        text.contains("runAsNonRoot: true"),
+        "{rel} must set runAsNonRoot: true on the POD, so a container added later \
              inherits it instead of silently re-opening the gap"
-        );
-        assert!(
-            text.contains("seccompProfile: {type: RuntimeDefault}"),
-            "{rel} must keep the RuntimeDefault seccomp profile the restricted profile requires"
-        );
-        let containers = pod_containers(&text);
-        assert!(
-            containers.iter().any(|(n, _)| n == "gate")
-                && containers.iter().any(|(n, _)| n == "postgres"),
-            "{rel}: the scan found {:?}, not the gate + postgres pair — either a container was \
+    );
+    assert!(
+        text.contains("seccompProfile: {type: RuntimeDefault}"),
+        "{rel} must keep the RuntimeDefault seccomp profile the restricted profile requires"
+    );
+    let containers = pod_containers(&text);
+    assert!(
+        containers.iter().any(|(n, _)| n == "gate")
+            && containers.iter().any(|(n, _)| n == "postgres"),
+        "{rel}: the scan found {:?}, not the gate + postgres pair — either a container was \
              renamed or this scan no longer sees the sections it must cover",
-            containers.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        containers.iter().map(|(n, _)| n).collect::<Vec<_>>()
+    );
+    for (name, block) in &containers {
+        assert!(
+            block.contains("allowPrivilegeEscalation: false"),
+            "{rel}: container {name} must set allowPrivilegeEscalation: false"
         );
-        for (name, block) in &containers {
-            assert!(
-                block.contains("allowPrivilegeEscalation: false"),
-                "{rel}: container {name} must set allowPrivilegeEscalation: false"
-            );
-            assert!(
-                block.contains(r#"capabilities: {drop: ["ALL"]}"#),
-                "{rel}: container {name} must drop ALL capabilities. NET_RAW-only was the \
+        assert!(
+            block.contains(r#"capabilities: {drop: ["ALL"]}"#),
+            "{rel}: container {name} must drop ALL capabilities. NET_RAW-only was the \
                  right read of the postgres entrypoint's root-then-gosu hop and the wrong \
                  fix: name uid 999 and the root phase never happens, so nothing needs \
                  CHOWN/SETUID/SETGID"
-            );
-            let uid = block
-                .lines()
-                .find_map(|l| l.trim().strip_prefix("runAsUser: ").map(str::trim))
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{rel}: container {name} names no runAsUser. runAsNonRoot alone makes \
+        );
+        let uid = block
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("runAsUser: ").map(str::trim))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{rel}: container {name} names no runAsUser. runAsNonRoot alone makes \
                          the kubelet REFUSE an image whose user is root, and boss-ci declares \
                          no USER — so the uid has to be explicit here or the pod never starts"
-                    )
-                });
-            assert_ne!(
-                uid, "0",
-                "{rel}: container {name} runs as uid 0, which runAsNonRoot forbids"
-            );
-        }
+                )
+            });
+        assert_ne!(
+            uid, "0",
+            "{rel}: container {name} runs as uid 0, which runAsNonRoot forbids"
+        );
     }
 }
 
@@ -269,19 +246,18 @@ fn both_runners_meet_the_restricted_profile() {
 /// a run.sh change would be live before the change was.
 #[test]
 fn the_non_root_gate_is_given_a_writable_home() {
-    for rel in [SHARED, LOCAL] {
-        let text = read(rel);
-        let (_, gate) = pod_containers(&text)
-            .into_iter()
-            .find(|(n, _)| n == "gate")
-            .unwrap_or_else(|| panic!("{rel} has no container named gate"));
-        assert!(
-            gate.contains("{name: HOME, value: /gate-target}"),
-            "{rel}: the gate container must set HOME to the workspace mount. It exists before \
+    let rel = SHARED;
+    let text = read(rel);
+    let (_, gate) = pod_containers(&text)
+        .into_iter()
+        .find(|(n, _)| n == "gate")
+        .unwrap_or_else(|| panic!("{rel} has no container named gate"));
+    assert!(
+        gate.contains("{name: HOME, value: /gate-target}"),
+        "{rel}: the gate container must set HOME to the workspace mount. It exists before \
              the container starts and fsGroup has already made it group-writable, which an \
              arbitrary path would not be"
-        );
-    }
+    );
 }
 
 /// A TEST DATABASE DIES WITH ITS POD, SO DURABILITY BUYS NOTHING.
@@ -296,9 +272,7 @@ fn the_non_root_gate_is_given_a_writable_home() {
 /// to max_connections in two red train gates (backlog afaa90a3).
 ///
 /// PGDATA is an emptyDir: the data cannot outlive the Job, so there is
-/// no crash it could be recovered from. Both runners carry the flags,
-/// because the local variant is "identical except the workspace" and a
-/// slow database is not part of that difference.
+/// no crash it could be recovered from.
 ///
 /// THE DEV POD'S SIDECAR IS THE SAME DATABASE, AND NOW PINNED WITH THEM
 /// (backlog c71cf9d0, 2026-09-24). It was left out on 2026-09-23 because
@@ -317,7 +291,7 @@ fn the_non_root_gate_is_given_a_writable_home() {
 /// restarts"), so there is nothing a synced file could be recovered for.
 #[test]
 fn a_test_database_skips_durability_it_cannot_use() {
-    for rel in [SHARED, LOCAL, DEV] {
+    for rel in [SHARED, DEV] {
         let text = read(rel);
         let (_, pg) = pod_containers(&text)
             .into_iter()

@@ -261,6 +261,9 @@ pub async fn recent_by_kind(
          AND ($2::text IS NULL OR payload->>'scope' = $2) \
          AND ($3::timestamptz IS NULL OR timestamp >= $3) \
          AND ($4::timestamptz IS NULL OR timestamp < $4)";
+    if let Some(key) = window.latest_per {
+        return newest_per_key(pool, kind, window, key, WHERE, limit).await;
+    }
     let rows = sqlx::query_as::<_, AuditEntry>(&format!(
         "SELECT event_id, timestamp, source, kind, payload FROM audit_log {WHERE} \
          ORDER BY timestamp DESC LIMIT $5"
@@ -285,14 +288,70 @@ pub async fn recent_by_kind(
     Ok(KindPage { rows, total })
 }
 
+/// [`recent_by_kind`] with `latest_per` set: the newest row of each
+/// distinct `payload->>key` inside the window, newest first, and
+/// `total` the number of those groups (backlog 725532ab).
+///
+/// The grouping is `DISTINCT ON` in the same statement as the WHERE
+/// and BEFORE the LIMIT, for the reason the scope filter is: measured
+/// 2026-09-25, `scope=host&limit=50` held 50 of 768 host rows, all
+/// forge's, because forge compares every fifteen minutes and boss-gcp
+/// once a day. Collapsing that page per host in the reader still has
+/// no boss-gcp row to collapse. `event_id` breaks a timestamp tie so
+/// the same log always answers the same row (determinism).
+///
+/// `COUNT(*)` over `SELECT DISTINCT` counts a row with no such key as
+/// one group, exactly as `DISTINCT ON` returns one row for it — so
+/// rows == total is a whole answer and rows < total a truncated one.
+async fn newest_per_key(
+    pool: &PgPool,
+    kind: &str,
+    window: &KindWindow<'_>,
+    key: &str,
+    filter: &str,
+    limit: i64,
+) -> Result<KindPage, String> {
+    let rows = sqlx::query_as::<_, AuditEntry>(&format!(
+        "SELECT event_id, timestamp, source, kind, payload FROM ( \
+           SELECT DISTINCT ON (payload->>$6::text) event_id, timestamp, source, kind, payload \
+           FROM audit_log {filter} \
+           ORDER BY payload->>$6::text, timestamp DESC, event_id DESC \
+         ) newest ORDER BY timestamp DESC, event_id DESC LIMIT $5"
+    ))
+    .bind(kind)
+    .bind(window.scope)
+    .bind(window.since)
+    .bind(window.until)
+    .bind(limit)
+    .bind(key)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    let (total,): (i64,) = sqlx::query_as(&format!(
+        "SELECT COUNT(*)::BIGINT FROM (SELECT DISTINCT payload->>$5::text FROM audit_log {filter}) groups"
+    ))
+    .bind(kind)
+    .bind(window.scope)
+    .bind(window.since)
+    .bind(window.until)
+    .bind(key)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(KindPage { rows, total })
+}
+
 /// Which rows of one kind [`recent_by_kind`] reads: an exact payload
 /// `scope`, and a half-open `[since, until)` window on `timestamp`.
-/// Every field absent reads the whole kind.
+/// Every field absent reads the whole kind. `latest_per`, a top-level
+/// payload key, reduces the window to the newest row per distinct
+/// value of that key (backlog 725532ab).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct KindWindow<'a> {
     pub scope: Option<&'a str>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
+    pub latest_per: Option<&'a str>,
 }
 
 /// One page of a kind's rows, newest first, and how many rows its

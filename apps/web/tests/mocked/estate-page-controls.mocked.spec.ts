@@ -20,8 +20,9 @@
 //   buttons   0         — no manual refresh
 //   forms     0, inputs 0
 //   snippets  3         — the dev door's copyable command lines
-//   reads     4 estate reads (the fourth, the host comparisons scoped,
-//             since gap 1 — 2d8d983b), plus 2 jobs reads per loop row
+//   reads     4 estate reads (the fourth, the host comparisons scoped
+//             since gap 1 — 2d8d983b — and grouped per host since
+//             725532ab), plus 2 jobs reads per loop row
 //   writes    0
 //   timer     1         — every read again each 60 s
 //
@@ -51,8 +52,9 @@ const OBS_READ = /\/api\/estate\/observations\?limit=20$/;
 const CMP_READ = /\/api\/estate\/comparisons\?limit=20$/;
 /// The host series, read on its own (gap 1, 2d8d983b): forge compares
 /// every 15 minutes and boss-gcp once a day, so the unscoped page of 20
-/// almost never holds boss-gcp's row.
-const HOST_CMP_READ = /\/api\/estate\/comparisons\?scope=host&limit=50$/;
+/// almost never holds boss-gcp's row — and grouped per host on the
+/// server (725532ab), because even scoped, 50 of 768 rows were forge's.
+const HOST_CMP_READ = /\/api\/estate\/comparisons\?scope=host&latest_per=host&limit=50$/;
 /// The loops' reads (two per row).
 const LOOPS_READ = /\/api\/jobs\?kind=(maintenance-|ops-request)/;
 
@@ -114,17 +116,17 @@ const hostCmp = (host: string, minutes: number, counts: Record<string, number> =
     counts: { observed: 1, observed_not_declared: 0, drift: 0, disk_tight: 0, ...counts },
   });
 
-/// The live shape measured on 2026-09-23, newest first: forge drifted
-/// (memory declared 30, observed 31) over an older clean forge row the
-/// newest-per-host collapse hides, and boss-gcp's daily row short of
-/// disk (13 G free against a 17 G floor) AND drifted.
+/// The live shape measured on 2026-09-23, as the grouped read serves it
+/// (725532ab: `latest_per=host`, one row per host, `total` counting
+/// hosts): forge drifted (memory declared 30, observed 31), and
+/// boss-gcp's daily row short of disk (13 G free against a 17 G floor)
+/// AND drifted.
 const hostComparisons = () => ({
   data: [
     hostCmp('forge', 2, { drift: 1 }),
-    hostCmp('forge', 17),
     hostCmp('boss-gcp', 200, { drift: 1, disk_tight: 1 }),
   ],
-  total: 3,
+  total: 2,
 });
 
 /// Two loop packets, so the loops table carries both link kinds.
@@ -220,8 +222,9 @@ test.describe('/it/estate — the chrome, the loading line and the reads', () =>
   // CURRENT, gap 4 (75027a93): both event reads are one unscoped page of
   // 20 rows across every scope, not one scoped read per rendered scope.
   // The host comparisons are the one series read scoped (gap 1,
-  // 2d8d983b), because a daily host never sat in the unscoped page.
-  test('CURRENT, gap 4: four estate reads, the two event reads unscoped at limit=20 and the host comparisons scoped; no write, no button, no form', async ({ page }) => {
+  // 2d8d983b), because a daily host never sat in the unscoped page, and
+  // grouped per host (725532ab), because it did not sit in the scoped one.
+  test('CURRENT, gap 4: four estate reads, the two event reads unscoped at limit=20 and the host comparisons scoped and grouped per host; no write, no button, no form', async ({ page }) => {
     const sent: string[] = [];
     page.on('request', (req) => {
       const u = new URL(req.url());
@@ -236,7 +239,7 @@ test.describe('/it/estate — the chrome, the loading line and the reads', () =>
     const estate = sent.filter((s) => s.includes('/api/estate')).sort();
     expect(estate).toEqual([
       'GET /api/estate/comparisons?limit=20',
-      'GET /api/estate/comparisons?scope=host&limit=50',
+      'GET /api/estate/comparisons?scope=host&latest_per=host&limit=50',
       'GET /api/estate/nodes',
       'GET /api/estate/observations?limit=20',
     ]);
@@ -375,36 +378,69 @@ test.describe('/it/estate — 01 OBSERVED vs DECLARED', () => {
     for (let i = 0; i < 2; i += 1) {
       await expect(verdicts.nth(i)).toHaveClass(/\bestate-drift\b/);
     }
-    // forge's older clean row is hidden by its newer drifted one, and
-    // a page that is the whole series says nothing about its reach.
-    await expect(page.locator('.estate-obs').getByText(/forge: 1 observed/)).toHaveCount(0);
+    // A read that is every host says nothing about its reach.
     await expect(page.locator('.estate-cover')).toHaveCount(0);
   });
 
   test('gap 1: a host that matches its declaration reads green, with no declared total to print as 0', async ({ page }) => {
-    await install(page, { hostBody: () => ({ data: [hostCmp('forge', 2)], total: 1 }) });
+    await install(page, {
+      hostBody: () => ({ data: [hostCmp('forge', 2), hostCmp('boss-gcp', 600)], total: 2 }),
+    });
     await mountPage(page, PATH, TITLE);
 
-    const verdict = hostRows(page).locator('span:nth-child(2)');
+    const verdict = hostRows(page).filter({ hasText: 'forge:' }).locator('span:nth-child(2)');
     await expect(verdict).toHaveText('forge: 1 observed — no drift');
     await expect(verdict).toHaveClass(/\bestate-ok\b/);
   });
 
-  test('gap 1: a host page that is not the whole series says how far back it reached', async ({ page }) => {
-    // Measured 2026-09-23: 612 host rows, 49 of the newest 50 forge's.
-    // A daily host older than the page gets no line, so the page says
-    // what it covered rather than let the absence read as silence.
-    await install(page, { hostBody: () => ({ data: [hostCmp('forge', 2, { drift: 1 })], total: 612 }) });
+  // FLIPPED by 725532ab. This pin asserted a coverage line — "The newest
+  // 1 of 612 host comparisons, back to …: a host whose last comparison
+  // is older has no line here" — because the read was a scoped page of
+  // 50 and boss-gcp's daily row fell off it about half of every day
+  // (measured 2026-09-25: 50 of 768, all forge's). The read is grouped
+  // per host on the server now, so a whole answer draws no coverage
+  // line, and a declared host missing from it gets a line of its own.
+  test('gap 1: every declared host gets its line — one with no comparison says so in amber, and a whole read draws no coverage line', async ({ page }) => {
+    await install(page, { hostBody: () => ({ data: [hostCmp('forge', 2, { drift: 1 })], total: 1 }) });
     await mountPage(page, PATH, TITLE);
 
-    await expect(hostRows(page)).toHaveCount(1);
+    const verdicts = hostRows(page).locator('span:nth-child(2)');
+    await expect(verdicts).toHaveText([
+      'boss-gcp: no host comparison recorded',
+      'forge: 1 drifted from declaration',
+    ]);
+    await expect(verdicts.nth(0)).toHaveClass(/\bestate-drift\b/);
+    // w-1 is a cluster node (the cluster verdict speaks for it) and
+    // old-1 is retired: neither is owed a host line.
+    await expect(hostRows(page).filter({ hasText: /w-1|old-1/ })).toHaveCount(0);
+    await expect(page.locator('.estate-cover')).toHaveCount(0);
+  });
+
+  test('gap 1: a host read that is not every host says so, and never tells a declared host it has none', async ({ page }) => {
+    // More hosts than the page held: the absence is the read's.
+    await install(page, { hostBody: () => ({ data: [hostCmp('forge', 2, { drift: 1 })], total: 3 }) });
+    await mountPage(page, PATH, TITLE);
+
+    await expect(hostRows(page).locator('span:nth-child(2)')).toHaveText([
+      'boss-gcp: not among the 1 of 3 hosts this read returned',
+      'forge: 1 drifted from declaration',
+    ]);
     await expect(page.locator('.estate-cover')).toHaveText(
-      /^The newest 1 of 612 host comparisons, back to \d+m ago: a host whose last comparison is older has no line here\.$/,
+      'The host read returned 1 of 3 hosts: a host past it has no comparison shown here.',
     );
   });
 
-  test('gap 1: an empty host series says so in its own line', async ({ page }) => {
+  test('gap 1: an empty host series gives each declared host its line', async ({ page }) => {
     await install(page, { host: 'empty' });
+    await mountPage(page, PATH, TITLE);
+    await expect(hostRows(page).locator('span:nth-child(2)')).toHaveText([
+      'boss-gcp: no host comparison recorded',
+      'forge: no host comparison recorded',
+    ]);
+  });
+
+  test('gap 1: an empty host series with the registry unread says so in its own line', async ({ page }) => {
+    await install(page, { host: 'empty', nodes: 'down' });
     await mountPage(page, PATH, TITLE);
     await expect(hostRows(page).locator('span')).toHaveText(['host comparison', 'no host comparison recorded yet']);
   });
@@ -413,7 +449,7 @@ test.describe('/it/estate — 01 OBSERVED vs DECLARED', () => {
     await install(page, { host: 'down' });
     await mountPage(page, PATH, TITLE);
     await expect(page.locator(`p.estate-fail${FAILURE_MARKER}`)).toHaveText([
-      'Host comparisons unavailable: /api/estate/comparisons?scope=host&limit=50: HTTP 503',
+      'Host comparisons unavailable: /api/estate/comparisons?scope=host&latest_per=host&limit=50: HTTP 503',
     ]);
     await expect(hostRows(page)).toHaveCount(0);
     await expect(obsRow(page, 'comparison').locator('span').nth(1)).toHaveText('5 observed, 5 declared — no drift');
@@ -455,8 +491,13 @@ test.describe('/it/estate — 01 OBSERVED vs DECLARED', () => {
     await install(page, { obs: 'empty', cmp: 'empty', host: 'empty' });
     await mountPage(page, PATH, TITLE);
 
-    // The two scopes and the host comparison's own empty line (gap 1).
-    await expect(obsRows(page)).toHaveCount(3);
+    // The two scopes and one host-comparison line per declared host
+    // (gap 1; per declared host since 725532ab — forge and boss-gcp).
+    await expect(obsRows(page)).toHaveCount(4);
+    await expect(obsRow(page, 'host comparison').locator('span:nth-child(2)')).toHaveText([
+      'boss-gcp: no host comparison recorded',
+      'forge: no host comparison recorded',
+    ]);
     await expect(obsRow(page, 'kubernetes-nodes').locator('span').nth(1)).toHaveText('no observation recorded yet');
     await expect(obsRow(page, 'host').locator('span').nth(1)).toHaveText('no observation recorded yet');
     await expect(obsRow(page, 'comparison')).toHaveCount(0);

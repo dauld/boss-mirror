@@ -268,17 +268,15 @@ pub(crate) fn stranded_refresh_patch(a: &StrandedGreen, now: DateTime<Utc>) -> V
     })
 }
 
-/// The triage completion that CLOSES a standing alarm when the branch
-/// stops being stranded. `disposition = "stale"` is the backlog-item
-/// terminal titled "Closed — the claim no longer holds", which is
-/// exactly the case. PUT on a step REPLACES top-level metadata, so the
-/// step's existing keys are carried through.
-pub(crate) fn stranded_clear_step_body(
-    existing: &Map<String, Value>,
-    branch: &str,
-    why: &str,
-) -> Value {
-    let mut metadata = existing.clone();
+/// The triage fields that CLOSE a standing alarm when the branch stops
+/// being stranded. `disposition = "stale"` is the backlog-item terminal
+/// titled "Closed — the claim no longer holds", which is exactly the
+/// case. Only these keys: the conductor lands them through the step's
+/// merge door and then flips the status alone ([`step_completion_writes`],
+/// e39a9d2a), so the step's stored keys stay where they are without
+/// being read and re-sent.
+pub(crate) fn stranded_clear_writes(branch: &str, why: &str) -> Map<String, Value> {
+    let mut metadata = Map::new();
     metadata.insert("disposition".into(), json!("stale"));
     metadata.insert(
         "evidence".into(),
@@ -289,7 +287,7 @@ pub(crate) fn stranded_clear_step_body(
         )),
     );
     metadata.insert("cleared_by".into(), json!(STRANDED_CLEARED_BY));
-    json!({"status": "completed", "metadata": metadata})
+    metadata
 }
 
 fn cause_key(cause: StrandCause) -> &'static str {
@@ -480,10 +478,10 @@ mod stranded_green_tests {
     use super::{
         StrandCause, StrandWindows, StrandedGreen, convergence_overdue_alarm_body,
         stranded_alarm_body, stranded_alarms_to_clear, stranded_clear_reason,
-        stranded_clear_step_body, stranded_greens_to_alarm, stranded_refresh_patch,
+        stranded_clear_writes, stranded_greens_to_alarm, stranded_refresh_patch,
     };
     use chrono::{TimeZone, Utc};
-    use serde_json::{Map, json};
+    use serde_json::json;
     use std::collections::BTreeSet;
 
     /// The windows the live conductor runs on: 45 min for a hand-gated
@@ -1080,22 +1078,19 @@ mod stranded_green_tests {
 
     /// The clear completes the triage step as `stale` — the
     /// backlog-item terminal titled "Closed — the claim no longer
-    /// holds" — carries the step's existing keys through the PUT, and
-    /// STAMPS ITSELF, so a machine clear is distinguishable from a
-    /// human's answer and can never be read as one.
+    /// holds" — and STAMPS ITSELF, so a machine clear is distinguishable
+    /// from a human's answer and can never be read as one. It names ONLY
+    /// its own three keys: they go through the step merge door, which
+    /// keeps every stored key, so none is carried (e39a9d2a).
     #[test]
-    fn the_clear_step_body_closes_stale_and_stamps_itself() {
-        let mut existing = Map::new();
-        existing.insert("authority_role".into(), json!("platform-admin"));
-        let body = stranded_clear_step_body(&existing, "fix/parked", "a car now carries it");
-        assert_eq!(body["status"], "completed");
-        assert_eq!(body["metadata"]["disposition"], "stale");
-        assert_eq!(body["metadata"]["authority_role"], "platform-admin");
-        assert_eq!(
-            body["metadata"]["cleared_by"],
-            json!(super::STRANDED_CLEARED_BY)
-        );
-        let evidence = body["metadata"]["evidence"].as_str().unwrap();
+    fn the_clear_writes_close_stale_and_stamp_themselves() {
+        let writes = stranded_clear_writes("fix/parked", "a car now carries it");
+        let mut keys: Vec<&str> = writes.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["cleared_by", "disposition", "evidence"]);
+        assert_eq!(writes["disposition"], "stale");
+        assert_eq!(writes["cleared_by"], json!(super::STRANDED_CLEARED_BY));
+        let evidence = writes["evidence"].as_str().unwrap();
         assert!(
             evidence.contains("fix/parked") && evidence.contains("a car now carries it"),
             "the evidence names the branch and what changed: {evidence}"

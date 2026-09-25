@@ -47,6 +47,7 @@ pub mod landing;
 pub mod metadata_containment;
 pub mod metadata_key;
 pub mod orphan_steps;
+pub mod plugin_version_repair;
 pub mod policy_glue;
 pub mod port;
 #[cfg(feature = "postgres")]

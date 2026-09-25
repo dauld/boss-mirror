@@ -2388,8 +2388,20 @@ pub(super) struct EstateEventsQuery {
     /// instant that does not parse is a 400 from the extractor, never
     /// read as absent, which would answer the newest page instead.
     until: Option<chrono::DateTime<chrono::Utc>>,
+    /// Answer only the newest row per distinct value of this payload
+    /// key, with `total` counting the groups (backlog 725532ab). One of
+    /// [`LATEST_PER_KEYS`]; anything else is a 400, never ignored.
+    latest_per: Option<String>,
     limit: Option<i64>,
 }
+
+/// The payload keys `?latest_per=` groups by. `host` because compare_host
+/// stamps it on every self-scoped comparison and observation
+/// (estate_compare.rs) and /it/estate owes every declared host its line.
+/// A key outside this list is refused rather than read: an absent or
+/// misspelled key groups every row into one NULL group and answers ONE
+/// row, confidently — a wrong target answering instead of erroring.
+pub(super) const LATEST_PER_KEYS: &[&str] = &["host"];
 
 /// `GET /api/estate/observations` and `/api/estate/comparisons` — the
 /// read half of the estate loop's event series (d471a8ce).
@@ -2428,6 +2440,14 @@ pub(super) struct EstateEventsQuery {
 /// the window so a reader compares its rows to it rather than taking a
 /// full page for the whole answer. Both are in the WHERE clause, beside
 /// the scope and before the limit.
+///
+/// `?latest_per=host` does it for HOSTS (backlog 725532ab). The scope
+/// alone was not enough for the host series: forge compares every
+/// fifteen minutes and boss-gcp once a day, so measured 2026-09-25
+/// `scope=host&limit=50` held 50 of 768 rows, all forge's, and
+/// /it/estate had no boss-gcp line for about half of every day. Grouped,
+/// the answer is each host's newest row and `total` counts hosts, so
+/// one page is the whole answer whenever rows == total.
 pub(super) async fn list_estate_observations<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(_user): CurrentUser,
@@ -2450,14 +2470,29 @@ async fn estate_events<R: JobsRepository + 'static, B: EventBus + 'static>(
     q: &EstateEventsQuery,
 ) -> Response {
     let limit = q.limit.unwrap_or(5).clamp(1, 50);
-    // The scope and the window reach the repository, which pushes them
-    // to the WHERE clause. Narrowing the page after it comes back would
-    // leave the slow series, and the old window, exactly as unreadable
-    // as they were.
+    if let Some(key) = q.latest_per.as_deref()
+        && !LATEST_PER_KEYS.contains(&key)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "latest_per={key} is not a key this reader groups by; it groups by: {}",
+                    LATEST_PER_KEYS.join(", ")
+                )
+            })),
+        )
+            .into_response();
+    }
+    // The scope, the window and the grouping reach the repository,
+    // which pushes them to the WHERE clause. Narrowing the page after it
+    // comes back would leave the slow series, the old window, and the
+    // daily host exactly as unreadable as they were.
     let window = crate::port::EventWindow {
         scope: q.scope.clone(),
         since: q.since,
         until: q.until,
+        latest_per: q.latest_per.clone(),
     };
     match state.jobs.recent_events_by_kind(kind, &window, limit).await {
         Ok(page) => {

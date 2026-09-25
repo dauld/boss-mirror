@@ -48,6 +48,7 @@ mod publish_requests;
 mod queue;
 mod reach;
 mod receipt;
+mod repair;
 mod reporting_to;
 mod rerail;
 mod running;
@@ -963,6 +964,8 @@ enum Commands {
     Merged(merged::Cmd),
     #[command(flatten)]
     Receipt(receipt::Cmd),
+    #[command(flatten)]
+    Repair(repair::Cmd),
     #[command(flatten)]
     Running(running::Cmd),
     #[command(flatten)]
@@ -2132,6 +2135,7 @@ async fn main() -> Result<()> {
         Commands::Credential(cmd) => credential::dispatch(cmd).await,
         Commands::Merged(cmd) => merged::dispatch(cmd),
         Commands::Receipt(cmd) => receipt::dispatch(cmd).await,
+        Commands::Repair(cmd) => repair::dispatch(cmd).await,
         Commands::Running(cmd) => running::dispatch(cmd),
         Commands::Steps(cmd) => steps::dispatch(cmd).await,
         Commands::Tenant(cmd) => tenant::dispatch(cmd).await,

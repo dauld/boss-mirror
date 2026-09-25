@@ -464,6 +464,13 @@ impl Assured {
     }
 }
 
+/// What the presence-content refusal in `update_step` tells its caller
+/// (backlog c0b56fd9).
+const PRESENCE_CONTENT_HINT: &str = "write the content first through the merge door \
+     (PATCH .../metadata), run the passkey ceremony over the step as it then stands, and \
+     complete with {\"status\":\"completed\"} alone and the ticket that ceremony issued. \
+     A presence-assured step is not skipped: leave it open, or cancel the packet.";
+
 pub(super) fn judge_assurance(
     floor: boss_core::job::Assurance,
     step: &boss_core::job::Step,
@@ -1026,6 +1033,51 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         let assured = judge_assurance(floor, &old, &step_id_str, &user.id, &headers, key);
         if assured.falls_short() {
             return assured.refusal();
+        }
+        // THE CONTENT JUDGED IS THE CONTENT COMPLETED (backlog c0b56fd9,
+        // review of car 5b30ccf9). A ticket binds the step's shape hash,
+        // and the judgement above reads `old` — so a PUT that changed
+        // the title or metadata in the same write completed bytes no
+        // passkey ever saw: measured 204, stored plan replaced, on a
+        // presence step without sign-off roles. The PUT that leaves the
+        // open states therefore changes nothing the hash covers; the
+        // content goes through the merge door first, and the ceremony
+        // is then run over it. The status-only completion the surfaces
+        // send (car 5b30ccf9) and a read-merge-write re-send of the
+        // stored keys change nothing, and pass.
+        //
+        // AND IT IS NOT SKIPPED. A skip satisfies `steps.<slug>.done`
+        // as a completion does, but the sign-off contract and the
+        // required-at-done fields below are judged on `completed` only.
+        // The ticket carries no verb, so no ticket can mean "skip"
+        // rather than "approve" — the safe skip is none. Declining is
+        // leaving the step open or cancelling the packet.
+        //
+        // After the judgement, so a caller carrying no presence still
+        // gets the 422 that tells it to run the ceremony (the contract
+        // an_assurance_holds_on_every_path pins); this refusal speaks
+        // only to one that did.
+        if assured.required >= boss_core::job::Assurance::Presence {
+            let judged = boss_core::job::step_shape_hash(&old.title, &old.metadata);
+            let completing = boss_core::job::step_shape_hash(&step.title, &step.metadata);
+            let skipping = step.status == StepStatus::Skipped;
+            if judged != completing || skipping {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": if skipping {
+                            "a presence-assured step is completed, never skipped"
+                        } else {
+                            "a presence-assured step completes the content its ceremony saw \
+                             — this PUT also changes its title or metadata"
+                        },
+                        "step_id": step_id.to_string(),
+                        "merge_door": format!("/api/jobs/{job_id}/steps/{step_id}/metadata"),
+                        "hint": PRESENCE_CONTENT_HINT,
+                    })),
+                )
+                    .into_response();
+            }
         }
     }
 

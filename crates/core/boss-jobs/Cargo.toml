@@ -161,6 +161,10 @@ name = "a_created_step_replays_at_its_plugin_version_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "a_step_whose_log_lost_its_plugin_version_is_corrected_once_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "restart_epoch_payroll_clear"
 required-features = ["postgres"]
 

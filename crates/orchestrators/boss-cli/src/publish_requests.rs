@@ -32,11 +32,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use reqwest::Method;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::gate::{api, stamp};
 use crate::train::rows;
-use crate::train::{find_step, id8, metadata_map, step_done};
+use crate::train::{find_step, id8, step_completion_writes, step_done};
 
 /// What a publish-request packet asks for, read off its metadata.
 /// `bundle_b64` travels separately (it is transport, not intent).
@@ -381,11 +381,26 @@ impl Drop for TempFile {
     }
 }
 
-/// Complete the packet's `publish` step: existing metadata carried
-/// forward (a PUT replaces metadata wholesale), `result`/`detail` from
+/// The `publish` step's fields for an outcome: `result`/`detail` from
 /// the outcome, `completed_at` in the one stamp format every verb
-/// writes. The terminals fire from the workflow; nothing here touches
-/// them.
+/// writes — and nothing else. They land through the step's merge door,
+/// which keeps every stored key, so none is read and carried forward
+/// (e39a9d2a; [`step_completion_writes`] says why).
+fn publish_writes(outcome: &Outcome, now: DateTime<Utc>) -> Map<String, Value> {
+    let (result, detail) = match outcome {
+        Outcome::Pushed { detail } => ("pushed", detail),
+        Outcome::Refused { detail } => ("refused", detail),
+    };
+    let mut md = Map::new();
+    md.insert("result".to_string(), json!(result));
+    md.insert("detail".to_string(), json!(detail));
+    md.insert("completed_at".to_string(), json!(stamp(now)));
+    md
+}
+
+/// Complete the packet's `publish` step: [`publish_writes`] through the
+/// merge door, then the status alone. The terminals fire from the
+/// workflow; nothing here touches them.
 async fn complete_publish(
     http: &reqwest::Client,
     jid: &str,
@@ -397,21 +412,9 @@ async fn complete_publish(
         .get("id")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("publish step without an id on packet {}", id8(jid)))?;
-    let (result, detail) = match outcome {
-        Outcome::Pushed { detail } => ("pushed", detail),
-        Outcome::Refused { detail } => ("refused", detail),
-    };
-    let mut md = metadata_map(step);
-    md.insert("result".to_string(), json!(result));
-    md.insert("detail".to_string(), json!(detail));
-    md.insert("completed_at".to_string(), json!(stamp(now)));
-    api(
-        http,
-        Method::PUT,
-        &format!("/api/jobs/{jid}/steps/{sid}"),
-        Some(json!({"status": "completed", "metadata": md})),
-    )
-    .await?;
+    for (method, path, body) in step_completion_writes(jid, sid, publish_writes(outcome, now)) {
+        api(http, method, &path, Some(body)).await?;
+    }
     Ok(())
 }
 
@@ -566,6 +569,33 @@ mod tests {
 
     const A40: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const B40: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// The publish step's completion names ONLY its own three fields —
+    /// the terminals fork on `result` — and carries none of the step's
+    /// stored keys: they stay put behind the merge door (e39a9d2a).
+    #[test]
+    fn a_publish_completion_writes_only_its_own_fields() {
+        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 9, 25, 7, 0, 0).unwrap();
+        let refused = publish_writes(
+            &Outcome::Refused {
+                detail: "base moved".into(),
+            },
+            now,
+        );
+        let mut keys: Vec<&str> = refused.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["completed_at", "detail", "result"]);
+        assert_eq!(refused["result"], "refused");
+        assert_eq!(refused["detail"], "base moved");
+        assert_eq!(refused["completed_at"], json!(stamp(now)));
+        let pushed = publish_writes(
+            &Outcome::Pushed {
+                detail: "pushed".into(),
+            },
+            now,
+        );
+        assert_eq!(pushed["result"], "pushed");
+    }
 
     #[test]
     fn a_request_reads_off_the_packet_metadata() {

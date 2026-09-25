@@ -87,21 +87,28 @@ export type Comparison = Readonly<{
 // SCOPED, not taken from the unscoped page of 20 the rest of the
 // section reads (75027a93): forge compares every 15 minutes and
 // boss-gcp once a day, so a mixed page spent by the five-minute series
-// held boss-gcp's row about one hour in twenty-four. The reader caps a
-// page at 50 (jobs.rs estate_events) and filters by scope only, so even
-// scoped a daily host falls off after ~12 h of forge rows (49 forge, 1
-// boss-gcp at the 2026-09-23 measure) — which is why the page states
-// how far back its page reached whenever it is not the whole series,
-// rather than letting an absent host read as silence.
-export const HOST_COMPARISONS_READ = '/api/estate/comparisons?scope=host&limit=50';
+// held boss-gcp's row about one hour in twenty-four.
+//
+// AND GROUPED PER HOST ON THE SERVER (backlog 725532ab). Scoped alone,
+// a daily host still fell off: measured 2026-09-25 07:50Z, the page of
+// 50 held 50 of 768 host rows, all forge's, and boss-gcp's 10:25Z row
+// was gone — so the page rendered a coverage line saying how far back
+// it reached, a truthful statement of a missing answer. `latest_per=
+// host` asks the question the section renders — each host's newest
+// word — and its `total` counts HOSTS, so one read is the whole answer
+// whenever rows == total, and the page owes every declared host a line.
+export const HOST_COMPARISONS_READ = '/api/estate/comparisons?scope=host&latest_per=host&limit=50';
 
-/** One page of the host series: the host rows, the series' total, and
- *  the oldest instant the page reached (null when it is empty). */
+/** The host series read grouped: each host's newest row, and how many
+ *  hosts the server counted (null from a reader that did not say). */
 export type HostComparisonPage = Readonly<{
   rows: readonly Comparison[];
   total: number | null;
-  oldest: string | null;
 }>;
+
+/** One line of the host comparison: a host and its newest comparison,
+ *  or null when the read holds none for a host the registry declares. */
+export type HostLine = Readonly<{ host: string | null; cmp: Comparison | null }>;
 
 // THE LOOPS (backlog 0d9b2960; page audit 2cff1d6e, GAP 10). The
 // estate is kept by loops — the hosts converge themselves, observe
@@ -319,8 +326,61 @@ export function parseHostComparisons(raw: unknown): HostComparisonPage {
   return {
     rows,
     total: typeof total === 'number' ? total : null,
-    oldest: rows.at(-1)?.observed_at ?? null,
   };
+}
+
+/** Whether the read is every host there is: the server counted, and the
+ *  page holds that many (a limit below the host count shows as rows <
+ *  total). An empty answer is whole either way — there is no tail. */
+export function hostPageIsWhole(page: HostComparisonPage): boolean {
+  const groups = latestPerHost(page.rows).length;
+  if (page.total === null) return groups === 0;
+  return groups >= page.total;
+}
+
+/** The hosts that owe a self-scoped comparison: every live declared
+ *  node OUTSIDE the cluster — the complement of the cluster compare's
+ *  participation rule (estate_compare.rs: role `talos-*`, not retired),
+ *  since a cluster node is compared in the cluster verdict instead. */
+export function declaredHosts(nodes: readonly EstateNode[]): readonly string[] {
+  return nodes.filter((n) => !n.retired && !n.role.startsWith('talos-')).map((n) => n.id);
+}
+
+/** Every line the host comparison renders: the newest row of each host
+ *  the read returned, plus a comparison-less line for each declared
+ *  host it did not, in host order. An unread registry leaves the rows
+ *  alone — it declares nothing the page could owe a line to. */
+export function hostLines(nodes: Remote<readonly EstateNode[]>, page: HostComparisonPage): readonly HostLine[] {
+  const latest = latestPerHost(page.rows);
+  const seen = new Set(latest.map((c) => c.host ?? null));
+  const owed = nodes.kind === 'ready' ? declaredHosts(nodes.data).filter((h) => !seen.has(h)) : [];
+  const lines: readonly HostLine[] = [
+    ...latest.map((c) => ({ host: c.host ?? null, cmp: c })),
+    ...owed.map((h) => ({ host: h, cmp: null })),
+  ];
+  return [...lines].sort((a, b) => (a.host ?? '').localeCompare(b.host ?? ''));
+}
+
+/** What a declared host with no row reads. Only a whole read may say
+ *  the host has none; otherwise the absence is the read's, and it says
+ *  how much of the series it holds. */
+export function missingHostText(page: HostComparisonPage): string {
+  if (hostPageIsWhole(page)) return 'no host comparison recorded';
+  const held = latestPerHost(page.rows).length;
+  return page.total === null
+    ? `not among the ${held} hosts this read returned, which did not say how many there are`
+    : `not among the ${held} of ${page.total} hosts this read returned`;
+}
+
+/** The line under a read that is not every host, or null when it is:
+ *  a truncated answer is never presented as whole. */
+export function hostCoverText(page: HostComparisonPage): string | null {
+  if (hostPageIsWhole(page)) return null;
+  const held = latestPerHost(page.rows).length;
+  const count = page.total === null
+    ? `${held} hosts and did not say how many there are`
+    : `${held} of ${page.total} hosts`;
+  return `The host read returned ${count}: a host past it has no comparison shown here.`;
 }
 
 /** Newest comparison per host — rows arrive newest-first, so the first
