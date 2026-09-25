@@ -65,7 +65,9 @@
 # Usage:  infra/prep-github-publish.sh [--json]
 # Exit:   0 = safe to publish (or nothing to publish)
 #         1 = a blocking finding; do not publish
-#         2 = refused: a ref did not resolve; nothing was measured
+#         2 = refused: a ref did not resolve, SOURCE_REF moved during
+#             the run, or the scanned tree was not SOURCE_REF's tree —
+#             no verdict was given
 set -uo pipefail
 
 REMOTE="${GITHUB_REMOTE:-github}"
@@ -78,8 +80,8 @@ JSON=0
 [ "${1:-}" = "--json" ] && JSON=1
 
 # Resolved BESIDE THIS SCRIPT, and before the cd: the classifier is part
-# of this script, while the cd below is about running the tree-wide
-# secrets lint over the repo being measured. Those are two different
+# of this script, while the cd below is about the repo being measured
+# (whose SOURCE_REF tree the secrets lint reads). Those are two different
 # directories whenever the script is invoked against a scratch repo.
 LIB="$(cd "$(dirname "$0")" && pwd)/mirror-drift-lib.sh"
 
@@ -129,9 +131,14 @@ TARGET="$REMOTE/$BRANCH"
 if ! git rev-parse --verify --quiet "$TARGET^{commit}" >/dev/null; then
   refuse "mirror ref $TARGET does not resolve (remote $REMOTE = $(git remote get-url "$REMOTE" 2>/dev/null))"
 fi
-if ! git rev-parse --verify --quiet "$SOURCE^{commit}" >/dev/null; then
+if ! SOURCE_SHA=$(git rev-parse --verify --quiet "$SOURCE^{commit}"); then
   refuse "source ref $SOURCE does not resolve; set SOURCE_REF to a ref this clone has (e.g. origin/main after git fetch origin)"
 fi
+# Resolved ONCE, and every measurement below reads this commit rather
+# than the name: `origin/main` is shared by every worktree of the clone,
+# so another session's fetch can move it between two reads, and a drift
+# counted at one commit beside a scan of another vouches for neither.
+# The name is re-read after the scan and a move is a refusal.
 # owner/repo for `gh pr create --repo`, derived from the remote rather
 # than hardcoded so a fork or a renamed repo does not print a command
 # that quietly targets the wrong place.
@@ -143,9 +150,9 @@ SLUG=$(git remote get-url "$REMOTE" 2>/dev/null \
 # ---------------------------------------------------------------------
 # No `|| echo 0` fallbacks: both refs were verified above, so a failure
 # here is a real git error and must surface, not read as "current".
-AHEAD=$(git rev-list --count "$TARGET".."$SOURCE") || refuse "git rev-list $TARGET..$SOURCE failed"
-BEHIND=$(git rev-list --count "$SOURCE".."$TARGET") || refuse "git rev-list $SOURCE..$TARGET failed"
-FILES=$(git diff --name-only "$TARGET" "$SOURCE" | wc -l | tr -d ' ')
+AHEAD=$(git rev-list --count "$TARGET".."$SOURCE_SHA") || refuse "git rev-list $TARGET..$SOURCE failed"
+BEHIND=$(git rev-list --count "$SOURCE_SHA".."$TARGET") || refuse "git rev-list $SOURCE..$TARGET failed"
+FILES=$(git diff --name-only "$TARGET" "$SOURCE_SHA" | wc -l | tr -d ' ')
 
 say "  commits ahead : $AHEAD"
 say "  commits behind: $BEHIND"
@@ -157,7 +164,7 @@ BLOCKING=""
 # carries content the source history does not — see the header and
 # mirror-drift-lib.sh. The classifier refuses (2) rather than answering
 # when it cannot tell, and that refusal is passed straight through.
-FOREIGN=$(foreign_mirror_commits "$SOURCE" "$TARGET")
+FOREIGN=$(foreign_mirror_commits "$SOURCE_SHA" "$TARGET")
 case $? in
   0) ;;
   *) refuse "cannot tell the mirror's own publish bookkeeping from foreign work on $TARGET (see the error above)" ;;
@@ -179,20 +186,59 @@ fi
 
 if [ "$AHEAD" -eq 0 ] && [ -z "$BLOCKING" ]; then
   say "  nothing to publish — the mirror is current"
-  [ "$JSON" -eq 1 ] && printf '{"has_drift":false,"commits_ahead":0,"commits_behind":%s,"commits_behind_foreign":0,"files_changed":0,"secrets_scan":"skipped","newly_public":0,"newly_public_files":[],"blocking":""}\n' "$BEHIND"
+  [ "$JSON" -eq 1 ] && printf '{"has_drift":false,"commits_ahead":0,"commits_behind":%s,"commits_behind_foreign":0,"files_changed":0,"secrets_scan":"skipped","source_sha":"%s","scanned_sha":null,"newly_public":0,"newly_public_files":[],"blocking":""}\n' "$BEHIND" "$SOURCE_SHA"
   exit 0
 fi
 
 # ---------------------------------------------------------------------
-# 2. SECRETS — the existing tree-wide gate, self-testing.
+# 2. SECRETS — the existing tree-wide gate, self-testing, run over the
+# tree being PUBLISHED.
 # ---------------------------------------------------------------------
-if bash infra/lint/no-secrets.sh >/dev/null 2>&1; then
+# Until 2026-09-25 this ran `infra/lint/no-secrets.sh` in the working
+# tree while everything above measured SOURCE_REF (backlog 63c82d2f).
+# Measured by run 701ccb98: the dev pod checkout was 2 commits (18
+# files) behind origin/main, so its `clean` vouched for a tree nobody
+# was publishing — and a publish to a public repo cannot be taken back.
+#
+# So the tree is taken from git, never from disk: `git archive` of the
+# resolved commit into a scratch dir, indexed there so the lint's own
+# `git ls-files` lists exactly that tree, and the lint run is the
+# REF's copy with the ref's allow-list — the pair that ships together,
+# as publish-github-pr.sh --measure already runs it. The extraction is
+# then hashed and must equal the commit's tree: `git archive` honours an
+# `export-ignore` committed in the tree it archives, so a file could be
+# published without being scanned, and "the scan read that tree" is a
+# fact to check, not to assume.
+SCAN_DIR=$(mktemp -d) || refuse "could not create a scratch dir for the tree of $SOURCE"
+trap 'rm -rf "$SCAN_DIR"' EXIT
+SCAN_TREE="$SCAN_DIR/tree"
+mkdir -p "$SCAN_TREE"
+git archive --format=tar "$SOURCE_SHA" | tar -x -C "$SCAN_TREE" \
+  || refuse "could not extract the tree of $SOURCE ($SOURCE_SHA) with git archive"
+git -C "$SCAN_TREE" init -q 2>/dev/null \
+  && git -C "$SCAN_TREE" add -A -f 2>/dev/null \
+  || refuse "could not index the extracted tree of $SOURCE ($SOURCE_SHA)"
+SCANNED_TREE=$(git -C "$SCAN_TREE" write-tree) \
+  || refuse "could not hash the extracted tree of $SOURCE ($SOURCE_SHA)"
+WANT_TREE=$(git rev-parse "$SOURCE_SHA^{tree}")
+if [ "$SCANNED_TREE" != "$WANT_TREE" ]; then
+  refuse "the tree extracted for the scan ($SCANNED_TREE) is not the tree of $SOURCE ($SOURCE_SHA, tree $WANT_TREE) — an export-ignore or export-subst attribute on that tree changes what git archive writes, so a scan of it would not vouch for what is published"
+fi
+if ( cd "$SCAN_TREE" && bash infra/lint/no-secrets.sh ) >/dev/null 2>&1; then
   SECRETS="clean"
 else
   SECRETS="FAILED"
   BLOCKING="${BLOCKING}secrets-lint-failed "
 fi
+SCANNED_SHA="$SOURCE_SHA"
+# The name is read again: a verdict about the commit SOURCE_REF named at
+# the start says nothing about the one it names now.
+NOW_SHA=$(git rev-parse --verify --quiet "$SOURCE^{commit}")
+if [ "$NOW_SHA" != "$SCANNED_SHA" ]; then
+  refuse "source ref $SOURCE moved during the measurement: scanned $SCANNED_SHA, it now names ${NOW_SHA:-nothing}"
+fi
 say "  secrets scan  : $SECRETS"
+say "  scanned       : $SCANNED_SHA (the tree of $SOURCE, from git, not the working tree)"
 
 # ---------------------------------------------------------------------
 # 3. NEWLY PUBLIC SURFACE — files that exist on the source ref and have
@@ -202,7 +248,7 @@ say "  secrets scan  : $SECRETS"
 # they describe how to reach and recover the live system, which is a
 # different kind of disclosure from source code.
 # ---------------------------------------------------------------------
-NEW_FILES=$(git diff --name-only --diff-filter=A "$TARGET" "$SOURCE" 2>/dev/null)
+NEW_FILES=$(git diff --name-only --diff-filter=A "$TARGET" "$SOURCE_SHA" 2>/dev/null)
 NEW_COUNT=$(printf '%s' "$NEW_FILES" | grep -c . || true)
 SENSITIVE=$(printf '%s\n' "$NEW_FILES" | grep -E '^(docs/runbooks/|infra/(cluster|caddy|forge)/)' || true)
 SENS_COUNT=$(printf '%s' "$SENSITIVE" | grep -c . || true)
@@ -218,8 +264,8 @@ fi
 
 if [ "$JSON" -eq 1 ]; then
   LIST=$(printf '%s\n' "$SENSITIVE" | grep . | sed 's/.*/"&"/' | paste -sd, - 2>/dev/null || true)
-  printf '{"has_drift":true,"commits_ahead":%s,"commits_behind":%s,"commits_behind_foreign":%s,"files_changed":%s,"secrets_scan":"%s","newly_public":%s,"newly_public_files":[%s],"blocking":"%s"}\n' \
-    "$AHEAD" "$BEHIND" "$FOREIGN_COUNT" "$FILES" "$SECRETS" "$SENS_COUNT" "${LIST:-}" "$(echo "$BLOCKING" | xargs)"
+  printf '{"has_drift":true,"commits_ahead":%s,"commits_behind":%s,"commits_behind_foreign":%s,"files_changed":%s,"secrets_scan":"%s","source_sha":"%s","scanned_sha":"%s","newly_public":%s,"newly_public_files":[%s],"blocking":"%s"}\n' \
+    "$AHEAD" "$BEHIND" "$FOREIGN_COUNT" "$FILES" "$SECRETS" "$SOURCE_SHA" "$SCANNED_SHA" "$SENS_COUNT" "${LIST:-}" "$(echo "$BLOCKING" | xargs)"
 fi
 
 if [ -n "$BLOCKING" ]; then
