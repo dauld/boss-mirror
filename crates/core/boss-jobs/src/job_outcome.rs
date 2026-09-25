@@ -27,6 +27,25 @@ pub const REOPEN_HINT: &str = "a closed or cancelled packet is a finished record
      reopen. Work that must continue is a new packet — file one that names this one — and a \
      finding about what this one said is a correction (`boss correct <packet>`).";
 
+/// The hint a refused admission carries (backlog 570e72bd).
+pub const ADMISSION_HINT: &str = "a packet ends through its protocol's terminal, or through a \
+     job PUT that closes it, and the close writes its `outcome`. Admit it `open` (or `draft`) \
+     with no `outcome`; a packet that records something already finished is a correction or a \
+     note on the packet that did the work.";
+
+/// The hint a refused hand skip of a protocol step carries.
+pub const HAND_SKIP_HINT: &str = "a protocol step is skipped by its protocol: the engine skips \
+     one whose `ready_when` can no longer hold, and a terminal's close skips what is left. To \
+     stop the work, complete the protocol's abort terminal (it completes from any open state) \
+     or cancel the packet; a skipped step reads as resolved to the steps behind it, so a skip \
+     by hand would open them with the work undone.";
+
+/// The hint a step whose `ready_when` does not hold carries.
+pub const READY_WHEN_HINT: &str = "the step's own `ready_when` is read against the packet as \
+     stored, and it does not hold. Do what it waits on — complete the steps it names, or set the \
+     job-metadata marker it reads through `PATCH /api/jobs/{id}/metadata` — and the engine \
+     opens the step; then complete it.";
+
 /// The hint a job PUT that changes a recorded outcome carries.
 pub const PUT_REFUSAL_HINT: &str = "`outcome` is written by the close — the terminal step's, \
      or a hand close that moves the packet to closed in the same write — and not by a later \

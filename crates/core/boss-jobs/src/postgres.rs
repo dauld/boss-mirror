@@ -597,6 +597,12 @@ impl JobsRepository for PgJobs {
         // name the protocol the packet was admitted under (backlog
         // b433bdf3), and a version moves only through
         // `repin_workflow_version_at`.
+        //
+        // A FINISHED STATUS DOES NOT MOVE (backlog 570e72bd): the WHERE
+        // is the compare-and-set the job PUT's read-then-judge could not
+        // be. A row stored closed or cancelled is written only by a
+        // write that keeps that status; anything else matches no row
+        // and is named below, never answered as a write that landed.
         let result = sqlx::query(
             r#"
             UPDATE jobs SET subject_kind = $2, subject_id = $3,
@@ -604,6 +610,7 @@ impl JobsRepository for PgJobs {
                 opened_on = $8, due_on = $9, closed_on = $10, metadata = $11,
                 tags = $12, updated_at = $13
             WHERE id = $1
+              AND (status NOT IN ('closed', 'cancelled') OR status = $6)
             "#,
         )
         .bind(*job.id.inner().as_uuid())
@@ -624,10 +631,22 @@ impl JobsRepository for PgJobs {
         .map_err(|e| JobsError::Storage(e.to_string()))?;
 
         if result.rows_affected() == 0 {
-            return Err(JobsError::NotFound(job.id));
+            // No row matched: either there is none, or it is finished
+            // and this write would move its status. Read which, in the
+            // same transaction, so the refusal names the stored status.
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT status FROM jobs WHERE id = $1")
+                    .bind(*job.id.inner().as_uuid())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| JobsError::Storage(e.to_string()))?;
+            return Err(match stored {
+                Some(status) => JobsError::TerminalJob { id: job.id, status },
+                None => JobsError::NotFound(job.id),
+            });
         }
         // OUTBOX (phase 2): the caller's events (JOB_UPDATED + status
-        // markers) record with the row (the NotFound above returns
+        // markers) record with the row (the refusals above return
         // pre-recording).
         for event in events {
             boss_events::outbox::record_event_in_tx(&mut tx, event)
