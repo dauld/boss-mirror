@@ -151,3 +151,50 @@ ready_when = "steps.collect.done AND job.metadata.empty = \"true\""
 title_template = "Disassembled — cars back to the dock"
 terminal = { outcome = "cancelled" }
 metadata_defaults = { outcome_kind = "aborted" }
+
+# MERGE LOST (backlog f9256445, design d812f1b7 D1, decided 2026-09-25).
+# Train 2026-09-25 20:04 (PR #687) merged as c85941b4 at 20:10:41Z; by
+# 20:11:14Z forge main was back at 777a5888, and the 20:34 train was
+# assembled on that real main. No later cluster commit could descend
+# from the merge, so `converged` waited, then alarmed, then waited for
+# ever: `arrived` needs `converged`, and `cancelled` means CLOSED
+# UNMERGED, which is false for a PR the forge reports merged.
+#
+# The conductor reaches this on evidence: for a train past `merged` and
+# not `converged`, it reads forge main with `ls-remote` and asks `git
+# merge-base --is-ancestor <merge> <forge main>` in its clone. A git
+# failure is a refusal to judge, never a verdict, and it takes TWO NOT
+# readings on two ticks. Then, in this order: these four fields and the
+# marker (the train closes, which releases the track), every boarded car
+# unlanded through `boss car unland`'s writer (ship-a-change `unlanded`,
+# a successor car on the dock's road), and ONE backlog-item on the
+# pipeline-failure channel. After this a merged train either converges
+# by ancestry or ends here; only a cluster that deploys nothing at all
+# still waits, and the converge alarm covers that.
+#
+# `aborted`: the delivery did not complete, and an abort completes from
+# any open state — so the four REQUIRED fields are its gate. Nobody
+# reaches it without the reading.
+[[workflow.step]]
+title = "merge-lost"
+kind = "outcome"
+ready_when = "steps.merged.done AND job.metadata.merge_lost = \"true\""
+title_template = "Merge lost — main no longer carries it; cars back to the dock"
+terminal = { outcome = "merge-lost" }
+metadata_defaults = { outcome_kind = "aborted" }
+[[workflow.step.fields]]
+name = "merge_ref"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "main_at_read"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "read_at"
+field_type = "string"
+required = true
+[[workflow.step.fields]]
+name = "evidence"
+field_type = "string"
+required = true

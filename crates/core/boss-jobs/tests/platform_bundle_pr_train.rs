@@ -162,3 +162,65 @@ fn a_materialised_train_is_born_the_conductors() {
         assert_eq!(step.assignee_id, None, "`{slug}` is a marker, nobody's");
     }
 }
+
+/// A MERGED TRAIN WHOSE MERGE MAIN LOST ENDS ON EVIDENCE (backlog
+/// f9256445, design d812f1b7 D1). Train 2026-09-25 20:04 merged as
+/// c85941b4; by 20:11:14Z forge main was back at 777a5888 and no later
+/// cluster commit could ever descend from the merge, so `converged`
+/// waited for ever: `arrived` needs `converged`, and `cancelled` (closed
+/// UNMERGED, and waiting on the `empty` marker) would record something
+/// false about a PR the forge reports merged.
+///
+/// `merge-lost` is the third ending: an ABORT (the delivery did not
+/// complete, and an abort completes from any open state — so its four
+/// REQUIRED fields are its gate: nobody reaches it without the reading),
+/// ready only after `merged` and on the conductor's own marker.
+#[test]
+fn a_merge_main_lost_is_an_abort_that_carries_its_reading() {
+    let train = bundled("pr-train");
+    let spec = train
+        .steps
+        .iter()
+        .find(|s| s.title == "merge-lost")
+        .expect("pr-train carries a `merge-lost` terminal");
+    assert_eq!(spec.kind, "outcome");
+    assert_eq!(
+        spec.terminal.as_ref().map(|t| t.outcome.as_str()),
+        Some("merge-lost")
+    );
+    assert!(
+        spec.ready_when.contains("steps.merged.done")
+            && spec
+                .ready_when
+                .contains("job.metadata.merge_lost = \"true\""),
+        "only a merged train can lose its merge, and only the conductor's marker says so: {:?}",
+        spec.ready_when
+    );
+    let required: Vec<&str> = spec
+        .fields
+        .iter()
+        .filter(|f| f.required)
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(
+        required,
+        ["merge_ref", "main_at_read", "read_at", "evidence"],
+        "the four fields the arm reads are its gate"
+    );
+    let steps = materialize_steps(
+        &train,
+        &Subject::new("custom", "train/20260925-2004"),
+        JobId::new(),
+        &serde_json::Value::Object(Default::default()),
+        StepId::new,
+    );
+    let lost = steps
+        .iter()
+        .find(|s| s.spec_slug.as_deref() == Some("merge-lost"))
+        .expect("`merge-lost` materialised");
+    assert_eq!(
+        lost.metadata.get("outcome_kind"),
+        Some(&serde_json::json!("aborted"))
+    );
+    assert_eq!(lost.assignee_id, None, "a terminal is a marker, nobody's");
+}
