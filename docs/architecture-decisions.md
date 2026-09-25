@@ -323,7 +323,12 @@ person holding it does. Landed: the axis readers — boss-people's
 employee checks (`a45ab09d`), then the agents batch door, account-team
 roles and `GET /api/classes?member_attribute=` (`ab1e6ff8`). Not built:
 the department write door, the publish path and the move; the
-`departments` table still has no write door.
+`departments` table still has no write door. Algedonic's own roster
+was answered on design `8c3e9599` (2026-09-25; §Step UX & frontend).
+It has nine live rows, `engineering` folds into `it`, `people` stays
+as a row, and the six physical-operations rows are retired on this
+instance. That design also gives a department a second axis,
+`practices`, beside its single `function`.
 
 **The People roster holds people** (design `7aa2d1c5`, David
 2026-09-23; answers backlog `6a123f1f`, gap 12 of the `/ux/people`
@@ -2138,6 +2143,89 @@ instance; the line is physical operations and headcount, which the
 playground and the simulator carry. It differs in kind from the
 stand-down above: a department with no protocol at all has nothing to
 dogfood. Nothing to build; the batch fix landed on its own (#586).
+
+**Every page belongs to a department or to Home, at `/<code>/<slug>`;
+`/ux` dissolves and its old links keep working** (design `8c3e9599`,
+David 2026-09-25, the design approved and its one question answered as
+proposed: "that roster looks right, go ahead with the design"; while it
+was being measured he added: "let's not get trapped by forgetting that
+something like Design might be a department and a function within a
+department"). Measured on `d093f6e6`: the router's `/ux` block matched
+50 patterns and already answered every one without the prefix, so the
+prefix was decoration. Page ownership was written four times in four
+vocabularies (the catalog's `app` and `department` fields,
+`APP_SURFACES`, `IT_GROUPS`/`HOME_GROUPS`), `APP_SUBJECT_KINDS` made a
+fifth, and web-kit spelled 15 `/ux` paths by hand. 630 of 19,884 stored
+packets (112 open) and 23 page-audit Subjects name a `/ux` URL in the
+immutable log. Decided: (1) **two axes, both data.** A *unit* is a row
+in the `departments` Subject registry, and its code is its identity.
+Nesting, when a roster first needs it, is a nullable `parent` on the
+row, a Subject relation; the Class `parent_code` is not used, because
+it nests values of one taxonomy. A *practice* is a kind of work
+several units do: a Class on the department kind (`member_attribute =
+practice`), with many-to-many membership in `departments.practices`
+validated at the write door, and `parent_code` nesting sub-practices.
+The single-valued `function` axis stays as it is, because a department
+has one purpose and several practices. So Design is a department whose
+row carries the `design` practice, IT, Product and Marketing carry it
+too, and nothing special-cases it. Rejected: a flat page-to-department
+map, a practice as a department that others link to, per-tenant
+re-homing of surfaces (a second answer to "who owns this page"), and a
+multi-valued `function`. (2) **Every catalog entry declares one
+owner.** A unit-owned page mounts once at `/<code>/<slug>`. A
+practice-owned page mounts under every unit that carries the practice,
+scoped to that unit (`/api/jobs?department=<code>`). That one field
+replaces `app`, `department`, `APP_SURFACES` and `APP_SUBJECT_KINDS`.
+Every unit carries its in / working / out jobs view at `/<code>/jobs`.
+Membership (`employees.department`, `agents.department`) decides
+nothing about what a person sees, because one human runs every
+department; visibility is policy, the module gate and a live registry
+row. Membership does move onto department rows as the one vocabulary.
+(3) **The URL is `/<code>`, `/<code>/<slug>` or
+`/<code>/<slug>/<id>`, never `/<code>/<id>`.** It holds the leaf code
+only, so a re-org changes no URL, and the code rather than the display
+name. Packets move between departments, so job and step detail stay at
+the root, and `/ux/sales/:id` and `/ux/service/:id` fold onto
+`/jobs/:id`. **Home is not a department** and holds the root: My Day
+`/`, `/inbox`, `/views`, `/schedule`, `/jobs`, `/search`, `/manual`,
+and the guest `/system-model` outside the chrome. The registry write
+door refuses a department code that equals a reserved root segment
+(Home's paths, the gateway's prefixes, the SPA's static root entries),
+and a test holds that list against the catalog and the gateway router.
+`/<code>` lands on the entry flagged `landing`, else the department's
+first entry, else its jobs view. The design's table maps all 50
+patterns and deletes no page. A page whose owner is not a department on
+this instance renders not-found with one door back to Home, never a
+module-off notice. (4) **Old paths stay permanently, in one
+definition:** each catalog entry and detail pattern carries `legacy:
+[...]`, resolved with `history.replaceState` to its canonical path. A
+legacy path is a recorded move, not a guess, so bookmarks, surface-opens
+telemetry and page-audit routes all converge on one spelling. Pins hold
+that every legacy path parses to its canonical route, that no alias
+names an alias, and that no legacy path is canonical. The page-audit
+opener canonicalises through the same aliases. The gateway is
+untouched, because a Rust copy of the map would be a fact living
+twice. (5) **Navigation derives from the registry.** Tabs are Home,
+then Simulator when the sim module is on, then every live root
+department in `sort_order`. A sidebar lists the department's own
+entries, then its practices' surfaces, then its child units, then
+Jobs. `entityHref` and GlobalSearch build their paths from catalog
+entries that declare `detail: {subjectKind}`. A new department is a
+registry row and needs no code. (6) **Algedonic, LLC's roster** (the
+one question, an org-chart call): `it` (engineering and operations are
+its two halves), `product`, `design` (top-level, owning the brand guide
+and design language, `9230dfe4`), `marketing`, `sales`, `support`,
+`hosting`, `finance` and `executive`. `people` stays a row so every
+actor's name keeps a page, with its sidebar stood down (`36b79159`).
+`production`, `warehouse`, `distribution`, `maintenance`, `service` and
+`qa` are retired on this instance and kept for the Ales playground.
+Not built: all of it. The plan is ten cars, filed as backlog items
+that cite the design. The departments write door and the LLC roster
+come first and block nothing. The legacy field and Home at the root
+must land before any page moves. Registry-derived routing comes next,
+then the four department moves, then the links. Deleting `/ux` comes
+last in the routing chain, and the practice axis rides with
+`9230dfe4` after the write door.
 
 **The look is one light theme, Transit, and the map's colours are the
 first to route through it** (design `dea94998`, David 2026-09-23: "I
