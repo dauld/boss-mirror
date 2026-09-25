@@ -41,7 +41,7 @@ use boss_core::publisher::DomainPublisher;
 use boss_jobs::http::{JobsApiState, router};
 use boss_jobs::registry::seedable_platform_workflows;
 use boss_jobs::{InMemoryJobs, InMemoryWorkflows, JobsRepository, WorkflowRegistry};
-use boss_policy_client::{FakePolicyClient, PolicyClient};
+use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
 use boss_testing::RecordingEventBus;
 use chrono::NaiveDate;
 use http_body_util::BodyExt;
@@ -100,7 +100,13 @@ async fn seed() -> axum::Router {
     ] {
         jobs.create_job(&job_at(id, title)).await.unwrap();
     }
-    let policy: Arc<dyn PolicyClient> = Arc::new(FakePolicyClient::builder().build());
+    // The platform default the operator reads packets under — the
+    // detail is scoped by policy Read on job since backlog 046832d3.
+    let policy: Arc<dyn PolicyClient> = Arc::new(
+        FakePolicyClient::builder()
+            .allow("platform-admin", Action::Read, Resource::job(), Scope::All)
+            .build(),
+    );
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
     let state = JobsApiState {

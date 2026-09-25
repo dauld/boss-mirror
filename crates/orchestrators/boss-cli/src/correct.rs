@@ -345,6 +345,9 @@ mod tests {
                     Resource::job(),
                     Scope::All,
                 )
+                // The verb reads the packet back through the job GET,
+                // scoped by policy Read on job since backlog 046832d3.
+                .allow("platform-admin", Action::Read, Resource::job(), Scope::All)
                 .build(),
         );
         let app = boss_jobs::http::router(boss_jobs::http::JobsApiState::minimal(

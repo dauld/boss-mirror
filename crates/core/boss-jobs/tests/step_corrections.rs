@@ -75,6 +75,9 @@ fn build_app() -> (Router, Arc<InMemoryJobs>) {
         FakePolicyClient::builder()
             .allow("service-tech", Action::Update, Resource::job(), Scope::All)
             .allow("service-tech", Action::Update, Resource::step(), Scope::All)
+            // The job GET is scoped by policy Read on job since backlog
+            // 046832d3: the writer here reads what it corrected.
+            .allow("service-tech", Action::Read, Resource::job(), Scope::All)
             .build(),
     );
     let state = JobsApiState::minimal(
