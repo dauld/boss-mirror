@@ -47,6 +47,9 @@ struct State {
     /// Packets whose close write fails, set by
     /// [`InMemoryJobs::fail_job_close`].
     unclosable_jobs: BTreeSet<String>,
+    /// Packets whose own row read fails, set by
+    /// [`InMemoryJobs::fail_job_read`].
+    unreadable_jobs: BTreeSet<String>,
 }
 
 impl InMemoryJobs {
@@ -81,6 +84,18 @@ impl InMemoryJobs {
     pub fn fail_job_close(&self, job_id: &JobId) {
         if let Ok(mut state) = self.inner.lock() {
             state.unclosable_jobs.insert(job_key(job_id));
+        }
+    }
+
+    /// Make every later `get_job` of this packet fail with a storage
+    /// error, so a handler's answer to a packet it could not read is
+    /// testable: the step PUT read it with `.ok().flatten()`, so a
+    /// failed read became "no packet", the protocol gate read no
+    /// protocol, and the step was judged as if it had none (backlog
+    /// 5186c5e1).
+    pub fn fail_job_read(&self, job_id: &JobId) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.unreadable_jobs.insert(job_key(job_id));
         }
     }
 
@@ -302,6 +317,11 @@ impl JobsRepository for InMemoryJobs {
 
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError> {
         let state = self.inner.lock().expect("poisoned");
+        if state.unreadable_jobs.contains(&job_key(id)) {
+            return Err(JobsError::Storage(format!(
+                "job {id} unreadable (injected by fail_job_read)"
+            )));
+        }
         Ok(state.jobs.get(&job_key(id)).cloned())
     }
 
@@ -331,6 +351,16 @@ impl JobsRepository for InMemoryJobs {
             let Some(existing) = state.jobs.get(&key) else {
                 return Err(JobsError::NotFound(job.id));
             };
+            // A finished packet's status does not move — the Pg
+            // adapter's WHERE clause, mirrored (backlog 570e72bd).
+            if matches!(existing.status, JobStatus::Closed | JobStatus::Cancelled)
+                && job.status != existing.status
+            {
+                return Err(JobsError::TerminalJob {
+                    id: job.id,
+                    status: format!("{:?}", existing.status).to_lowercase(),
+                });
+            }
             // Mirror the Pg adapter: the partition and the admission
             // instant are decided at admission and immutable — an
             // update carries no authority over either. The storage

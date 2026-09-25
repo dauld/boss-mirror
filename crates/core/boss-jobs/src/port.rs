@@ -33,6 +33,14 @@ pub enum JobsError {
     /// handler turns this into the 409 the caller can act on.
     #[error("step {id} is {status} — a terminal step's metadata is frozen")]
     TerminalStep { id: StepId, status: String },
+    /// A whole-row job write would move a finished (closed or
+    /// cancelled) packet's status. The job PUT judges the row it READ;
+    /// a close that commits between that read and this write is only
+    /// visible here, so the adapters refuse atomically with the row
+    /// check rather than write a stale open copy over the close
+    /// (backlog 570e72bd, road 5).
+    #[error("job {id} is {status} — a finished packet's status does not move")]
+    TerminalJob { id: JobId, status: String },
 }
 
 /// Optional filters for listing jobs.
@@ -753,6 +761,14 @@ pub trait JobsRepository: Send + Sync {
         self.update_job_at(job, Utc::now(), &[]).await
     }
 
+    /// Replace the Job's row with `job`, recording `events` with it.
+    ///
+    /// A compare-and-set on a FINISHED status: a row stored Closed or
+    /// Cancelled keeps it, and a write whose `status` differs is refused
+    /// as [`JobsError::TerminalJob`] with nothing written or recorded. A
+    /// write that keeps the finished status (a retitle after the close)
+    /// lands. The job PUT judged the row it read; only the store sees a
+    /// close that committed after that read (backlog 570e72bd).
     async fn update_job_at(
         &self,
         job: &Job,

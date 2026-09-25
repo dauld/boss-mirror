@@ -1769,6 +1769,52 @@ pub fn reevaluate(
     changed
 }
 
+/// What a packet's protocol says about ONE of its steps, read against
+/// the packet as stored (backlog 570e72bd).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProtocolReading {
+    /// No spec step pairs with this step, so no predicate describes it.
+    Unpaired,
+    /// Its `ready_when` holds.
+    Holds { ready_when: String },
+    /// Its `ready_when` does not hold — false, or not yet evaluable (a
+    /// metadata key nothing has written), which is the answer the
+    /// engine acts on too.
+    Waits { ready_when: String },
+}
+
+/// PURE: read step `step_id`'s own `ready_when` against the packet as
+/// stored — the same pairing ([`pair_steps`]), context
+/// ([`build_context`]) and evaluation [`reevaluate`] uses, so a hand
+/// write is judged by exactly the predicate the engine opens the step
+/// by. The step API's gate read only `blocked_by`, the edge list drawn
+/// FROM the predicate, which cannot see a `job.metadata` clause: a
+/// terminal waiting on `steps.review.done AND job.metadata.merged =
+/// "true"` was completable by hand the moment review was done.
+pub fn read_step(
+    spec: &WorkflowSpec,
+    steps: &[Step],
+    subject: &Subject,
+    job_metadata: &serde_json::Value,
+    step_id: &boss_core::job::StepId,
+) -> ProtocolReading {
+    let pairing = pair_steps(spec, steps);
+    let Some(spec_step) = steps
+        .iter()
+        .position(|s| &s.id == step_id)
+        .and_then(|j| pairing.iter().position(|p| *p == Some(j)))
+        .and_then(|i| spec.steps.get(i))
+    else {
+        return ProtocolReading::Unpaired;
+    };
+    let ctx = build_context(spec, steps, &pairing, subject, job_metadata);
+    let ready_when = spec_step.ready_when.clone();
+    match eval_ready_when(&ready_when, &ctx) {
+        Some(true) => ProtocolReading::Holds { ready_when },
+        _ => ProtocolReading::Waits { ready_when },
+    }
+}
+
 /// If the step has an `authority_role`, surface it in metadata so the
 /// sign-off gate in `boss-jobs::http::update_step` can enforce it.
 ///

@@ -4008,6 +4008,36 @@ impl Conductor {
                 present.join(", ")
             );
         }
+        // NOR A TERMINAL THE STEP API WILL REFUSE (backlog 5186c5e1).
+        // `cancelled` waits on the `empty` marker, which a train that
+        // boarded cars never carries, and this verb completes it without
+        // one: the step API takes that only because the row is an abort
+        // (`outcome_kind = aborted` completes from any open state,
+        // 570e72bd). A version whose row were not would answer 409 at the
+        // foot of this function — after the PR was closed and the cars
+        // released. The forge writes stay first (10bb1e1a: a forge
+        // failure must leave the train intact); this is the one jobs-API
+        // refusal that can be read before them, so it is read here.
+        if let Some(step) = find_step(train, "cancelled", "Cancelled — nothing to board")
+            && !completes_by_hand(step)
+        {
+            let version = train
+                .get("workflow_version")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            bail!(
+                "refusing to cancel train {}: its `cancelled` terminal is {} and its row is not \
+                 an abort (no outcome_kind = aborted on pinned pr-train v{version}), so the step \
+                 API would refuse its completion without the `empty` marker — after the PR was \
+                 closed and the cars released. Move the packet to a version whose `cancelled` \
+                 is an abort (`boss job convert`). Nothing was written: the PR is still open \
+                 and the cars are still aboard.",
+                id8(tid),
+                step.get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("of unknown status"),
+            );
+        }
 
         let boarded: Vec<String> = train
             .get("metadata")
@@ -4161,6 +4191,23 @@ impl Conductor {
         log(format!("train {} cancelled: {reason}", id8(tid)));
         Ok(())
     }
+}
+
+/// Whether the step API takes a hand completion of `step` with its
+/// predicate unread: the engine has opened it (or it is already done,
+/// which `complete_step` skips), or its materialised row is an abort,
+/// which completes from any open state (boss-jobs `update_step`).
+fn completes_by_hand(step: &Value) -> bool {
+    let opened = matches!(
+        step.get("status").and_then(Value::as_str),
+        Some("ready" | "active" | "completed" | "skipped")
+    );
+    let abort = step
+        .get("metadata")
+        .and_then(|m| m.get("outcome_kind"))
+        .and_then(Value::as_str)
+        == Some("aborted");
+    opened || abort
 }
 
 #[cfg(test)]
@@ -4592,6 +4639,86 @@ mod tests {
         assert!(
             step_puts.lock().unwrap().is_empty(),
             "no step was completed"
+        );
+    }
+
+    /// 5186c5e1: the `cancelled` terminal's `ready_when` waits on the
+    /// `empty` marker, which a train that boarded cars never carries,
+    /// and the step API opens a Pending step by hand only where its
+    /// predicate holds — except an ABORT (`outcome_kind = aborted`),
+    /// which completes from any open state. pr-train's row says
+    /// `aborted` (pinned in boss-jobs platform_bundle_pr_train.rs); a
+    /// train pinned to a version that did not would answer the
+    /// completion 409 AFTER the PR was closed and the cars released —
+    /// a half-cancelled train. Refused FIRST, before any write.
+    #[tokio::test]
+    async fn cancel_refuses_a_train_whose_terminal_cannot_complete_before_any_write() {
+        let mut train = requested_open_train();
+        train["workflow_version"] = json!(7);
+        for s in train["steps"].as_array_mut().unwrap() {
+            if s["spec_slug"] == "cancelled" {
+                s["status"] = json!("pending");
+                s["metadata"] = json!({});
+            }
+        }
+        let (jobs, job_puts, step_puts) =
+            cancel_request_jobs_api(train, struck_boarded_car()).await;
+        let (c, close_called) = cancel_request_conductor(jobs, true);
+
+        let err = c
+            .cancel_train("t1", "bad consist", false, false)
+            .await
+            .expect_err("a terminal the step API will refuse cannot be completed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cancelled") && msg.contains("v7") && msg.contains("aborted"),
+            "names the step, the pinned version and what it lacks: {msg}"
+        );
+        assert!(
+            msg.contains("Nothing was written"),
+            "says the train is intact: {msg}"
+        );
+        assert!(
+            !*close_called.lock().unwrap(),
+            "refused BEFORE the forge write — the PR is still open"
+        );
+        assert!(job_puts.lock().unwrap().is_empty(), "no car was released");
+        assert!(
+            step_puts.lock().unwrap().is_empty(),
+            "no step was completed"
+        );
+    }
+
+    /// Control: the shape pr-train actually materialises — `cancelled`
+    /// Pending on its marker, `outcome_kind = aborted` — is cancelled.
+    #[tokio::test]
+    async fn cancel_completes_a_pending_terminal_that_is_an_abort() {
+        let mut train = requested_open_train();
+        for s in train["steps"].as_array_mut().unwrap() {
+            if s["spec_slug"] == "cancelled" {
+                s["status"] = json!("pending");
+                s["metadata"] = json!({ "outcome_kind": "aborted" });
+            }
+        }
+        let (jobs, job_puts, step_puts) =
+            cancel_request_jobs_api(train, struck_boarded_car()).await;
+        let (c, close_called) = cancel_request_conductor(jobs, true);
+
+        c.cancel_train("t1", "bad consist", false, false)
+            .await
+            .expect("an abort terminal completes from any open state");
+        assert!(*close_called.lock().unwrap(), "the PR is closed");
+        assert!(
+            job_puts.lock().unwrap().iter().any(|(id, _)| id == "c1"),
+            "the car was released"
+        );
+        assert!(
+            step_puts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(id, sid, _)| id == "t1" && sid == "s-cancelled"),
+            "the cancelled terminal was completed"
         );
     }
 
