@@ -433,10 +433,10 @@ pub(crate) async fn unland(given: &str, merge_ref: &str, dry_run: bool) -> Resul
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn git_in(root: &Path, args: &[&str]) -> String {
+    pub(crate) fn git_in(root: &Path, args: &[&str]) -> String {
         let out = Command::new("git")
             .arg("-C")
             .arg(root)
@@ -461,7 +461,7 @@ mod tests {
     /// that has fetched a merge on top — then main is rewound to `base`
     /// with a force push, the way 2026-09-25's main lost c85941b4.
     /// Returns (clone, base, merge).
-    fn forge_that_lost_a_merge(tag: &str) -> (std::path::PathBuf, String, String) {
+    pub(crate) fn forge_that_lost_a_merge(tag: &str) -> (std::path::PathBuf, String, String) {
         let root = boss_testing::scratch::scratch_dir(tag);
         let forge = root.join("forge.git");
         let clone = root.join("clone");
@@ -485,7 +485,7 @@ mod tests {
         (clone, base, merge)
     }
 
-    fn now() -> DateTime<Utc> {
+    pub(crate) fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-09-25T21:19:00Z")
             .unwrap()
             .with_timezone(&Utc)
@@ -603,7 +603,7 @@ mod tests {
         }
     }
 
-    async fn serve() -> String {
+    pub(crate) async fn serve() -> String {
         use boss_jobs::WorkflowRegistry;
         use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
         use std::sync::Arc;
@@ -647,7 +647,7 @@ mod tests {
     /// A car the conductor landed as `merge`: scope, build, gate and
     /// review completed (review with the conductor's landing note), and
     /// the `merged` marker on the job.
-    async fn landed(door: &dyn Door, branch: &str, merge: &str) -> String {
+    pub(crate) async fn landed(door: &dyn Door, branch: &str, merge: &str) -> String {
         let made = door
             .send(
                 Method::POST,
