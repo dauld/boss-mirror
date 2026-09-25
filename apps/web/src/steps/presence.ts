@@ -78,18 +78,85 @@ export function shownAfter(
 }
 
 /**
- * One key the passkey signs, as a surface puts it on screen.
+ * One key the passkey signs, as a surface puts it on screen: `key` is the
+ * key itself (the row's identity), `label` the key as drawn, `text` the
+ * value as drawn — both through {@link signedText}.
  */
-export type SignedRow = Readonly<{ key: string; text: string }>;
+export type SignedRow = Readonly<{ key: string; label: string; text: string }>;
+
+// The only characters drawn as themselves: printable ASCII, and the em
+// dash the platform's own prose is full of (364 of them in infra/ops
+// alone), which has no ASCII look-alike. Everything else — controls, bidi
+// overrides and isolates, zero-width and other invisible characters,
+// non-ASCII spaces, and every letter, digit or mark from another script
+// that could pass for an ASCII one — is written as an escape. A letter
+// table of "confusables" would be a claim to keep up to date; this is a
+// rule with no table (backlog 6093cf13).
+const AS_ITSELF = /^[\x20-\x7E\u2014]$/u;
+const NOT_AS_ITSELF = /[^\x20-\x7E\n\u2014]/gu;
+
+const escaped = (c: string): string =>
+  `\\u{${(c.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, '0')}}`;
+
+const QUOTED: Readonly<Record<string, string>> = {
+  '\\': '\\\\',
+  '"': '\\"',
+  // A line break is drawn as \n AND breaks, so a multi-line plan stays
+  // readable and a line the box wraps is never mistaken for one the
+  // bytes break.
+  '\n': '\\n\n',
+  '\t': '\\t',
+  '\r': '\\r',
+};
+
+/** A string in double quotes, every character not drawn as itself escaped. */
+const quoted = (s: string): string =>
+  `"${[...s].map((c) => QUOTED[c] ?? (AS_ITSELF.test(c) ? c : escaped(c))).join('')}"`;
 
 /**
- * A signed value as text: a string byte for byte (a plan keeps its
- * newlines), anything else as its indented JSON — so a value the surface
- * has no renderer for is still shown, never skipped.
+ * Whether a string can be drawn bare and still read as exactly itself:
+ * one line, non-empty, every character drawn as itself, no space at an
+ * edge, not starting with a quote (a quoted drawing always does), and
+ * not something a reader would take for a number, a boolean, null or
+ * JSON — '42' and 42 drew alike until 6093cf13.
+ */
+function readsAsItself(s: string): boolean {
+  if (s === '' || s.startsWith('"') || s.startsWith(' ') || s.endsWith(' ')) return false;
+  if (![...s].every((c) => AS_ITSELF.test(c))) return false;
+  try {
+    JSON.parse(s);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * A signed value AS THE BYTES IT IS (backlog 6093cf13, adversarial review
+ * of car 30674304). A string that reads as exactly itself is drawn bare;
+ * any other string is drawn in double quotes with every character that is
+ * not printable ASCII (or an em dash) written as `\u{XXXX}`, and `\n`,
+ * `\t`, `\r`, `\\`, `\"` as themselves. Anything else is its indented
+ * JSON, with the same escapes inside it — so a value the surface has no
+ * renderer for is still shown, never skipped, and two values the passkey
+ * would sign differently are never drawn alike. Key names and the title
+ * are drawn through this too. It changes what is DRAWN, never what is
+ * signed: the begin still names the raw step.
  */
 export function signedText(v: unknown): string {
-  if (typeof v === 'string') return v;
-  return JSON.stringify(v, null, 2) ?? String(v);
+  if (typeof v === 'string') return readsAsItself(v) ? v : quoted(v);
+  const json = JSON.stringify(v, null, 2);
+  return json === undefined ? String(v) : json.replace(NOT_AS_ITSELF, escaped);
+}
+
+/**
+ * What a value whose box scrolls says under it: rendered is not read, so
+ * a long plan that scrolls inside an 18em box names how much of it there
+ * is (6093cf13). `text` is the value as drawn.
+ */
+export function scrollNote(text: string): string {
+  const lines = text.split('\n').length;
+  return `scrolls in its box: ${lines} ${lines === 1 ? 'line' : 'lines'}, ${[...text].length} characters. Read it to the end; your passkey signs all of it.`;
 }
 
 /**
@@ -109,11 +176,14 @@ export function signedText(v: unknown): string {
 export function signedRows(shown: ShownStep): SignedRow[] {
   return Object.keys(shown.metadata)
     .sort()
-    .map((key) => ({ key, text: signedText(shown.metadata[key]) }));
+    .map((key) => ({ key, label: signedText(key), text: signedText(shown.metadata[key]) }));
 }
 
-/** A value's JSON with object keys sorted, so equality is order-free. */
-function canonical(v: unknown): string {
+/**
+ * A value's JSON with object keys sorted, so equality is order-free.
+ * Exported for the pin that holds sign-off.js's copy equal to it.
+ */
+export function canonical(v: unknown): string {
   if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
   if (v !== null && typeof v === 'object') {
     const o = v as Record<string, unknown>;

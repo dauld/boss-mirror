@@ -382,12 +382,23 @@ pub(crate) const fn admits(live: usize, max: usize, who: Requester) -> bool {
 /// Pure, and it NAMES the running gates — the operator's next move is
 /// to wait for or watch one of them, and a bound that says only "3
 /// running" sends them off to run the kubectl this verb already ran.
-pub(crate) fn crowd_refusal(live: &[String], max: usize) -> Option<String> {
-    if admits(live.len(), max, Requester::Car) {
+///
+/// `dock_waiting` is the dock's claims on a bay ([`dock_waiting`]): a
+/// slot one of them is waiting for is not free to a builder.
+pub(crate) fn crowd_refusal(live: &[String], dock_waiting: usize, max: usize) -> Option<String> {
+    if admits(live.len() + dock_waiting, max, Requester::Car) {
         return None;
     }
+    let dock = if dock_waiting == 0 {
+        String::new()
+    } else {
+        format!(
+            ", and {dock_waiting} parked car(s) the dock is waiting to re-gate on current main \
+             go first (design 42279fb2)"
+        )
+    };
     Some(format!(
-        "{n} gate(s) already running ({names}) — at the concurrency bound of {max}.\n  \
+        "{n} gate(s) already running ({names}){dock} — at the concurrency bound of {max}.\n  \
          Every workspace is per-run so the verdicts stay independent, but the gates \
          share one build node and one seed disk: at five concurrent, I/O pressure hit \
          65% and a ~35-minute gate took ~93 (measured 2026-08-26). Wait for one to \
@@ -471,6 +482,9 @@ pub(crate) enum Admission {
 }
 
 /// Launch, queue, or refuse — decided before a packet exists.
+/// `dock_waiting` counts the dock's claims ahead of every builder
+/// ([`dock_waiting`]).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn admission(
     live: &[String],
     max: usize,
@@ -479,6 +493,7 @@ pub(crate) fn admission(
     wait: bool,
     queue_depth: usize,
     queue_cap: usize,
+    dock_waiting: usize,
 ) -> Admission {
     // LEGACY-MANIFEST GUARD, and it never queues. If the runner's
     // /gate-target is still a PVC (a stale checkout, or `--manifest` at
@@ -499,7 +514,7 @@ pub(crate) fn admission(
             names = live.join(", "),
         ));
     }
-    let Some(crowd) = crowd_refusal(live, max) else {
+    let Some(crowd) = crowd_refusal(live, dock_waiting, max) else {
         return Admission::Launch;
     };
     // WITHOUT `--wait` THERE IS NO LAUNCHER. A queued packet is started
@@ -589,9 +604,88 @@ pub(crate) fn places_ahead(order: &[String], reuse: Option<&str>) -> usize {
 ///
 /// Oldest first, and only into a slot that is actually free: second in
 /// line waits for the second slot, so two waiters released by one
-/// finishing gate do not both launch onto a node with room for one.
-pub(crate) const fn may_launch(live: usize, max: usize, position: usize) -> bool {
-    admits(live + position, max, Requester::Car)
+/// finishing gate do not both launch onto a node with room for one. And
+/// the dock's claims ([`dock_waiting`]) stand ahead of the whole line.
+pub(crate) const fn may_launch(
+    live: usize,
+    dock_waiting: usize,
+    max: usize,
+    position: usize,
+) -> bool {
+    admits(live + dock_waiting + position, max, Requester::Car)
+}
+
+/// THE DOCK'S PLACE AHEAD OF THE LINE (design 42279fb2 D3, backlog
+/// 4890165b). The metadata key on a PARKED CAR that says the dock is
+/// waiting for a gate bay to re-gate it on current main.
+///
+/// WHY THE DOCK GOES FIRST: the reason [`admits`] gives for trains — a
+/// busy dock must not starve landing. A dock car is already reviewed and
+/// already green; a builder gate that jumps it produces one more car
+/// that cannot board either. Measured 2026-09-25 over ten trains: 42 of
+/// 58 left-behind rows read "waiting for a gate slot", because a builder
+/// holding a place re-polls every 30 s and the dock asked once a window.
+///
+/// WHY A CLAIM ON THE CAR AND NOT A PLACE IN THE GATE-RUN LINE: the dock
+/// cannot file its gate-run before a bay is free — the replay onto main
+/// comes first, and a replayed branch that is not gated is a car that
+/// cannot board (`launch_base_regate`). So the claim rides on the car the
+/// dock already writes each pass, and it launches through the dock's own
+/// admission (`admits(live, max, Car)`), which never reads the builder
+/// line; only builders read the claim, and yield to it.
+///
+/// HELD BY A HEARTBEAT, like a builder's place: the conductor re-stamps
+/// it on every walk of the dock (the two-minute `train-dock-refresh`,
+/// inside [`QUEUE_PLACE_TTL_SECS`]), and only while the track is clear.
+/// A claim nobody re-stamps — a train on the track, whose merge is about
+/// to replace the main it waits on; a stopped conductor — ages out on the
+/// same TTL as a builder's place, so the line never waits on a ghost.
+pub(crate) const DOCK_WAITING: &str = "regate_waiting";
+
+/// The claim the dock writes: the main it waits to re-gate on, and when
+/// it last said so.
+pub(crate) fn dock_waiting_stamp(main: &str, at: chrono::DateTime<chrono::Utc>) -> Value {
+    json!({ "main": main, "at": stamp(at) })
+}
+
+/// PURE: how many parked cars hold a live dock claim — each one ahead of
+/// every builder place. A claim whose `at` does not parse is no claim,
+/// never a guess into the head of the line.
+pub(crate) fn dock_waiting(
+    cars: &[Value],
+    now: chrono::DateTime<chrono::Utc>,
+    ttl_secs: i64,
+) -> usize {
+    cars.iter()
+        .filter_map(|c| c.pointer(&format!("/metadata/{DOCK_WAITING}/at")))
+        .filter_map(Value::as_str)
+        .filter_map(parse_instant)
+        .filter(|at| (now - *at).num_seconds() <= ttl_secs)
+        .count()
+}
+
+/// The dock's claims, read now. BEST-EFFORT, LOUDLY: a builder must owe
+/// nothing to the dock, so a read that fails counts none — the line as
+/// it was before D3 — and says so.
+async fn dock_waiting_now(http: &reqwest::Client, now: chrono::DateTime<chrono::Utc>) -> usize {
+    match api(
+        http,
+        reqwest::Method::GET,
+        "/api/stations/loading-dock/queue",
+        None,
+    )
+    .await
+    .and_then(rows)
+    {
+        Ok(cars) => dock_waiting(&cars, now, QUEUE_PLACE_TTL_SECS),
+        Err(e) => {
+            eprintln!(
+                "boss gate: could not read the loading dock ({e:#}) — counting no dock \
+                 re-gates ahead of this place"
+            );
+            0
+        }
+    }
 }
 
 /// Roughly what a place costs, a gate at a time. Arithmetic on the
@@ -3234,6 +3328,7 @@ pub async fn run(
         wait,
         ahead,
         QUEUE_CAP,
+        dock_waiting_now(&http, now).await,
     ) {
         Admission::Refuse(why) => bail!("{why}"),
         Admission::Queue => true,
@@ -4118,6 +4213,7 @@ async fn wait_for_slot(
     let started = std::time::Instant::now();
     let mut absent_since: Option<std::time::Instant> = None;
     let mut reported: Option<usize> = None;
+    let mut dock_reported = 0;
     loop {
         tokio::time::sleep(QUEUE_POLL).await;
         // `now` is minted once at the CLI boundary (the no-wallclock
@@ -4184,8 +4280,21 @@ async fn wait_for_slot(
         }
         let order = queue_order(&open, at, QUEUE_PLACE_TTL_SECS);
         let live = running_gates(namespace)?;
+        // The dock's claims go before the whole line (design 42279fb2
+        // D3). Said once each time the count changes, so a place that
+        // does not move says why.
+        let dock = dock_waiting_now(http, at).await;
+        if dock != dock_reported {
+            if dock > 0 {
+                println!(
+                    "boss gate: {dock} parked car(s) are waiting for a bay to re-gate on current \
+                     main — the dock goes first (design 42279fb2)"
+                );
+            }
+            dock_reported = dock;
+        }
         match order.iter().position(|id| id == packet) {
-            Some(pos) if may_launch(live.len(), max, pos) => {
+            Some(pos) if may_launch(live.len(), dock, max, pos) => {
                 println!(
                     "boss gate: a slot freed after {}m — launching {branch} (packet {})",
                     started.elapsed().as_secs() / 60,
@@ -6061,7 +6170,8 @@ mod tests {
                 "infra/gate-runner/gate-runner.yaml",
                 true,
                 0,
-                QUEUE_CAP
+                QUEUE_CAP,
+                0
             ),
             Admission::Launch
         ));
@@ -6074,7 +6184,7 @@ mod tests {
         let live = vec!["gate-a".to_string(), "gate-b".into(), "gate-c".into()];
         assert!(
             matches!(
-                admission(&live, 3, false, "m.yaml", true, 0, QUEUE_CAP),
+                admission(&live, 3, false, "m.yaml", true, 0, QUEUE_CAP, 0),
                 Admission::Queue
             ),
             "at the bound with --wait the gate takes a place in line"
@@ -6088,7 +6198,7 @@ mod tests {
     #[test]
     fn the_bound_refuses_a_caller_that_cannot_hold_its_place() {
         let live = vec!["gate-a".to_string(), "gate-b".into(), "gate-c".into()];
-        let Admission::Refuse(why) = admission(&live, 3, false, "m.yaml", false, 0, QUEUE_CAP)
+        let Admission::Refuse(why) = admission(&live, 3, false, "m.yaml", false, 0, QUEUE_CAP, 0)
         else {
             panic!("without --wait there is no process to launch the queued run")
         };
@@ -6107,7 +6217,7 @@ mod tests {
     fn a_full_queue_refuses_rather_than_growing_without_bound() {
         let live = vec!["gate-a".to_string(), "gate-b".into(), "gate-c".into()];
         let Admission::Refuse(why) =
-            admission(&live, 3, false, "m.yaml", true, QUEUE_CAP, QUEUE_CAP)
+            admission(&live, 3, false, "m.yaml", true, QUEUE_CAP, QUEUE_CAP, 0)
         else {
             panic!("a full queue refuses")
         };
@@ -6118,7 +6228,7 @@ mod tests {
         );
         // One below the cap still queues.
         assert!(matches!(
-            admission(&live, 3, false, "m.yaml", true, QUEUE_CAP - 1, QUEUE_CAP),
+            admission(&live, 3, false, "m.yaml", true, QUEUE_CAP - 1, QUEUE_CAP, 0),
             Admission::Queue
         ));
     }
@@ -6136,6 +6246,7 @@ mod tests {
             true,
             0,
             QUEUE_CAP,
+            0,
         ) else {
             panic!("a shared workspace beside a live gate refuses")
         };
@@ -6143,7 +6254,7 @@ mod tests {
         assert!(why.contains("2026-08-24"), "{why}");
         // Alone, the legacy shape still gates.
         assert!(matches!(
-            admission(&[], 3, true, "old-runner.yaml", true, 0, QUEUE_CAP),
+            admission(&[], 3, true, "old-runner.yaml", true, 0, QUEUE_CAP, 0),
             Admission::Launch
         ));
     }
@@ -6446,12 +6557,97 @@ mod tests {
     /// by one finishing gate do not both launch.
     #[test]
     fn the_head_of_the_queue_launches_into_the_first_free_slot() {
-        assert!(!may_launch(3, 3, 0), "no slot free");
-        assert!(may_launch(2, 3, 0), "head takes the one free slot");
-        assert!(!may_launch(2, 3, 1), "second in line waits its turn");
-        assert!(may_launch(1, 3, 1), "two free slots release two places");
-        assert!(may_launch(0, 3, 2));
-        assert!(!may_launch(0, 3, 3));
+        assert!(!may_launch(3, 0, 3, 0), "no slot free");
+        assert!(may_launch(2, 0, 3, 0), "head takes the one free slot");
+        assert!(!may_launch(2, 0, 3, 1), "second in line waits its turn");
+        assert!(may_launch(1, 0, 3, 1), "two free slots release two places");
+        assert!(may_launch(0, 0, 3, 2));
+        assert!(!may_launch(0, 0, 3, 3));
+    }
+
+    /// D3 OF DESIGN 42279fb2 (backlog 4890165b): a parked car the dock is
+    /// waiting to re-gate stands AHEAD of every builder place. Measured
+    /// 2026-09-25 over ten trains: 42 of 58 left-behind rows read "waiting
+    /// for a gate slot", because a builder re-polls every 30 s and the dock
+    /// asked once a window. A slot one dock re-gate is waiting for is not a
+    /// builder's slot; the one after it is.
+    #[test]
+    fn a_dock_regate_waiting_for_a_slot_goes_before_the_head_of_the_line() {
+        assert!(
+            !may_launch(2, 1, 3, 0),
+            "the one free slot is the dock's, not the head of the line's"
+        );
+        assert!(
+            may_launch(1, 1, 3, 0),
+            "two free slots: the dock takes one, the head of the line the other"
+        );
+        assert!(!may_launch(1, 1, 3, 1), "and second in line still waits");
+        assert!(
+            may_launch(2, 0, 3, 0),
+            "no dock waiting is the line exactly as before"
+        );
+    }
+
+    /// The same order at the door: a builder that arrives below the bound
+    /// while the dock is waiting for that slot takes a place in line
+    /// rather than launching into it — and without `--wait`, is refused
+    /// with the dock named as the reason, not a crowd of running gates it
+    /// cannot see.
+    #[test]
+    fn a_builder_arriving_below_the_bound_queues_behind_a_waiting_dock() {
+        let live = vec!["gate-a".to_string(), "gate-b".into()];
+        assert!(
+            matches!(
+                admission(&live, 3, false, "m.yaml", true, 0, QUEUE_CAP, 1),
+                Admission::Queue
+            ),
+            "the free slot is the dock's: a waiting builder queues"
+        );
+        let Admission::Refuse(why) = admission(&live, 3, false, "m.yaml", false, 0, QUEUE_CAP, 1)
+        else {
+            panic!("without --wait there is no process to hold the place")
+        };
+        assert!(why.contains("dock"), "the refusal names the dock: {why}");
+        assert!(
+            matches!(
+                admission(&live, 3, false, "m.yaml", true, 0, QUEUE_CAP, 0),
+                Admission::Launch
+            ),
+            "no dock waiting launches exactly as before"
+        );
+    }
+
+    fn parked(id: &str, waiting: Option<Value>) -> Value {
+        let mut md = json!({ "branch": format!("feat/{id}") });
+        if let Some(w) = waiting {
+            md[DOCK_WAITING] = w;
+        }
+        json!({ "id": id, "metadata": md })
+    }
+
+    /// A dock claim is held only while the conductor re-stamps it: every
+    /// two-minute refresh while the track is clear (D1). One the dock
+    /// stopped stamping — a train on the track, a dead conductor, a car
+    /// that boarded — ages out on the same TTL as a builder's place, so
+    /// the line never waits on a ghost (the fd217c65 rule, for the dock).
+    #[test]
+    fn only_a_dock_claim_the_conductor_still_stamps_is_ahead_of_the_line() {
+        let now = at("2026-09-25T22:30:00Z");
+        let cars = vec![
+            parked(
+                "fresh",
+                Some(dock_waiting_stamp("77bf499e", at("2026-09-25T22:28:00Z"))),
+            ),
+            parked(
+                "stale",
+                Some(dock_waiting_stamp("77bf499e", at("2026-09-25T22:20:00Z"))),
+            ),
+            parked("none", None),
+            parked("cleared", Some(Value::Null)),
+            parked("garbage", Some(json!({"main": "77bf499e", "at": "soon"}))),
+        ];
+        assert_eq!(dock_waiting(&cars, now, QUEUE_PLACE_TTL_SECS), 1);
+        assert_eq!(dock_waiting(&[], now, QUEUE_PLACE_TTL_SECS), 0);
     }
 
     /// The estimate is arithmetic on the measured median (2026-09-08:
@@ -6507,9 +6703,13 @@ mod tests {
     #[test]
     fn the_crowd_refusal_fires_at_the_bound_and_names_the_gates() {
         let live: Vec<String> = vec!["gate-feat-x-ab1".into(), "gate-fix-y-ef3".into()];
-        assert_eq!(crowd_refusal(&live, 3), None, "below the bound is silence");
+        assert_eq!(
+            crowd_refusal(&live, 0, 3),
+            None,
+            "below the bound is silence"
+        );
 
-        let msg = crowd_refusal(&live, 2).expect("at the bound refuses");
+        let msg = crowd_refusal(&live, 0, 2).expect("at the bound refuses");
         assert!(msg.contains("gate-feat-x-ab1"), "{msg}");
         assert!(msg.contains("gate-fix-y-ef3"), "{msg}");
         assert!(
@@ -6517,14 +6717,14 @@ mod tests {
             "the refusal must name the override, or the bound reads as a wall: {msg}"
         );
         assert!(
-            crowd_refusal(&live, 1).is_some(),
+            crowd_refusal(&live, 0, 1).is_some(),
             "past the bound refuses too (gates launched before a lower bound was set)"
         );
     }
 
     #[test]
     fn an_idle_cluster_admits_even_at_bound_one() {
-        assert_eq!(crowd_refusal(&[], 1), None);
+        assert_eq!(crowd_refusal(&[], 0, 1), None);
     }
 
     /// 48f7aba1: THE ONE DEFINITION OF ADMISSION, both callers. Three
@@ -6556,9 +6756,9 @@ mod tests {
         // `crowd_refusal` at the bound refuses, `may_launch` counts a
         // waiter's place against the same line.
         let live: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
-        assert!(crowd_refusal(&live, 3).is_some());
-        assert!(!may_launch(3, 3, 0));
-        assert!(may_launch(2, 3, 0) && !may_launch(2, 3, 1));
+        assert!(crowd_refusal(&live, 0, 3).is_some());
+        assert!(!may_launch(3, 0, 3, 0));
+        assert!(may_launch(2, 0, 3, 0) && !may_launch(2, 0, 3, 1));
     }
 
     /// The env override: absent means the FALLBACK (the delivery

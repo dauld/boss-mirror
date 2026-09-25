@@ -12,6 +12,7 @@
 // among them.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { scrollNote, signedText } from '../../src/steps/presence';
 
 const JOB_ID = 'job-askp-1';
 const TICKET = 'ticket-askp';
@@ -45,9 +46,15 @@ type OnScreen = { title: string; keys: string[]; values: string[] };
 type Seen = { begins: { shown: { title: string; metadata: Record<string, unknown> } }[];
   onScreenAtBegin: OnScreen[]; writes: string[] };
 
-const text = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v, null, 2));
+// A value as the surface draws it: its bytes, quoted and escaped wherever
+// a reader could misread them (backlog 6093cf13) — the app's own function,
+// so this spec checks the page against the rendering, not a copy of it.
+const text = signedText;
 
-async function opsApproval(page: Page): Promise<Seen> {
+async function opsApproval(
+  page: Page,
+  overrides: { title?: string; metadata?: Record<string, unknown> } = {},
+): Promise<Seen> {
   await page.addInitScript(() => {
     setInterval(() => document.querySelector('bun-hmr')?.remove(), 200);
     const buf = () => new Uint8Array([1, 2, 3]).buffer;
@@ -63,11 +70,12 @@ async function opsApproval(page: Page): Promise<Seen> {
     });
   });
   const step = {
-    id: 's1', job_id: JOB_ID, title: 'Approve the plan: wipe on forge', kind: 'sign-off',
+    id: 's1', job_id: JOB_ID, title: overrides.title ?? 'Approve the plan: wipe on forge',
+    kind: 'sign-off',
     status: 'ready', assignee_id: null, sort_order: 0, blocked_by: [],
     sign_offs_required: ['platform-admin'], sign_offs: [] as unknown[],
     assurance_required: 'presence',
-    metadata: { ...METADATA } as Record<string, unknown>, notes: null,
+    metadata: { ...(overrides.metadata ?? METADATA) } as Record<string, unknown>, notes: null,
   };
   const job = {
     id: JOB_ID, kind: 'ops-request', title: 'wipe a disk on forge', status: 'open',
@@ -141,9 +149,11 @@ test('an open approve step shows every key its passkey would sign, planted ones 
   for (const k of ['plan', 'verb', 'host', 'args', 'rendered_plan_sha256', 'planted']) {
     await expect(surface.locator('.step-signed-key', { hasText: k }).first()).toBeVisible();
   }
-  // The plan is shown byte for byte, newlines kept.
+  // The plan is shown as its bytes: quoted, each newline drawn as \n and
+  // then broken, so its trailing newline is visible too (6093cf13).
   const values = await surface.locator('.step-signed-value').allTextContents();
-  expect(values[Object.keys(METADATA).sort().indexOf('plan')]).toBe(METADATA.plan);
+  expect(values[Object.keys(METADATA).sort().indexOf('plan')]).toBe(signedText(METADATA.plan));
+  expect(signedText(METADATA.plan).endsWith('\\n\n"')).toBe(true);
 });
 
 test('Approve: the keys on screen when the passkey is asked are exactly the keys it signs', async ({ page }) => {
@@ -169,4 +179,44 @@ test('Approve: the keys on screen when the passkey is asked are exactly the keys
   expect(seen.writes).toEqual([
     'PATCH metadata', 'POST sign-offs -', `POST sign-offs ${TICKET}`, `PUT ${TICKET}`,
   ]);
+});
+
+// Backlog 6093cf13 (adversarial review of car 30674304): the check above
+// compared bytes to the render's source, and the page drew a string byte
+// for byte — so a bidi override reordered what the approver read, a
+// Cyrillic "о" passed for a Latin one, '42' drew like 42, and a key name
+// with a zero-width space drew like the plain one. Read off the page: what
+// is drawn names every such byte.
+test('a hostile step is drawn as its bytes: title, key names and values', async ({ page }) => {
+  const title = ' Approve  the plan: wipe on fоrge ';
+  const metadata = {
+    ...METADATA,
+    host: 'fоrge‮xcod.exe',
+    'verb​': 'wipe',
+    count: '42',
+  };
+  await opsApproval(page, { title, metadata });
+  await page.goto(`/ux/jobs/${JOB_ID}`);
+  const surface = page.locator('.sg-detail');
+  const keys = Object.keys(metadata).sort();
+
+  await expect(surface.locator('.step-signed-key')).toHaveText(keys.map(signedText));
+  const values = await surface.locator('.step-signed-value').allTextContents();
+  expect(values).toEqual(keys.map((k) => signedText(metadata[k as keyof typeof metadata])));
+  expect(values[keys.indexOf('host')]).toBe('"f\\u{043E}rge\\u{202E}xcod.exe"');
+  expect(values[keys.indexOf('count')]).toBe('"42"');
+  // The title keeps both its edge spaces and its double space AS LAID OUT:
+  // innerText follows the CSS white-space rule, where textContent and a
+  // string toHaveText (which normalises whitespace) would not.
+  expect(await surface.locator('.step-signed-title').innerText()).toBe(
+    '" Approve  the plan: wipe on f\\u{043E}rge "',
+  );
+});
+
+test('a value that scrolls in its box says so; one that fits does not', async ({ page }) => {
+  const plan = Array.from({ length: 80 }, (_, i) => `  line ${i} of the plan`).join('\n');
+  await opsApproval(page, { metadata: { ...METADATA, plan } });
+  await page.goto(`/ux/jobs/${JOB_ID}`);
+  const surface = page.locator('.sg-detail');
+  await expect(surface.locator('.step-signed-overflow')).toHaveText([scrollNote(signedText(plan))]);
 });

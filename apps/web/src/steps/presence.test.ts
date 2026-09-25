@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import {
+  canonical,
   completeWithPresence,
   NotShownRefusal,
   notShown,
   performPresenceCeremony,
+  scrollNote,
   shownAfter,
   signedRows,
+  signedText,
 } from './presence';
+import { genString, genValue, rng, TRICKY } from './signedInputs.testkit';
 
 // Backlog 2e893e27 (2026-09-21): performPresenceCeremony caught
 // navigator.credentials.get with a bare `catch {` and threw one
@@ -336,9 +340,12 @@ describe('a passkey signs only what the surface put on screen', () => {
     }
   });
 
-  test('a string renders byte for byte; anything else renders as its JSON', () => {
+  test('a plain string renders as itself; a multi-line one quoted; anything else as its JSON', () => {
     const rows = new Map(signedRows(OPS_APPROVE).map((r) => [r.key, r.text]));
-    expect(rows.get('plan')).toBe(OPS_APPROVE.metadata.plan);
+    expect(rows.get('verb')).toBe('wipe');
+    // Every line break is drawn as \n before it breaks, so a line the box
+    // wraps cannot be mistaken for a line the bytes break (6093cf13).
+    expect(rows.get('plan')).toBe('"PLAN wipe target-a\\n\n  /dev/sdb  by-id/ata-X\\n\n"');
     expect(rows.get('args')).toBe(JSON.stringify(['target-a'], null, 2));
     expect(rows.get('planted_by_someone_else')).toContain('"anything": true');
   });
@@ -409,5 +416,107 @@ describe('a passkey signs only what the surface put on screen', () => {
     if (res.kind === 'failed') expect(res.error).toContain('does not show');
     expect(begins).toBe(0);
     expect(puts).toEqual([null]);
+  });
+});
+
+// Backlog 6093cf13 (adversarial review of car 30674304, 2026-09-25): the
+// check above compares BYTES to the bytes the surface rendered from, and
+// the rendering drew a string byte for byte — so '42' and 42 drew alike, a
+// JSON string drew like the object it encodes, a bidi override reordered
+// what the approver read, and a zero-width space, a Cyrillic "о" or a
+// trailing space were invisible. The passkey signs bytes; the approver
+// reads glyphs. The rendering now draws any string that could be misread
+// in double quotes, with every character that is not printable ASCII (or
+// an em dash) written as an escape — so two values the passkey would sign
+// differently can never be drawn alike.
+describe('a signed value is drawn as the bytes it is', () => {
+  const DRAWN: readonly (readonly [unknown, string])[] = [
+    ['wipe', 'wipe'],
+    ['forge-01.lan', 'forge-01.lan'],
+    ['2026-09-25T15:00:00Z', '2026-09-25T15:00:00Z'],
+    ['a \u2014 b', 'a \u2014 b'],
+    ['C:\\dir', 'C:\\dir'],
+    // Reads as a non-string, so it is quoted.
+    ['42', '"42"'],
+    ['true', '"true"'],
+    ['null', '"null"'],
+    ['{"verb":"wipe"}', '"{\\"verb\\":\\"wipe\\"}"'],
+    ['"half', '"\\"half"'],
+    // An empty or edge-whitespace string is quoted, so the edge shows.
+    ['', '""'],
+    ['forge ', '"forge "'],
+    [' forge', '" forge"'],
+    // What cannot be seen, or is a look-alike, is written as an escape.
+    ['forge\u202Excod.exe', '"forge\\u{202E}xcod.exe"'],
+    ['for\u200Bge', '"for\\u{200B}ge"'],
+    ['f\u043Erge', '"f\\u{043E}rge"'],
+    ['a \u2013 b', '"a \\u{2013} b"'],
+    ['a\tb', '"a\\tb"'],
+    ['\u001b[31mred', '"\\u{001B}[31mred"'],
+    ['x\u{1F600}', '"x\\u{1F600}"'],
+    // A line break is drawn as \n and then breaks.
+    ['PLAN a\n  b\n', '"PLAN a\\n\n  b\\n\n"'],
+    // Non-strings: their JSON, with the same escapes inside it.
+    [42, '42'],
+    [true, 'true'],
+    [null, 'null'],
+    [['target-a'], '[\n  "target-a"\n]'],
+    [{ host: 'forge\u202E' }, '{\n  "host": "forge\\u{202E}"\n}'],
+    [{ 'k\u200B': 1 }, '{\n  "k\\u{200B}": 1\n}'],
+  ];
+
+  test('each hostile shape is drawn as named', () => {
+    for (const [value, drawn] of DRAWN) expect([value, signedText(value)]).toEqual([value, drawn]);
+  });
+
+  test('nothing drawn is invisible or a look-alike: printable ASCII, line breaks and em dashes only', () => {
+    const r = rng(6093);
+    for (let i = 0; i < 3000; i++) {
+      const v = genValue(r);
+      const bad = [...signedText(v)].filter((c) => !/^[\x20-\x7E\n\u2014]$/u.test(c));
+      expect([v, bad]).toEqual([v, []]);
+    }
+  });
+
+  test('two values the passkey would sign differently are never drawn alike', () => {
+    const r = rng(0x6093cf13);
+    const values: unknown[] = [...TRICKY, 0, 42, -1, true, false, null, [], {}, ['42'], [42]];
+    for (let i = 0; i < 4000; i++) values.push(genValue(r));
+    const signedAs = new Map<string, string>();
+    for (const v of values) {
+      const drawn = signedText(v);
+      const seen = signedAs.get(drawn);
+      if (seen !== undefined) expect([drawn, seen]).toEqual([drawn, canonical(v)]);
+      signedAs.set(drawn, canonical(v));
+    }
+  });
+
+  test('a key name is drawn the same way as a value, and keeps its own identity', () => {
+    const rows = signedRows({
+      title: 't',
+      metadata: { plan: 'x', '4\u200B2': 1, '42': 2 },
+    });
+    expect(rows.map((r) => [r.key, r.label])).toEqual([
+      ['42', '"42"'],
+      ['4\u200B2', '"4\\u{200B}2"'],
+      ['plan', 'plan'],
+    ]);
+  });
+
+  test('a title with extra whitespace is drawn with it', () => {
+    expect(signedText(' Approve  the plan ')).toBe('" Approve  the plan "');
+    expect(signedText('Approve  the plan')).toBe('Approve  the plan');
+  });
+
+  test('a value that scrolls in its box says how much there is to read', () => {
+    const r = rng(7);
+    for (let i = 0; i < 50; i++) {
+      const text = signedText(genString(r));
+      expect(scrollNote(text)).toContain(`${text.split('\n').length} line`);
+    }
+    expect(scrollNote('a\nb\nc')).toBe(
+      'scrolls in its box: 3 lines, 5 characters. Read it to the end; your passkey signs all of it.',
+    );
+    expect(scrollNote('abc')).toContain('1 line,');
   });
 });

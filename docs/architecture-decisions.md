@@ -1083,6 +1083,48 @@ write merged against a stale pre-completion fetch cannot demote
 Completed/Skipped) — both proven necessary by race forensics
 against the live dispatcher.
 
+**A stamp dies when the shape it signed leaves the step** (design
+`87329a13`, David 2026-09-25, option C; answers backlog `c085256d`,
+found in the round-4 review of car 7abc0154). "Current-shape stamp"
+used to mean only `shape_hash == current`, so an edit that went A to
+B and back to A revived the stamp on A: after a withdrawal, anyone who
+could write the step's metadata could restore the approved shape from
+the audit log, and the old stamp satisfied the server and the ops
+runner again. There are two ways to withdraw and only one writes a
+stamp (Reject stamps the new shape; Request changes saves the decision
+and writes none), so a rule keyed on a LATER stamp — the runner alone
+(A), or the latest stamp per role (B) — misses the second; dropping
+superseded stamps (D) deletes the provenance above. Decided: (1)
+**the edit that changes a stamped step's shape voids every stamp on
+the old shape, permanently, in the edit's own transaction** — the
+stamp stays in `sign_offs`, annotated `voided_at` / `voided_by_event`,
+and a stamp counts only when it is not voided AND its `shape_hash` is
+the current shape; (2) **one predicate** — `Step::live_stamps()` — is
+read by `sign_offs_satisfied`, the completion 409's
+`missing_or_stale_roles`, and the sign-offs POST's idempotent-re-stamp
+check, so a re-sign of a restored shape is a fresh stamp and not an
+"idempotent" answer; (3) **`jobs.step.stamps_invalidated` is
+load-bearing**: it names the voided stamps (role, authority,
+`stamped_at`, `shape_hash`), the rebuild applies it, and the metadata
+merge door writes it in the edit's transaction rather than best-effort
+— existing rows are re-judged by replaying the events already in the
+log, and a merge-door event the old best-effort path lost cannot be
+recovered; (4) it holds for **session stamps as well as presence
+ones** — the cost is one re-tap after a reverted edit; (5) **the ops
+runner mirrors it**: `verify_approval`'s `$bound` excludes a stamp
+carrying `voided_at`, and, as defence in depth, refuses when a named
+approver's latest stamp for the role is on a shape other than the
+current one — it reads only server-minted fields, because the runner
+judges the record independently of the server (`17835005`). The build
+is test-first at both judges (an A-B-A through Request changes and
+through Reject answers the completion 409 naming the role, a rebuild
+reproduces the voids, and `ops_runner_approval_sh` refuses the A-B-A
+job), and, as a trust-boundary car, is held for an adversarial review
+before it boards. Out of scope: replaying a presence nonce within its
+ticket's life (`3977b3d2`) and a per-key writer rule for the runner's
+own keys (`6c9183de`), which would not cover `decision`, a key the
+human's surface writes.
+
 The v1 step-type catalog derives from the traditional software
 stack BOSS replaces (CRM/ITSM/ERP/HR/comms); the canonical source
 is data (`crates/core/boss-jobs/seeds/step_types.toml`), loaded by

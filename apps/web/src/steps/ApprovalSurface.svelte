@@ -9,8 +9,10 @@
     completeWithPresence,
     needsPresence,
     performPresenceCeremony,
+    scrollNote,
     shownAfter,
     signedRows,
+    signedText,
     type ShownStep,
   } from './presence';
   import { describeWriteFailure, saveStep } from './stepWrite';
@@ -76,6 +78,32 @@
   // Read at the instant a ceremony begins — never a copy taken earlier.
   const shownNow = (): ShownStep | null => (signedVisible ? onScreen : null);
 
+  // The rows whose value box scrolls, by key: rendered is not read, so a
+  // box that scrolls says so under it (backlog 6093cf13). Measured off
+  // the laid-out box — on each draw of its text, and whenever the box
+  // changes size.
+  let scrolling = $state<Readonly<Record<string, boolean>>>({});
+  function watchOverflow(node: HTMLElement, row: { key: string; text: string }) {
+    let key = row.key;
+    const check = (): void => {
+      const scrolls =
+        node.scrollHeight > node.clientHeight + 1 || node.scrollWidth > node.clientWidth + 1;
+      if ((scrolling[key] ?? false) !== scrolls) scrolling = { ...scrolling, [key]: scrolls };
+    };
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(check) : null;
+    observer?.observe(node);
+    check();
+    return {
+      update(next: { key: string; text: string }) {
+        key = next.key;
+        requestAnimationFrame(check);
+      },
+      destroy() {
+        observer?.disconnect();
+      },
+    };
+  }
+
   $effect(() => {
     // The surface instance is reused when the rail switches steps —
     // an error from step A must not render under step B, nor A's
@@ -85,6 +113,7 @@
     void stepId;
     signError = '';
     pending = null;
+    scrolling = {};
   });
 
   async function decide(d: string): Promise<void> {
@@ -225,13 +254,21 @@
     <section class="step-signed-keys" aria-label="What your passkey signs">
       <div class="step-signed-keys-head">What your passkey signs</div>
       <p class="step-signed-keys-note">
-        The title above and every key below, exactly as shown. Your decision,
-        its time and your comment join them when you press a button.
+        The step <strong class="step-signed-title">{signedText(onScreen.title)}</strong>
+        and every key below, exactly as shown. Text in double quotes has each
+        character you could not otherwise see or tell apart written as an
+        escape. Your decision, its time and your comment join them when you
+        press a button.
       </p>
       <dl>
         {#each signed as row (row.key)}
-          <dt class="step-signed-key">{row.key}</dt>
-          <dd><pre class="step-signed-value">{row.text}</pre></dd>
+          <dt class="step-signed-key">{row.label}</dt>
+          <dd>
+            <pre class="step-signed-value" use:watchOverflow={{ key: row.key, text: row.text }}>{row.text}</pre>
+            {#if scrolling[row.key]}
+              <div class="step-signed-overflow">{scrollNote(row.text)}</div>
+            {/if}
+          </dd>
         {/each}
       </dl>
     </section>

@@ -51,6 +51,10 @@ pub(super) struct DockHold {
     pub(super) reason: String,
     pub(super) stamp: Option<Value>,
     pub(super) in_round: Option<dock_regate::InRound>,
+    /// The main the dock is waiting for a free gate bay to re-gate this
+    /// car on — its claim ahead of every builder place (design 42279fb2
+    /// D3, `gate::DOCK_WAITING`). `None` when it is not waiting for one.
+    pub(super) waiting: Option<String>,
 }
 
 impl DockHold {
@@ -60,6 +64,7 @@ impl DockHold {
             reason,
             stamp: None,
             in_round: None,
+            waiting: None,
         }
     }
 }
@@ -3454,6 +3459,7 @@ impl Conductor {
                 reason,
                 stamp,
                 in_round,
+                waiting,
             }) = hold
             {
                 log(format!("{}: {reason} — leaving behind", id8(&jid)));
@@ -3463,6 +3469,13 @@ impl Conductor {
                     let mut kv = vec![("skip_reason", json!(reason))];
                     if let Some(stamp) = stamp {
                         kv.push((dock_regate::BASE_REGATE, stamp));
+                    }
+                    // The dock's claim on the next free bay: re-stamped
+                    // every pass while it waits (its heartbeat, so this
+                    // write is new each time), deleted the pass it stops.
+                    if let Some(w) = dock_regate::waiting_write(&j, waiting.as_deref(), Utc::now())
+                    {
+                        kv.push((crate::gate::DOCK_WAITING, w));
                     }
                     // Only a CHANGED hold is written: the dock is walked
                     // every two minutes by the refresh as well as on every
@@ -3474,6 +3487,14 @@ impl Conductor {
                     }
                 }
                 continue;
+            }
+            // Boardable, so it waits for no bay: a claim it still carries
+            // would hold builders back for a car about to depart.
+            if let Some(w) = dock_regate::waiting_write(&j, None, Utc::now())
+                && !self.cfg.dry
+            {
+                self.merge_job_metadata(&jid, vec![(crate::gate::DOCK_WAITING, w)])
+                    .await?;
             }
             out.push((j, branch));
         }
@@ -3634,11 +3655,14 @@ impl Conductor {
         .await;
         match slot {
             Ok((live, max)) if crate::gate::admits(live, max, crate::gate::Requester::Car) => {}
+            // No bay: claim the next one, ahead of every builder place
+            // (design 42279fb2 D3). The refresh re-asks within two minutes.
             Ok((live, max)) => {
                 let why = format!("{live} gate(s) running of {max}");
-                return Some(DockHold::plain(dock_regate::busy_reason(
-                    &why, reading, touched,
-                )));
+                return Some(DockHold {
+                    waiting: Some(reading.main.clone()),
+                    ..DockHold::plain(dock_regate::busy_reason(&why, reading, touched))
+                });
             }
             Err(e) => {
                 log(format!(
@@ -3661,6 +3685,7 @@ impl Conductor {
                     reason: dock_regate::refused_reason(jid, &stamp),
                     stamp: Some(stamp.to_value(Utc::now())),
                     in_round: None,
+                    waiting: None,
                 });
             }
             Err(e) => {
@@ -3716,6 +3741,7 @@ impl Conductor {
                         main: stamp.main.clone(),
                         since: at,
                     }),
+                    waiting: None,
                 }
             }
             // No gate is running for it, so nothing will turn it green
@@ -3724,6 +3750,7 @@ impl Conductor {
                 reason: dock_regate::unfiled_reason(&stamp, &format!("{e:#}")),
                 stamp: Some(stamp.to_value(at)),
                 in_round: None,
+                waiting: None,
             },
         }
     }
@@ -3881,6 +3908,7 @@ impl Conductor {
             reason: dock_regate::in_flight_reason(jid, &stamp, &standing),
             stamp: None,
             in_round,
+            waiting: None,
         }
     }
 
@@ -6905,11 +6933,16 @@ mod tests {
             reason,
             stamp: write,
             in_round,
+            waiting,
         } = c
             .base_hold(&car, "car-g-000", "feat/g", &head)
             .await
             .expect("held");
         assert!(reason.contains("boss rerail car-g-00"), "{reason}");
+        assert!(
+            waiting.is_none(),
+            "held on the recorded answer, it waits for no bay, so it claims none"
+        );
         assert!(write.is_none(), "the recorded answer is not rewritten");
         assert!(
             in_round.is_none(),
