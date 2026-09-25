@@ -331,6 +331,16 @@ impl JobsRepository for InMemoryJobs {
             let Some(existing) = state.jobs.get(&key) else {
                 return Err(JobsError::NotFound(job.id));
             };
+            // A finished packet's status does not move — the Pg
+            // adapter's WHERE clause, mirrored (backlog 570e72bd).
+            if matches!(existing.status, JobStatus::Closed | JobStatus::Cancelled)
+                && job.status != existing.status
+            {
+                return Err(JobsError::TerminalJob {
+                    id: job.id,
+                    status: format!("{:?}", existing.status).to_lowercase(),
+                });
+            }
             // Mirror the Pg adapter: the partition and the admission
             // instant are decided at admission and immutable — an
             // update carries no authority over either. The storage
