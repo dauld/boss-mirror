@@ -407,8 +407,8 @@ pub(super) async fn list_assignments<R: JobsRepository + 'static, B: EventBus + 
 /// The assignment rows `user` may see: those on a packet inside
 /// `scope`, and those whose step is assigned to the caller itself —
 /// work handed to someone is theirs to see even on a packet they do not
-/// own (a brewer granted `self` works steps on the head brewer's
-/// packets). The caller's own id counts only when it is an identified
+/// own (a role granted `self` works steps on packets its manager
+/// owns). The caller's own id counts only when it is an identified
 /// actor (`self_id`), never the anonymous default.
 #[allow(
     clippy::result_large_err,
