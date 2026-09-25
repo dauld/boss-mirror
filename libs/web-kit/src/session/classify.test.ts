@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { classifyProbe, type Employee } from './classify';
+import { classifyProbe, READ_ONLY_GUEST_ROLES, type Employee } from './classify';
 
 const emp: Employee = {
   id: 'emp-1', name: 'Ada', email: 'ada@x', role: 'platform-admin',
@@ -26,6 +26,23 @@ describe('classifyProbe', () => {
       expect(c.value.user.name).toBe('Guest');
       expect(c.value.user.role).toBe('audit-readonly');
     }
+  });
+
+  // Design 2830b6b7 (2026-09-25): the OSS default guest carries
+  // `visitor`, not `audit-readonly`. Unrecognised, the guest button
+  // signed a visitor in and the app answered "no matching employee".
+  test('visitor with no employee is the guest too — and carries its own role', () => {
+    const c = classifyProbe({ username: 'guest@algedonic.dev', role: 'visitor' }, byId)!;
+    expect(c.value.kind).toBe('ready');
+    expect(c.readonly).toBe(true);
+    if (c.value.kind === 'ready') {
+      expect(c.value.user.name).toBe('Guest');
+      expect(c.value.user.role).toBe('visitor');
+    }
+  });
+
+  test('the guest roles are exactly the read-only floor', () => {
+    expect([...READ_ONLY_GUEST_ROLES]).toEqual(['audit-readonly', 'visitor']);
   });
 
   test('any other unmatched session stays unrecognized', () => {

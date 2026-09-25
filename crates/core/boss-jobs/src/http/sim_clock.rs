@@ -26,18 +26,20 @@ pub(super) async fn sim_clock_state_from_clock(
 
 /// Guard for the sim-control writes (pause / resume / restart-epoch).
 /// They mutate the shared sim_clock and — for restart — trim audit_log,
-/// so they're restricted to signed-in operators. The gateway mints an
-/// `audit-readonly` session for demo/anonymous visitors (the demo floor;
-/// selecting a persona does NOT change it — see boss-gateway
-/// role_headers.rs), and `guest` is the no-`x-boss-user` default for a
-/// direct, ungatewayed call. Neither is an operator, so both are refused
-/// with 403 — the same read-only treatment policy gives every other write.
-/// Denying these two floors covers "logged-in only" without an operator
-/// allowlist (roles are tenant-extensible Classes). `Some(403)` short-
-/// circuits the handler; `None` allows it.
+/// so they're restricted to signed-in operators. The gateway mints a
+/// read-only-floor session for an anonymous visitor (`visitor`, or
+/// `audit-readonly` where the instance opts in — design 2830b6b7), and
+/// `guest` is the no-`x-boss-user` default for a direct, ungatewayed
+/// call. Neither is an operator, so both are refused with 403 — the same
+/// read-only treatment policy gives every other write. The floor is
+/// `boss_core::roles::is_read_only_floor`, not a role name: keyed on the
+/// name `audit-readonly`, the new `visitor` passed. Denying the floor
+/// covers "logged-in only" without an operator allowlist (roles are
+/// tenant-extensible Classes). `Some(403)` short-circuits the handler;
+/// `None` allows it.
 fn operator_guard(user: &CurrentUser) -> Option<Response> {
     let role = user.0.role.as_str();
-    if role == "audit-readonly" || role == "guest" {
+    if boss_core::roles::is_read_only_floor(role) || role == "guest" {
         return Some(
             (
                 StatusCode::FORBIDDEN,
@@ -181,4 +183,48 @@ pub(super) async fn sim_clock_restart_epoch<R: JobsRepository + 'static, B: Even
     }
     let after = sim_clock_state_from_clock(state.clock.as_ref()).await;
     Json(after).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boss_policy_client::{AccessTier, User};
+
+    fn as_role(role: &str) -> CurrentUser {
+        CurrentUser(User {
+            id: "x".into(),
+            role: role.into(),
+            access_tier: AccessTier::User,
+            territory_account_ids: Vec::new(),
+            direct_report_ids: Vec::new(),
+            department: None,
+        })
+    }
+
+    /// Design 2830b6b7: the guard asks the read-only floor predicate,
+    /// so the OSS guest's `visitor` is refused exactly as
+    /// `audit-readonly` is. Keyed on the name alone it passed — a
+    /// stranger could restart the epoch, which trims audit_log.
+    #[test]
+    fn every_read_only_floor_role_and_the_headerless_guest_are_refused() {
+        for role in boss_core::roles::READ_ONLY_FLOOR_ROLES
+            .into_iter()
+            .chain(["guest"])
+        {
+            let refused = operator_guard(&as_role(role));
+            assert_eq!(
+                refused.map(|r| r.status()),
+                Some(StatusCode::FORBIDDEN),
+                "{role} must not drive the sim clock"
+            );
+        }
+        assert!(operator_guard(&as_role(boss_core::roles::VISITOR_ROLE)).is_some());
+    }
+
+    #[test]
+    fn a_signed_in_operator_passes() {
+        for role in ["platform-admin", "service-tech"] {
+            assert!(operator_guard(&as_role(role)).is_none(), "{role}");
+        }
+    }
 }

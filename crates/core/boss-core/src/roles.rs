@@ -92,6 +92,50 @@ pub fn can_administer_auth(role: &str) -> bool {
     AUTH_ADMINISTRATOR_ROLES.contains(&role)
 }
 
+/// Visitor role — the anonymous guest on an install offering BASIC
+/// guest access, the OSS default (design 2830b6b7, decided 2026-09-25:
+/// "the default for the OSS repo be guest accounts with only basic
+/// access, whatever that means for that install"). It reads what the
+/// install grants the role as policy data and nothing else: it is not
+/// in [`has_global_read`], so the name-keyed gates on that (the events
+/// tail, the people scope routes) refuse it without an edit of their
+/// own.
+///
+/// Named `visitor` and NOT `guest`: `guest` is the role the policy
+/// extractor gives a request that arrived with no `x-boss-user` header
+/// — a loopback sibling or a test harness — and `boss-jobs` `trust.rs`
+/// and boss-messages admit that string for WRITES. A browser session
+/// carrying it would pass those doors.
+pub const VISITOR_ROLE: &str = "visitor";
+
+/// The roles that read and never write — the two a guest session can
+/// carry. `audit-readonly` is the system-audit read (the external
+/// auditor, and a guest on an instance that opts in to it);
+/// `visitor` is the basic guest. Every read-only guard asks
+/// [`is_read_only_floor`] rather than naming a role, because three such
+/// guards once keyed on the NAME `audit-readonly` and a new guest role
+/// added only to policy would have passed all three (sim-clock control,
+/// the simulator, surface opens).
+///
+/// `guest` is deliberately not here: it is the no-header trusted-
+/// internal sentinel, not a session, and the doors that refuse it keep
+/// their own check beside this one.
+pub const READ_ONLY_FLOOR_ROLES: [&str; 2] = [AUDIT_READONLY_ROLE, VISITOR_ROLE];
+
+/// True for exactly the roles in [`READ_ONLY_FLOOR_ROLES`].
+pub fn is_read_only_floor(role: &str) -> bool {
+    READ_ONLY_FLOOR_ROLES.contains(&role)
+}
+
+/// The role a session acts as when it carries none: [`VISITOR_ROLE`],
+/// the least access, where it used to be `audit-readonly` — the widest
+/// read. A session reaching a backend without a role is a defect
+/// somewhere upstream, and a defect should not widen what a stranger
+/// reads (design 2830b6b7).
+pub fn effective_role(role: Option<&str>) -> &str {
+    role.unwrap_or(VISITOR_ROLE)
+}
+
 // ---------------------------------------------------------------------------
 // Broad-account-access role set
 // ---------------------------------------------------------------------------
@@ -246,6 +290,60 @@ mod tests {
         assert_eq!(
             AUTH_ADMINISTRATOR_ROLES,
             [PLATFORM_ADMIN_ROLE, BREAK_GLASS_ROLE]
+        );
+    }
+
+    /// Design 2830b6b7 (decided 2026-09-25): the read-only floor is
+    /// the two roles a guest can carry and nothing else. A role that
+    /// merely READS everything (platform-admin, a seeded executive) is
+    /// not on it, nor is break-glass, nor `guest` — that string is the
+    /// no-header trusted-internal sentinel, and every door that asks
+    /// this predicate keeps its own `guest` check beside it.
+    #[test]
+    fn the_read_only_floor_is_audit_readonly_and_visitor() {
+        seed_executive_set();
+        assert_eq!(READ_ONLY_FLOOR_ROLES, [AUDIT_READONLY_ROLE, VISITOR_ROLE]);
+        assert!(is_read_only_floor(AUDIT_READONLY_ROLE));
+        assert!(is_read_only_floor(VISITOR_ROLE));
+        for role in [
+            PLATFORM_ADMIN_ROLE,
+            BREAK_GLASS_ROLE,
+            "guest",
+            "ceo",
+            "service-tech",
+            "",
+            "Visitor",
+        ] {
+            assert!(!is_read_only_floor(role), "{role:?} is not the floor");
+        }
+    }
+
+    /// `visitor` is a NEW name, not a second spelling of `guest` — the
+    /// no-header sentinel `trust.rs` and boss-messages admit for writes.
+    /// And it is outside global read: the OSS guest reads only what the
+    /// install grants it as policy rows, so the name-keyed gates on
+    /// `has_global_read` (the events tail, people `bootstrap_by_email`)
+    /// refuse it with no edit of their own.
+    #[test]
+    fn a_visitor_is_not_the_headerless_guest_and_has_no_global_read() {
+        seed_executive_set();
+        assert_eq!(VISITOR_ROLE, "visitor");
+        assert_ne!(VISITOR_ROLE, "guest");
+        assert!(!has_global_read(VISITOR_ROLE));
+        assert!(!has_broad_account_access(VISITOR_ROLE));
+        assert!(!can_administer_auth(VISITOR_ROLE));
+    }
+
+    /// A session that reaches a backend with no role acts as the LEAST
+    /// access, not the widest read: the fallback used to be
+    /// `audit-readonly`, Read on every shipped resource (design 2830b6b7).
+    #[test]
+    fn a_session_without_a_role_acts_as_a_visitor() {
+        assert_eq!(effective_role(None), VISITOR_ROLE);
+        assert_eq!(effective_role(Some("service-tech")), "service-tech");
+        assert_eq!(
+            effective_role(Some(AUDIT_READONLY_ROLE)),
+            AUDIT_READONLY_ROLE
         );
     }
 }

@@ -21,7 +21,7 @@ mod visits;
 
 use perf::PerfCollector;
 
-use boss_gateway::local_auth::{self, CredentialStore, LocalAuthState};
+use boss_gateway::local_auth::{self, CredentialStore, GuestAccess, LocalAuthState};
 
 /// Auth provider — picks which middleware mints the
 /// `boss_session` cookie.
@@ -166,7 +166,13 @@ async fn main() -> Result<()> {
             // variable also decided whether the simulator ran, so
             // turning off synthetic activity silently withdrew guest
             // access, and neither effect was visible from the name.
-            guest_access: std::env::var("BOSS_GUEST_ACCESS").as_deref() == Ok("1"),
+            //
+            // Since design 2830b6b7 (2026-09-25) the one question has
+            // three answers — no guest, a basic `visitor`, or the
+            // system-audit read — and "1" means basic.
+            guest_access: GuestAccess::from_env_or_off(
+                std::env::var("BOSS_GUEST_ACCESS").ok().as_deref(),
+            ),
             mail: boss_gateway::mail::from_env(),
             // The IdP front door (idm-kanidm.md). Absent config →
             // None → the oidc routes answer that they are off, the
@@ -1277,7 +1283,7 @@ mod routing_tests {
             session_key: vec![0u8; 32],
             http: reqwest::Client::new(),
             audit: boss_gateway::audit::AuthAudit::disabled(),
-            guest_access: true,
+            guest_access: GuestAccess::Basic,
             oidc: None,
             mail: boss_gateway::mail::from_env(),
             public_url: "https://boss.test".into(),
@@ -1514,7 +1520,7 @@ mod routing_tests {
             session_key: vec![0u8; 32],
             http: reqwest::Client::new(),
             audit: boss_gateway::audit::AuthAudit::disabled(),
-            guest_access: true,
+            guest_access: GuestAccess::Basic,
             oidc: None,
             mail: boss_gateway::mail::from_env(),
             public_url: "https://boss.test".into(),
@@ -1549,7 +1555,7 @@ mod routing_tests {
             session_key: vec![0u8; 32],
             http: reqwest::Client::new(),
             audit: boss_gateway::audit::AuthAudit::disabled(),
-            guest_access: false,
+            guest_access: GuestAccess::Off,
             oidc: None,
             mail: boss_gateway::mail::from_env(),
             public_url: "https://boss.test".into(),

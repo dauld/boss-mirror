@@ -1601,6 +1601,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "boss-core",
  "boss-policy-client",
  "boss-ports",
  "reqwest 0.13.4",

@@ -43,18 +43,26 @@ export type SessionEnvelope = {
   value: SessionState;
   roster: ReadonlyArray<Employee>;
   fromGateway: boolean;
-  /// True for the audit-readonly guest: every read surface renders,
+  /// True for the read-only guest: every read surface renders,
   /// and surfaces that offer writes may hide or soften them.
   readonly: boolean;
 };
 
 
-export function guestEmployee(username: string): Employee {
+/// The roles an anonymous guest session can carry — the read-only floor,
+/// `boss_core::roles::READ_ONLY_FLOOR_ROLES`, held equal to it by
+/// crates/core/boss-testing/tests/the_web_guest_roles_are_the_read_only_floor.rs.
+/// `visitor` is the OSS basic guest; `audit-readonly` the system-audit
+/// read an instance opts in to (design 2830b6b7, 2026-09-25). Keep the
+/// declaration on ONE line: the pin reads its quoted literals.
+export const READ_ONLY_GUEST_ROLES: ReadonlyArray<string> = ['audit-readonly', 'visitor'];
+
+export function guestEmployee(username: string, role: string = 'audit-readonly'): Employee {
   return {
     id: username,
     name: 'Guest',
     email: username,
-    role: 'audit-readonly',
+    role,
     department: 'visitor',
     hire_date: new Date().toISOString().slice(0, 10),
     status: 'active',
@@ -113,11 +121,11 @@ export function classifyProbe(
   const username = body.username ?? '';
   const emp = body.employee_id ? (byId.get(body.employee_id) ?? null) : null;
   if (emp) return { value: { kind: 'ready', user: emp }, readonly: false };
-  // A session with no employee and the audit-readonly role is the
+  // A session with no employee and a read-only-floor role is the
   // guest — a first-class read-only persona, not a broken login.
-  if (username && body.role === 'audit-readonly') {
+  if (username && body.role && READ_ONLY_GUEST_ROLES.includes(body.role)) {
     return {
-      value: { kind: 'ready', user: guestEmployee(username) },
+      value: { kind: 'ready', user: guestEmployee(username, body.role) },
       readonly: true,
     };
   }

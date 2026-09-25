@@ -9,6 +9,7 @@ name = "boss-simulator"
 path = "src/bin/boss_simulator.rs"
 
 [dependencies]
+boss-core = { path = "../../core/boss-core" }
 boss-ports = { path = "../../core/boss-ports" }
 boss-policy-client = { path = "../../core/boss-policy-client" }
 axum = { workspace = true }

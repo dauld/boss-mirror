@@ -33,6 +33,12 @@
 //! whose session it is, and an expiring session now expires — it
 //! does not quietly become somebody else's.
 //!
+//! Which access it carries is the deployment's answer, [`GuestAccess`]
+//! (design 2830b6b7, 2026-09-25): none, a basic `visitor` (the OSS
+//! default — what the install grants that role), or `audit-readonly`
+//! where an instance opts in to the system-audit read. A guest never
+//! writes under either.
+//!
 //! Onboarding (admin-only):
 //! - `POST /api/auth/onboard {email, password}` — creates a
 //!   credential row. Caller's session role must pass
@@ -383,11 +389,74 @@ pub struct LocalAuthState {
     /// OIDC runtime when the IdP is configured (idm-kanidm.md).
     /// None → the oidc routes answer honestly that they are off.
     pub oidc: Option<std::sync::Arc<crate::oidc::OidcRuntime>>,
-    /// Whether this deployment offers the read-only guest session.
-    /// Off unless the deployment declares itself a demo — a tenant
-    /// running BOSS on real data does not hand out a session that
-    /// reads every projection.
-    pub guest_access: bool,
+    /// Whether this deployment offers the read-only guest session, and
+    /// which read it hands a stranger. Off unless the deployment says
+    /// otherwise — a tenant running BOSS on real data does not hand out
+    /// a session at all.
+    pub guest_access: GuestAccess,
+}
+
+/// What an anonymous visitor is handed on this deployment — design
+/// 2830b6b7, decided 2026-09-25 ("Guests read what the install
+/// declares, and never write"). One answer with three values, not a
+/// flag plus a role: two keys would admit `off` with a role, a pair
+/// that means nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuestAccess {
+    /// No guest button, no guest session — the operating instance
+    /// (David: "boss.algedonic.dev won't support any guests").
+    Off,
+    /// The OSS default: a `visitor` session, which reads only what the
+    /// install grants that role as policy data.
+    Basic,
+    /// An instance's explicit opt-in to the system-audit read: an
+    /// `audit-readonly` session, Read on every shipped resource (the
+    /// playground: "anonymous guests with the system-audit policy
+    /// grant").
+    Audit,
+}
+
+impl GuestAccess {
+    /// Parse `BOSS_GUEST_ACCESS`. Unset, empty or `0` is Off; `basic`
+    /// is Basic, and so is `1` — the value every install already set to
+    /// turn guests on, which therefore moves to the basic default
+    /// without an edit; `audit` is Audit. Anything else is refused,
+    /// naming the value: the variable carries an ANSWER, never a role
+    /// name, so no instance can mint `platform-admin` for strangers by
+    /// typo, and a bare `true` has not said which read it gives them.
+    pub fn from_env_value(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None | Some("") | Some("0") => Ok(Self::Off),
+            Some("1") | Some("basic") => Ok(Self::Basic),
+            Some("audit") => Ok(Self::Audit),
+            Some(other) => Err(format!(
+                "BOSS_GUEST_ACCESS={other:?} is not one of 0, basic (or 1), audit — \
+                 this gateway offers no guest session until it is"
+            )),
+        }
+    }
+
+    /// [`Self::from_env_value`], with a refused value answered as Off
+    /// and the refusal logged — the gateway still starts (a typo in a
+    /// guest setting must not take sign-in down with it), offers no
+    /// guest, and says why rather than going quiet.
+    pub fn from_env_or_off(value: Option<&str>) -> Self {
+        Self::from_env_value(value).unwrap_or_else(|why| {
+            tracing::warn!("{why}");
+            Self::Off
+        })
+    }
+
+    /// The role a guest session carries here; `None` when this
+    /// deployment mints no guest. Both roles are on
+    /// `boss_core::roles::READ_ONLY_FLOOR_ROLES`.
+    pub fn role(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Basic => Some(boss_core::roles::VISITOR_ROLE),
+            Self::Audit => Some(boss_core::roles::AUDIT_READONLY_ROLE),
+        }
+    }
 }
 
 // --------------------------------------------------------------------
@@ -515,7 +584,8 @@ pub const GUEST_EMAIL: &str = "guest@algedonic.dev";
 pub struct GuestAvailability {
     pub enabled: bool,
     pub email: &'static str,
-    pub role: &'static str,
+    /// The role a guest would carry here; `null` when none is minted.
+    pub role: Option<&'static str>,
 }
 
 /// `GET /api/auth/guest` — does this deployment offer guest
@@ -525,37 +595,40 @@ pub struct GuestAvailability {
 /// Unauthenticated by necessity: the caller is on the sign-in page.
 /// It discloses nothing a visitor cannot learn by clicking.
 pub async fn guest_available(State(state): State<Arc<LocalAuthState>>) -> Response {
+    let role = state.guest_access.role();
     Json(GuestAvailability {
-        enabled: state.guest_access,
+        enabled: role.is_some(),
         email: GUEST_EMAIL,
-        role: boss_core::roles::AUDIT_READONLY_ROLE,
+        role,
     })
     .into_response()
 }
 
 /// `POST /api/auth/guest` — mint the read-only session.
 ///
-/// Both the identity and the role are constants: nothing the
-/// caller sends influences either, because the request body of an
-/// unauthenticated endpoint is not evidence of anything. Writes
-/// are refused downstream by `audit-readonly`'s policy rules —
-/// this handler grants a role, it does not enforce one.
+/// The identity is a constant and the role is the deployment's
+/// ([`GuestAccess`]): nothing the caller sends influences either,
+/// because the request body of an unauthenticated endpoint is not
+/// evidence of anything. Either role is on the read-only floor
+/// (`boss_core::roles::is_read_only_floor`); writes are refused
+/// downstream by policy and by the floor guards — this handler
+/// grants a role, it does not enforce one.
 ///
 /// `employee_id` stays `None`. A guest is not on the payroll, and
 /// giving them an Employee row to satisfy a session field would
 /// put a person who does not exist into the org chart, headcount
 /// and directory.
 pub async fn guest(State(state): State<Arc<LocalAuthState>>) -> Response {
-    if !state.guest_access {
+    let Some(role) = state.guest_access.role() else {
         return (
             StatusCode::NOT_FOUND,
             "guest access is not enabled on this deployment",
         )
             .into_response();
-    }
+    };
 
     let mut sess = Session::new(GUEST_EMAIL, session::DEFAULT_TTL_SECONDS);
-    sess.role = Some(boss_core::roles::AUDIT_READONLY_ROLE.to_string());
+    sess.role = Some(role.to_string());
 
     // Counted, deliberately (§Policy & auth): an
     // unauthenticated endpoint that mints real read access gets a
@@ -856,7 +929,7 @@ mod tests {
             session_key: vec![7u8; 32],
             http: reqwest::Client::new(),
             audit: crate::audit::AuthAudit::disabled(),
-            guest_access: false,
+            guest_access: GuestAccess::Off,
             oidc: None,
             mail: transport.clone(),
             public_url: "https://boss.test".into(),
@@ -955,14 +1028,14 @@ mod tests {
         );
     }
 
-    fn guest_state(enabled: bool) -> (TempDir, Arc<LocalAuthState>) {
+    fn guest_state(access: GuestAccess) -> (TempDir, Arc<LocalAuthState>) {
         let (td, store) = temp_store();
         let st = Arc::new(LocalAuthState {
             store,
             session_key: vec![7u8; 32],
             http: reqwest::Client::new(),
             audit: crate::audit::AuthAudit::disabled(),
-            guest_access: enabled,
+            guest_access: access,
             oidc: None,
             mail: Arc::new(crate::mail::LogTransport),
             public_url: "https://boss.test".into(),
@@ -992,7 +1065,7 @@ mod tests {
             session_key: vec![7u8; 32],
             http: reqwest::Client::new(),
             audit: crate::audit::AuthAudit::spawn(cap.clone()),
-            guest_access: false,
+            guest_access: GuestAccess::Off,
             oidc: None,
             mail: Arc::new(crate::mail::LogTransport),
             public_url: "https://boss.test".into(),
@@ -1032,7 +1105,7 @@ mod tests {
             session_key: vec![7u8; 32],
             http: reqwest::Client::new(),
             audit: crate::audit::AuthAudit::spawn(cap.clone()),
-            guest_access: true,
+            guest_access: GuestAccess::Basic,
             oidc: None,
             mail: Arc::new(crate::mail::LogTransport),
             public_url: "https://boss.test".into(),
@@ -1070,17 +1143,26 @@ mod tests {
         value.to_string()
     }
 
-    /// Nothing the caller sends decides who a guest is, so the only
-    /// thing to assert is that the constants land on the session.
-    #[tokio::test]
-    async fn a_guest_session_is_audit_readonly_and_not_an_employee() {
-        let (_td, st) = guest_state(true);
+    /// Mint a guest on a deployment offering `access` and decode the
+    /// session its cookie carries.
+    async fn minted_guest(access: GuestAccess) -> Session {
+        let (_td, st) = guest_state(access);
         let resp = guest(State(st.clone())).await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::OK, "{access:?} mints");
+        Session::decode(&cookie_value(&resp), &st.session_key).expect("decodes")
+    }
 
-        let sess = Session::decode(&cookie_value(&resp), &st.session_key).expect("decodes");
+    /// Design 2830b6b7 (decided 2026-09-25): the OSS default guest is
+    /// a `visitor` — basic access, whatever the install grants that
+    /// role — and NOT `audit-readonly`, whose Read on every shipped
+    /// resource handed a stranger the employee roster. Nothing the
+    /// caller sends decides who a guest is, so the only thing to assert
+    /// is that the deployment's constants land on the session.
+    #[tokio::test]
+    async fn a_basic_guest_session_is_a_visitor_and_not_an_employee() {
+        let sess = minted_guest(GuestAccess::Basic).await;
         assert_eq!(sess.username, GUEST_EMAIL);
-        assert_eq!(sess.role.as_deref(), Some("audit-readonly"));
+        assert_eq!(sess.role.as_deref(), Some(boss_core::roles::VISITOR_ROLE));
         assert!(
             sess.employee_id.is_none(),
             "a guest must not carry an Employee identity — that would put a \
@@ -1088,11 +1170,40 @@ mod tests {
         );
     }
 
+    /// The playground's opt-in (David, 2026-09-25: "Playground will
+    /// support anonymous guests with the system-audit policy grant"):
+    /// the same guest identity, carrying `audit-readonly`.
+    #[tokio::test]
+    async fn an_audit_guest_session_is_audit_readonly_and_not_an_employee() {
+        let sess = minted_guest(GuestAccess::Audit).await;
+        assert_eq!(sess.username, GUEST_EMAIL);
+        assert_eq!(
+            sess.role.as_deref(),
+            Some(boss_core::roles::AUDIT_READONLY_ROLE)
+        );
+        assert!(sess.employee_id.is_none());
+    }
+
+    /// Whichever read the deployment chose, the guest is on the
+    /// read-only floor — the predicate every name-keyed write guard
+    /// now asks.
+    #[tokio::test]
+    async fn every_guest_mode_mints_a_read_only_floor_role() {
+        for access in [GuestAccess::Basic, GuestAccess::Audit] {
+            let sess = minted_guest(access).await;
+            let role = sess.role.expect("a guest carries a role");
+            assert!(
+                boss_core::roles::is_read_only_floor(&role),
+                "{access:?} minted {role}, which is off the read-only floor"
+            );
+        }
+    }
+
     /// A tenant running BOSS on their own company's data has not asked
     /// to hand out a session that reads every projection.
     #[tokio::test]
     async fn guest_access_is_refused_unless_the_deployment_offers_it() {
-        let (_td, st) = guest_state(false);
+        let (_td, st) = guest_state(GuestAccess::Off);
         let resp = guest(State(st.clone())).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         assert!(
@@ -1102,17 +1213,63 @@ mod tests {
 
         let avail = body_json(guest_available(State(st)).await).await;
         assert_eq!(avail["enabled"], serde_json::json!(false));
+        assert!(
+            avail["role"].is_null(),
+            "a deployment that mints no guest names no guest role: {avail}"
+        );
     }
 
     /// The sign-in page renders its button from this, so the answer
     /// has to track the deployment rather than be assumed.
     #[tokio::test]
     async fn availability_reports_the_identity_it_would_mint() {
-        let (_td, st) = guest_state(true);
-        let avail = body_json(guest_available(State(st)).await).await;
-        assert_eq!(avail["enabled"], serde_json::json!(true));
-        assert_eq!(avail["email"], serde_json::json!(GUEST_EMAIL));
-        assert_eq!(avail["role"], serde_json::json!("audit-readonly"));
+        for (access, role) in [
+            (GuestAccess::Basic, boss_core::roles::VISITOR_ROLE),
+            (GuestAccess::Audit, boss_core::roles::AUDIT_READONLY_ROLE),
+        ] {
+            let (_td, st) = guest_state(access);
+            let avail = body_json(guest_available(State(st)).await).await;
+            assert_eq!(avail["enabled"], serde_json::json!(true), "{access:?}");
+            assert_eq!(avail["email"], serde_json::json!(GUEST_EMAIL));
+            assert_eq!(avail["role"], serde_json::json!(role), "{access:?}");
+        }
+    }
+
+    /// `BOSS_GUEST_ACCESS` takes three answers and no role name. "1"
+    /// keeps meaning what every OSS install already set it to for —
+    /// and so moves them to the basic default without an edit.
+    #[test]
+    fn the_guest_access_env_value_is_one_of_three_answers() {
+        for (raw, want) in [
+            (None, GuestAccess::Off),
+            (Some(""), GuestAccess::Off),
+            (Some("0"), GuestAccess::Off),
+            (Some("1"), GuestAccess::Basic),
+            (Some("basic"), GuestAccess::Basic),
+            (Some("audit"), GuestAccess::Audit),
+        ] {
+            assert_eq!(GuestAccess::from_env_value(raw), Ok(want), "{raw:?}");
+        }
+    }
+
+    /// Anything else is refused BY NAME, and the gateway runs with no
+    /// guests: a role name cannot be passed through the environment,
+    /// so no instance can mint `platform-admin` for strangers by typo,
+    /// and a bare `true` has not said which read it gives them.
+    #[test]
+    fn an_unrecognised_guest_access_value_is_named_and_offers_no_guest() {
+        for raw in [
+            "true",
+            "yes",
+            "Audit",
+            "platform-admin",
+            "audit-readonly",
+            "visitor",
+        ] {
+            let why = GuestAccess::from_env_value(Some(raw)).expect_err(raw);
+            assert!(why.contains(raw), "the refusal names {raw:?}: {why}");
+            assert_eq!(GuestAccess::from_env_or_off(Some(raw)), GuestAccess::Off);
+        }
     }
 
     /// Regression. `me` used to 401 a session with no `employee_id`
@@ -1122,7 +1279,7 @@ mod tests {
     /// to the sign-in page they just left.
     #[tokio::test]
     async fn me_answers_for_a_guest_session() {
-        let (_td, st) = guest_state(true);
+        let (_td, st) = guest_state(GuestAccess::Basic);
         let minted = guest(State(st.clone())).await;
 
         let mut headers = HeaderMap::new();
@@ -1227,6 +1384,12 @@ mod tests {
     // reset links outside `forgot`'s rate limit.
 
     fn admin_gate_state() -> (TempDir, Arc<LocalAuthState>, Arc<CapturingTransport>) {
+        admin_gate_state_offering(GuestAccess::Audit)
+    }
+
+    fn admin_gate_state_offering(
+        access: GuestAccess,
+    ) -> (TempDir, Arc<LocalAuthState>, Arc<CapturingTransport>) {
         let (td, store) = temp_store();
         let cap = Arc::new(CapturingTransport::default());
         let st = Arc::new(LocalAuthState {
@@ -1234,7 +1397,7 @@ mod tests {
             session_key: vec![7u8; 32],
             http: reqwest::Client::new(),
             audit: crate::audit::AuthAudit::disabled(),
-            guest_access: true,
+            guest_access: access,
             oidc: None,
             mail: cap.clone(),
             public_url: "https://boss.test".into(),
@@ -1297,10 +1460,17 @@ mod tests {
 
     /// The live shape of the defect: a cookie minted by `guest()`
     /// itself, not a hand-built one, so the role it carries is exactly
-    /// the one an anonymous visitor would present.
+    /// the one an anonymous visitor would present — in each guest mode
+    /// a deployment can offer (design 2830b6b7).
     #[tokio::test]
     async fn a_guest_session_may_not_onboard_or_reset_a_credential() {
-        let (_td, st, cap) = admin_gate_state();
+        for access in [GuestAccess::Basic, GuestAccess::Audit] {
+            a_guest_of_this_mode_may_not_onboard_or_reset(access).await;
+        }
+    }
+
+    async fn a_guest_of_this_mode_may_not_onboard_or_reset(access: GuestAccess) {
+        let (_td, st, cap) = admin_gate_state_offering(access);
         let victim_pw = fresh_password();
         st.store
             .upsert("victim@example.com", &victim_pw)
