@@ -54,22 +54,6 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| "connecting to Postgres")?;
 
-    // Seed the executive-role cache from the Class registry so the
-    // IT-providers gate's `has_global_read` recognises tenant-defined
-    // executives. Skip on missing config or transport failure —
-    // platform-admin + audit-readonly still grant global read.
-    if let Some(url) = &cfg.classes_api_url {
-        let client = boss_classes_client::ReqwestClassesClient::new(url.clone());
-        match boss_classes_client::seed_executive_role_cache(&client).await {
-            Ok(n) => info!(count = n, classes_api_url = %url, "executive role cache seeded"),
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to seed executive roles from classes; falling back to platform-admin/audit-readonly only")
-            }
-        }
-    } else {
-        info!("classes_api_url unset; executive role cache disabled");
-    }
-
     // Clock-api URL: env override (BOSS_CLOCK_URL) takes
     // precedence; default goes to the canonical port via
     // boss-ports. Production deploys point at a wall-mode
