@@ -112,7 +112,11 @@ async fn the_stamp_is_written_once_and_survives_annotation_and_claim() {
     repo.claim_step_at(
         &StepId::from_uuid(Uuid::parse_str(STEP_PROMOTED).unwrap()),
         "claude@algedonic.dev",
-        t("2026-09-02T08:00:00Z"),
+        &boss_core::publisher::EventStamp::new(
+            "jobs",
+            boss_core::actor::ActorId::automation("test"),
+        )
+        .with_timestamp(t("2026-09-02T08:00:00Z")),
         &[],
     )
     .await

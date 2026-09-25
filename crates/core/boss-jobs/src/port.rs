@@ -57,6 +57,23 @@ pub enum JobsError {
         "step {id} changed since this write read it — the row is no longer the version the write was computed from"
     )]
     StepChanged { id: StepId },
+    /// A sign-off stamp attests a shape the row no longer has: the
+    /// sign-off door built it over the step it READ, and a write moved
+    /// the row before the append took the lock (backlog 4174c4a9, the
+    /// review of car e1a62aa5). Written, it would sit alive on the
+    /// wrong shape — no edit ever voided it, because it landed after
+    /// the edit — and a later write that put the row back on the signed
+    /// shape (a claim dropping the run edge) would make it count.
+    /// Refused atomically with the row lock instead; the approver reads
+    /// the step again and signs what is there.
+    #[error(
+        "step {id} moved since the stamp was built — it signs shape {signed}, the step is {current}"
+    )]
+    StampOffShape {
+        id: StepId,
+        signed: String,
+        current: String,
+    },
 }
 
 /// The version a step row was at when it was read — the judgement a
@@ -1291,11 +1308,19 @@ pub trait JobsRepository: Send + Sync {
     /// `in_memory::tests::an_aliased_holder_is_refused_in_memory_because_it_has_no_alias_source`.
     /// A new adapter must decide which of the two it is and say so
     /// here.
+    ///
+    /// A CLAIM THAT MOVES THE SHAPE VOIDS WHAT IT MOVED (backlog
+    /// 4174c4a9). Dropping the run edge changes the metadata, which is
+    /// inside `step_shape_hash`, so the claim is an edit of the signed
+    /// content: both adapters void every live stamp under the lock when
+    /// it does, and record the `jobs.step.stamps_invalidated` event —
+    /// built from `stamp`, after the caller's `events` — in the claim's
+    /// own write. `stamp.timestamp` is the claim's instant.
     async fn claim_step_at(
         &self,
         step_id: &StepId,
         actor: &str,
-        now: DateTime<Utc>,
+        stamp: &boss_core::publisher::EventStamp,
         events: &[boss_core::event::Event],
     ) -> Result<Step, JobsError>;
 
@@ -1304,6 +1329,13 @@ pub trait JobsRepository: Send + Sync {
     /// never writes `sign_offs`, so a concurrent read-modify-write
     /// (dispatcher auto-assign, predicate re-eval) cannot clobber a
     /// stamp that landed between its read and its write.
+    ///
+    /// The stamp lands only on the shape it signs: under the row's lock,
+    /// a row whose `step_shape_hash` is not `stamp.shape_hash` refuses
+    /// with [`JobsError::StampOffShape`] and nothing — stamp or events —
+    /// is written (backlog 4174c4a9). The sign-off door builds the stamp
+    /// from an earlier read, and this is the one place a write between
+    /// the two can be seen.
     async fn append_sign_off(
         &self,
         step_id: &StepId,

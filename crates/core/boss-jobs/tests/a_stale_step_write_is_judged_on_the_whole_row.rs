@@ -273,9 +273,17 @@ async fn every_write_to_a_row_moves_its_version() {
     let (_, again) = read(&jobs, &step).await;
     assert_eq!(first, again, "a read does not move the version");
 
-    jobs.claim_step_at(&step.id, "agent-claimer", chrono::Utc::now(), &[])
-        .await
-        .unwrap();
+    jobs.claim_step_at(
+        &step.id,
+        "agent-claimer",
+        &boss_core::publisher::EventStamp::new(
+            "jobs",
+            boss_core::actor::ActorId::automation("test"),
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
     let (_, claimed) = read(&jobs, &step).await;
     assert_ne!(claimed, first, "a claim moves it");
 
