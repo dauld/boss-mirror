@@ -19,10 +19,14 @@
 //   buttons   1 per queue row — Review (→ the review step's full-page
 //                         surface, back labelled "Design Review"; the
 //                         job page when the step cannot be resolved)
+//             1 per failure line — Retry (→ that region's read again,
+//                         and only that one; 3bbb194a)
 //   forms     0, inputs 0
-//   reads     3         — GET /api/stations/design-review/queue (mount)
+//   reads     3         — GET /api/stations/design-review/queue (mount,
+//                         and again on its failure line's Retry)
 //                         GET /api/stations/design-decided/queue (mount,
-//                         only once the first read has succeeded)
+//                         whatever the first read answers — 3bbb194a —
+//                         and again on its failure line's Retry)
 //                         GET /api/jobs/{id} (on Review, only when the
 //                         envelope did not carry the row's review step)
 //   writes    0         — decisions are written on the step surface the
@@ -52,15 +56,18 @@
 //   U1  67825067  FIXED — a malformed 200 from either station read is
 //       that read's failure line, not the honest empty state (the item
 //       filed for the /it/operate/marshalling twin took both pages)
+//   U2  3bbb194a  FIXED — a failed review-queue read hid the decided
+//       panel: its independent read was never made. Each region now
+//       loads and fails on its own.
+//   U4  3bbb194a  FIXED — neither failure line offered a Retry (the
+//       Retry half of measure's gap 7; c3e4edcc closed on the marker
+//       alone). Each line now carries one, and it re-runs only its
+//       own region's read.
 // and not owned by any open item (UNFILED):
-//   U2  a failed review-queue read hides the decided panel: its
-//       independent read is never made
 //   U3  the eyebrow names "System Model", on an IT page, in both lens
 //       rows and in the fallback; the fallback subtitle "Open questions
 //       and ADRs" describes the corpus deleted on 2026-09-10, and it is
 //       what a failed read shows (the /it/kb twin is 839a7f0f)
-//   U4  neither failure line offers a Retry (the Retry half of measure's
-//       gap 7; c3e4edcc closed on the marker alone)
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage } from './_helpers';
@@ -219,6 +226,10 @@ const queueRow = (page: Page, title: string) => queueTable(page).locator('tbody 
 const decidedTables = (page: Page) => page.locator('table.decided-table');
 const failures = (page: Page) => page.locator(FAILURE_MARKER);
 const sectionTitles = (page: Page) => page.locator('section.tab-section > h3');
+/// Each failure line's Retry, by the read it names (3bbb194a). Two can
+/// show at once, so each carries its region in its accessible name.
+const queueRetry = (page: Page) => page.getByRole('button', { name: 'Retry the review queue' });
+const decidedRetry = (page: Page) => page.getByRole('button', { name: 'Retry the decided designs' });
 
 /// The empty state's paragraph, verbatim. Whitespace is normalised by
 /// toHaveText; the three <code> words are part of the text.
@@ -554,20 +565,66 @@ test.describe('/it/design — empty, failed and malformed reads', () => {
     });
   });
 
-  test('CURRENT, U2 (UNFILED): a failed review-queue read hides WORKING and OUT — the decided read is never made', async ({ page }) => {
+  test('U2 (3bbb194a) is FIXED — a failed review-queue read leaves WORKING and OUT standing: the decided read is made', async ({ page }) => {
     const counts = await install(page, { queue: (r) => json(r, 'down', 503) });
     await mountPage(page, PATH, TITLE);
     await expect(page.locator('p.design-error.load-failed')).toBeVisible();
-    await expect(page.getByText(/Decided, being folded|Settled/)).toHaveCount(0);
-    await expect(page.getByText('Loading the decided designs…')).toHaveCount(0);
-    expect(counts.decided).toBe(0);
+    await expect(sectionTitles(page)).toHaveText(['Decided, being folded (2)', 'Settled in the last 7 days (1)']);
+    await expect(decidedTables(page).locator('a')).toHaveText([
+      'A design being folded', 'A design waiting for its fold', 'A settled design',
+    ]);
+    // The one failure on the page is the queue's: the decided panel's
+    // read answered, and it painted what it read.
+    await expect(failures(page)).toHaveCount(1);
+    expect(counts.decided).toBe(1);
   });
 
-  test('CURRENT, U4 (UNFILED): neither failure line offers a Retry', async ({ page }) => {
-    await install(page, { queue: (r) => json(r, 'down', 503) });
+  test('both reads refused: two failure lines, each in its own words and with its own Retry', async ({ page }) => {
+    await install(page, { queue: (r) => json(r, 'down', 503), decided: (r) => json(r, 'down', 503) });
+    await mountPage(page, PATH, TITLE);
+    await expect(failures(page)).toHaveText([
+      'The review queue could not be read: queue: HTTP 503. This is not an empty queue.',
+      'Could not read the decided designs: HTTP 503',
+    ]);
+    await expect(queueRetry(page)).toBeVisible();
+    await expect(decidedRetry(page)).toBeVisible();
+    await expect(sectionTitles(page)).toHaveCount(0);
+  });
+
+  test('U4 (3bbb194a) is FIXED — the review queue\'s Retry re-runs its read, and only its read', async ({ page }) => {
+    let answered = 0;
+    const counts = await install(page, {
+      // Refused once, then served: what a Retry after a blip meets.
+      queue: (r) => (answered++ === 0 ? json(r, 'down', 503) : json(r, queue())),
+    });
     await mountPage(page, PATH, TITLE);
     await expect(page.locator('p.design-error.load-failed')).toBeVisible();
-    await expect(page.locator('.app-shell').getByRole('button', { name: /retry|try again|reload/i })).toHaveCount(0);
+    await expect(decidedTables(page)).toHaveCount(2);
+    expect(counts).toMatchObject({ queue: 1, decided: 1 });
+
+    await queueRetry(page).click();
+    await expect(queueTable(page).locator('tbody tr')).toHaveCount(3);
+    await expect(failures(page)).toHaveCount(0);
+    await expect(queueRetry(page)).toHaveCount(0);
+    await expect(sectionTitles(page)).toHaveText([
+      'Waiting on a decision (3)',
+      'Decided, being folded (2)',
+      'Settled in the last 7 days (1)',
+    ]);
+    // The decided panel was not asked again: a Retry is its region's.
+    expect(counts).toMatchObject({ queue: 2, decided: 1 });
+  });
+
+  test('a review-queue Retry that fails again stays the failure line, with its Retry', async ({ page }) => {
+    const counts = await install(page, { queue: (r) => json(r, 'down', 503) });
+    await mountPage(page, PATH, TITLE);
+    await queueRetry(page).click();
+    await expect.poll(() => counts.queue).toBe(2);
+    await expect(page.locator('p.design-error.load-failed')).toHaveText(
+      'The review queue could not be read: queue: HTTP 503. This is not an empty queue.',
+    );
+    await expect(queueRetry(page)).toBeVisible();
+    await expect(page.getByText('Nothing is waiting on a decision.', { exact: false })).toHaveCount(0);
   });
 
   test('a refused decided read is its own failure line, and the review queue still renders', async ({ page }) => {
@@ -578,13 +635,34 @@ test.describe('/it/design — empty, failed and malformed reads', () => {
     await expect(page.getByText('Nothing decided is waiting to be folded.')).toHaveCount(0);
     await expect(page.getByText('Nothing settled in this window.')).toHaveCount(0);
     await expect(queueTable(page).locator('tbody tr')).toHaveCount(3);
-    await expect(page.locator('.app-shell').getByRole('button', { name: /retry|try again|reload/i })).toHaveCount(0);
+    await expect(decidedRetry(page)).toBeVisible();
+    await expect(queueRetry(page)).toHaveCount(0);
+  });
+
+  test('U4 (3bbb194a) is FIXED — the decided panel\'s Retry re-runs its read, and only its read', async ({ page }) => {
+    let answered = 0;
+    const counts = await install(page, {
+      decided: (r) => (answered++ === 0 ? json(r, 'down', 503) : json(r, decided())),
+    });
+    await mountPage(page, PATH, TITLE);
+    await expect(page.getByText('Could not read the decided designs: HTTP 503')).toBeVisible();
+    expect(counts).toMatchObject({ queue: 1, decided: 1 });
+
+    await decidedRetry(page).click();
+    await expect(sectionTitles(page)).toHaveText([
+      'Waiting on a decision (3)',
+      'Decided, being folded (2)',
+      'Settled in the last 7 days (1)',
+    ]);
+    await expect(failures(page)).toHaveCount(0);
+    await expect(decidedRetry(page)).toHaveCount(0);
+    expect(counts).toMatchObject({ queue: 1, decided: 2 });
   });
 
   // U1, FIXED by 67825067: both station reads parse through the shared
   // envelope reader (src/data/shape.ts), so a 200 that is not the
   // envelope is the read's failure line, naming the read and what came
-  // back. Neither line offers a Retry because the page offers none (U4).
+  // back. Each line carries its region's Retry (U4, 3bbb194a).
   test('U1 (67825067): a malformed 200 from the review queue is the failure line, never "Nothing is waiting"', async ({ page }) => {
     // A list where the envelope is due — what an api floor's catch-all
     // answers, and what the page used to take as an envelope with no data.
@@ -596,7 +674,10 @@ test.describe('/it/design — empty, failed and malformed reads', () => {
     );
     await expect(line).toHaveAttribute('role', 'alert');
     await expect(page.getByText('Nothing is waiting on a decision.', { exact: false })).toHaveCount(0);
-    await expect(sectionTitles(page)).toHaveCount(0);
+    // Only the queue's section is missing: WORKING and OUT read on their
+    // own (U2, 3bbb194a).
+    await expect(sectionTitles(page)).toHaveText(['Decided, being folded (2)', 'Settled in the last 7 days (1)']);
+    await expect(queueRetry(page)).toBeVisible();
   });
 
   test('U1 (67825067): a malformed 200 from the decided station is its own failure line, and the review queue still renders', async ({ page }) => {

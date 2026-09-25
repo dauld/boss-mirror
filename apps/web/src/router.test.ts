@@ -421,6 +421,34 @@ describe('jobs list subject filter from the query string', () => {
     expect('jobSubjectId' in r).toBe(false);
     expect(r.jobStatus).toBe('closed');
   });
+
+  // The same mix-up, for `kind`: HrPage's "start a workflow" link sends
+  // /jobs?new=1&kind=…&subject_kind=employee&subject_id=…, and the kind
+  // it names was read as the list's Kind filter — so the list behind
+  // the form narrowed to that workflow, and the form's own Kind came up
+  // unpicked (backlog 3f5cce16, excluded from d0b93b80's car).
+  test('under new=1, kind names the new job kind and filters nothing', () => {
+    const r = at('?new=1&kind=onboarding&subject_kind=employee&subject_id=emp-7&status=closed');
+    expect(r.newJobOpen).toBe(true);
+    expect(r.newJobKind).toBe('onboarding');
+    expect(r.newJobSubjectKind).toBe('employee');
+    expect(r.newJobSubjectId).toBe('emp-7');
+    expect('workflow' in r).toBe(false);
+    expect('jobSubjectId' in r).toBe(false);
+    expect(r.jobStatus).toBe('closed');
+  });
+
+  // Without `new=1` there is no new job, so the same parameters are the
+  // list's filters and seed nothing.
+  test('without new=1, kind and subject_id filter the list and seed no new job', () => {
+    const r = at('?kind=onboarding&subject_kind=employee&subject_id=emp-7');
+    expect(r.workflow).toBe('onboarding');
+    expect(r.jobSubjectId).toBe('emp-7');
+    expect('newJobOpen' in r).toBe(false);
+    expect('newJobKind' in r).toBe(false);
+    expect('newJobSubjectKind' in r).toBe(false);
+    expect('newJobSubjectId' in r).toBe(false);
+  });
 });
 
 describe('personal Views route', () => {

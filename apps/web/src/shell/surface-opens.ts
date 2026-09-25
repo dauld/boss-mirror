@@ -46,6 +46,7 @@ export const QUERY_FIELDS: ReadonlySet<string> = new Set([
   'jobStatus',
   'jobOwnerId',
   'jobSubjectId',
+  'newJobKind',
   'newJobSubjectKind',
   'newJobSubjectId',
   'q',

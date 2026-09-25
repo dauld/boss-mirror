@@ -17,6 +17,18 @@ pub enum CommerceError {
     Conflict(String),
 }
 
+impl CommerceError {
+    /// The refusal `InvoiceStatus::transition_to` answers `Refused` for,
+    /// worded once so both adapters name the same transition
+    /// (backlog 203ef806). A `Conflict`, so the API answers 409.
+    pub fn refused_transition(id: &str, from: &str, to: &str) -> Self {
+        Self::Conflict(format!(
+            "invoice {id}: refused transition '{from}' -> '{to}': \
+             paid and written-off are terminal, only an owed invoice moves"
+        ))
+    }
+}
+
 /// Read-only persistence port for invoices and revenue.
 #[async_trait]
 pub trait CommerceRepository: Send + Sync {
@@ -89,6 +101,9 @@ pub trait CommerceRepository: Send + Sync {
     }
     /// Records `commerce.invoice.paid` (full post-update row state)
     /// in the same transaction as the status flip — outbox phase 2.
+    /// The three status verbs move an invoice only as
+    /// `InvoiceStatus::transition_to` allows: an already-paid invoice
+    /// is Ok with no event, a written-off one is refused by name.
     async fn mark_invoice_paid_at(
         &self,
         id: &str,
@@ -103,6 +118,9 @@ pub trait CommerceRepository: Send + Sync {
     /// net-30-ish delay — never both, never neither.
     /// Records `commerce.invoice.past_due` (full post-update row
     /// state) in the same transaction as the flip — outbox phase 2.
+    /// A paid or written-off invoice is refused by name
+    /// (`InvoiceStatus::transition_to`): it had no guard on Pg, so
+    /// either could re-enter the receivable (backlog 203ef806).
     async fn mark_invoice_past_due(
         &self,
         id: &str,
@@ -117,8 +135,9 @@ pub trait CommerceRepository: Send + Sync {
     /// copy (the counterparty chain + the system webhook copy), so
     /// callers gate their event emit on `true` to keep the double
     /// delivery convergent. Writing off a `paid` invoice is a
-    /// `Conflict`: the paid and past-due counterparty branches are
-    /// mutually exclusive, so that drive means model drift, not a race.
+    /// `Conflict` (`InvoiceStatus::transition_to`): the paid and
+    /// past-due counterparty branches are mutually exclusive, so that
+    /// drive means model drift, not a race.
     /// See the brewery `[counterparty.bad-debt-writeoff]` for the
     /// 60-day-after-past-due trigger that drives this in sim.
     /// Outbox phase 2: the `commerce.invoice.written_off` event

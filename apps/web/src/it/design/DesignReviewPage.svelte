@@ -55,9 +55,13 @@
     loading = true;
     error = null;
     try {
-      // One read, and it is the queue. If it fails the surface has
-      // nothing honest to show, so it throws rather than rendering an
-      // empty table that reads as "nothing to review".
+      // The queue region's one read. If it fails the REGION has nothing
+      // honest to show, so it throws rather than rendering an empty
+      // table that reads as "nothing to review" — but only the region:
+      // the decided panel makes its own read whatever this one answers
+      // (backlog 3bbb194a — until then a failed queue read painted this
+      // line in place of the whole page, and WORKING and OUT were never
+      // asked for). Its Retry re-runs this read and nothing else.
       // A 200 that is not the envelope throws too (67825067): the cast
       // this replaced read a list as a queue with nothing waiting.
       const resp = await fetch(stationQueuePath(REVIEW_STATION));
@@ -101,17 +105,31 @@
 
 <PageHeader eyebrow={header.eyebrow} title={header.title} subtitle={header.subtitle} />
 
-{#if loading}
-  <p class="empty">Loading the review queue…</p>
-{:else if error}
-  <!-- The shared failure marker (sweep c3e4edcc) draws the failed read's
-       rail; this page's own class keeps only the spacing. -->
-  <p class="design-error load-failed" role="alert">
-    The review queue could not be read: {error}. This is not an empty queue.
-  </p>
-{:else}
-  {#each panels as panel (panel)}
-    {#if panel === 'queue'}
+<!-- Each panel is a region that loads and fails on its own (3bbb194a).
+     Until the queue answers there is no lens, and `panelsFor` falls back
+     to every panel this surface ships, so the decided panel mounts and
+     reads at once instead of waiting behind a read it does not need. -->
+{#each panels as panel (panel)}
+  {#if panel === 'queue'}
+    {#if loading}
+      <p class="empty">Loading the review queue…</p>
+    {:else if error}
+      <!-- The shared failure marker (sweep c3e4edcc) draws the failed
+           read's rail; this page's own class keeps only the spacing. -->
+      <div class="design-failed">
+        <p class="design-error load-failed" role="alert">
+          The review queue could not be read: {error}. This is not an empty queue.
+        </p>
+        <button
+          class="btn btn-sm"
+          type="button"
+          aria-label="Retry the review queue"
+          onclick={() => void load()}
+        >
+          Retry
+        </button>
+      </div>
+    {:else}
       <Section title={`Waiting on a decision (${rows.length})`} wide>
         {#if rows.length === 0}
           <p class="empty">
@@ -164,11 +182,11 @@
           </table>
         {/if}
       </Section>
-    {:else if panel === 'decided'}
-      <DecidedDesigns />
     {/if}
-  {/each}
-{/if}
+  {:else if panel === 'decided'}
+    <DecidedDesigns />
+  {/if}
+{/each}
 
 <style>
   .design-table {
@@ -236,7 +254,17 @@
     color: var(--static);
     margin: 0 0 12px;
   }
-  .design-error {
+  /* The failure line and its Retry, side by side; the line takes the
+     room, the button keeps its own width. */
+  .design-failed {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
     margin: 12px 0;
+  }
+  .design-error {
+    flex: 1 1 24ch;
+    margin: 0;
   }
 </style>

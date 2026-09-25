@@ -35,6 +35,7 @@
     pageTitle,
     eyebrow = 'Work',
     initialNewJobOpen = false,
+    initialNewJobKind = '',
     initialNewJobSubjectKind = '',
     initialNewJobSubjectId = '',
     writesFiltersToUrl = false,
@@ -62,8 +63,11 @@
     eyebrow?: string;
     // Deep-link params from /jobs?new=1&subject_kind=…&subject_id=…
     // (Phase 3 of create-Job UX; populated when a Subject detail
-    // page sends the user here pre-filled).
+    // page sends the user here pre-filled). The Kind is the deep link's
+    // `kind`, which under `new=1` names the new job's workflow and
+    // filters nothing (HrPage's link; backlog 3f5cce16).
     initialNewJobOpen?: boolean;
+    initialNewJobKind?: string;
     initialNewJobSubjectKind?: string;
     initialNewJobSubjectId?: string;
     /// Set by the /jobs mount only: the route whose query parseRoute
@@ -423,6 +427,7 @@
   onMount(() => {
     if (initialNewJobOpen) {
       openNewJob({
+        kind: initialNewJobKind,
         subjectKind: initialNewJobSubjectKind,
         subjectId: initialNewJobSubjectId,
       });

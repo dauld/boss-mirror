@@ -67,6 +67,10 @@ name = "gl_drift"
 required-features = ["postgres"]
 
 [[test]]
+name = "invoice_transitions"
+required-features = ["postgres"]
+
+[[test]]
 name = "open_ar_pg"
 required-features = ["postgres"]
 

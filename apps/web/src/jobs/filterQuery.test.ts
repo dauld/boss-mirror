@@ -52,6 +52,18 @@ describe('jobsFilterSearch', () => {
       '?new=1&subject_kind=account&subject_id=acc-1&status=',
     );
   });
+
+  // And kind, the same way (backlog 3f5cce16): HrPage's deep link names
+  // the new job's workflow in `kind`, which the router now reads as the
+  // form's Kind under `new=1`. A mount, whose Kind filter is empty, used
+  // to take it out of the URL; a Kind chosen while the form is open
+  // waits for Cancel.
+  test('under new=1, kind is the new job kind and the write leaves it alone', () => {
+    const deep = '?new=1&kind=ad-hoc&subject_kind=account&subject_id=acc-1';
+    expect(jobsFilterSearch(deep, none)).toBe(deep);
+    expect(jobsFilterSearch(deep, { ...none, kind: 'page-audit' })).toBe(deep);
+    expect(jobsFilterSearch(deep, { ...none, status: 'closed' })).toBe(`${deep}&status=closed`);
+  });
 });
 
 // Cancel on a deep-linked form. It stripped the WHOLE query, filters
@@ -81,6 +93,24 @@ describe('searchWithoutNewJob', () => {
     expect(
       searchWithoutNewJob('?new=1&subject_kind=account&subject_id=acc-1', { ...none, subjectId: 'ast-9' }),
     ).toBe('?subject_id=ast-9');
+  });
+
+  // The new job's kind is the deep link's too (backlog 3f5cce16): it
+  // goes with the rest of the new-job half, and a Kind filter chosen
+  // while the form was open is written in its place.
+  test('takes out the new job kind with the rest of the new-job half', () => {
+    expect(
+      searchWithoutNewJob('?new=1&kind=ad-hoc&subject_kind=account&subject_id=acc-1&status=closed', {
+        ...none,
+        status: 'closed',
+      }),
+    ).toBe('?status=closed');
+    expect(
+      searchWithoutNewJob('?new=1&kind=ad-hoc&subject_kind=account&subject_id=acc-1', {
+        ...none,
+        kind: 'page-audit',
+      }),
+    ).toBe('?kind=page-audit');
   });
 
   test('a search with no deep link is only the filters write', () => {

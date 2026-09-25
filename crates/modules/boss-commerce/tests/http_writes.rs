@@ -346,3 +346,28 @@ async fn put_write_off_second_call_converges_without_duplicate_event() {
         "repeat PUT is a converged no-op"
     );
 }
+
+/// A written-off invoice cannot be marked past-due: the receivable is
+/// already gone, and the flip would count it owed again. The API says
+/// so by name — 409 naming both statuses — and records nothing
+/// (backlog 203ef806; the whole table is `invoice_transitions.rs`).
+#[tokio::test]
+async fn put_past_due_on_a_written_off_invoice_is_refused_by_name() {
+    let app = CommerceTestApp::with_invoices(vec![past_due_fixture("inv-step-wo-pd")]);
+    TestRequest::put("/api/commerce/invoices/inv-step-wo-pd/write-off")
+        .send(&app.router)
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+
+    let resp = TestRequest::put("/api/commerce/invoices/inv-step-wo-pd/past-due")
+        .send(&app.router)
+        .await;
+
+    resp.assert_status(StatusCode::CONFLICT);
+    let body = String::from_utf8_lossy(&resp.body_bytes);
+    assert!(
+        body.contains("'written-off' -> 'past-due'"),
+        "the refusal names the transition: {body}"
+    );
+    assert!(app.recorded_of_kind("commerce.invoice.past_due").is_empty());
+}

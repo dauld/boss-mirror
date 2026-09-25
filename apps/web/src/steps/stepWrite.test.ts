@@ -77,6 +77,33 @@ describe('writeStep', () => {
     expect(res.kind).toBe('failed');
     if (res.kind === 'failed') expect(res.error).toContain('Failed to fetch');
   });
+
+  // Backlog 3ce3c15f: a surface must be able to tell a completion refused
+  // for PRESENCE from every other refusal, because that one it answers
+  // with a passkey tap — and the status alone does not say it (a 422 is
+  // also a malformed body).
+  test('a 422 refusal for presence is marked as one', async () => {
+    stubFetch(
+      async () =>
+        new Response(
+          JSON.stringify({ error: 'step requires stronger assurance', required: 'presence' }),
+          { status: 422 },
+        ),
+    );
+    const res = await writeStep('/api/x', { method: 'PUT' });
+    expect(res).toEqual({
+      kind: 'failed',
+      error: 'HTTP 422 — step requires stronger assurance',
+      presenceRequired: true,
+    });
+  });
+
+  test('any other 422 is not', async () => {
+    stubFetch(async () => new Response(JSON.stringify({ error: 'bad field' }), { status: 422 }));
+    const res = await writeStep('/api/x', { method: 'PUT' });
+    expect(res).toEqual({ kind: 'failed', error: 'HTTP 422 — bad field' });
+    expect('presenceRequired' in res).toBe(false);
+  });
 });
 
 describe('writeStep — deploy-roll retry (packet 04cc82ab)', () => {

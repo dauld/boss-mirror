@@ -4,8 +4,13 @@
 
   import { session } from '@boss/web-kit/session/session.svelte';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
-  import { needsPresence, performPresenceCeremony, shownAfter } from './presence';
-  import { describeWriteFailure, putStep, saveStep } from './stepWrite';
+  import {
+    completeWithPresence,
+    needsPresence,
+    performPresenceCeremony,
+    shownAfter,
+  } from './presence';
+  import { describeWriteFailure, saveStep } from './stepWrite';
 
   type StepData = {
     id: string;
@@ -36,10 +41,16 @@
     session.value.kind === 'ready' ? session.value.user.role : '',
   );
   let signError = $state('');
+  // The id as a VALUE: a derived notifies only when it changes, where
+  // reading `step.id` in the effect re-ran it on every refresh of the
+  // same step — so the onUpdate() after a refused completion wiped the
+  // refusal it had just rendered (measured by the mocked spec for
+  // backlog 3ce3c15f, 2026-09-25).
+  let stepId = $derived(step.id);
   $effect(() => {
     // The surface instance is reused when the rail switches steps —
     // an error from step A must not render under step B.
-    void step.id;
+    void stepId;
     signError = '';
   });
 
@@ -122,7 +133,16 @@
         }
       }
       if (d === 'approved' || d === 'rejected') {
-        const done = await putStep(jobId, step.id, { status: 'completed' }, presenceTicket);
+        // A completion refused for presence — no ticket after a reload,
+        // this gesture's ticket past its life, or a presence step whose
+        // sign-offs this user's role does not carry — is answered with
+        // ONE tap on the step as shown and ONE retry (backlog 3ce3c15f).
+        const done = await completeWithPresence(
+          jobId,
+          step.id,
+          { title: step.title, metadata: shownAfter(step.metadata, body.metadata) },
+          presenceTicket,
+        );
         // 409 (stamps missing or stale) renders as the same
         // "sign-offs outstanding: …" line as before — describeWriteFailure
         // names the roles from the conflict body.

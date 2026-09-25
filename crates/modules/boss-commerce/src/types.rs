@@ -59,6 +59,45 @@ impl InvoiceStatus {
     pub fn is_owed(&self) -> bool {
         !Self::NOT_OWED.contains(&self.0.as_str())
     }
+
+    /// The invoice transition rule, stated once (backlog 203ef806): what
+    /// a status write to `to` does to an invoice at this status. An
+    /// invoice leaves the receivable once — every owed status, a
+    /// tenant's own included, may move to any other; a status in
+    /// `NOT_OWED` is terminal, because paid and written-off have both
+    /// already taken the amount out of 1100 A/R and a flip back would
+    /// count it owed a second time. Writing the status it already has
+    /// is a redelivered drive and converges. Both adapters of the three
+    /// status verbs enforce this — Pg in the UPDATE's own WHERE — and
+    /// `tests/invoice_transitions.rs` holds both to the same table:
+    ///
+    /// | from \ to    | paid    | past-due | written-off |
+    /// |--------------|---------|----------|-------------|
+    /// | outstanding  | flip    | flip     | flip        |
+    /// | past-due     | flip    | already  | flip        |
+    /// | paid         | already | REFUSED  | REFUSED     |
+    /// | written-off  | REFUSED | REFUSED  | already     |
+    /// | (tenant, owed) | flip  | flip     | flip        |
+    pub fn transition_to(&self, to: &str) -> InvoiceTransition {
+        if self.0 == to {
+            InvoiceTransition::Already
+        } else if self.is_owed() {
+            InvoiceTransition::Flip
+        } else {
+            InvoiceTransition::Refused
+        }
+    }
+}
+
+/// What `InvoiceStatus::transition_to` decides for one status write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvoiceTransition {
+    /// The invoice moves, and the move records its event.
+    Flip,
+    /// Already at the target: Ok, nothing changes, no event.
+    Already,
+    /// The source is terminal: refused by name, nothing changes.
+    Refused,
 }
 
 impl std::fmt::Display for InvoiceStatus {
@@ -360,6 +399,30 @@ pub struct InvoiceSummary {
     /// Reporting currency for all `*_cents` fields in this summary.
     #[serde(default = "default_currency")]
     pub currency: String,
+}
+
+#[cfg(test)]
+mod transition_tests {
+    use super::*;
+
+    /// The rule's three answers, including a tenant's own status: owed,
+    /// so it moves (backlog 203ef806). The whole table, on both
+    /// adapters, is `tests/invoice_transitions.rs`.
+    #[test]
+    fn transition_to_refuses_only_out_of_a_terminal_status() {
+        let from = |s: &str| InvoiceStatus::new(s);
+        let t = |f: &str, to: &str| from(f).transition_to(to);
+        use InvoiceTransition::*;
+        assert_eq!(t(InvoiceStatus::OUTSTANDING, InvoiceStatus::PAST_DUE), Flip);
+        assert_eq!(t("disputed", InvoiceStatus::WRITTEN_OFF), Flip);
+        assert_eq!(t(InvoiceStatus::PAST_DUE, InvoiceStatus::PAST_DUE), Already);
+        assert_eq!(t(InvoiceStatus::PAID, InvoiceStatus::PAST_DUE), Refused);
+        assert_eq!(t(InvoiceStatus::WRITTEN_OFF, InvoiceStatus::PAID), Refused);
+        assert_eq!(
+            t(InvoiceStatus::WRITTEN_OFF, InvoiceStatus::WRITTEN_OFF),
+            Already
+        );
+    }
 }
 
 #[cfg(test)]

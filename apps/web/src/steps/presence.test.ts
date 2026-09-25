@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { performPresenceCeremony, shownAfter } from './presence';
+import { completeWithPresence, performPresenceCeremony, shownAfter } from './presence';
 
 // Backlog 2e893e27 (2026-09-21): performPresenceCeremony caught
 // navigator.credentials.get with a bare `catch {` and threw one
@@ -147,6 +147,118 @@ describe('a presence ceremony signs what was shown', () => {
     const msg = await failureOf();
     expect(msg).toContain('changed since it was shown');
     expect(msg).not.toContain('No passkey enrolled');
+  });
+});
+
+// Backlog 3ce3c15f (review of car 5b30ccf9, 2026-09-25): a completion
+// the jobs API refuses for presence — no ticket held after a reload, a
+// held one past its two-minute life, or a step whose sign-offs the user
+// does not carry — used to stop the surface at the raw 422. It is now
+// answered with ONE ceremony on the step as shown and ONE retry carrying
+// the ticket that ceremony was issued. Never a loop; never a ticket the
+// gateway did not issue.
+describe('completeWithPresence answers a presence refusal once', () => {
+  const STEP_PUT = '/api/jobs/job-1/steps/step-1';
+  const REFUSAL = JSON.stringify({ error: 'step requires stronger assurance', required: 'presence' });
+  const bytes = new Uint8Array([1, 2, 3]).buffer;
+  const withPasskey = () =>
+    stubBrowser(() =>
+      Promise.resolve({
+        id: 'AQID',
+        rawId: bytes,
+        type: 'public-key',
+        response: { authenticatorData: bytes, clientDataJSON: bytes, signature: bytes, userHandle: null },
+      }),
+    );
+
+  /** A jobs API + gateway pair: ceremonies issue `fresh-n`; the step PUT
+   *  honours only `accepts`; records what every PUT and begin carried. */
+  const server = (accepts: (ticket: string | null) => boolean, begin?: Answer) => {
+    const seen = { puts: [] as (string | null)[], bodies: [] as unknown[], begins: [] as unknown[] };
+    let n = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/assert/begin')) {
+        seen.begins.push(JSON.parse(String(init?.body)));
+        return begin
+          ? new Response(begin.body, { status: begin.status })
+          : new Response(JSON.stringify(BEGIN), { status: 200 });
+      }
+      if (url.endsWith('/assert/finish')) {
+        n += 1;
+        return new Response(JSON.stringify({ ticket: `fresh-${n}` }), { status: 200 });
+      }
+      if (url === STEP_PUT && init?.method === 'PUT') {
+        const t = new Headers(init.headers).get('x-presence-ticket');
+        seen.puts.push(t);
+        seen.bodies.push(JSON.parse(String(init.body)));
+        return accepts(t)
+          ? new Response('{}', { status: 200 })
+          : new Response(REFUSAL, { status: 422 });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    }) as unknown as typeof fetch;
+    return seen;
+  };
+
+  test('a held ticket the server honours completes with no ceremony', async () => {
+    const seen = server((t) => t === 'held');
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, 'held');
+    expect(res.kind).toBe('ok');
+    expect(seen.puts).toEqual(['held']);
+    expect(seen.begins).toEqual([]);
+    expect(seen.bodies).toEqual([{ status: 'completed' }]);
+  });
+
+  test('no ticket held (a reload after the stamp): one ceremony on the shown step, one retry', async () => {
+    withPasskey();
+    const seen = server((t) => t === 'fresh-1');
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN);
+    expect(res.kind).toBe('ok');
+    expect(seen.puts).toEqual([null, 'fresh-1']);
+    expect(seen.begins).toEqual([{ job_id: 'job-1', step_id: 'step-1', shown: SHOWN }]);
+  });
+
+  test('a held ticket past its life: one fresh ceremony, and the retry carries the fresh ticket', async () => {
+    withPasskey();
+    const seen = server((t) => t === 'fresh-1');
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, 'expired');
+    expect(res.kind).toBe('ok');
+    expect(seen.puts).toEqual(['expired', 'fresh-1']);
+    expect(seen.begins.length).toBe(1);
+  });
+
+  test('refused again after the fresh tap: failed, named, and never a second ceremony', async () => {
+    withPasskey();
+    const seen = server(() => false);
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN);
+    expect(res.kind).toBe('failed');
+    if (res.kind === 'failed') {
+      expect(res.error).toContain('refused again after a fresh passkey tap');
+      expect(res.error).toContain('422');
+    }
+    expect(seen.puts).toEqual([null, 'fresh-1']);
+    expect(seen.begins.length).toBe(1);
+  });
+
+  test('a ceremony that fails is named, and the completion is not re-sent', async () => {
+    const seen = server(() => false, { status: 409, body: 'no passkey' });
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN);
+    expect(res.kind).toBe('failed');
+    if (res.kind === 'failed') expect(res.error).toContain('No passkey enrolled');
+    expect(seen.puts).toEqual([null]);
+  });
+
+  test('a refusal that is not about presence is returned as it is, with no ceremony', async () => {
+    const seen = { begins: 0, puts: 0 };
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      if (String(input).includes('/assert/')) seen.begins += 1;
+      else seen.puts += 1;
+      return new Response(JSON.stringify({ missing_or_stale_roles: ['ceo'] }), { status: 409 });
+    }) as unknown as typeof fetch;
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN);
+    expect(res).toEqual({ kind: 'failed', error: 'sign-offs outstanding: ceo' });
+    expect(seen).toEqual({ begins: 0, puts: 1 });
   });
 });
 

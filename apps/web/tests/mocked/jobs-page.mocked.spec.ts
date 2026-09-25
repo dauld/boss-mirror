@@ -51,7 +51,8 @@
 // that did not remount the list, a deep link's subject_id filtering the
 // list behind the form, the account list read twice, Subject kind held
 // to its first value, unprefixed Subject paths, and "0 open" above
-// "Loading…".
+// "Loading…". The deep link's subject_id fix left its `kind` a list
+// filter; backlog 3f5cce16 made it the form's Kind, pinned beside it.
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage, settledReads } from './_helpers';
@@ -770,6 +771,38 @@ test.describe('/ux/jobs — the new-job form', () => {
     await button(page, 'Cancel').click();
     await expect(form(page)).toHaveCount(0);
     await expect.poll(() => new URL(page.url()).search).toBe('?subject_id=ast-9');
+  });
+
+  // HrPage's "start a workflow" link is this shape: it names the new
+  // job's workflow in `kind`. d0b93b80 made the deep link's subject_id
+  // the new job's and left `kind` a list filter, so the list behind the
+  // form narrowed to that workflow and the form's own Kind came up
+  // unpicked (backlog 3f5cce16). Under `new=1` it is the form's Kind.
+  test('a deep link naming a kind picks it in the form and filters nothing; Cancel takes it out', async ({ page }) => {
+    const seen = await openList(page, {}, `${PATH}?new=1&kind=ad-hoc&subject_kind=account&subject_id=acc-1&status=closed`);
+    await expect(form(page)).toBeVisible();
+    await expect(field(page, 'Kind').locator('select')).toHaveValue('ad-hoc');
+    await expect(field(page, 'Subject kind').locator('select')).toHaveValue('account');
+    await expect(field(page, 'Subject id').locator('input')).toHaveValue('acc-1');
+    await expect(button(page, 'Create Job')).toBeEnabled();
+
+    await expect(kindFilter(page)).toHaveValue('');
+    await expect.poll(() => lastRead(seen)).toEqual({ status: 'closed', limit: '200' });
+    expect(seen.list.every((p) => !p.has('kind'))).toBe(true);
+    await expect(bodyRows(page)).toHaveCount(3);
+    expect(new URL(page.url()).search).toBe('?new=1&kind=ad-hoc&subject_kind=account&subject_id=acc-1&status=closed');
+
+    // A Kind filter chosen while the form is up waits for Cancel, as a
+    // subject filter does; Cancel keeps the status and drops only the
+    // new-job half, the deep link's kind with it.
+    await kindFilter(page).selectOption('page-audit');
+    await expect.poll(() => lastRead(seen)).toEqual({ kind: 'page-audit', status: 'closed', limit: '200' });
+    expect(new URL(page.url()).searchParams.get('kind')).toBe('ad-hoc');
+    await button(page, 'Cancel').click();
+    await expect(form(page)).toHaveCount(0);
+    await expect.poll(() => new URL(page.url()).search).toBe('?status=closed&kind=page-audit');
+    await expect(kindFilter(page)).toHaveValue('page-audit');
+    expect(seen.writes).toHaveLength(0);
   });
 });
 

@@ -308,6 +308,7 @@
           initialOwnerId={route.jobOwnerId ?? ''}
           initialSubjectId={route.jobSubjectId ?? ''}
           initialNewJobOpen={route.newJobOpen ?? false}
+          initialNewJobKind={route.newJobKind ?? ''}
           initialNewJobSubjectKind={route.newJobSubjectKind ?? ''}
           initialNewJobSubjectId={route.newJobSubjectId ?? ''}
           writesFiltersToUrl

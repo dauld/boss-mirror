@@ -8,10 +8,13 @@
 // suite against a scratch stack; nothing ran it, and it went with
 // design 0e07ce64. The live crawl is playwright.live.config.ts.)
 
+import { cpus } from 'node:os';
+
 import { defineConfig } from '@playwright/test';
 
 import { MOCKED_FLAG } from './src/dev-mocked';
 import { DEFAULT_PORT } from './src/dev-tree';
+import { mockedWorkers, readCpuMax } from './src/dev-workers';
 
 // The port the runner chose. It is usually DEFAULT_PORT, but when the
 // preferred port is held by a server serving a DIFFERENT tree the runner
@@ -88,6 +91,13 @@ export default defineConfig({
   // suite's budget.
   timeout: 60_000,
   expect: { timeout: 15_000 },
+  // Half the CPUs the cgroup lets this process use, not half the node's
+  // (backlog 55ca0748): the default read w-1's 32 CPUs and ran 16 workers
+  // in a pod whose quota is 16 (dev) or 20 (gate). See src/dev-workers.ts.
+  workers: mockedWorkers(readCpuMax(), cpus().length),
+  // No retry in the gate, deliberately: the gate sets no CI marker (its
+  // receipt records `ci: false`), and docs/design/testing-strategy.md
+  // names a flaky-test retry as an anti-pattern. Only forge CI gets one.
   retries: process.env['CI'] ? 1 : 0,
   reporter: [['list']],
   use: {

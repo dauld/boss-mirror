@@ -6,8 +6,9 @@
 // back to Open and a filtered view could not be shared. This is the
 // inverse of that read, and it follows the read's own rules rather
 // than a second set: an absent status means JOBS_DEFAULT_STATUS, an
-// EMPTY one means every status (backlog 03e198e5), and an empty kind
-// or subject id is no filter at all.
+// EMPTY one means every status (backlog 03e198e5), an empty kind or
+// subject id is no filter at all, and under `new=1` the kind and the
+// subject id are the new job's and no filter (d0b93b80, 3f5cce16).
 
 /** What an absent `status` parameter means on /jobs. App mounts the
  *  page with it, and the write below leaves the parameter out for it,
@@ -30,20 +31,22 @@ export function jobsFilterSearch(search: string, f: JobsFilters): string {
     if (want === absentMeans) params.delete(key);
     else params.set(key, want);
   };
-  put('kind', params.get('kind') ?? '', f.kind, '');
+  // Under `new=1` parseRoute reads kind and subject_id as the new job's
+  // Kind and subject, not as these filters (backlog d0b93b80 for the
+  // subject, 3f5cce16 for the kind), so the write leaves both be: a
+  // mount must not strip the deep link's new job, and a filter set
+  // while that form is open is written by its Cancel.
+  const deepLink = isNewJobDeepLink(params);
+  if (!deepLink) put('kind', params.get('kind') ?? '', f.kind, '');
   put('status', params.get('status') ?? JOBS_DEFAULT_STATUS, f.status, JOBS_DEFAULT_STATUS);
-  // Under `new=1` parseRoute reads subject_id as the new job's subject,
-  // not as this filter (backlog d0b93b80), so the write leaves it be: a
-  // mount must not strip the deep link's subject, and a subject filter
-  // typed while that form is open is written by its Cancel.
-  if (!isNewJobDeepLink(params)) put('subject_id', params.get('subject_id') ?? '', f.subjectId, '');
+  if (!deepLink) put('subject_id', params.get('subject_id') ?? '', f.subjectId, '');
   if (!changed) return search;
   const s = params.toString();
   return s ? `?${s}` : '';
 }
 
 /** The parameters a `new=1` deep link carries for the job it opens. */
-const NEW_JOB_PARAMS = ['new', 'subject_kind', 'subject_id'] as const;
+const NEW_JOB_PARAMS = ['new', 'kind', 'subject_kind', 'subject_id'] as const;
 
 function isNewJobDeepLink(params: URLSearchParams): boolean {
   return params.get('new') === '1';

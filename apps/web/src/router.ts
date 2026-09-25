@@ -32,6 +32,8 @@ export type Route =
       // Phase 3 of the create-Job UX work: deep-link from a
       // Subject detail page opens the form pre-filled.
       newJobOpen?: boolean;
+      // The new job's Kind — `kind` under `new=1` (backlog 3f5cce16).
+      newJobKind?: string;
       newJobSubjectKind?: string;
       newJobSubjectId?: string;
     }
@@ -401,7 +403,11 @@ export function parseRoute(pathname: string, search = ''): Route {
     const ownerId = sp.get('owner_id');
     const filterSubjectId = sp.get('subject_id');
     const r: Route = { kind: 'jobs' };
-    if (jk) (r as { workflow?: string }).workflow = jk;
+    // Under `new=1` the kind is the new job's Kind, as the subject_id
+    // below is its subject: HrPage's link names its workflow there, and
+    // read as the list's filter it narrowed the list behind the form
+    // and left the form's own Kind unpicked (backlog 3f5cce16).
+    if (jk && newJob !== '1') (r as { workflow?: string }).workflow = jk;
     if (jkp) (r as { workflowPrefix?: string }).workflowPrefix = jkp;
     // `!== null`, not truthiness: an EMPTY status is a deep link asking
     // for every status (EmployeePage's owned-jobs link sends
@@ -414,9 +420,14 @@ export function parseRoute(pathname: string, search = ''): Route {
     // it narrowed under a URL that no longer said so (backlog d0b93b80).
     // filterQuery's write reads the parameter the same way.
     if (filterSubjectId && newJob !== '1') (r as { jobSubjectId?: string }).jobSubjectId = filterSubjectId;
-    if (newJob === '1') (r as { newJobOpen?: boolean }).newJobOpen = true;
-    if (sk) (r as { newJobSubjectKind?: string }).newJobSubjectKind = sk;
-    if (sid) (r as { newJobSubjectId?: string }).newJobSubjectId = sid;
+    // The new-job half exists only under `new=1`; without it there is
+    // no form to seed, and the same parameters are the list's filters.
+    if (newJob === '1') {
+      (r as { newJobOpen?: boolean }).newJobOpen = true;
+      if (jk) (r as { newJobKind?: string }).newJobKind = jk;
+      if (sk) (r as { newJobSubjectKind?: string }).newJobSubjectKind = sk;
+      if (sid) (r as { newJobSubjectId?: string }).newJobSubjectId = sid;
+    }
     return r;
   }
   // Before /jobs/([^/]+) below — which, while it was the greedy

@@ -7,9 +7,27 @@
 // result the surface must branch on: `ok` continues, `failed` renders
 // inline and leaves state untouched.
 
+/// `presenceRequired` is set only on a 422 whose body says
+/// `required: "presence"` — the one refusal a surface answers with a
+/// passkey tap rather than showing (backlog 3ce3c15f). A 422 is also a
+/// malformed body, so the status alone cannot say which it was.
 export type StepWriteResult =
   | { kind: 'ok'; response: Response }
-  | { kind: 'failed'; error: string };
+  | { kind: 'failed'; error: string; presenceRequired?: true };
+
+function refusedForPresence(status: number, bodyText: string): boolean {
+  if (status !== 422) return false;
+  try {
+    const parsed: unknown = JSON.parse(bodyText);
+    return (
+      !!parsed &&
+      typeof parsed === 'object' &&
+      (parsed as Record<string, unknown>)['required'] === 'presence'
+    );
+  } catch {
+    return false;
+  }
+}
 
 const MAX_BODY_CHARS = 200;
 
@@ -114,7 +132,10 @@ export async function writeStep(
       const response = await fetch(url, init);
       if (!response.ok) {
         const text = await response.text().catch(() => '');
-        result = { kind: 'failed', error: describeWriteFailure(response.status, text) };
+        const error = describeWriteFailure(response.status, text);
+        result = refusedForPresence(response.status, text)
+          ? { kind: 'failed', error, presenceRequired: true }
+          : { kind: 'failed', error };
         // A 4xx is an ANSWER and is never retried. Nor is a 500: the app
         // RAN and returned an error (`db down`, `registry unavailable`),
         // which the operator must see now, not after a backoff. A deploy

@@ -671,6 +671,235 @@ describe('sign-off — a presence step completes with its own ticket', () => {
 });
 
 // ---------------------------------------------------------------------
+// A completion refused for presence is answered with ONE tap and retried
+// ONCE (backlog 3ce3c15f, from the review of car 5b30ccf9, 2026-09-25).
+//
+// Two ways the completion reached the jobs API with no ticket it would
+// accept, both measured on the car's tree: after a RELOAD the stamp is
+// already on the step, so sign() is skipped and nothing is held; and a
+// ticket held from an earlier signature outlives its two-minute life. The
+// server answered 422 {required:"presence"} and this surface printed the
+// raw refusal — the only way through was to change the comment so the
+// shape moved and a signature was forced. And the held ticket was never
+// cleared, so a spent one rode every later completion from this mount.
+//
+// The server below issues a DISTINCT ticket per ceremony and accepts only
+// the ones it currently honours, so a surface that retried with the held
+// ticket, looped, or minted anything itself cannot pass.
+
+describe('sign-off — a completion refused for presence gets one tap and one retry', () => {
+  const BEGIN = '/api/auth/passkey/assert/begin';
+  const FINISH = '/api/auth/passkey/assert/finish';
+  const beginOptions = {
+    challenge_id: 'chal-1',
+    publicKey: {
+      challenge: 'AAAA',
+      rpId: 'boss.test',
+      allowCredentials: [{ type: 'public-key', id: 'AAAA' }],
+      userVerification: 'required',
+      timeout: 60000,
+    },
+  };
+  const buf = () => new Uint8Array([1, 2, 3]).buffer;
+  const credential = {
+    id: 'cred',
+    rawId: buf(),
+    type: 'public-key',
+    response: { authenticatorData: buf(), clientDataJSON: buf(), signature: buf(), userHandle: null },
+  };
+  const ticketOn = (init?: RequestInit) =>
+    (init?.headers as Record<string, string> | undefined)?.['x-presence-ticket'];
+  const refusal = { __status: 422, required: 'presence', produced: 'session' };
+
+  /** Presence-gated on both doors; ceremony n issues `ticket-n`; a ticket
+   *  is honoured only while it is in `live` (expire one by deleting it). */
+  const presenceServer = (step: ReturnType<typeof bypassStep>) => {
+    const srv = signingServer(step);
+    const live = new Set<string>();
+    let ceremonies = 0;
+    const completionTickets: (string | undefined)[] = [];
+    const begins: unknown[] = [];
+    let completionAnswer: ((init?: RequestInit) => unknown) | null = null;
+    const routes = (url: string, init?: RequestInit) => {
+      const m = init?.method ?? 'GET';
+      const t = ticketOn(init);
+      if (url === SIGN && m === 'POST' && !(t && live.has(t))) return refusal;
+      if (url === BEGIN) {
+        begins.push(JSON.parse(String(init?.body)));
+        return beginOptions;
+      }
+      if (url === FINISH) {
+        ceremonies += 1;
+        const ticket = `ticket-${ceremonies}`;
+        live.add(ticket);
+        return { ticket };
+      }
+      if (url === STEP && m === 'PUT') {
+        completionTickets.push(t);
+        if (completionAnswer) {
+          const answer = completionAnswer(init);
+          if (answer !== undefined) return answer;
+        }
+        if (!(t && live.has(t))) return refusal;
+      }
+      return srv.routes(url, init);
+    };
+    return {
+      srv,
+      routes,
+      live,
+      begins,
+      ceremonies: () => ceremonies,
+      completionTickets,
+      answerCompletion: (fn: (init?: RequestInit) => unknown) => {
+        completionAnswer = fn;
+      },
+    };
+  };
+  const withPasskey = () => {
+    (globalThis as unknown as Record<string, unknown>).navigator = {
+      credentials: { get: async () => credential },
+    };
+  };
+
+  test('after a reload with the stamp already recorded: one tap on the current content, retried, completed', async () => {
+    const step = bypassStep();
+    const server = presenceServer(step);
+    // Signed before the reload: the stamp pins the step as it stands, and
+    // this mount holds no ticket of its own.
+    server.srv.stampAs('platform-admin');
+    (step as { sign_offs: Stamp[] }).sign_offs = server.srv.stamps.slice();
+    const { mount } = loadBundle(server.routes);
+    withPasskey();
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    expect(server.ceremonies()).toBe(1);
+    expect(server.completionTickets).toEqual([undefined, 'ticket-1']);
+    expect(server.srv.puts).toEqual([200]);
+    // The tap signs the step as this surface shows it — the server's own
+    // copy, since nothing was re-saved.
+    expect(server.begins).toEqual([
+      { job_id: 'job-1', step_id: 'step-1', shown: { title: step.title, metadata: step.metadata } },
+    ]);
+    expect(allText(c)).toContain('Completed');
+    expect(allText(c)).not.toContain('422');
+  });
+
+  test('a held ticket past its life: the completion is refused, one fresh tap, retried with the fresh ticket', async () => {
+    const step = bypassStep();
+    const server = presenceServer(step);
+    const { mount } = loadBundle(server.routes);
+    withPasskey();
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
+    await settled();
+    expect(server.ceremonies()).toBe(1);
+    // Two minutes pass: the ticket that signature minted is no longer honoured.
+    server.live.delete('ticket-1');
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    expect(server.ceremonies()).toBe(2);
+    expect(server.completionTickets).toEqual(['ticket-1', 'ticket-2']);
+    expect(server.srv.puts).toEqual([200]);
+    expect(allText(c)).toContain('Completed');
+  });
+
+  test('a presence step this user signs no role on: the completion alone asks for the tap', async () => {
+    const step = bypassStep();
+    step.sign_offs_required = [];
+    const server = presenceServer(step);
+    const { mount } = loadBundle(server.routes);
+    withPasskey();
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    expect(server.ceremonies()).toBe(1);
+    expect(server.completionTickets).toEqual([undefined, 'ticket-1']);
+    expect(server.srv.puts).toEqual([200]);
+  });
+
+  test('refused again after the fresh tap: no second ceremony, no third write, and the refusal says so', async () => {
+    const step = bypassStep();
+    const server = presenceServer(step);
+    server.srv.stampAs('platform-admin');
+    (step as { sign_offs: Stamp[] }).sign_offs = server.srv.stamps.slice();
+    // A server that will not honour any ticket on the completion.
+    server.answerCompletion(() => refusal);
+    const { mount } = loadBundle(server.routes);
+    withPasskey();
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    expect(server.ceremonies()).toBe(1);
+    expect(server.completionTickets).toEqual([undefined, 'ticket-1']);
+    expect(allText(c)).toContain('refused again after a fresh passkey tap');
+    expect(allText(c)).not.toContain('Completed');
+  });
+
+  test('a recovery ceremony that fails is named, and the completion is not re-sent', async () => {
+    const step = bypassStep();
+    const server = presenceServer(step);
+    server.srv.stampAs('platform-admin');
+    (step as { sign_offs: Stamp[] }).sign_offs = server.srv.stamps.slice();
+    const { mount } = loadBundle((url, init) =>
+      url === BEGIN ? { __status: 409, __text: 'no passkey' } : server.routes(url, init),
+    );
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    expect(server.completionTickets).toEqual([undefined]);
+    expect(allText(c)).toContain('No passkey enrolled');
+  });
+
+  test('the held ticket is spent on the completion it rode: a later attempt does not carry it', async () => {
+    const step = bypassStep();
+    const server = presenceServer(step);
+    let first = true;
+    // The first completion is refused for a reason that is not presence.
+    server.answerCompletion(() => {
+      if (!first) return undefined;
+      first = false;
+      return { __status: 400, __text: "required field 'approved' is missing" };
+    });
+    const { mount } = loadBundle(server.routes);
+    withPasskey();
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
+    await settled();
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+    expect(allText(c)).toContain("required field 'approved' is missing");
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    // Second attempt went bare, was refused for presence, and took its own tap.
+    expect(server.completionTickets).toEqual(['ticket-1', undefined, 'ticket-2']);
+    expect(server.ceremonies()).toBe(2);
+    expect(server.srv.puts).toEqual([200]);
+  });
+});
+
+// ---------------------------------------------------------------------
 // The presence ceremony names what failed (backlog f3436d99).
 //
 // The plugin runs its own copy of the ceremony — a bundle cannot import

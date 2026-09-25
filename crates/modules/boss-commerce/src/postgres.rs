@@ -448,18 +448,12 @@ impl CommerceRepository for PgCommerce {
         // can still author the fact directly via
         // `record_fact_in_tx`; we just don't auto-emit one for
         // every PUT /paid.
-        let row: Option<(String, i64, String, chrono::NaiveDate)> = sqlx::query_as(
-            "UPDATE invoices SET status = 'paid', paid_on = $2 \
-             WHERE id = $1 RETURNING account_id, amount_cents, currency, paid_on",
-        )
-        .bind(id)
-        .bind(paid_on)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| CommerceError::Storage(e.to_string()))?;
-
-        if row.is_none() {
-            return Err(CommerceError::NotFound(format!("invoice {id}")));
+        //
+        // Guarded by the transition rule: an already-paid invoice keeps
+        // its first paid_on and records nothing, and a written-off one
+        // is refused — it re-stamped both before (backlog 203ef806).
+        if !transition_in_tx(&mut tx, id, InvoiceStatus::PAID, Some(paid_on)).await? {
+            return Ok(());
         }
 
         // OUTBOX (phase 2): record commerce.invoice.paid with the full
@@ -497,13 +491,8 @@ impl CommerceRepository for PgCommerce {
             .begin()
             .await
             .map_err(|e| CommerceError::Storage(e.to_string()))?;
-        let result = sqlx::query("UPDATE invoices SET status = 'past-due' WHERE id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| CommerceError::Storage(e.to_string()))?;
-        if result.rows_affected() == 0 {
-            return Err(CommerceError::NotFound(format!("invoice {id}")));
+        if !transition_in_tx(&mut tx, id, InvoiceStatus::PAST_DUE, None).await? {
+            return Ok(());
         }
         let invoice = fetch_invoice_in_tx(&mut tx, id).await?;
         let event = stamp.event(
@@ -544,35 +533,14 @@ impl CommerceRepository for PgCommerce {
         // write-off drive arrives once per past-due copy the
         // counterparty received, and only the copy that wins the
         // UPDATE writes the fact — the row lock serializes the rest
-        // into the 0-rows branch below.
+        // into `transition_in_tx`'s already-written-off answer.
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| CommerceError::Storage(e.to_string()))?;
-        let updated = sqlx::query(
-            "UPDATE invoices SET status = 'written-off' \
-             WHERE id = $1 AND status IN ('outstanding', 'past-due')",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| CommerceError::Storage(e.to_string()))?;
-        if updated.rows_affected() == 0 {
-            let status: Option<String> =
-                sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
-                    .bind(id)
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|e| CommerceError::Storage(e.to_string()))?;
-            return match status.as_deref() {
-                None => Err(CommerceError::NotFound(format!("invoice {id}"))),
-                Some("written-off") => Ok(false),
-                Some(other) => Err(CommerceError::Conflict(format!(
-                    "invoice {id} is '{other}': only outstanding or past-due \
-                     invoices write off"
-                ))),
-            };
+        if !transition_in_tx(&mut tx, id, InvoiceStatus::WRITTEN_OFF, None).await? {
+            return Ok(false);
         }
         // Fetch the full written-off invoice in-tx so the live fact payload
         // is byte-identical to the commerce.invoice.written_off event the
@@ -871,6 +839,57 @@ impl CommerceRepository for PgCommerce {
             revenue_by_month,
             currency: "USD".to_string(),
         })
+    }
+}
+
+/// The status write all three status verbs run (backlog 203ef806):
+/// `InvoiceStatus::transition_to`, applied in the UPDATE's own WHERE so
+/// the check and the write are one statement under the row lock — the
+/// past-due flip had no guard at all and moved paid and written-off
+/// invoices back into the receivable. `true` when THIS call moved the
+/// invoice (the caller then records its event); `false` when it was
+/// already at `to` (a redelivered drive — no event); a terminal source
+/// is refused by name, never answered as a silent 0-row update. The
+/// not-owed statuses are bound from the one Rust list.
+async fn transition_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: &str,
+    to: &str,
+    paid_on: Option<chrono::NaiveDate>,
+) -> Result<bool, CommerceError> {
+    let not_owed: Vec<String> = InvoiceStatus::NOT_OWED
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let updated = sqlx::query(
+        "UPDATE invoices SET status = $2, paid_on = COALESCE($3, paid_on) \
+         WHERE id = $1 AND status <> $2 AND status <> ALL($4)",
+    )
+    .bind(id)
+    .bind(to)
+    .bind(paid_on)
+    .bind(&not_owed)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| CommerceError::Storage(e.to_string()))?;
+    if updated.rows_affected() > 0 {
+        return Ok(true);
+    }
+    let from: Option<String> = sqlx::query_scalar("SELECT status FROM invoices WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| CommerceError::Storage(e.to_string()))?;
+    let Some(from) = from else {
+        return Err(CommerceError::NotFound(format!("invoice {id}")));
+    };
+    match InvoiceStatus::new(from.clone()).transition_to(to) {
+        InvoiceTransition::Already => Ok(false),
+        InvoiceTransition::Refused => Err(CommerceError::refused_transition(id, &from, to)),
+        // Only a write between the UPDATE and this read lands here.
+        InvoiceTransition::Flip => Err(CommerceError::Conflict(format!(
+            "invoice {id} moved to '{from}' while being written '{to}'; retry"
+        ))),
     }
 }
 

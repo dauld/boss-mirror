@@ -598,13 +598,49 @@
         // granted on, when it holds one: a presence-gated step is judged
         // again on this request, and the stamp does not lend it its
         // assurance (b568044a).
-        const doneHeaders = { 'Content-Type': 'application/json' };
-        if (presenceTicketHeld) doneHeaders['x-presence-ticket'] = presenceTicketHeld;
-        const done = await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
-          method: 'PUT',
-          headers: doneHeaders,
-          body: JSON.stringify({ status: 'completed' }),
-        });
+        const complete = (ticket) => {
+          const headers = { 'Content-Type': 'application/json' };
+          if (ticket) headers['x-presence-ticket'] = ticket;
+          return fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
+            method: 'PUT',
+            headers,
+            body: JSON.stringify({ status: 'completed' }),
+          });
+        };
+        let done = await complete(presenceTicketHeld);
+        // The held ticket is spent on the attempt it rode, whatever the
+        // answer: kept, it rode every later completion from this mount
+        // long past its two-minute life (backlog 3ce3c15f).
+        presenceTicketHeld = null;
+        // A completion refused for PRESENCE — after a reload the stamp is
+        // already on the step and this mount holds no ticket; a held one
+        // may have expired; or no role this user signs is required — is
+        // answered with ONE ceremony on the step as shown, and ONE retry
+        // (3ce3c15f). It used to print the raw 422, and the only way on
+        // was to edit the comment until the shape moved and a signature
+        // was forced. The ticket is the gateway's, minted by that
+        // ceremony for this step and this person; the server judges it on
+        // the retry exactly as on a stamp. Never a second ceremony.
+        let retried = false;
+        if (done.status === 422) {
+          const refusal = await done
+            .clone()
+            .json()
+            .catch(() => null);
+          if (refusal && refusal.required === 'presence') {
+            progress.push('Completing needs your passkey');
+            renderAll();
+            let ticket;
+            try {
+              ticket = await presenceTicket();
+            } catch (e) {
+              error = `Could not complete: ${e && e.message ? e.message : e}`;
+              return;
+            }
+            done = await complete(ticket);
+            retried = true;
+          }
+        }
         if (!done.ok) {
           // 400: a required-at-done contract this surface did not
           // satisfy — name it, never swallow it (v1's ApprovalSurface
@@ -612,7 +648,9 @@
           // silently do nothing). 409: stale stamps; the server's own
           // text names which roles.
           const text = await done.text();
-          error = `${done.status}: ${text}`;
+          error = retried
+            ? `The completion was refused again after a fresh passkey tap — ${done.status}: ${text}`
+            : `${done.status}: ${text}`;
           // The 409 names the roles whose stamps the server will not
           // accept; the roster offers those signatures again rather
           // than showing them as signed.

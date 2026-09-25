@@ -28,6 +28,7 @@ const bytesToB64url = (buf: ArrayBuffer): string =>
     .replace(/=+$/, '');
 
 import { assertionFailure, enrolmentFailure } from '../me/passkeyHints';
+import { putStep, type StepWriteResult } from './stepWrite';
 
 export type PresenceRefusal = Readonly<{
   required?: string;
@@ -168,6 +169,49 @@ export async function performPresenceCeremony(
   }
   const { ticket } = (await finish.json()) as { ticket: string };
   return ticket;
+}
+
+/**
+ * Complete a step, answering a completion refused for PRESENCE with ONE
+ * ceremony on the step as `shown` and ONE retry carrying the ticket that
+ * ceremony was issued (backlog 3ce3c15f, review of car 5b30ccf9).
+ *
+ * The jobs API judges assurance on the request that completes a step,
+ * from that request's own ticket. A surface can reach it with none it
+ * will honour three ways: after a reload the stamp is already on the step
+ * and no ceremony runs; the ticket its stamp was issued is past its
+ * two-minute life; or the user's role carries no sign-off on the step, so
+ * the stamp ceremony never runs. Each stopped the surface at the raw 422.
+ *
+ * `heldTicket` is a ticket a ceremony on THIS step just issued to the
+ * surface, spent on the first attempt and never re-sent. Nothing here
+ * mints or widens one: the gateway issues it for this step and person,
+ * and the server re-checks step, person, shape and expiry on the retry.
+ * Never a second ceremony — a retry the server refuses again is returned
+ * failed, saying so.
+ */
+export async function completeWithPresence(
+  jobId: string,
+  stepId: string,
+  shown: ShownStep,
+  heldTicket?: string,
+): Promise<StepWriteResult> {
+  const body = { status: 'completed' };
+  const first = await putStep(jobId, stepId, body, heldTicket);
+  if (first.kind === 'ok' || !first.presenceRequired) return first;
+  let ticket: string;
+  try {
+    ticket = await performPresenceCeremony(jobId, stepId, shown);
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    return { kind: 'failed', error: `Completing needs your passkey, and the ceremony failed: ${why}` };
+  }
+  const retry = await putStep(jobId, stepId, body, ticket);
+  if (retry.kind === 'ok') return retry;
+  return {
+    kind: 'failed',
+    error: `The completion was refused again after a fresh passkey tap — ${retry.error}`,
+  };
 }
 
 /** Enrolment: register a new passkey for the signed-in employee. */

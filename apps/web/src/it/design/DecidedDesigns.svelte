@@ -32,7 +32,11 @@
 
   let panel = $state<Panel>({ kind: 'loading' });
 
+  // Also the failure line's Retry (backlog 3bbb194a): it re-runs this
+  // panel's read and nothing else, so it says it is loading again first
+  // rather than leaving the old failure standing while the read is out.
   async function load(): Promise<void> {
+    panel = { kind: 'loading' };
     try {
       // decidedRows throws on a 200 that is not the envelope (67825067),
       // and that throw is this panel's failure line, not its empty one.
@@ -66,7 +70,17 @@
 {#if panel.kind === 'loading'}
   <p class="empty">Loading the decided designs…</p>
 {:else if panel.kind === 'failed'}
-  <p class="load-failed" role="alert">Could not read the decided designs: {panel.why}</p>
+  <div class="decided-failed">
+    <p class="load-failed" role="alert">Could not read the decided designs: {panel.why}</p>
+    <button
+      class="btn btn-sm"
+      type="button"
+      aria-label="Retry the decided designs"
+      onclick={() => void load()}
+    >
+      Retry
+    </button>
+  </div>
 {:else}
   <Section title={`Decided, being folded (${panel.working.length})`} wide>
     {#if panel.working.length === 0}
@@ -176,5 +190,17 @@
     color: var(--static);
     margin: 12px 0;
     line-height: 1.5;
+  }
+  /* The same line-and-Retry layout as the review queue's failure above. */
+  .decided-failed {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin: 12px 0;
+  }
+  .decided-failed p {
+    flex: 1 1 24ch;
+    margin: 0;
   }
 </style>
