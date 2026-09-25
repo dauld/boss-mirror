@@ -848,20 +848,16 @@ exit 0
 
 /// sha256 of a text, by the same tool the runner uses.
 fn sha256_hex(text: &str) -> String {
-    use std::io::Write;
     let mut child = Command::new("sh")
         .args(["-c", "sha256sum | cut -d' ' -f1"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(text.as_bytes())
-        .unwrap();
+    // Its exit status is the verdict, not the write (backlog d93cc7d5).
+    boss_testing::feed_stdin(&mut child, text.as_bytes());
     let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "sha256sum: {:?}", out.status);
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 

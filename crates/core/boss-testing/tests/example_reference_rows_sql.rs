@@ -51,9 +51,8 @@
 //! Never against production: TestDb refuses a server hosting a database
 //! named `boss` (test_db.rs).
 
-use boss_testing::{TestDb, create_dir, repo_root, scratch_dir, write_file};
+use boss_testing::{TestDb, create_dir, feed_stdin, repo_root, scratch_dir, write_file};
 use std::collections::BTreeSet;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -98,15 +97,14 @@ fn psql(url: &str, sql: &str, read_only: bool) -> String {
         .stderr(Stdio::piped())
         .spawn()
         .expect("psql on PATH");
-    {
-        let mut stdin = child.stdin.take().unwrap();
-        if read_only {
-            stdin
-                .write_all(b"SET default_transaction_read_only = on;\n")
-                .unwrap();
-        }
-        stdin.write_all(sql.as_bytes()).unwrap();
-    }
+    // psql's exit status, asserted below, is the verdict — not the write
+    // (backlog d93cc7d5).
+    let guard = if read_only {
+        "SET default_transaction_read_only = on;\n"
+    } else {
+        ""
+    };
+    feed_stdin(&mut child, format!("{guard}{sql}").as_bytes());
     let out = child.wait_with_output().unwrap();
     assert!(
         out.status.success(),
