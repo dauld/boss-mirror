@@ -5,7 +5,7 @@
 //! and serves them directly. Unknown paths return `index.html` so the
 //! client-side router handles navigation.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
@@ -47,6 +47,13 @@ fn is_public_path(path: &str) -> bool {
 
 /// Handle all `/dashboard/*` and root `/*` requests for the SPA.
 pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Response {
+    serve(&state, req, Path::new(static_dir())).await
+}
+
+/// The handler's body, with the directory it serves from as an
+/// argument so a test can point it at a scratch directory — the
+/// `static_dir()` cache is process-wide and read once.
+async fn serve(state: &AppState, req: Request, base: &Path) -> Response {
     // Who the page is for, as the role-header layer signed it from the
     // session cookie (role_headers.rs) — the identity the flights read
     // is resolved for. Taken before anything else reads the request.
@@ -68,24 +75,34 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
 
     // Strip /dashboard prefix if present. Both / and /dashboard
     // serve the same SPA — the client-side router handles navigation.
-    let stripped = path.strip_prefix("/dashboard").unwrap_or(path);
+    // Only a WHOLE segment is stripped: as a bare string prefix,
+    // `/dashboard../x.key` became `../x.key`, a climb carrying no
+    // dot-segment for the edge to refuse (dot-segment car review,
+    // 2026-09-25). `resolve` below runs on what the strip leaves.
+    let stripped = match path.strip_prefix("/dashboard") {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
+        _ => path,
+    };
     let file_path = match stripped {
         "" | "/" => "/index.html",
         other => other,
     };
 
-    // Resolve to a file on disk.
-    let base = static_dir();
-    let clean = file_path.trim_start_matches('/');
-    let full_path = PathBuf::from(base).join(clean);
-
-    // Security: don't serve files outside the static dir.
-    if !full_path.starts_with(base) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
+    // Resolve to a file on disk, refusing any path that is not plain
+    // names (backlog 814a32a2). The guard this replaces joined the raw
+    // path and asked `PathBuf::starts_with(base)`, which compares
+    // components LEXICALLY: `dist/../secret.key` starts with `dist`, and
+    // the OS resolved the `..` on read. With a dotted last segment
+    // served sessionless, that was an unauthenticated read of any file
+    // with an extension — the session key included. The edge refuses
+    // dot-segments too (fix/gateway-refuses-dot-segments-before-routing);
+    // this is the handler holding its own line regardless.
+    let Some(full_path) = resolve(base, file_path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
 
     // Try to read the file. If it doesn't exist, serve index.html (SPA fallback).
-    let (content, serving_path) = match tokio::fs::read(&full_path).await {
+    let (content, serving_path) = match read_inside(base, &full_path).await {
         Ok(bytes) => (bytes, full_path),
         // A request that NAMES A FILE and misses is a 404, not the SPA.
         //
@@ -108,7 +125,7 @@ pub async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Respons
         Err(_) if is_static_asset => return StatusCode::NOT_FOUND.into_response(),
         Err(_) => {
             // SPA fallback: serve index.html for any non-file path.
-            let index = PathBuf::from(base).join("index.html");
+            let index = base.join("index.html");
             match tokio::fs::read(&index).await {
                 Ok(bytes) => (bytes, index),
                 Err(_) => {
@@ -211,6 +228,51 @@ pub(crate) fn guess_content_type(path: &Path) -> HeaderValue {
         _ => "application/octet-stream",
     };
     HeaderValue::from_static(ct)
+}
+
+/// The file a request path names inside `base`, or `None` when the path
+/// names nothing servable — site.rs's `resolve`, made stricter. Every
+/// segment is read RAW first, because `Path::components` folds an
+/// interior `.` away without a word: a `.` or `..` segment, or a
+/// backslash anywhere, refuses the path rather than being resolved.
+/// Then every component must be a plain name, so a root or a prefix
+/// refuses it too. The request path is never percent-decoded here, so
+/// `%2e%2e` is a literal name that exists nowhere (backlog 814a32a2).
+fn resolve(base: &Path, request_path: &str) -> Option<PathBuf> {
+    let rel = request_path.trim_start_matches('/');
+    if rel
+        .split('/')
+        .any(|seg| seg == "." || seg == ".." || seg.contains('\\'))
+    {
+        return None;
+    }
+    let mut out = base.to_path_buf();
+    for c in Path::new(rel).components() {
+        match c {
+            Component::Normal(seg) => out.push(seg),
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Read `file` only if, with every symlink and `..` resolved by the OS,
+/// it still sits inside the resolved `base`. The lexical check in
+/// `resolve` is the first wall; this is the second, and it is the one a
+/// symlink inside the directory cannot walk past. A file outside reads
+/// as absent, so the caller's miss handling (404 for an asset, the SPA
+/// for a route) applies to it unchanged and says nothing about what is
+/// out there.
+async fn read_inside(base: &Path, file: &Path) -> std::io::Result<Vec<u8>> {
+    let base = tokio::fs::canonicalize(base).await?;
+    let file = tokio::fs::canonicalize(file).await?;
+    if !file.starts_with(&base) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "outside the static directory",
+        ));
+    }
+    tokio::fs::read(&file).await
 }
 
 fn has_valid_session(headers: &HeaderMap, key: &[u8]) -> bool {
@@ -473,5 +535,257 @@ mod asset_fallback_tests {
     fn a_dot_earlier_in_the_path_does_not_make_a_route_an_asset() {
         assert!(!has_file_extension("/docs/design/the-three-layers.md/view"));
         assert!(has_file_extension("/docs/design/the-three-layers.md"));
+    }
+}
+
+/// A request path cannot read outside the static directory (backlog
+/// 814a32a2). Until 2026-09-25 the handler joined the raw path onto
+/// the directory and guarded with `PathBuf::starts_with`, a LEXICAL
+/// component compare that `dist/../secret.key` passes; the OS then
+/// resolved the `..` on read. A dotted last segment is served without
+/// a session, so `GET /../../<dir>/<file.ext>` sent as-is — directly on
+/// the LAN, where no edge normalises it — could read any readable file
+/// with an extension, the gateway's session key among them. Every
+/// answer below is the handler's own, against a scratch directory with
+/// secrets planted one and two levels above it.
+#[cfg(test)]
+mod traversal_tests {
+    use super::*;
+    use crate::perf::PerfCollector;
+    use axum::body::Body;
+    use http_body_util::BodyExt;
+
+    const SECRET: &str = "SECRET-BYTES-THAT-MUST-NEVER-LEAVE";
+    const KEY: [u8; 32] = [7u8; 32];
+
+    /// `<root>/web/dist` is the static directory; a `secret.key` and an
+    /// extensionless `secret` sit in `<root>/web` AND in `<root>`, so a
+    /// one-level and a two-level climb each has a real file to reach.
+    fn fixture(case: &str) -> (PathBuf, PathBuf) {
+        let root = boss_testing::scratch_dir(&format!("gateway-static-{case}"));
+        let dist = root.join("web").join("dist");
+        boss_testing::create_dir(&dist.join("kb-assets"));
+        boss_testing::write_file(
+            &dist.join("index.html"),
+            "<!doctype html><html><head></head><body>the spa</body></html>",
+        );
+        boss_testing::write_file(&dist.join("chunk-abc123.js"), "console.log('asset')");
+        boss_testing::write_file(&dist.join("kb-assets/one.svg"), "<svg/>");
+        for dir in [root.join("web"), root.clone()] {
+            boss_testing::write_file(&dir.join("secret.key"), SECRET);
+            boss_testing::write_file(&dir.join("secret"), SECRET);
+        }
+        (root, dist)
+    }
+
+    fn state() -> AppState {
+        AppState {
+            session_key: KEY.to_vec(),
+            proxy_client: reqwest::Client::new(),
+            perf: Arc::new(PerfCollector::new()),
+        }
+    }
+
+    /// The handler's answer for `path`, sent as-is (no client-side
+    /// normalisation), with or without a valid session.
+    async fn get(dist: &Path, path: &str, signed_in: bool) -> (StatusCode, HeaderMap, String) {
+        let mut req = Request::builder().uri(path);
+        if signed_in {
+            let cookie = Session::new("tester", 3600).encode(&KEY);
+            req = req.header(header::COOKIE, format!("{}={cookie}", session::COOKIE_NAME));
+        }
+        let req = req.body(Body::empty()).unwrap();
+        assert_eq!(
+            req.uri().path(),
+            path,
+            "the request must carry the path raw"
+        );
+        let resp = serve(&state(), req, dist).await;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// Every shape of climb named in the packet, each with a dotted
+    /// last segment so it needs no session: raw `..`, deeper chains,
+    /// `..` behind a real directory, encoded dots and slashes,
+    /// backslash forms, an absolute path, and the `/dashboard` prefix.
+    fn climbs(root: &Path) -> Vec<String> {
+        let abs = root.join("secret.key");
+        let abs = abs.to_str().unwrap();
+        let mut paths: Vec<String> = [
+            "/../secret.key",
+            "/../../secret.key",
+            "/./../secret.key",
+            "/kb-assets/../../secret.key",
+            "/kb-assets/../../../secret.key",
+            "/%2e%2e/secret.key",
+            "/%2e%2e/%2e%2e/secret.key",
+            "/%2E%2E/%2E%2E/secret.key",
+            "/..%2fsecret.key",
+            "/..%2f..%2fsecret.key",
+            "/..%5csecret.key",
+            "/..\\secret.key",
+            "/..\\..\\secret.key",
+            "/dashboard/../secret.key",
+            "/dashboard/../../secret.key",
+            "/dashboard/./../../secret.key",
+            "/dashboard/%2e%2e/%2e%2e/secret.key",
+            "/dashboard../secret.key",
+            "/dashboard../../secret.key",
+            "/dashboard..%2fsecret.key",
+            "/dashboard..%2f..%2fsecret.key",
+        ]
+        .map(String::from)
+        .to_vec();
+        paths.push(format!("/{abs}"));
+        paths.push(format!("//{abs}"));
+        paths.push(format!("/dashboard/{abs}"));
+        paths.push(format!("/dashboard//{abs}"));
+        paths
+    }
+
+    #[tokio::test]
+    async fn no_climb_reads_a_file_outside_the_static_dir_without_a_session() {
+        let (root, dist) = fixture("climb-anon");
+        for path in climbs(&root) {
+            let (status, _, body) = get(&dist, &path, false).await;
+            assert!(!body.contains(SECRET), "{path} read outside the static dir");
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+        }
+    }
+
+    /// A session widens what reaches the resolver (an extensionless
+    /// last segment is no longer turned away at 401), so the climbs are
+    /// re-run signed in, plus the extensionless `secret`.
+    #[tokio::test]
+    async fn no_climb_reads_a_file_outside_the_static_dir_with_a_session() {
+        let (root, dist) = fixture("climb-session");
+        let mut paths = climbs(&root);
+        for p in [
+            "/../secret",
+            "/../../secret",
+            "/kb-assets/../../../secret",
+            "/dashboard/../../secret",
+        ] {
+            paths.push(p.to_string());
+        }
+        for path in paths {
+            let (_, _, body) = get(&dist, &path, true).await;
+            assert!(!body.contains(SECRET), "{path} read outside the static dir");
+        }
+    }
+
+    /// `/dashboard` is stripped only as a whole segment. Stripped as a
+    /// bare string prefix, `/dashboard../x.key` became `../x.key` — a
+    /// climb with no dot-segment in the request for the edge to see
+    /// (review of the dot-segment car, 2026-09-25). A name that merely
+    /// begins with `dashboard` is a file of that name.
+    #[tokio::test]
+    async fn the_dashboard_prefix_is_stripped_only_as_a_whole_segment() {
+        let (_, dist) = fixture("prefix");
+        boss_testing::write_file(&dist.join("dashboardx.js"), "prefix-bound");
+        let (status, _, body) = get(&dist, "/dashboardx.js", false).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "prefix-bound"));
+        let (status, _, body) = get(&dist, "/dashboard/dashboardx.js", false).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "prefix-bound"));
+    }
+
+    /// The second wall: a path of plain names that the OS resolves out
+    /// of the directory — a symlink inside it pointing up — reads as
+    /// absent. The lexical resolver alone would pass it.
+    #[tokio::test]
+    async fn a_symlink_out_of_the_static_dir_is_not_followed() {
+        let (root, dist) = fixture("symlink");
+        std::os::unix::fs::symlink(root.join("secret.key"), dist.join("link.key")).unwrap();
+        std::os::unix::fs::symlink(root.clone(), dist.join("up")).unwrap();
+        for path in [
+            "/link.key",
+            "/up/secret.key",
+            "/dashboard/up/web/secret.key",
+        ] {
+            let (status, _, body) = get(&dist, path, true).await;
+            assert!(!body.contains(SECRET), "{path} followed a link out");
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+        }
+    }
+
+    /// The resolver alone, on the shapes that matter: only plain names
+    /// survive, and nothing it returns can sit outside the directory.
+    #[test]
+    fn only_plain_names_resolve() {
+        let base = Path::new("/s");
+        assert_eq!(
+            resolve(base, "/chunk.js"),
+            Some(PathBuf::from("/s/chunk.js"))
+        );
+        assert_eq!(
+            resolve(base, "/kb-assets/one.svg"),
+            Some(PathBuf::from("/s/kb-assets/one.svg"))
+        );
+        for bad in [
+            "/..",
+            "/../x.key",
+            "/a/../x.key",
+            "/./x.js",
+            "/a/./x.js",
+            "/..\\x.key",
+            "/a\\b.js",
+        ] {
+            assert_eq!(resolve(base, bad), None, "{bad} must not resolve");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_legitimate_asset_is_served_without_a_session() {
+        let (_, dist) = fixture("asset");
+        for path in ["/chunk-abc123.js", "/dashboard/chunk-abc123.js"] {
+            let (status, headers, body) = get(&dist, path, false).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {body}");
+            assert_eq!(body, "console.log('asset')", "{path}");
+            assert_eq!(
+                headers[header::CONTENT_TYPE],
+                "application/javascript; charset=utf-8"
+            );
+            assert_eq!(
+                headers[header::CACHE_CONTROL],
+                "public, max-age=31536000, immutable"
+            );
+        }
+        let (status, _, body) = get(&dist, "/kb-assets/one.svg", false).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "<svg/>"));
+    }
+
+    /// A request that names a file and misses is a 404, never the SPA.
+    #[tokio::test]
+    async fn a_missing_named_file_is_a_404_not_the_spa() {
+        let (_, dist) = fixture("missing");
+        for path in ["/chunk-gone.js", "/dashboard/chunk-gone.css"] {
+            let (status, _, body) = get(&dist, path, true).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+            assert!(!body.contains("the spa"), "{path}");
+        }
+    }
+
+    /// A route reaches index.html, uncached, for a signed-in viewer; a
+    /// signed-out one is turned away except on the public pages.
+    #[tokio::test]
+    async fn a_route_falls_back_to_the_spa() {
+        let (_, dist) = fixture("spa");
+        for path in ["/system/yard", "/dashboard", "/dashboard/", "/jobs/abc"] {
+            let (status, headers, body) = get(&dist, path, true).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {body}");
+            assert!(body.contains("the spa"), "{path}: {body}");
+            assert_eq!(
+                headers[header::CACHE_CONTROL],
+                "no-store, no-cache, must-revalidate, max-age=0"
+            );
+        }
+        let (status, _, _) = get(&dist, "/system/yard", false).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _, body) = get(&dist, "/", false).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("the spa"));
     }
 }

@@ -41,20 +41,20 @@ use boss_gateway::session::{self, Session};
 
 /// Distinct from the routing tests' all-zero key, so a cookie from one
 /// module can never pass in the other by accident.
-const KEY: [u8; 32] = [0x5a; 32];
+pub(crate) const KEY: [u8; 32] = [0x5a; 32];
 
 /// What the stub answers every forwarded request with.
-const UPSTREAM_ANSWER: &str = "the recording upstream answered";
+pub(crate) const UPSTREAM_ANSWER: &str = "the recording upstream answered";
 
 /// Every request the gateway sent upstream, as `METHOD uri`.
-type Hits = Arc<Mutex<Vec<String>>>;
+pub(crate) type Hits = Arc<Mutex<Vec<String>>>;
 
 const WRITES: [Method; 4] = [Method::POST, Method::PUT, Method::PATCH, Method::DELETE];
 
 /// A server that records every request it is sent and answers 200. It
 /// is reached as a FORWARD PROXY, so the uri it records is the absolute
 /// upstream URL the gateway meant to reach.
-async fn recording_upstream() -> (String, Hits) {
+pub(crate) async fn recording_upstream() -> (String, Hits) {
     let hits: Hits = Arc::default();
     let seen = hits.clone();
     let stub = axum::Router::new().fallback(move |req: axum::extract::Request| {
@@ -98,6 +98,13 @@ fn local_auth() -> Arc<LocalAuthState> {
 /// The gateway's own route table, local auth mounted (so the guest
 /// door exists), every forward diverted to `upstream`.
 fn gateway(upstream: &str) -> axum::Router {
+    gateway_declaring(upstream, &public_reads::PublicReads::none())
+}
+
+/// The same table with `reads` declared sessionless — the shape a
+/// tenant's `[gateway] public_reads` gives it (the dot-segment tests,
+/// a_path_cannot_climb_out_of_its_route.rs, need `/api/workflows` open).
+pub(crate) fn gateway_declaring(upstream: &str, reads: &public_reads::PublicReads) -> axum::Router {
     let proxy_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .proxy(reqwest::Proxy::all(upstream).expect("stub proxy url"))
@@ -108,7 +115,7 @@ fn gateway(upstream: &str) -> axum::Router {
         proxy_client,
         perf: Arc::new(PerfCollector::new()),
     });
-    build_router(Some(local_auth()), &public_reads::PublicReads::none()).with_state(state)
+    build_router(Some(local_auth()), reads).with_state(state)
 }
 
 /// A proxied route as the table registers it: the probe path to send,
@@ -154,7 +161,7 @@ fn proxied_routes() -> Vec<Proxied> {
         .collect()
 }
 
-async fn send(
+pub(crate) async fn send(
     app: axum::Router,
     method: Method,
     path: &str,
@@ -180,7 +187,7 @@ async fn send(
 /// The cookie `POST /api/auth/guest` hands an anonymous visitor —
 /// minted by the gateway's own `guest()` through its own route, so the
 /// role it carries is exactly the one a stranger presents.
-async fn guest_cookie(app: axum::Router) -> String {
+pub(crate) async fn guest_cookie(app: axum::Router) -> String {
     let resp = app
         .oneshot(
             Request::builder()
@@ -203,14 +210,14 @@ async fn guest_cookie(app: axum::Router) -> String {
 }
 
 /// A session signed with the gateway's key, as login would mint it.
-fn signed_cookie(role: Option<&str>, employee_id: Option<&str>) -> String {
+pub(crate) fn signed_cookie(role: Option<&str>, employee_id: Option<&str>) -> String {
     let mut sess = Session::new("someone@boss.test", 600);
     sess.role = role.map(str::to_string);
     sess.employee_id = employee_id.map(str::to_string);
     format!("{}={}", session::COOKIE_NAME, sess.encode(&KEY))
 }
 
-fn hits_of(hits: &Hits) -> Vec<String> {
+pub(crate) fn hits_of(hits: &Hits) -> Vec<String> {
     hits.lock().expect("hits lock").clone()
 }
 

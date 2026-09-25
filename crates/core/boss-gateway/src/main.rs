@@ -7,8 +7,11 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 #[cfg(test)]
+mod a_path_cannot_climb_out_of_its_route;
+#[cfg(test)]
 mod a_read_only_session_cannot_write;
 mod api;
+mod dot_segments;
 mod inquiries;
 mod perf;
 mod plugin_files;
@@ -268,6 +271,14 @@ async fn main() -> Result<()> {
         .as_deref()
         .map(|host| inquiries::Door::new(host, Arc::new(inquiries::Services::from_env())));
     let app = inquiries::mount(app, door);
+
+    // The door every request enters, OUTERMOST (dot_segments.rs,
+    // backlog 1d9b7db7): a path with a `.` or `..` segment, raw or
+    // percent-encoded, is answered 400 before the site, the inquiry
+    // door or any route sees it — reqwest would otherwise resolve it
+    // after routing, and the upstream would receive a path no route
+    // matched. Last, so nothing added above can run ahead of it.
+    let app = dot_segments::mount(app);
 
     tracing::info!(listen = %listen, static_dir = %static_files::static_dir(), "boss-gateway starting");
     let listener = TcpListener::bind(&listen).await?;
