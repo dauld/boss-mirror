@@ -60,9 +60,9 @@
   let tab = $state<Tab>('overview');
 
   /// One GET, settled on its own. A refusal keeps the server's status
-  /// AND its text: warehouse-status answers 503 "not configured" or 502
-  /// naming the failing leg, and the page used to keep neither, so an
-  /// operator could not tell the two apart (backlog 0dcb0200).
+  /// AND its text, which the page used to drop (backlog 0dcb0200). A
+  /// shipping outage is no longer a refusal: it rides a 200 as the
+  /// outbound leg's `unavailable` reason (backlog 89cf07d8).
   async function read(url: string): Promise<{ state: ReadState; body: unknown }> {
     try {
       const r = await fetch(url);
@@ -299,7 +299,15 @@
           </Section>
 
           <Section title="Outbound shipments">
-              {@const os = s.outbound_shipments}
+            <!-- The one leg read from another department's service fails
+                 alone and says why (backlog 89cf07d8); parts stock and
+                 inbound POs above are inventory's own and still stand. -->
+            {#if s.outbound_shipments.kind === 'unavailable'}
+              <p class="empty load-failed" role="alert">
+                Outbound shipments unavailable — {s.outbound_shipments.reason}
+              </p>
+            {:else}
+              {@const os = s.outbound_shipments.summary}
               <dl class="kv">
                 <dt>Label created</dt><dd><strong>{os.label_created.toLocaleString()}</strong></dd>
                 <dt>Picked up</dt><dd><strong>{os.picked_up.toLocaleString()}</strong></dd>
@@ -312,6 +320,7 @@
                 </dd>
                 <dt>Delivered (7d)</dt><dd><strong>{os.delivered_7d.toLocaleString()}</strong></dd>
               </dl>
+            {/if}
           </Section>
         </div>
 

@@ -18,7 +18,7 @@ const STATUS: WarehouseStatus = {
     total_open: 3, draft_count: 1, submitted_count: 1, acknowledged_count: 0,
     in_transit_count: 1, late_count: 1, arriving_this_week_count: 2, recent: [],
   },
-  outbound_shipments: { label_created: 0, picked_up: 0, in_transit: 0, exception: 0, delivered_7d: 0, recent: [] },
+  outbound_shipments: { kind: 'unavailable', reason: 'shipping client not configured' },
   as_of: '2026-09-23T22:00:00Z',
 };
 

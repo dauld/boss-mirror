@@ -24,9 +24,9 @@ use vendor_invoices::*;
 use vendors::*;
 use warehouse::*;
 
-/// Cross-service clients needed by the warehouse-status projection.
+/// Cross-service clients the warehouse-status projection reads.
 /// Bundled so the binary constructs once and passes a single Option —
-/// tests that don't exercise `/warehouse-status` leave `clients = None`.
+/// `clients = None` answers the shipping leg as unavailable, not the read.
 pub struct WarehouseClients {
     pub shipping: Arc<dyn ShippingClient>,
 }
@@ -629,5 +629,102 @@ mod tests {
             VendorInvoiceStatus::new(VendorInvoiceStatus::APPROVED)
         );
         assert!(rows[0].approved_on.is_some());
+    }
+
+    // ----- warehouse-status: one leg down is not the whole read ------
+
+    /// A shipping client that answers what it was built with — the
+    /// in-memory stand-in for boss-shipping, up or down.
+    struct StubShipping(Result<boss_shipping_client::OutboundShipmentSummary, &'static str>);
+
+    #[async_trait::async_trait]
+    impl ShippingClient for StubShipping {
+        async fn outbound_shipment_summary(
+            &self,
+        ) -> Result<
+            boss_shipping_client::OutboundShipmentSummary,
+            boss_shipping_client::ShippingClientError,
+        > {
+            self.0
+                .clone()
+                .map_err(|e| boss_shipping_client::ShippingClientError::Unreachable(e.to_string()))
+        }
+    }
+
+    async fn warehouse_status_with(clients: Option<WarehouseClients>) -> (StatusCode, Value) {
+        let inventory = Arc::new(InMemoryInventory::new(
+            vec![test_item("PART-001"), test_item("PART-002")],
+            vec![test_po("PO-001")],
+        ));
+        let resp = router(InventoryApiState {
+            inventory,
+            publisher: None,
+            clients,
+            classes_client: None,
+            clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
+        })
+        .oneshot(
+            Request::builder()
+                .uri("/api/inventory/warehouse-status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    use serde_json::Value;
+
+    // Backlog 89cf07d8: a shipping outage — distribution's service,
+    // off on the live instance — answered 502 for the whole read, so
+    // parts stock and inbound POs, both inventory's own, went with it.
+    // The leg that failed is named on the wire; the rest still answers.
+    #[tokio::test]
+    async fn warehouse_status_keeps_inventory_reads_when_shipping_is_down() {
+        let (status, body) = warehouse_status_with(Some(WarehouseClients {
+            shipping: Arc::new(StubShipping(Err("connection refused"))),
+        }))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["parts_stock"]["total_skus"], 2);
+        assert_eq!(body["inbound_pos"]["total_open"], 1);
+        assert_eq!(body["outbound_shipments"]["kind"], "unavailable");
+        assert_eq!(
+            body["outbound_shipments"]["reason"],
+            "shipping service unreachable: connection refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn warehouse_status_keeps_inventory_reads_when_shipping_is_not_configured() {
+        let (status, body) = warehouse_status_with(None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["parts_stock"]["total_skus"], 2);
+        assert_eq!(body["inbound_pos"]["total_open"], 1);
+        assert_eq!(body["outbound_shipments"]["kind"], "unavailable");
+        assert_eq!(
+            body["outbound_shipments"]["reason"],
+            "shipping client not configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn warehouse_status_carries_the_shipping_summary_when_it_answers() {
+        let summary = boss_shipping_client::OutboundShipmentSummary {
+            in_transit: 6,
+            ..Default::default()
+        };
+        let (status, body) = warehouse_status_with(Some(WarehouseClients {
+            shipping: Arc::new(StubShipping(Ok(summary))),
+        }))
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["outbound_shipments"]["kind"], "ok");
+        assert_eq!(body["outbound_shipments"]["summary"]["in_transit"], 6);
     }
 }

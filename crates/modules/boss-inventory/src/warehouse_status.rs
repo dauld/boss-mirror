@@ -10,7 +10,9 @@
 //!
 //! The outbound summary is computed by the shipping client adapter
 //! (`boss-shipping-client`); this module combines it with inventory's
-//! own items + POs into the wire shape the frontend consumes.
+//! own items + POs into the wire shape the frontend consumes. The
+//! shipping leg can be unavailable on its own (`OutboundShipmentsRead`)
+//! without taking inventory's own two summaries down with it.
 //!
 //! Recent receive/put-away activity is a v1.1 follow-up (needs an assets
 //! events feed the warehouse dashboard can subscribe to).
@@ -29,10 +31,24 @@ pub use boss_shipping_client::{OutboundShipmentRow, OutboundShipmentSummary};
 pub struct WarehouseStatus {
     pub parts_stock: PartsStockSummary,
     pub inbound_pos: InboundPoSummary,
-    pub outbound_shipments: OutboundShipmentSummary,
+    pub outbound_shipments: OutboundShipmentsRead,
     /// Snapshot time — clients can display "updated X ago" without
     /// threading a second timestamp through.
     pub as_of: DateTime<Utc>,
+}
+
+/// The one leg this projection reads from another department's service,
+/// as that read turned out. Backlog 89cf07d8: a shipping outage used to
+/// answer 502 for the WHOLE read, so parts stock and inbound POs —
+/// inventory's own data — vanished with it, and distribution's service
+/// is off on the live instance. The leg now fails alone and names why;
+/// one enum rather than an Option beside a reason, so the wire cannot
+/// carry a summary and a failure at once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OutboundShipmentsRead {
+    Ok { summary: OutboundShipmentSummary },
+    Unavailable { reason: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -215,12 +231,12 @@ fn inbound_pos_summary(pos: &[PurchaseOrder], today: NaiveDate) -> InboundPoSumm
 // ---------------------------------------------------------------------------
 
 /// Combine inventory's own data (items + POs) with the pre-fetched
-/// outbound shipment summary into the wire shape. Pure function — no
+/// outbound shipment read into the wire shape. Pure function — no
 /// I/O, so tests can pin every branch deterministically.
 pub fn build_warehouse_status(
     items: &[InventoryItem],
     purchase_orders: &[PurchaseOrder],
-    outbound_shipments: OutboundShipmentSummary,
+    outbound_shipments: OutboundShipmentsRead,
     as_of: DateTime<Utc>,
 ) -> WarehouseStatus {
     WarehouseStatus {
@@ -450,11 +466,12 @@ mod tests {
             recent: vec![],
         };
 
-        let status = build_warehouse_status(&items, &pos, outbound.clone(), ts(2026, 4, 22));
+        let read = OutboundShipmentsRead::Ok { summary: outbound };
+        let status = build_warehouse_status(&items, &pos, read.clone(), ts(2026, 4, 22));
 
         assert_eq!(status.parts_stock.total_skus, 1);
         assert_eq!(status.inbound_pos.total_open, 1);
-        assert_eq!(status.outbound_shipments, outbound);
+        assert_eq!(status.outbound_shipments, read);
         assert_eq!(status.as_of, ts(2026, 4, 22));
     }
 
@@ -467,7 +484,9 @@ mod tests {
         let status = build_warehouse_status(
             &[],
             &[],
-            OutboundShipmentSummary::default(),
+            OutboundShipmentsRead::Ok {
+                summary: OutboundShipmentSummary::default(),
+            },
             ts(2026, 4, 22),
         );
         let wire = serde_json::to_value(&status).unwrap();
@@ -489,7 +508,9 @@ mod tests {
         let status = build_warehouse_status(
             &[],
             &[],
-            OutboundShipmentSummary::default(),
+            OutboundShipmentsRead::Ok {
+                summary: OutboundShipmentSummary::default(),
+            },
             ts(2026, 4, 22),
         );
         assert_eq!(status.parts_stock.total_skus, 0);
@@ -675,7 +696,7 @@ mod tests {
             items in vec(arb_item(), 0..10),
             pos in vec(arb_po(), 0..10),
         ) {
-            let outbound = OutboundShipmentSummary::default();
+            let outbound = OutboundShipmentsRead::Ok { summary: OutboundShipmentSummary::default() };
             let as_of = ts(2026, 4, 22);
             let status = build_warehouse_status(&items, &pos, outbound.clone(), as_of);
             prop_assert_eq!(&status.outbound_shipments, &outbound);

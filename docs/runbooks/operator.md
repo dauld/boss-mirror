@@ -34,7 +34,7 @@ kubectl -n boss logs deploy/boss --tail=200   # the pod's launcher + services
 Reading a host is an **ops-request**, never ssh: `boss ops <host>
 <verb> [args] --wait` files a packet the host's runner answers
 (`infra/ops/verbs/` is the allowlist; `df`, `uptime`, `unit-status`,
-`journal-tail`, `pod-logs`, `disk-report` are the reads). The forge's
+`journal-tail`, `pod-logs`, `disk-report`, `forge-log` are the reads). The forge's
 and boss-gcp's journals are also readable over HTTP on `:19531`
 (`infra/forge/OPERATIONS.md` §Reading the host from the pod).
 
