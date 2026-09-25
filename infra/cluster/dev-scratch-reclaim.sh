@@ -118,7 +118,8 @@
 #                            origin/ ref, not on origin/main) counts as
 #                            abandoned                      (default 48)
 #   BOSS_WORKTREE_GRACE_H    hours of git quiet before a LANDED
-#                            worktree is removable; under the /work
+#                            worktree (by sha or by content) is
+#                            removable; under the /work
 #                            floor it yields to BOSS_LIVE_TARGET_MIN
 #                                                           (default 12)
 #   BOSS_WORKTREE_IDLE_H     hours of git quiet before a main/detached
@@ -279,7 +280,7 @@ problems=0
 # Totals every pass leaves for the record at the end.
 WT_PASS=skipped; WT_PASS_REASON=""
 WT_MAIN_SHA=""; WT_MAIN_TS=""
-WT_REMOVED=0; WT_REMOVED_MIB=0
+WT_REMOVED=0; WT_REMOVED_MIB=0; WT_REMOVED_BY_CONTENT=0
 WT_KEPT_DIRTY=0; WT_KEPT_DIRTY_NAMES=""
 WT_KEPT_UNREFERENCED=0; WT_KEPT_UNREFERENCED_NAMES=""
 WT_KEPT_LIVE=0; WT_KEPT_RECENT=0; WT_KEPT_LOCKED=0; WT_KEPT_REFUSED=0
@@ -608,7 +609,12 @@ fast_forward_checkout() {
 #      stale read is visible — and a landed branch's origin/ ref
 #      outlives the forge's copy until a fetch prunes it (fetch.prune
 #      is not set on the pod), which keeps a worktree, never removes
-#      one: every error here is on the side of keeping;
+#      one: every error here is on the side of keeping. SINCE 2026-09-25
+#      (backlog 4a738ca5) a head NOT on origin/main is still LANDED when
+#      its work is — every file it changed byte-identical on main, or
+#      every commit of its own there by patch-id (`landed_by_content`)
+#      — because a rebase and a train's squash leave the checkout's own
+#      sha on no origin ref at all, and 56 of 58 measured heads were;
 #   2. git has been QUIET in it for the window (1) chose — no commit,
 #      no HEAD or index write, no new reflog ENTRY (an entry's own
 #      time, never the file's mtime, which a gc rewrites in every
@@ -743,6 +749,51 @@ ref_holding() {
     git -C "$REPO_DIR" for-each-ref --count=1 --format='%(refname)' --contains "$1" 2>/dev/null || true
 }
 
+# Is a head's WORK on origin/main although the head itself is not?
+# Prints how — `content` or `patch-id` — and succeeds; fails for
+# anything else, including a git that cannot answer, so every error
+# here reads as "not landed" and keeps.
+#
+# WHY (backlog 4a738ca5). Measured 2026-09-25 04:10Z: under the /work
+# floor a pass removed 11 worktrees and kept 286 "recent" while /work
+# sat at 12 GB free of 40, and of 58 sampled worktree heads only 2 were
+# on any origin ref. Builders commit on local `worktree-agent-*`
+# branches, `boss gate --rebase` replays the commit onto a new sha, and
+# a train squashes its cars into one commit — so no sha a worktree holds
+# ever reaches origin/main, the ancestry test above called every landed
+# tree UNPUSHED, and each waited the 48h abandoned window, not the
+# landed one.
+#
+# The two rules are `boss merged`'s (crates/orchestrators/boss-cli/src/
+# merged.rs), which settled this question for cars, in the same terms:
+#   CONTENT — every file the head changed since its merge-base with main
+#     is byte-identical on main. The only signal that survives a train:
+#     a squash of N cars has a patch-id equal to no single car's.
+#   PATCH-ID — `git cherry` finds every commit of the head's own on main
+#     by patch-id. The one that survives a LATER car editing the file.
+# A head with no commits of its own is the ancestry case, not this one;
+# a head whose commits change no file answers nothing and is kept. A
+# SOME-files match is not a landing either (a sibling car editing one
+# of the files looks the same), so it keeps, as `boss merged` reports
+# Unknown for it. Content runs first because it is two diffs; the
+# cherry computes a patch-id for every main commit since the base.
+landed_by_content() {
+    local head="$1" main="$2" base cherry
+    local -a files=()
+    base=$(git -C "$REPO_DIR" merge-base "$main" "$head" 2>/dev/null) || return 1
+    [ -n "$base" ] || return 1
+    mapfile -d '' files < <(git -C "$REPO_DIR" diff --name-only -z "$base" "$head" 2>/dev/null)
+    if [ "${#files[@]}" -gt 0 ] &&
+        git --literal-pathspecs -C "$REPO_DIR" diff --quiet "$main" "$head" -- "${files[@]}" 2>/dev/null; then
+        echo content
+        return 0
+    fi
+    cherry=$(git -C "$REPO_DIR" cherry "$main" "$head" 2>/dev/null) || return 1
+    [ -n "$cherry" ] || return 1
+    case $'\n'"$cherry" in *$'\n+'*) return 1 ;; esac
+    echo patch-id
+}
+
 worktree_target() { echo "$SCRATCH_MOUNT/target-$(basename "$1")"; }
 
 remove_worktree_target() {
@@ -828,6 +879,11 @@ reclaim_gone_worktrees() {
     # standing in for a HEAD with no branch; the first block is the main
     # worktree.
     local first=1 path branch locked reason stale window_s why last idle_s idle_h dirty kb head held
+    local landed_window_s floor_note unpushed how by_content
+    landed_window_s=$((WORKTREE_GRACE_H * 3600)); floor_note=""
+    if [ "$under_floor" = 1 ]; then
+        landed_window_s=$((LIVE_TARGET_MIN * 60)); floor_note=", under the /work floor"
+    fi
     while IFS=$'\t' read -r path branch locked reason; do
         [ -z "$path" ] && continue
         if [ "$first" = 1 ]; then first=0; continue; fi
@@ -845,6 +901,7 @@ reclaim_gone_worktrees() {
             WT_STALE_LOCK_NAMES="${WT_STALE_LOCK_NAMES:+$WT_STALE_LOCK_NAMES, }$(basename "$path")"
         fi
 
+        unpushed=0; by_content=0
         case "$branch" in
             detached|main)
                 window_s=$((WORKTREE_IDLE_H * 3600)); why="on $branch"
@@ -855,11 +912,9 @@ reclaim_gone_worktrees() {
                     continue
                 fi
                 if git -C "$REPO_DIR" merge-base --is-ancestor "refs/heads/$branch" "$main_sha" 2>/dev/null; then
-                    window_s=$((WORKTREE_GRACE_H * 3600)); why="branch $branch has no origin/ ref and its head is on origin/main (landed)"
-                    if [ "$under_floor" = 1 ]; then
-                        window_s=$((LIVE_TARGET_MIN * 60)); why="$why, under the /work floor"
-                    fi
+                    window_s=$landed_window_s; why="branch $branch has no origin/ ref and its head is on origin/main (landed)$floor_note"
                 else
+                    unpushed=1
                     window_s=$((WORKTREE_MAX_AGE_H * 3600)); why="branch $branch has no origin/ ref and is not on origin/main (unpushed)"
                 fi
                 ;;
@@ -868,6 +923,17 @@ reclaim_gone_worktrees() {
         last=$(worktree_last_activity "$path")
         idle_s=$((now - last))
         idle_h=$((idle_s / 3600))
+        # A head that is not on origin/main may still have LANDED — its
+        # work replayed and squashed onto main under other shas (backlog
+        # 4a738ca5, `landed_by_content`). Asked only where the answer
+        # can change the outcome: idle past the landed window but inside
+        # the unpushed one, which is where the 286 kept trees stood.
+        if [ "$unpushed" = 1 ] && [ "$idle_s" -ge "$landed_window_s" ] && [ "$idle_s" -lt "$window_s" ] &&
+            how=$(landed_by_content "refs/heads/$branch" "$main_sha"); then
+            by_content=1
+            window_s=$landed_window_s
+            why="branch $branch has no origin/ ref and its work is on origin/main by $how (landed — rebased or squashed under other shas)$floor_note"
+        fi
         if [ "$idle_s" -lt "$window_s" ]; then
             WT_KEPT_RECENT=$((WT_KEPT_RECENT + 1))
             continue
@@ -922,6 +988,7 @@ reclaim_gone_worktrees() {
         fi
         WT_REMOVED=$((WT_REMOVED + 1))
         WT_REMOVED_MIB=$((WT_REMOVED_MIB + ${kb:-0} / 1024))
+        if [ "$by_content" = 1 ]; then WT_REMOVED_BY_CONTENT=$((WT_REMOVED_BY_CONTENT + 1)); fi
         log "  removed worktree $path ($((${kb:-0} / 1024))MiB; $why, idle ${idle_h}h, clean)"
         remove_worktree_target "$path"
     done < <(
@@ -933,7 +1000,7 @@ reclaim_gone_worktrees() {
         '
     )
 
-    log "worktree pass: removed $WT_REMOVED worktree(s) (${WT_REMOVED_MIB}MiB) and $WT_TARGETS_REMOVED target(s) (${WT_TARGETS_MIB}MiB); kept $WT_KEPT_LIVE with an origin/ ref still in the checkout, $WT_KEPT_RECENT with git activity inside the window, $WT_KEPT_DIRTY dirty, $WT_KEPT_UNREFERENCED with a head no ref holds, $WT_KEPT_LOCKED locked, $WT_KEPT_REFUSED refused by git; pruned $WT_PRUNED entries whose directory was gone; judged $WT_STALE_LOCKS with a stale lock"
+    log "worktree pass: removed $WT_REMOVED worktree(s) (${WT_REMOVED_MIB}MiB; $WT_REMOVED_BY_CONTENT of them landed by content, not by sha) and $WT_TARGETS_REMOVED target(s) (${WT_TARGETS_MIB}MiB); kept $WT_KEPT_LIVE with an origin/ ref still in the checkout, $WT_KEPT_RECENT with git activity inside the window, $WT_KEPT_DIRTY dirty, $WT_KEPT_UNREFERENCED with a head no ref holds, $WT_KEPT_LOCKED locked, $WT_KEPT_REFUSED refused by git; pruned $WT_PRUNED entries whose directory was gone; judged $WT_STALE_LOCKS with a stale lock"
 }
 
 # ---------------------------------------------------------------------
@@ -1335,6 +1402,7 @@ record_pass() {
             "ff_result=$FF_RESULT" "ff_to=$FF_TO" "ff_detail=$FF_DETAIL" \
             "origin_main_sha=$WT_MAIN_SHA" "origin_main_ref_ts=$WT_MAIN_TS" \
             "worktrees_removed=$WT_REMOVED" "worktrees_removed_mib=$WT_REMOVED_MIB" \
+            "worktrees_removed_by_content=$WT_REMOVED_BY_CONTENT" \
             "worktrees_kept_dirty=$WT_KEPT_DIRTY" "worktrees_kept_dirty_names=$WT_KEPT_DIRTY_NAMES" \
             "worktrees_kept_unreferenced=$WT_KEPT_UNREFERENCED" "worktrees_kept_unreferenced_names=$WT_KEPT_UNREFERENCED_NAMES" \
             "worktrees_kept_live=$WT_KEPT_LIVE" "worktrees_kept_recent=$WT_KEPT_RECENT" \

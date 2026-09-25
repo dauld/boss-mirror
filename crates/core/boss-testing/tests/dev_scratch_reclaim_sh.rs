@@ -405,6 +405,18 @@ impl Yard {
     /// signal — the commit, the worktree's HEAD, index and reflog, the
     /// directory itself — dated `hours_ago`.
     fn worktree(&self, name: &str, branch: Option<&str>, hours_ago: u64) -> PathBuf {
+        self.worktree_writing(name, branch, hours_ago, "work.txt")
+    }
+
+    /// `worktree`, with its one commit writing `file` — so two trees
+    /// whose work lands on one main do not both add the same path.
+    fn worktree_writing(
+        &self,
+        name: &str,
+        branch: Option<&str>,
+        hours_ago: u64,
+        file: &str,
+    ) -> PathBuf {
         let path = self.root.join("work").join("wt").join(name);
         let p = path.to_str().expect("utf8");
         match branch {
@@ -419,7 +431,7 @@ impl Yard {
                 &["worktree", "add", "-q", "--detach", p, "main"],
             ),
         };
-        boss_testing::write_file(&path.join("work.txt"), name);
+        boss_testing::write_file(&path.join(file), name);
         git(&path, hours_ago, &["add", "."]);
         git(&path, hours_ago, &["commit", "-q", "-m", name]);
         let gitdir = PathBuf::from(git(&path, hours_ago, &["rev-parse", "--absolute-git-dir"]));
@@ -430,7 +442,7 @@ impl Yard {
             }
         }
         touch_at(&gitdir, hours_ago);
-        touch_at(&path.join("work.txt"), hours_ago);
+        touch_at(&path.join(file), hours_ago);
         touch_at(&path, hours_ago);
         path
     }
@@ -455,6 +467,80 @@ impl Yard {
 
     fn origin_main(&self) -> String {
         git(&self.repo, 0, &["rev-parse", "refs/remotes/origin/main"])
+    }
+
+    /// Land `branch` the way the pipeline does (backlog 4a738ca5): an
+    /// earlier train moves the forge's main, `boss gate --rebase`
+    /// replays the branch's commit onto it, and the train SQUASHES the
+    /// car into one commit on main — with a sibling car's change when
+    /// `sibling`, so the commit's patch-id is the union of two cars' and
+    /// equals neither. `later_edit` then lands one more train editing
+    /// every file the car's commit touched, so main no longer holds the
+    /// car's bytes and only the patch-id can say it landed. The forge
+    /// never has a branch of this name and the checkout's head is never
+    /// on origin/main — the shape of 56 of 58 worktree heads measured on
+    /// the pod. The checkout then fetches, as the dev container does.
+    fn train_land(&self, branch: &str, sibling: bool, later_edit: bool) {
+        let tag = branch.replace('/', "-");
+        let clone = self.root.join(format!("train-{tag}"));
+        let forge = self.root.join("forge.git");
+        git(
+            &self.root,
+            0,
+            &[
+                "clone",
+                "-q",
+                forge.to_str().expect("utf8"),
+                clone.to_str().expect("utf8"),
+            ],
+        );
+        boss_testing::write_file(&clone.join(format!("earlier-{tag}.txt")), "earlier\n");
+        git(&clone, 0, &["add", "."]);
+        git(&clone, 0, &["commit", "-q", "-m", "an earlier train"]);
+        git(
+            &clone,
+            0,
+            &[
+                "fetch",
+                "-q",
+                self.repo.to_str().expect("utf8"),
+                &format!("refs/heads/{branch}:refs/heads/car"),
+            ],
+        );
+        // `boss gate --rebase`: the car's commit, replayed onto a main
+        // that has moved — a new sha.
+        git(&clone, 0, &["cherry-pick", "car"]);
+        let touched = git(&clone, 0, &["diff", "--name-only", "HEAD~1", "HEAD"]);
+        if sibling {
+            // The train: the replayed car and a sibling, ONE commit.
+            git(&clone, 0, &["reset", "-q", "--soft", "HEAD~1"]);
+            boss_testing::write_file(&clone.join(format!("sibling-{tag}.txt")), "sibling\n");
+            git(&clone, 0, &["add", "."]);
+            git(&clone, 0, &["commit", "-q", "-m", "train: (2 changes)"]);
+        }
+        if later_edit {
+            for f in touched.lines().filter(|l| !l.is_empty()) {
+                boss_testing::write_file(&clone.join(f), "a later car edited this\n");
+            }
+            git(&clone, 0, &["commit", "-q", "-am", "a later train"]);
+        }
+        git(&clone, 0, &["push", "-q", "origin", "main"]);
+        git(&self.repo, 0, &["fetch", "-q", "origin"]);
+    }
+
+    /// Is `sha` an ancestor of the checkout's origin/main?
+    fn on_origin_main(&self, sha: &str) -> bool {
+        Command::new("git")
+            .current_dir(&self.repo)
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                sha,
+                "refs/remotes/origin/main",
+            ])
+            .status()
+            .expect("run git")
+            .success()
     }
 }
 
@@ -2009,5 +2095,109 @@ fn under_the_work_floor_a_landed_worktree_waits_only_the_live_window() {
             fresh.exists(),
             "a tree cut minutes ago is inside the live window, floor or not\n{text}"
         );
+    }
+}
+
+/// LANDED IS JUDGED BY CONTENT, NOT BY SHA (backlog 4a738ca5). Measured
+/// 2026-09-25 04:10Z: a pass under the /work floor removed 11 worktrees
+/// and kept 286 as recent while /work sat at 12 GB free of 40 — and of
+/// 58 sampled worktrees only 2 had a head on any origin ref. Builders
+/// commit on local `worktree-agent-*` branches, `boss gate --rebase`
+/// replays the commit onto a new sha, and trains squash-merge, so no sha
+/// the pass read ever reached origin/main: every landed tree read as
+/// UNPUSHED and waited the 48h window instead of the landed one.
+///
+/// Two landed shapes, one per rule `boss merged` already decides by
+/// (crates/orchestrators/boss-cli/src/merged.rs): a car squashed into a
+/// two-car train (its patch-id matches no commit on main, and every file
+/// it changed is byte-identical there — CONTENT), and a car squashed
+/// alone whose file a later car then edited (the bytes differ, the
+/// patch-id matches — PATCH-ID). Beside them, a tree whose work did NOT
+/// land, idle just as long, is kept.
+#[test]
+fn a_worktree_whose_work_landed_by_a_rebase_and_a_squash_is_landed_and_unlanded_work_is_kept() {
+    let floor = work_floor();
+    for under in [true, false] {
+        let root = boss_testing::scratch_dir("boss-dsr-landed-by-content");
+        let _guard = Scratch(root.clone());
+        let yard = Yard::new(&root);
+        let trained = yard.worktree_writing(
+            "agent-trained",
+            Some("worktree-agent-trained"),
+            2,
+            "trained.txt",
+        );
+        yard.train_land("worktree-agent-trained", true, false);
+        let squashed = yard.worktree_writing(
+            "agent-squashed",
+            Some("worktree-agent-squashed"),
+            2,
+            "squashed.txt",
+        );
+        yard.train_land("worktree-agent-squashed", false, true);
+        let unlanded = yard.worktree_writing(
+            "agent-unlanded",
+            Some("worktree-agent-unlanded"),
+            2,
+            "unlanded.txt",
+        );
+        for b in [
+            "worktree-agent-trained",
+            "worktree-agent-squashed",
+            "worktree-agent-unlanded",
+        ] {
+            let head = git(&yard.repo, 0, &["rev-parse", &format!("refs/heads/{b}")]);
+            assert!(
+                !yard.on_origin_main(&head),
+                "precondition: {b}'s head is on no origin ref, as on the pod"
+            );
+        }
+
+        let free = if under { floor - 1 } else { floor + 10 };
+        let out = run(&root, &[("STUB_DF_WORK_GB", &free.to_string())]);
+        let text = say(&out);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            unlanded.exists(),
+            "work that is not on origin/main by sha, patch-id or content is unpushed: \
+             idle 2h against 48h, kept, floor or not\n{text}"
+        );
+        if under {
+            assert!(
+                !trained.exists(),
+                "squashed into a two-car train after a rebase: every file it changed is on \
+                 origin/main, so it is landed and waits only the live window\n{text}"
+            );
+            assert!(
+                !squashed.exists(),
+                "squashed alone, then edited by a later car: its patch is on origin/main, \
+                 so it is landed\n{text}"
+            );
+            assert!(
+                stdout.contains("worktree-agent-trained")
+                    && stdout.contains("on origin/main by content"),
+                "the removal says it was the content that showed the landing\n{text}"
+            );
+            assert!(
+                stdout.contains("worktree-agent-squashed")
+                    && stdout.contains("on origin/main by patch-id"),
+                "and which rule showed it\n{text}"
+            );
+            let log = curl_log(&root);
+            let put = log
+                .lines()
+                .find(|l| l.starts_with("PUT "))
+                .unwrap_or_else(|| panic!("the run step is completed\n{log}\n{text}"));
+            assert!(
+                put.contains("\"worktrees_removed_by_content\":\"2\""),
+                "the packet counts the trees only content could call landed\n{put}\n{text}"
+            );
+        } else {
+            assert!(
+                trained.exists() && squashed.exists(),
+                "above the floor a tree landed by content keeps the 12h grace, as one \
+                 landed by sha does\n{text}"
+            );
+        }
     }
 }
