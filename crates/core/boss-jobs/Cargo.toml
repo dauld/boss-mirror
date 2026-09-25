@@ -205,6 +205,10 @@ name = "a_stale_step_write_erases_nothing_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "a_stale_step_write_is_judged_on_the_whole_row_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "step_claim_admits_an_aliased_holder_pg"
 required-features = ["postgres"]
 

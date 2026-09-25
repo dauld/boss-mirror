@@ -589,8 +589,11 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // so clients can send `{"status": "done"}` without having to round-
     // trip the whole Step. Full replacements still work — a body that
     // includes every field just overwrites everything.
-    let old = match state.jobs.get_step(&step_id).await {
-        Ok(Some(s)) => s,
+    //
+    // Read WITH its version: the write at the foot lands only over the
+    // row as this read saw it (backlog 6ec22d71).
+    let (old, old_version) = match state.jobs.get_step_versioned(&step_id).await {
+        Ok(Some(read)) => read,
         Ok(None) => return (StatusCode::NOT_FOUND, "step not found").into_response(),
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -1791,9 +1794,13 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // same day, same 2 ms gap: it is the ordinary timing of a dispatch,
     // whose merge lands while the dispatcher is assigning the new run's
     // ready step, not a one-off.
+    //
+    // Judged on the row's VERSION, not its metadata (backlog 6ec22d71):
+    // a claim moves status and holder and no metadata, and this write
+    // computed before it wrote `ready` and its own holder back over it.
     match state
         .jobs
-        .update_step_if_unchanged_at(&step, &old.metadata, stamp.timestamp, &step_events)
+        .update_step_if_unchanged_at(&step, old_version, stamp.timestamp, &step_events)
         .await
     {
         Ok(()) => {}
@@ -1805,6 +1812,26 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                     "step_id": step_id.to_string(),
                     "hint": "nothing was written; send the same request again — the \
                              handler reads the row afresh",
+                })),
+            )
+                .into_response();
+        }
+        // A terminal row this handler read afresh, and a write that
+        // would move a column it freezes past the checks above (the
+        // authored `fields`, most plausibly): the row would keep its
+        // value while the event recorded the write's, so the adapter
+        // refuses and this says so rather than asking for a re-send
+        // that would be refused the same way.
+        Err(crate::port::JobsError::TerminalStep { status, .. }) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "step is {status}: what a finished step recorded does not move"
+                    ),
+                    "step_id": step_id.to_string(),
+                    "step_status": status,
+                    "hint": crate::corrections::TERMINAL_STEP_HINT,
                 })),
             )
                 .into_response();
@@ -2969,19 +2996,23 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
 }
 
 /// Mark one still-open step `Skipped` for a terminal close, written only
-/// over the metadata it was read with (backlog e381689d). A step another
-/// writer moved since the read is read again and skipped as it now
-/// stands — a skip decides nothing from metadata, so the fresh copy is
-/// the same decision without erasing that write — and one that went
-/// terminal in between needs no skip. Bounded: a row that keeps moving
+/// over the row VERSION it was read at (backlogs e381689d, 6ec22d71). A
+/// step another writer moved since the read — any column: a holder, a
+/// note, metadata — is read again and skipped as it now stands, since a
+/// skip decides nothing from the row's contents, so the fresh copy is
+/// the same decision without erasing that write; and one that went
+/// terminal in between needs no skip and records none, where the write
+/// used to answer Ok over it while its `skipped` event was recorded
+/// for a row that stayed completed. Bounded: a row that keeps moving
 /// is left open and logged, which the catch-all close sees next pass.
 async fn skip_open_step<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &Arc<JobsApiState<R, B>>,
     job_id: &boss_core::job::JobId,
-    mut s: Step,
+    read: (Step, crate::port::StepVersion),
     terminal_stamp: &boss_core::publisher::EventStamp,
 ) {
     const ATTEMPTS: usize = 3;
+    let (mut s, mut version) = read;
     for _ in 0..ATTEMPTS {
         if !matches!(
             s.status,
@@ -2989,20 +3020,19 @@ async fn skip_open_step<R: JobsRepository + 'static, B: EventBus + 'static>(
         ) {
             return;
         }
-        let read = s.metadata.clone();
         s.status = StepStatus::Skipped;
         // OUTBOX (phase 2): the skip's state event records in the SAME
         // transaction as the row.
         let skip_event = terminal_stamp.event(events::STEP_UPDATED, events::step_state_payload(&s));
         match state
             .jobs
-            .update_step_if_unchanged_at(&s, &read, terminal_stamp.timestamp, &[skip_event])
+            .update_step_if_unchanged_at(&s, version, terminal_stamp.timestamp, &[skip_event])
             .await
         {
             Ok(()) => return,
             Err(crate::port::JobsError::StepChanged { .. }) => {
-                match state.jobs.get_step(&s.id).await {
-                    Ok(Some(fresh)) => s = fresh,
+                match state.jobs.get_step_versioned(&s.id).await {
+                    Ok(Some(fresh)) => (s, version) = fresh,
                     _ => break,
                 }
             }
@@ -3064,9 +3094,9 @@ async fn close_job_on_terminal<R: JobsRepository + 'static, B: EventBus + 'stati
 
     // Skip every still-non-terminal step. The Job is closing on its
     // terminal outcome; any Pending/Ready/Active step is now moot.
-    if let Ok(steps) = state.jobs.list_steps(job_id).await {
-        for s in steps {
-            skip_open_step(state, job_id, s, &terminal_stamp).await;
+    if let Ok(steps) = state.jobs.list_steps_versioned(job_id).await {
+        for read in steps {
+            skip_open_step(state, job_id, read, &terminal_stamp).await;
         }
     }
 
@@ -3201,76 +3231,30 @@ pub(super) async fn reevaluate_and_persist<R: JobsRepository + 'static, B: Event
     };
     match reg.get_version(&job.kind, job.workflow_version).await {
         Ok(spec) => {
-            let Ok(mut steps) = state.jobs.list_steps(&job.id).await else {
-                return;
-            };
-            // `reevaluate` requires steps in spec order (sort_order ==
-            // index); list_steps returns them sorted by sort_order, so
-            // the invariant holds. Invariant (expose, don't swallow):
-            // a Job's live step set must match its active Workflow
-            // spec, or `reevaluate`'s length-guard bails and the Job
-            // can no longer advance. With atomic materialization this
-            // only fires on a genuine mid-flight republish that
-            // changed the step count. Surface it loudly instead of
-            // silently stalling the Job.
-            if spec.steps.len() != steps.len() {
-                tracing::warn!(
-                    job_id = %job.id,
-                    kind = %job.kind,
-                    spec_len = spec.steps.len(),
-                    steps_len = steps.len(),
-                    "re-eval: live step count != active Workflow spec — \
-                     readiness cannot advance this Job (its step graph \
-                     is inconsistent with its Workflow)"
-                );
-            }
-            let changed =
-                crate::registry::reevaluate(&spec, &mut steps, &job.subject, &job.metadata);
             let stamp = state
                 .publisher
                 .stamp_with_actor(actor.clone())
                 .await
                 .with_partition(job.partition);
-            for idx in changed {
-                let changed_step = &steps[idx];
-                // OUTBOX (phase 2): the promoted step's state event +
-                // D6 ready marker (when it lands in `Ready` — lets
-                // dispatcher rules react to a step *becoming
-                // eligible*, the delegate-subjob spawn fork D7) record
-                // in the SAME transaction as the promotion.
-                let mut reeval_events = vec![stamp.event(
-                    events::STEP_UPDATED,
-                    events::step_state_payload(changed_step),
-                )];
-                if changed_step.status == StepStatus::Ready && !changed_step.kind.is_empty() {
-                    reeval_events
-                        .push(build_step_ready_event(state, job, changed_step, actor).await);
-                }
-                // Judged against the metadata `list_steps` read — the
-                // re-evaluator moves status only, so the copy's metadata
-                // IS the read (backlog e381689d). A refusal means another
-                // writer moved the row since; every step writer ends in
-                // this same pass, so that writer's own pass re-judges the
-                // promotion over the row as it now stands.
-                if let Err(e) = state
-                    .jobs
-                    .update_step_if_unchanged_at(
-                        changed_step,
-                        &changed_step.metadata,
-                        stamp.timestamp,
-                        &reeval_events,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        job_id = %job.id,
-                        step_id = %changed_step.id,
-                        error = %e,
-                        "re-eval: failed to persist promoted step",
-                    );
-                    continue;
+            // A pass whose promotion was refused because another writer
+            // moved that row since the list read (backlog 6ec22d71) is
+            // run again over the rows as they now stand: the promotion
+            // is re-judged there — it may still hold, or the other
+            // writer may have finished the step — rather than left to
+            // a later pass that a claim, a merge or a sign-off never
+            // runs. Promotions that landed are not repeated: the next
+            // read shows them done. Bounded, and a pass still refused
+            // at the bound is logged.
+            const PASSES: usize = 3;
+            for _ in 0..PASSES {
+                if !reevaluate_pass(state, job, actor, &spec, &stamp).await {
+                    return;
                 }
             }
+            tracing::warn!(
+                job_id = %job.id,
+                "re-eval: steps kept changing under the promotion — left for the next pass",
+            );
         }
         Err(crate::registry::WorkflowError::NotFound(_)) => {
             // No active spec (ad-hoc / registry-less kind): nothing to
@@ -3281,6 +3265,88 @@ pub(super) async fn reevaluate_and_persist<R: JobsRepository + 'static, B: Event
             tracing::warn!(error = %e, job_id = %job.id, version = job.workflow_version, "re-eval: pinned Workflow version not resolvable");
         }
     }
+}
+
+/// One re-evaluation over the steps as read now: persist every
+/// promotion, each only over the row version the read saw. Answers
+/// whether a promotion was REFUSED because its row moved since the read
+/// ([`crate::port::JobsError::StepChanged`]) — the caller's cue to run
+/// another pass over the rows as they now stand (backlog 6ec22d71).
+/// Every other failure is logged and not retried, as before.
+async fn reevaluate_pass<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    job: &Job,
+    actor: &boss_core::actor::ActorId,
+    spec: &crate::registry::WorkflowSpec,
+    stamp: &boss_core::publisher::EventStamp,
+) -> bool {
+    let Ok(read) = state.jobs.list_steps_versioned(&job.id).await else {
+        return false;
+    };
+    let (mut steps, versions): (Vec<Step>, Vec<crate::port::StepVersion>) =
+        read.into_iter().unzip();
+    // `reevaluate` requires steps in spec order (sort_order == index);
+    // the list read returns them sorted by sort_order, so the invariant
+    // holds. Invariant (expose, don't swallow): a Job's live step set
+    // must match its active Workflow spec, or `reevaluate`'s
+    // length-guard bails and the Job can no longer advance. With atomic
+    // materialization this only fires on a genuine mid-flight republish
+    // that changed the step count. Surface it loudly instead of
+    // silently stalling the Job.
+    if spec.steps.len() != steps.len() {
+        tracing::warn!(
+            job_id = %job.id,
+            kind = %job.kind,
+            spec_len = spec.steps.len(),
+            steps_len = steps.len(),
+            "re-eval: live step count != active Workflow spec — \
+             readiness cannot advance this Job (its step graph \
+             is inconsistent with its Workflow)"
+        );
+    }
+    let changed = crate::registry::reevaluate(spec, &mut steps, &job.subject, &job.metadata);
+    let mut refused = false;
+    for idx in changed {
+        let changed_step = &steps[idx];
+        // OUTBOX (phase 2): the promoted step's state event + D6 ready
+        // marker (when it lands in `Ready` — lets dispatcher rules react
+        // to a step *becoming eligible*, the delegate-subjob spawn fork
+        // D7) record in the SAME transaction as the promotion.
+        let mut reeval_events = vec![stamp.event(
+            events::STEP_UPDATED,
+            events::step_state_payload(changed_step),
+        )];
+        if changed_step.status == StepStatus::Ready && !changed_step.kind.is_empty() {
+            reeval_events.push(build_step_ready_event(state, job, changed_step, actor).await);
+        }
+        // Judged against the row version the list read saw (backlogs
+        // e381689d, 6ec22d71): a promotion computed before another
+        // writer's claim, assignment or skip would otherwise write the
+        // stale copy's holder back — or, over a row that went terminal,
+        // record a `jobs.step.updated` the row refused.
+        match state
+            .jobs
+            .update_step_if_unchanged_at(
+                changed_step,
+                versions[idx],
+                stamp.timestamp,
+                &reeval_events,
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(crate::port::JobsError::StepChanged { .. }) => refused = true,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %job.id,
+                    step_id = %changed_step.id,
+                    error = %e,
+                    "re-eval: failed to persist promoted step",
+                );
+            }
+        }
+    }
+    refused
 }
 
 /// What the packet's PINNED protocol says about `step`, read against the

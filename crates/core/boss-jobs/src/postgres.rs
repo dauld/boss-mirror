@@ -6,7 +6,7 @@ use boss_core::partition::Partition;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::port::{AssignmentRow, JobFilter, JobScope, JobsError, JobsRepository};
+use crate::port::{AssignmentRow, JobFilter, JobScope, JobsError, JobsRepository, StepVersion};
 
 pub struct PgJobs {
     pool: PgPool,
@@ -34,12 +34,12 @@ impl PgJobs {
     /// The one whole-row step write behind both
     /// [`JobsRepository::update_step_at`] (`read` = `None`, no judgement)
     /// and [`JobsRepository::update_step_if_unchanged_at`] (`read` = the
-    /// metadata the caller's copy was computed from). One statement, so
-    /// the two doors cannot disagree about anything but the judgement.
+    /// version the caller's copy was read at). One UPDATE, so the two
+    /// doors cannot disagree about anything but the judgement.
     async fn write_step(
         &self,
         step: &Step,
-        read: Option<&serde_json::Value>,
+        read: Option<StepVersion>,
         now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
@@ -48,6 +48,43 @@ impl PgJobs {
             .begin()
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
+        // THE JUDGEMENT (backlogs e381689d, 6ec22d71), under the row's
+        // lock so nothing can land between it and the UPDATE below. The
+        // row must still be the version the caller read — `xmin`, moved
+        // by every write to it, so ANY column any writer changed
+        // refuses: a claim's status and holder erased by an assignment
+        // PUT computed before it was exactly what a metadata compare
+        // let through. And a terminal row read at that version still
+        // refuses a write that would move a column it freezes: the
+        // UPDATE's CASEs would keep the row's value while the caller's
+        // `jobs.step.updated` recorded the write's, and the rebuild
+        // replays the event. Compared on the parsed row — the same
+        // parse the caller's copy came from — so no value the parse
+        // cannot hold exactly reads as a change.
+        if let Some(read) = read {
+            let row = sqlx::query_as::<_, VersionedStepRow>(&format!(
+                "{VERSIONED_STEP_SELECT} WHERE id = $1 FOR UPDATE"
+            ))
+            .bind(*step.id.inner().as_uuid())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+            let Some(row) = row else {
+                return Err(JobsError::StepNotFound(step.id));
+            };
+            if StepVersion::new(row.row_version) != read {
+                return Err(JobsError::StepChanged { id: step.id });
+            }
+            let current = row_to_step(row.step)?;
+            if matches!(current.status, StepStatus::Completed | StepStatus::Skipped)
+                && crate::port::terminal_write_moves_frozen(&current, step)
+            {
+                return Err(JobsError::TerminalStep {
+                    id: step.id,
+                    status: step_status_str(current.status).to_string(),
+                });
+            }
+        }
         let result = sqlx::query(
             r#"
             UPDATE steps SET kind = $2,
@@ -125,17 +162,7 @@ impl PgJobs {
                     WHEN status IN ('completed', 'skipped') THEN completed_at
                     ELSE $15
                 END
-            -- A write that names the metadata it was computed from
-            -- ($16) lands only while a live row still holds exactly
-            -- that (backlog e381689d): otherwise it would erase what
-            -- another writer stored since its read. A terminal row's
-            -- metadata is frozen above whatever the write carries, so
-            -- it is not judged. jsonb `=` is structural — key order
-            -- and whitespace do not count.
             WHERE id = $1
-              AND ($16::jsonb IS NULL
-                   OR status IN ('completed', 'skipped')
-                   OR metadata = $16::jsonb)
             "#,
         )
         .bind(*step.id.inner().as_uuid())
@@ -153,26 +180,11 @@ impl PgJobs {
         .bind(serde_json::to_value(&step.fields).unwrap_or_default())
         .bind(step.completed_by.as_ref().map(ToString::to_string))
         .bind(step.completed_at)
-        .bind(read)
         .execute(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
 
         if result.rows_affected() == 0 {
-            // Missing, or moved since the caller's read? Only a write
-            // that named its read can be the second, and the refusal
-            // must say which — "not found" for a row that is plainly
-            // there sends the caller looking for the wrong fault.
-            if read.is_some() {
-                let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM steps WHERE id = $1")
-                    .bind(*step.id.inner().as_uuid())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(|e| JobsError::Storage(e.to_string()))?;
-                if exists.is_some() {
-                    return Err(JobsError::StepChanged { id: step.id });
-                }
-            }
             return Err(JobsError::StepNotFound(step.id));
         }
         // OUTBOX (phase 2): the caller's events (STEP_UPDATED +
@@ -264,6 +276,25 @@ pub(crate) struct StepRow {
     completed_by: Option<String>,
     completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
+
+/// A step row with the version it was read at — `xmin`, the id of the
+/// transaction that last wrote the row, which EVERY write moves and no
+/// read does ([`StepVersion`], backlog 6ec22d71). Selected with the row
+/// in one statement, so the version is the version of exactly the
+/// values read.
+#[derive(sqlx::FromRow)]
+struct VersionedStepRow {
+    #[sqlx(flatten)]
+    step: StepRow,
+    row_version: i64,
+}
+
+/// `xid` has no integer cast; its text form is the unsigned 32-bit id,
+/// which a bigint holds whole.
+const VERSIONED_STEP_SELECT: &str = "SELECT id, job_id, kind, title, spec_slug, assignee_id, \
+     status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, \
+     completed_on, metadata, notes, step_plugin_version, embedded_job, completed_by, \
+     completed_at, xmin::text::bigint AS row_version FROM steps";
 
 /// Joined row backing [`PgJobs::list_assignments`] — a `StepRow`
 /// (flattened) plus the minimum Job context the pull surface needs.
@@ -1628,14 +1659,22 @@ impl JobsRepository for PgJobs {
     }
 
     async fn get_step(&self, id: &StepId) -> Result<Option<Step>, JobsError> {
-        let row = sqlx::query_as::<_, StepRow>(
-            "SELECT id, job_id, kind, title, spec_slug, assignee_id, status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, completed_on, metadata, notes, step_plugin_version, embedded_job, completed_by, completed_at FROM steps WHERE id = $1",
-        )
+        Ok(self.get_step_versioned(id).await?.map(|(step, _)| step))
+    }
+
+    async fn get_step_versioned(
+        &self,
+        id: &StepId,
+    ) -> Result<Option<(Step, StepVersion)>, JobsError> {
+        let row = sqlx::query_as::<_, VersionedStepRow>(&format!(
+            "{VERSIONED_STEP_SELECT} WHERE id = $1"
+        ))
         .bind(*id.inner().as_uuid())
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
-        row.map(row_to_step).transpose()
+        row.map(|r| Ok((row_to_step(r.step)?, StepVersion::new(r.row_version))))
+            .transpose()
     }
 
     async fn update_step_at(
@@ -1650,7 +1689,7 @@ impl JobsRepository for PgJobs {
     async fn update_step_if_unchanged_at(
         &self,
         step: &Step,
-        read: &serde_json::Value,
+        read: StepVersion,
         now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
@@ -1911,14 +1950,28 @@ impl JobsRepository for PgJobs {
     }
 
     async fn list_steps(&self, job_id: &JobId) -> Result<Vec<Step>, JobsError> {
-        let rows = sqlx::query_as::<_, StepRow>(
-            "SELECT id, job_id, kind, title, spec_slug, assignee_id, status, sort_order, blocked_by, sign_offs_required, assurance_required, sign_offs, fields, completed_on, metadata, notes, step_plugin_version, embedded_job, completed_by, completed_at FROM steps WHERE job_id = $1 ORDER BY sort_order",
-        )
+        Ok(self
+            .list_steps_versioned(job_id)
+            .await?
+            .into_iter()
+            .map(|(step, _)| step)
+            .collect())
+    }
+
+    async fn list_steps_versioned(
+        &self,
+        job_id: &JobId,
+    ) -> Result<Vec<(Step, StepVersion)>, JobsError> {
+        let rows = sqlx::query_as::<_, VersionedStepRow>(&format!(
+            "{VERSIONED_STEP_SELECT} WHERE job_id = $1 ORDER BY sort_order"
+        ))
         .bind(*job_id.inner().as_uuid())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
-        rows.into_iter().map(row_to_step).collect()
+        rows.into_iter()
+            .map(|r| Ok((row_to_step(r.step)?, StepVersion::new(r.row_version))))
+            .collect()
     }
 
     async fn list_assignments(

@@ -31,7 +31,11 @@ pub enum JobsError {
     /// the 204-that-wrote-nothing defect (job 903e6b90) reborn. The
     /// adapters refuse instead, atomically with the row check, and the
     /// handler turns this into the 409 the caller can act on.
-    #[error("step {id} is {status} — a terminal step's metadata is frozen")]
+    ///
+    /// The judged whole-row write refuses with it too: a write over a
+    /// terminal row it read afresh that would move a column the row
+    /// freezes ([`terminal_write_moves_frozen`], backlog 6ec22d71).
+    #[error("step {id} is {status} — what a terminal step recorded is frozen")]
     TerminalStep { id: StepId, status: String },
     /// A whole-row job write would move a finished (closed or
     /// cancelled) packet's status. The job PUT judges the row it READ;
@@ -41,17 +45,77 @@ pub enum JobsError {
     /// (backlog 570e72bd, road 5).
     #[error("job {id} is {status} — a finished packet's status does not move")]
     TerminalJob { id: JobId, status: String },
-    /// A whole-row step write was computed from a read whose metadata
-    /// the row no longer holds: another writer (the merge door, most
-    /// often) changed it between that read and this write. Written, the
-    /// stale copy would erase the other write while this one answered
-    /// success — measured on run 6b6fe011, 2026-09-25 (backlog
-    /// e381689d). Refused atomically with the row check instead; the
-    /// caller re-reads and re-sends.
+    /// A whole-row step write was computed from a read of a version the
+    /// row no longer is: another writer (the merge door, a claim, a
+    /// completion) wrote it between that read and this write. Written,
+    /// the stale copy would erase the other write while this one
+    /// answered success — measured on run 6b6fe011, 2026-09-25 (backlog
+    /// e381689d), and judged on every column since backlog 6ec22d71.
+    /// Refused atomically with the row check instead; the caller
+    /// re-reads and re-sends.
     #[error(
-        "step {id} changed since this write read it — its metadata is no longer what the write was computed from"
+        "step {id} changed since this write read it — the row is no longer the version the write was computed from"
     )]
     StepChanged { id: StepId },
+}
+
+/// The version a step row was at when it was read — the judgement a
+/// read-modify-write step writer's write is held to
+/// ([`JobsRepository::update_step_if_unchanged_at`], backlog 6ec22d71).
+///
+/// EVERY write to the row moves it, by any writer and whatever column
+/// it touched, and a read never does. That is the whole contract, and
+/// it is why this is a version and not a value: car 88123ae0 judged
+/// the write on the metadata it read, so a claim — status and holder,
+/// no metadata — was erased by an assignment PUT computed a moment
+/// before it, and a metadata number beyond f64 precision, written by
+/// hand, never compared equal to the reader's parsed copy and wedged
+/// the step.
+///
+/// The Pg adapter's is the row's `xmin`, the id of the transaction that
+/// last wrote it: no column to maintain, no writer that can forget to
+/// bump it, and nothing a rebuild has to reproduce — it is a
+/// concurrency token, never state, so it is in no event and no
+/// projection, and a read taken before a rebuild is simply refused
+/// after it. `updated_at` was the alternative and is not one: it is the
+/// write's own `now`, which the simulation clock can hold still, so two
+/// writes can share it. The in-memory adapter's is a counter bumped by
+/// every write under its lock. Opaque to callers — compare, never
+/// compute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StepVersion(i64);
+
+impl StepVersion {
+    pub(crate) fn new(raw: i64) -> Self {
+        Self(raw)
+    }
+}
+
+/// PURE: whether writing `write` over the TERMINAL row `row` would move
+/// a column the row freezes — the columns the whole-row write keeps
+/// under its terminal CASE (Pg) or copies back (in-memory): status,
+/// completion date, who and when, metadata, the authored fields, and
+/// what was completed (title, holder, notes; backlog 42e7c6b9).
+///
+/// A write that would is refused rather than written (backlog
+/// 6ec22d71): the row would keep its values, but the write's
+/// `jobs.step.updated` carries the write's, and `rebuild.rs`
+/// replays that event verbatim — so the rebuilt row would differ from
+/// the live one. One definition for both adapters (CLAUDE.md §9a).
+/// Compared on the parsed `Step` both sides hold, so a value the
+/// reader's copy cannot represent exactly (a number beyond f64) does
+/// not read as a change: the caller's copy of a terminal row came from
+/// the same parse.
+pub fn terminal_write_moves_frozen(row: &Step, write: &Step) -> bool {
+    row.status != write.status
+        || row.completed_on != write.completed_on
+        || row.completed_by != write.completed_by
+        || row.completed_at != write.completed_at
+        || row.metadata != write.metadata
+        || row.fields != write.fields
+        || row.title != write.title
+        || row.assignee_id != write.assignee_id
+        || row.notes != write.notes
 }
 
 /// Optional filters for listing jobs.
@@ -1085,6 +1149,23 @@ pub trait JobsRepository: Send + Sync {
 
     async fn get_step(&self, id: &StepId) -> Result<Option<Step>, JobsError>;
 
+    /// [`JobsRepository::get_step`] with the [`StepVersion`] the row was
+    /// at, read in the same statement — the read a judged write
+    /// ([`JobsRepository::update_step_if_unchanged_at`]) is computed
+    /// from (backlog 6ec22d71).
+    async fn get_step_versioned(
+        &self,
+        id: &StepId,
+    ) -> Result<Option<(Step, StepVersion)>, JobsError>;
+
+    /// [`JobsRepository::list_steps`] with each row's [`StepVersion`],
+    /// for the writers that judge a list read: the readiness
+    /// re-evaluator and the terminal close's skip (backlog 6ec22d71).
+    async fn list_steps_versioned(
+        &self,
+        job_id: &JobId,
+    ) -> Result<Vec<(Step, StepVersion)>, JobsError>;
+
     async fn update_step(&self, step: &Step) -> Result<(), JobsError> {
         self.update_step_at(step, Utc::now(), &[]).await
     }
@@ -1097,9 +1178,11 @@ pub trait JobsRepository: Send + Sync {
     ) -> Result<(), JobsError>;
 
     /// [`JobsRepository::update_step_at`] for a write computed from a
-    /// READ: `read` is the metadata the caller's copy of the step was
-    /// built from, and the write lands only while the live row still
-    /// holds exactly that. Otherwise it is refused with
+    /// READ: `read` is the [`StepVersion`] the caller's copy of the step
+    /// was read at ([`JobsRepository::get_step_versioned`] /
+    /// [`JobsRepository::list_steps_versioned`]), and the write lands
+    /// only while the live row is still that version — no writer has
+    /// touched ANY column since. Otherwise it is refused with
     /// [`JobsError::StepChanged`] and nothing — row or events — is
     /// written.
     ///
@@ -1114,13 +1197,26 @@ pub trait JobsRepository: Send + Sync {
     /// in the service writes through this door; the check rides the
     /// write's own statement, so no window is left between them.
     ///
-    /// A TERMINAL ROW IS NOT JUDGED: its metadata is frozen by
-    /// `update_step_at`'s rule whatever the write carries, so nothing a
-    /// stale copy holds can reach it.
+    /// ON EVERY COLUMN, AND OVER A TERMINAL ROW TOO (backlog 6ec22d71).
+    /// The first version of this door compared the METADATA read, and
+    /// exempted a terminal row because its metadata is frozen. Two
+    /// reviews reproduced what that left on 2026-09-25: a claim moves
+    /// status and holder and no metadata, so the assignment PUT computed
+    /// a moment before it wrote `ready` and its own holder back over the
+    /// claim; and a stale write over a row that went `completed`
+    /// answered Ok, the row kept its values under the terminal CASE,
+    /// and a `jobs.step.updated` carrying the stale ones was recorded
+    /// anyway — which `rebuild.rs::upsert_step` replays verbatim, so
+    /// replay demoted the step. Now any write since the read refuses,
+    /// and a terminal row read at this version still refuses
+    /// ([`JobsError::TerminalStep`]) a write that would move a column
+    /// it freezes ([`terminal_write_moves_frozen`]) — so no event is
+    /// ever recorded for a value the row refused. An idempotent re-send
+    /// over a fresh read of a terminal row moves nothing and lands.
     async fn update_step_if_unchanged_at(
         &self,
         step: &Step,
-        read: &serde_json::Value,
+        read: StepVersion,
         now: DateTime<Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError>;

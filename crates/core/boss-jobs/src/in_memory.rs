@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use boss_core::job::{Job, JobId, JobStatus, Step, StepId, StepStatus};
 use chrono::{DateTime, Utc};
 
-use crate::port::{JobFilter, JobScope, JobsError, JobsRepository};
+use crate::port::{JobFilter, JobScope, JobsError, JobsRepository, StepVersion};
 
 #[derive(Default)]
 pub struct InMemoryJobs {
@@ -38,6 +38,11 @@ struct State {
     /// instant per step. The lens's labelled lower-bound fallback for
     /// steps that never passed through `Ready`.
     step_touched_at: HashMap<String, DateTime<Utc>>,
+    /// The in-memory mirror of the Pg row's `xmin`: the version each
+    /// step row is at, moved by every write ([`touch_step`]) and by no
+    /// read — what a judged write is held to (backlog 6ec22d71).
+    step_version: HashMap<String, i64>,
+    last_step_version: i64,
     /// The in-memory mirror of `jobs.created_at`: the admission
     /// instant, written once in `create_job_at` from the same `now`
     /// the Pg adapter binds into that column. `list_jobs` breaks
@@ -60,7 +65,13 @@ struct State {
     /// Merges that land the moment a step is next read, set by
     /// [`InMemoryJobs::merge_after_next_read`].
     merge_after_read: HashMap<String, serde_json::Map<String, serde_json::Value>>,
+    /// Changes that land just before a step's next judged write, set by
+    /// [`InMemoryJobs::change_before_next_judged_write`].
+    change_before_write: HashMap<String, StepChange>,
 }
+
+/// A change another writer lands on a step row (test hook).
+type StepChange = Box<dyn FnOnce(&mut Step) + Send>;
 
 impl InMemoryJobs {
     pub fn new() -> Self {
@@ -137,27 +148,64 @@ impl InMemoryJobs {
         }
     }
 
+    /// Let another writer change this step — ANY column, through `change`
+    /// — just before the next judged write of it
+    /// (`update_step_if_unchanged_at`) is judged: the row moves between
+    /// that writer's read and its write, whichever read it was. The
+    /// stand-in for a claim, an assignment or a completion committing
+    /// inside a read-modify-write's window without touching metadata,
+    /// which a metadata-only compare let through (backlog 6ec22d71).
+    /// Unlike [`Self::merge_after_next_read`] it does not care which
+    /// read the writer took, so it reaches the re-evaluator and the
+    /// terminal close, whose reads are list reads. One-shot.
+    pub fn change_before_next_judged_write(
+        &self,
+        step_id: &StepId,
+        change: impl FnOnce(&mut Step) + Send + 'static,
+    ) {
+        if let Ok(mut state) = self.inner.lock() {
+            state
+                .change_before_write
+                .insert(step_key(step_id), Box::new(change));
+        }
+    }
+
     /// The one whole-row step write behind both `update_step_at` (`read`
     /// = `None`) and `update_step_if_unchanged_at` — the Pg adapter's
     /// `write_step`, judged under this adapter's lock as that one judges
-    /// in its UPDATE's WHERE clause (backlog e381689d).
+    /// under its row lock (backlogs e381689d, 6ec22d71).
     fn write_step(
         &self,
         step: &Step,
-        read: Option<&serde_json::Value>,
+        read: Option<StepVersion>,
         now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
         let mut state = self.inner.lock().expect("poisoned");
         let key = step_key(&step.id);
+        if read.is_some()
+            && let Some(change) = state.change_before_write.remove(&key)
+            && let Some(row) = state.steps.get_mut(&key)
+        {
+            // Another writer's write: it moves the version as any does.
+            change(row);
+            bump_version(&mut state, &key);
+        }
         let Some(existing) = state.steps.get(&key) else {
             return Err(JobsError::StepNotFound(step.id));
         };
-        if let Some(read) = read
-            && !matches!(existing.status, StepStatus::Completed | StepStatus::Skipped)
-            && existing.metadata != *read
-        {
-            return Err(JobsError::StepChanged { id: step.id });
+        if let Some(read) = read {
+            if version_of(&state, &key) != read {
+                return Err(JobsError::StepChanged { id: step.id });
+            }
+            if matches!(existing.status, StepStatus::Completed | StepStatus::Skipped)
+                && crate::port::terminal_write_moves_frozen(existing, step)
+            {
+                return Err(JobsError::TerminalStep {
+                    id: step.id,
+                    status: format!("{:?}", existing.status).to_lowercase(),
+                });
+            }
         }
         // Mirror the SQL adapter: the generic update never writes the
         // stamp fields — stamps are append-only via append_sign_off,
@@ -198,7 +246,7 @@ impl InMemoryJobs {
         if next.status == StepStatus::Ready {
             state.step_ready_at.entry(key.clone()).or_insert(now);
         }
-        state.step_touched_at.insert(key.clone(), now);
+        touch_step(&mut state, key.clone(), now);
         state.steps.insert(key, next);
         drop(state);
         self.record_all(events);
@@ -240,6 +288,26 @@ fn job_key(id: &JobId) -> String {
 
 fn step_key(id: &StepId) -> String {
     id.to_string()
+}
+
+/// Every write to a step row lands here: the `updated_at` mirror, and
+/// the version the Pg adapter's `xmin` is — moved by every write,
+/// whatever column it touched (backlog 6ec22d71).
+fn touch_step(state: &mut State, key: String, now: DateTime<Utc>) {
+    bump_version(state, &key);
+    state.step_touched_at.insert(key, now);
+}
+
+/// A fresh version for this row from one counter, so a version is never
+/// reused — the `xmin` of a transaction that has already committed.
+fn bump_version(state: &mut State, key: &str) {
+    state.last_step_version += 1;
+    let next = state.last_step_version;
+    state.step_version.insert(key.to_string(), next);
+}
+
+fn version_of(state: &State, key: &str) -> StepVersion {
+    StepVersion::new(state.step_version.get(key).copied().unwrap_or(0))
 }
 
 fn matches_filter(job: &Job, filter: &JobFilter) -> bool {
@@ -387,7 +455,7 @@ fn insert_step_locked(state: &mut State, step: &Step, now: chrono::DateTime<chro
         if step.status == StepStatus::Ready {
             state.step_ready_at.insert(key.clone(), now);
         }
-        state.step_touched_at.insert(key, now);
+        touch_step(state, key, now);
     }
     inserted
 }
@@ -891,7 +959,7 @@ impl JobsRepository for InMemoryJobs {
                         ..r.step.clone()
                     }
                 };
-                state.step_touched_at.insert(key.clone(), stamp.timestamp);
+                touch_step(&mut state, key.clone(), stamp.timestamp);
                 state.steps.insert(key, next.clone());
                 rewritten.push(next);
             }
@@ -983,9 +1051,20 @@ impl JobsRepository for InMemoryJobs {
     }
 
     async fn get_step(&self, id: &StepId) -> Result<Option<Step>, JobsError> {
+        Ok(self.get_step_versioned(id).await?.map(|(step, _)| step))
+    }
+
+    async fn get_step_versioned(
+        &self,
+        id: &StepId,
+    ) -> Result<Option<(Step, StepVersion)>, JobsError> {
         let mut state = self.inner.lock().expect("poisoned");
         let key = step_key(id);
-        let read = state.steps.get(&key).cloned();
+        let read = state
+            .steps
+            .get(&key)
+            .cloned()
+            .map(|s| (s, version_of(&state, &key)));
         if let Some(patch) = state.merge_after_read.remove(&key)
             && let Some(row) = state.steps.get_mut(&key)
         {
@@ -998,6 +1077,8 @@ impl JobsRepository for InMemoryJobs {
                 }
             }
             row.metadata = serde_json::Value::Object(md);
+            // The merge door's write, so it moves the version as one.
+            bump_version(&mut state, &key);
         }
         Ok(read)
     }
@@ -1014,7 +1095,7 @@ impl JobsRepository for InMemoryJobs {
     async fn update_step_if_unchanged_at(
         &self,
         step: &Step,
-        read: &serde_json::Value,
+        read: StepVersion,
         now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
@@ -1057,7 +1138,7 @@ impl JobsRepository for InMemoryJobs {
             step.metadata = serde_json::Value::Object(md);
             let merged = step.clone();
             // Mirrors the SQL's `updated_at = stamp.timestamp`.
-            state.step_touched_at.insert(key, stamp.timestamp);
+            touch_step(&mut state, key, stamp.timestamp);
             merged
         };
         let event = stamp.event(
@@ -1106,7 +1187,7 @@ impl JobsRepository for InMemoryJobs {
             let claimed = existing.clone();
             // A claim bumps `updated_at` in the Pg adapter; the ready
             // stamp, already written at the flip, stays put.
-            state.step_touched_at.insert(key, now);
+            touch_step(&mut state, key, now);
             claimed
         };
         self.record_all(events);
@@ -1128,7 +1209,7 @@ impl JobsRepository for InMemoryJobs {
             };
             existing.sign_offs.push(stamp.clone());
             // Mirrors the sign-off UPDATE's `updated_at = $3`.
-            state.step_touched_at.insert(key, now);
+            touch_step(&mut state, key, now);
         }
         self.record_all(events);
         Ok(())
@@ -1147,6 +1228,18 @@ impl JobsRepository for InMemoryJobs {
     }
 
     async fn list_steps(&self, job_id: &JobId) -> Result<Vec<Step>, JobsError> {
+        Ok(self
+            .list_steps_versioned(job_id)
+            .await?
+            .into_iter()
+            .map(|(step, _)| step)
+            .collect())
+    }
+
+    async fn list_steps_versioned(
+        &self,
+        job_id: &JobId,
+    ) -> Result<Vec<(Step, StepVersion)>, JobsError> {
         let state = self.inner.lock().expect("poisoned");
         let job_key = job_id.to_string();
         if state.unreadable_steps.contains(&job_key) {
@@ -1154,13 +1247,13 @@ impl JobsRepository for InMemoryJobs {
                 "steps of job {job_key} unreadable (injected by fail_steps_read)"
             )));
         }
-        let mut steps: Vec<Step> = state
+        let mut steps: Vec<(Step, StepVersion)> = state
             .steps
-            .values()
-            .filter(|s| s.job_id.to_string() == job_key)
-            .cloned()
+            .iter()
+            .filter(|(_, s)| s.job_id.to_string() == job_key)
+            .map(|(key, s)| (s.clone(), version_of(&state, key)))
             .collect();
-        steps.sort_by_key(|s| s.sort_order);
+        steps.sort_by_key(|(s, _)| s.sort_order);
         Ok(steps)
     }
 
