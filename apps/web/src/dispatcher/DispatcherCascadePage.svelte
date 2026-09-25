@@ -9,7 +9,8 @@
   feed's handler_emits is the dispatcher build's whole roster, most of
   whose company-module handlers no rule on a given instance fires
   (backlog ec40e269). Data: GET /api/dispatcher/rules.
-  Layout dagre LR; render Svelte Flow (same stack as the Workflow graph).
+  Layout dagre LR; render Svelte Flow (same stack as the Workflow graph),
+  each node a CascadeNode sized to the box dagre laid out.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -20,6 +21,9 @@
   import { buildCascade, describeTrigger, filterCascadeFromEvents, invokedEmits, triggerTopics, type Cascade } from './cascadeToGraph';
   import type { DispatcherRules } from './types';
   import { href, navigate } from '../router';
+  import CascadeNode from './CascadeNode.svelte';
+
+  const nodeTypes = { dx: CascadeNode };
 
   let data = $state<DispatcherRules | null>(null);
   let error = $state<string | null>(null);
@@ -96,8 +100,14 @@
       if (n.id === sel) classes.push('dx-selected');
       return {
         id: n.id,
+        type: 'dx',
         position: { x: (p?.x ?? 0) - NODE_W / 2, y: (p?.y ?? 0) - NODE_H / 2 },
-        data: { label: n.sublabel ? `${n.label}\n${n.sublabel}` : n.label },
+        // The box dagre just spaced, handed to the node itself: the
+        // library paints it inline, so no stylesheet can size the node
+        // differently from its slot (backlog db2ab40a).
+        width: NODE_W,
+        height: NODE_H,
+        data: { label: n.label, sublabel: n.sublabel ?? '' },
         class: classes.join(' '),
         sourcePosition: 'right',
         targetPosition: 'left',
@@ -242,6 +252,7 @@
           <SvelteFlow
             bind:nodes
             bind:edges
+            {nodeTypes}
             fitView
             nodesDraggable
             elementsSelectable
@@ -526,36 +537,49 @@
     margin: 2px 0;
   }
   /* Node styling — classes set in buildFlow; :global because nodes render
-     inside the Svelte Flow subtree. */
-  :global(.dx-node) {
+     inside the Svelte Flow subtree.
+
+     Every node rule is qualified by .svelte-flow__node so no one-class
+     library rule can tie it and win on stylesheet order (backlog
+     db2ab40a). Order is what decided it before, and the two bundles
+     disagree on it: the dev server the mocked suite serves links one
+     sheet per module, this page's BEFORE the library's, so
+     .svelte-flow__node-default's 150px and 10px padding won and nodes
+     overlapped; the production build concatenates the library first
+     (measured 2026-09-25: byte 350398 against 360533 of the one chunk
+     index.html links) and happened to paint 240. The node's size is not
+     set here at all: buildFlow hands the layout's box to the node. */
+  :global(.svelte-flow__node.dx-node) {
     border-radius: 8px;
     border-width: 1.5px;
     border-style: solid;
-    white-space: pre-line;
     font-size: 0.72rem;
     line-height: 1.25;
     text-align: center;
     padding: 5px 8px;
-    width: 240px;
     box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    overflow: hidden;
   }
-  :global(.dx-event) {
+  :global(.svelte-flow__node.dx-event) {
     background: var(--ink-raised);
     border-color: var(--hairline);
   }
-  :global(.dx-rule) {
+  :global(.svelte-flow__node.dx-rule) {
     background: var(--signal-wash);
     border-color: var(--signal);
   }
-  :global(.dx-handler) {
+  :global(.svelte-flow__node.dx-handler) {
     background: var(--ok-wash);
     border-color: var(--clear);
   }
-  :global(.dx-cycle) {
+  :global(.svelte-flow__node.dx-cycle) {
     box-shadow: 0 0 0 2px var(--troubled);
     border-color: var(--troubled) !important;
   }
-  :global(.dx-selected) {
+  :global(.svelte-flow__node.dx-selected) {
     box-shadow: 0 0 0 3px var(--signal);
   }
   .dx-event {
