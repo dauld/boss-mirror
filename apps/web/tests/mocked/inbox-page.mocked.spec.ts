@@ -40,6 +40,16 @@
 // path, every way a read can fail. Gap 1 (0b2bac00) landed in the
 // messages domain; gaps 9 (efd5a07d) and 10 (9c453257) are the notify
 // rule's and the machine door's, not controls this page renders.
+//
+// Six more this spec found and the audit did not list, all answered by
+// backlog e2679b23 and pinned below as answered: (a) the search reads
+// the sender as the row SHOWS it, not only the id; (b) a read that has
+// not landed prints no counts on the filter buttons; (c) a 200 whose
+// body is not a list is a failed read, never the empty inbox; (d) a
+// guest's per-row Mark read, Archive and checkbox stand behind the
+// WriteGate, and a guest's link is a navigation with no write; (e) the
+// To list names each role by its registry name; (f) the search box
+// has an accessible name.
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage, settledReads } from './_helpers';
@@ -62,6 +72,14 @@ const emp = (id: string, name: string, role: string) => ({
 const DAVID = emp('emp-001', 'David', 'platform-admin');
 const BO = emp('emp-002', 'Bo Cellar', 'head-of-sales');
 const ROSTER = [DAVID, BO];
+
+/// The role Classes, named the way no code could derive them from the
+/// code — so the To list proves it read the registry (e2679b23 (e)).
+const role = (code: string, display_name: string, sort_order: number) => ({
+  subject_kind: 'employee', code, display_name, parent_code: null, member_attribute: 'role',
+  metadata: {}, sort_order, retired_at: null,
+});
+const ROLE_CLASSES = [role('platform-admin', 'Platform administrator', 1), role('head-of-sales', 'Sales lead', 2)];
 
 const ago = (minutes: number): string => new Date(NOW.getTime() - minutes * 60_000).toISOString();
 
@@ -142,6 +160,7 @@ async function install(page: Page, opts: Options = {}): Promise<Backend> {
       : json(r, opts.roster ?? ROSTER));
   await page.route(/\/api\/session$/, (r) =>
     json(r, opts.session ?? { username: 'david', employee_id: DAVID.id, role: 'platform-admin' }));
+  await page.route(/\/api\/classes(\?|$)/, (r) => json(r, ROLE_CLASSES));
   // Where the links land: the job surfaces read the job, which this
   // backend does not hold — its own not-found, not the floor's `[]`,
   // which the job page cannot parse.
@@ -216,6 +235,9 @@ test.describe('/ux/inbox — the inbox, read', () => {
     await expect(page.getByRole('button', { name: 'Compose', exact: true })).toBeEnabled();
     await expect(filters(page).locator('.filter-label')).toHaveText(['Search', 'Filter']);
     await expect(searchbox(page)).toHaveAttribute('placeholder', 'Subject, sender…');
+    // (f) A name of its own: the placeholder is example text, and it is
+    // gone once anything is typed (class 2361ac45).
+    await expect(filters(page).getByRole('searchbox', { name: 'Search messages', exact: true })).toHaveCount(1);
     await expect(filters(page).getByRole('button')).toHaveText([
       'Waiting on you (2)', 'All (5)', 'Unread (3)', 'Direct (3)', 'Signals (2)',
     ]);
@@ -287,7 +309,7 @@ test.describe('/ux/inbox — the inbox, read', () => {
     await expectHeader(page, TITLE, SUBTITLE);
   });
 
-  test('the search narrows on subject, body and sender id, case-insensitively, and sends nothing', async ({ page }) => {
+  test('the search narrows on subject, body and sender — as shown, or by id — case-insensitively, and sends nothing', async ({ page }) => {
     const seen = watch(page);
     const backend = await open(page);
     await filter(page, 'All (5)').click();
@@ -302,9 +324,13 @@ test.describe('/ux/inbox — the inbox, read', () => {
     await expect(subjects(page)).toHaveText(['Review the design', 'Lunch on Friday']);
     await search.fill('automation:');
     await expect(subjects(page)).toHaveText(['Feedback closed']);
-    // The row shows the sender's NAME, and the search reads the sender's
-    // ID: the name a viewer can see finds nothing.
+    // (a) The row shows the sender's NAME, and the name a viewer can see
+    // finds the rows it is shown on — 'System' included.
     await search.fill('Cellar');
+    await expect(subjects(page)).toHaveText(['Review the design', 'Lunch on Friday']);
+    await search.fill('system');
+    await expect(subjects(page)).toHaveText(['Approve the payout', 'Train departed']);
+    await search.fill('no such words');
     await expect(rows(page)).toHaveCount(0);
     await expect(empty(page)).toHaveText('No messages match those filters.');
     await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
@@ -477,8 +503,9 @@ test.describe('/ux/inbox — the composer', () => {
     await compose.click();
     await expect(modal(page).locator('.compose-title')).toHaveText('New Message');
     await expect(modal(page).locator('label')).toHaveText(['To', 'Subject', 'Message']);
+    // (e) Each role by its registry name, not its code.
     await expect(page.locator('#inbox-to option')).toHaveText([
-      'Select recipient...', 'David (platform-admin)', 'Bo Cellar (head-of-sales)',
+      'Select recipient...', 'David (Platform administrator)', 'Bo Cellar (Sales lead)',
     ]);
     await expect(page.locator('#inbox-subject')).toHaveAttribute('placeholder', 'Subject...');
     await expect(page.locator('#inbox-body')).toHaveAttribute('placeholder', 'Write your message...');
@@ -609,16 +636,6 @@ test.describe('/ux/inbox — empty, loading and failed reads never paint alike',
     await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
   });
 
-  test('a 200 that is not a list paints as the empty inbox', async ({ page }) => {
-    // The page's parse coerces any non-array body to [] — so a changed
-    // response shape reads as "Nothing is waiting on you", not as a
-    // failure. Pinned as it is today.
-    await install(page, { inbox: (r) => json(r, { data: [STEP] }) });
-    await mountPage(page, PATH, { titleMatch: /Nothing is waiting on you/ });
-    await expect(empty(page)).toHaveText('No messages match those filters.');
-    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
-  });
-
   test('while the inbox loads the page claims neither a count nor an empty inbox', async ({ page }) => {
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => { release = resolve; });
@@ -628,6 +645,10 @@ test.describe('/ux/inbox — empty, loading and failed reads never paint alike',
     await expectHeader(page, 'Inbox', 'Loading…');
     await expect(empty(page)).toHaveText('Loading…');
     await expect(page.getByText('Nothing is waiting on you')).toHaveCount(0);
+    // (b) Nor on the buttons: a count is a claim about a read that landed.
+    await expect(filters(page).getByRole('button')).toHaveText([
+      'Waiting on you', 'All', 'Unread', 'Direct', 'Signals',
+    ]);
     release();
     await expectHeader(page, TITLE, SUBTITLE);
   });
@@ -645,6 +666,12 @@ test.describe('/ux/inbox — empty, loading and failed reads never paint alike',
     ['unreachable', (r) => r.abort('connectionrefused'), "Couldn't load your inbox — Failed to fetch"],
     ['not JSON', (r) => r.fulfill({ status: 200, contentType: 'application/json', body: 'not json' }),
       /^\s*Couldn't load your inbox — \S.*\S\s*$/],
+    // (c) A changed response shape — an envelope where the list was due
+    // — used to be coerced to [] and read "Nothing is waiting on you".
+    ['a 200 that is not a list', (r) => json(r, { data: [STEP] }),
+      "Couldn't load your inbox — /api/messages/inbox/emp-001: HTTP 200, but the body is an object, not a list"],
+    ['a 200 that is null', (r) => json(r, null),
+      "Couldn't load your inbox — /api/messages/inbox/emp-001: HTTP 200, but the body is null, not a list"],
   ];
   for (const [how, answer, line] of FAILURES) {
     test(`an inbox read that is ${how} paints the failure line and Retry, never the empty one`, async ({ page }) => {
@@ -653,16 +680,17 @@ test.describe('/ux/inbox — empty, loading and failed reads never paint alike',
 
       const failed = list(page).locator(`p${FAILURE_MARKER}[role=alert]`);
       await expect(failed).toHaveText(line);
-      await expectHeader(page, 'Inbox', 'The message store could not be reached.');
+      // Read, not reached: a 403 and a 200 of the wrong shape each came
+      // from a store that answered (e2679b23 (c)).
+      await expectHeader(page, 'Inbox', 'Your inbox could not be read.');
       await expect(page.getByText('Nothing is waiting on you')).toHaveCount(0);
       await expect(page.getByText('No messages match those filters.')).toHaveCount(0);
       await expect(list(page).getByRole('button', { name: 'Retry' })).toBeVisible();
       await expect(rows(page)).toHaveCount(0);
-      // The filter buttons still print counts, and they are the empty
-      // list's zeros: the failure is said in the header and the list,
-      // not on the buttons.
+      // (b) The filter buttons print no counts: zeros here would be the
+      // empty inbox's words on a read that failed.
       await expect(filters(page).getByRole('button')).toHaveText([
-        'Waiting on you (0)', 'All (0)', 'Unread (0)', 'Direct (0)', 'Signals (0)',
+        'Waiting on you', 'All', 'Unread', 'Direct', 'Signals',
       ]);
     });
   }
@@ -684,19 +712,29 @@ test.describe('/ux/inbox — empty, loading and failed reads never paint alike',
 });
 
 test.describe('/ux/inbox — a read-only guest', () => {
-  test('Compose and the bulk bar are behind the gate; the per-row buttons and checkboxes are not', async ({ page }) => {
-    await install(page, { session: { username: 'guest-7', role: 'audit-readonly' } });
+  test('Compose, the bulk bar and every row control are behind the gate, and a link is only a navigation', async ({ page }) => {
+    const backend = await install(page, { session: { username: 'guest-7', role: 'audit-readonly' } });
     await mountPage(page, PATH, { titleMatch: /waiting on you/ });
 
     await expect(page.getByRole('button', { name: 'Compose', exact: true })).toBeDisabled();
     await expect(bulk(page).getByRole('button', { name: /^Mark all read/ })).toBeDisabled();
     await expect(bulk(page).getByRole('checkbox', { name: 'Select all shown' })).toBeDisabled();
+    // One note for the composer, one for the list: the bulk bar and the
+    // rows share a gate, so the list does not repeat it per row.
     await expect(page.locator('p.write-gate-note')).toHaveText([
       'Read-only session — sign in to act.', 'Read-only session — sign in to act.',
     ]);
-    // Outside the gate, today: a guest can press them.
-    await expect(row(page, 'Review the design').getByRole('button', { name: 'Mark read' })).toBeEnabled();
-    await expect(row(page, 'Review the design').getByRole('button', { name: 'Archive', exact: true })).toBeEnabled();
-    await expect(row(page, 'Review the design').getByRole('checkbox')).toBeEnabled();
+    // (d) The rows' own writes were outside the gate: a guest could
+    // press each, and each was a 403 waiting for the click.
+    for (const subject of ['Review the design', 'Approve the payout']) {
+      await expect(row(page, subject).getByRole('button', { name: 'Mark read' })).toBeDisabled();
+      await expect(row(page, subject).getByRole('button', { name: 'Archive', exact: true })).toBeDisabled();
+      await expect(row(page, subject).getByRole('checkbox')).toBeDisabled();
+    }
+    // A link stays a link — a guest may read what a message points at —
+    // but it no longer tries to mark the message read on the way.
+    await list(page).getByRole('link', { name: 'job: job-2' }).click();
+    await expect.poll(() => new URL(page.url()).pathname).toBe('/jobs/job-2');
+    expect(backend.writes).toEqual([]);
   });
 });
