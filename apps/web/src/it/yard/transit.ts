@@ -181,27 +181,16 @@ function heldSinceText(iso: string | null): string {
   return Number.isNaN(at.getTime()) ? 'held' : `held ${at.toISOString().slice(11, 16)}Z`;
 }
 
-/** The number a dispatcher reads on every section: crossings a day and
- *  the mean gap — or, on a held section, since when ("held 08:48Z",
- *  short enough to sit inside its section). A rate nobody
- *  measured is "no reading", never 0/d. */
+/** The number a dispatcher reads on a section: crossings a day and the
+ *  mean gap — or, on a held section, since when ("held 08:48Z"). A rate
+ *  nobody measured is "no reading", never 0/d. Written in the section's
+ *  panel since car N2 of design e765b3fc, not on the track: the map
+ *  carries names, one number and states, and nothing else. */
 export function headwayText(b: Border | undefined): string {
   const rate = b?.rate.current ?? null;
   if (b === undefined || rate === null) return 'no reading';
   const tail = b.flowing === false ? heldSinceText(b.held_since) : gapText(rate);
   return `${perDayText(rate)}/d · ${tail}`;
-}
-
-/** Where a section's headway is written: under a level section, and
- *  beside a diagonal one on the side away from its destination, so two
- *  sidings meeting at the garage write outward. */
-export function headwayAt(s: Section): Point {
-  const start = pointAt(s.walked, 0);
-  const end = pointAt(s.walked, s.walked.length);
-  const mid = pointAt(s.walked, s.walked.length / 2);
-  const diagonal = Math.abs(start.y - end.y) > 20;
-  if (!diagonal) return { x: mid.x, y: mid.y + 22 };
-  return { x: mid.x + (mid.x < end.x ? -46 : 46), y: mid.y };
 }
 
 // ---------------------------------------------------------------------

@@ -3,7 +3,8 @@
 // word are pinned in transit.test.ts; this pins the page: with the
 // flight OFF the world map is the map it was and no transit map is
 // drawn; ON, the same two reads are drawn as stations and sections — a
-// held section red with its held-since, blocks waiting on the approach
+// held section red (its held-since is its panel's, car N2 of design
+// e765b3fc: it-department-map-panel.mocked.spec.ts), blocks waiting on the approach
 // and a count past the cap, a moving block where the rate earns one,
 // the planned tenant branch dashed, a troubled station pulsing, the
 // alarms board carrying the server's why — and a station opens its
@@ -92,11 +93,13 @@ test('flight ON: the same reads drawn as a transit monitor', async ({ page }) =>
 
   // The server's stillness, on the track itself.
   await expect(transit.locator('[data-section="dock→track"]')).toHaveAttribute('data-ground', 'held');
-  await expect(transit.locator('[data-headway="dock→track"]')).toHaveText('6/d · held 08:48Z');
   await expect(transit.locator('[data-section="receiving→marshalling"]')).toHaveAttribute('data-ground', 'unknown');
-  await expect(transit.locator('[data-headway="receiving→marshalling"]')).toHaveText('no reading');
-  // The headway a dispatcher reads: 480 a day is a 3-minute gap.
-  await expect(transit.locator('[data-headway="shop-floor→gates"]')).toHaveText('480/d · 3m gap');
+  // The headway a dispatcher reads is the section's PANEL's since car N2
+  // of design e765b3fc — written on no section of the map — and each
+  // section is a door to it.
+  await expect(transit.locator('[data-headway]')).toHaveCount(0);
+  await expect(transit.locator('[data-section-link]')).toHaveCount(SECTIONS.length);
+  await expect(transit.locator('[data-section-link="dock→track"]')).toHaveAttribute('href', '/it?at=dock-%3Etrack');
 
   // Waiting blocks on the approach, the rest a count.
   await expect(transit.locator('[data-waiting="shop-floor→gates"]')).toHaveCount(MAX_BLOCKS);

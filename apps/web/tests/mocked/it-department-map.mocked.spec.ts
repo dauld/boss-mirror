@@ -98,7 +98,8 @@ test('?at=gates opens the gates panel below the map, with its one number and its
   const panel = page.locator(PANEL);
   await expect(panel).toHaveCount(1);
   await expect(panel).toHaveAttribute('data-selection', 'gates');
-  await expect(panel.getByRole('heading', { level: 2 })).toHaveText('Gates');
+  // The panel's own title — the floor's cards below it carry headings too (car N2).
+  await expect(panel.locator('.panel-title')).toHaveText('Gates');
   await expect(panel.locator('[data-figure]')).toHaveText('3 / 3 bays in use');
   await expect(panel).toHaveAttribute('data-state', 'clear');
   await expect(panel.locator('.panel-state')).toHaveText('clear');

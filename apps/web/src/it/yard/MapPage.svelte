@@ -59,10 +59,13 @@
   // lines pulls up detail below". At /it a click SELECTS — `/it?at=<name>`
   // (regions.ts `regionHref`) — and the selection's panel opens under
   // the map, which is not torn down: the route is the same one with a
-  // query, and App.svelte mounts this page once for both. The panel is a
-  // shell on this car (the station's one number, its state and the door
-  // to its floor page); car N2 fills it and car N3 retires the floor
-  // pages, the `region` view below with them.
+  // query, and App.svelte mounts this page once for both. Car N1 opened
+  // the panel as a shell (the station's one number, its state and the
+  // door to its floor page). Car N2 fills it: a station's or a section's
+  // readings (`?at=dock->track` selects a section) and a station's floor
+  // cards, while the map marks what is selected and stops writing the
+  // detail itself. Car N3 retires the floor pages, the `region` view
+  // below with them.
   //
   // NO NEW STYLING (the visual redesign reskins): the world is drawn in
   // the yard's own strokes and tokens.
@@ -77,7 +80,8 @@
   import { railLines, regionTitle } from './region-page';
   import type { Remote } from '../../data/remote';
   import { countText, fetchRegions, floorHref, lampOf, stateText, type Regions } from './regions';
-  import { selectionOf, type MapSelection } from './selection';
+  import { markOf, selectionOf, type MapSelection } from './selection';
+  import { sectionCells, stationCells, type PanelCell } from './panel';
   import { territoryOf } from './world';
   import { hasInterior } from './region-contents';
   import RegionMap from './RegionMap.svelte';
@@ -111,10 +115,8 @@
   /** A region the layout does not know leaves the WORLD on screen
    *  rather than swapping to a map of nothing. */
   const shown = $derived(region !== null && territoryOf(region) !== undefined ? region : null);
-  /** The six regions whose floor is the yard's own. */
-  const floorRegion = $derived(shown !== null && hasInterior(shown) ? shown : null);
-  /** The two whose floor is a queue board — receiving and marshalling
-   *  (car 4). Their map draws PLATFORMS rather than wagons in transit,
+  /** The regions whose floor is a queue board — receiving, marshalling
+   *  and the shop floor (car 4). Their map draws PLATFORMS rather than wagons in transit,
    *  and the board itself mounts under it the way the yard's floor
    *  does. */
   const platformRegion = $derived(shown !== null && hasPlatforms(shown) ? shown : null);
@@ -182,7 +184,18 @@
   /** What `?at=` selects, against the regions the server served — none
    *  while the read is out, and none on a region's own view. */
   const picked = $derived<MapSelection>(
-    shown === null && regions.kind === 'ready' ? selectionOf(at, regions.data) : { kind: 'none' },
+    shown === null && regions.kind === 'ready'
+      ? selectionOf(at, regions.data, borders.kind === 'ready' ? borders.data : null)
+      : { kind: 'none' },
+  );
+  /** The panel's cells (design e765b3fc, car N2): every reading the map
+   *  no longer writes, for the one station or section selected. */
+  const cells = $derived<ReadonlyArray<PanelCell>>(
+    picked.kind === 'station'
+      ? stationCells(picked.region, borders.kind === 'ready' ? borders.data : null, regions.kind === 'ready' ? regions.data.now : '')
+      : picked.kind === 'section'
+        ? sectionCells(picked.border, borders.kind === 'ready' ? borders.data.now : '')
+        : [],
   );
 
   /** The panel sits under the map, so on a short screen it can open
@@ -220,7 +233,7 @@
       eyebrow="IT"
       title="Department Map"
       subtitle={transit
-        ? 'The network as a transit monitor: each region a station on its line, each border a section of track with what waits on it and its headway, and the alarms board beside it. Select a station to open its detail below the map.'
+        ? 'The network as a transit monitor: each region a station on its line, each border a section of track with what waits on it, and the alarms board beside it. Select a station or a section to open its detail below the map.'
         : 'The territories along the packet flow, and the borders between them carrying what crosses, what waits and the machine that moves it. Select a territory to open its detail below the map.'}
     />
   {/if}
@@ -271,10 +284,12 @@
         borders={borders.kind === 'ready' ? borders.data : null} />
     {:else if transit}
       <!-- The same two reads, drawn as a transit map (design 16091dfb):
-           stations, sections, headways and the alarms board. -->
+           stations, sections and the alarms board, with the selection
+           marked on it (design e765b3fc, car N2). -->
       <TransitMap
         regions={regions.data}
-        borders={borders.kind === 'ready' ? borders.data : null} />
+        borders={borders.kind === 'ready' ? borders.data : null}
+        selected={markOf(picked)} />
       <PlantStrip machines={regions.data.plant} />
     {:else}
       <WorldMap
@@ -287,37 +302,64 @@
       <PlantStrip machines={regions.data.plant} />
     {/if}
     {#if picked.kind !== 'none'}
-      <!-- THE SELECTION'S PANEL, under the map (design e765b3fc, car N1).
-           A shell on this car: the station's one number and its state,
-           and the door to the floor page that still holds its detail.
-           A name the read did not carry is said, never drawn as a quiet
-           empty panel. -->
-      {@const name = picked.kind === 'station' ? picked.name : picked.at}
+      <!-- THE SELECTION'S PANEL, under the map (design e765b3fc). Car N1
+           opened it as a shell; car N2 fills it with what the map no
+           longer writes — a station's or a section's rate, what waits
+           and on whom, what is stuck, its trend, the band and the why
+           that decided its state, its machines and its crossings
+           (panel.ts) — and, for a station, what stands in it: its
+           floor's cards, which used to be a page of their own. A name
+           the read did not carry is said, never drawn as a quiet empty
+           panel. -->
+      {@const name = picked.kind === 'station' ? picked.name : picked.kind === 'section' ? picked.key : picked.at}
+      {@const state = picked.kind === 'station' ? picked.region.state : picked.kind === 'section' ? (picked.border?.state ?? 'unknown') : 'unknown'}
       <section
         class="map-panel"
         bind:this={panel}
         data-map-panel
         data-selection={name}
-        data-state={picked.kind === 'station' ? picked.region.state : 'unknown'}
+        data-kind={picked.kind}
+        data-state={state}
         aria-label="the {name} selection">
         <header class="panel-head">
-          {#if picked.kind === 'station'}
-            <span class="panel-lamp {lampOf(picked.region.state)}" aria-hidden="true"></span>
+          {#if state !== 'unknown'}
+            <span class="panel-lamp {lampOf(state)}" aria-hidden="true"></span>
           {/if}
-          <span class="panel-kind">{picked.kind === 'station' ? 'Station' : 'Selection'}</span>
-          <h2 class="panel-title">{picked.kind === 'station' ? picked.title : name}</h2>
+          <span class="panel-kind">{picked.kind === 'station' ? 'Station' : picked.kind === 'section' ? 'Section' : 'Selection'}</span>
+          <h2 class="panel-title">{picked.kind === 'unknown' ? name : picked.title}</h2>
           <a class="panel-close" data-close href="/it" aria-label="close the {name} selection"
             onclick={(e) => go(e, '/it')}>close</a>
         </header>
-        {#if picked.kind === 'station'}
-          <div class="panel-reading">
-            <span class="panel-figure" data-figure>{countText(picked.region)}</span>
-            <span class="panel-state">{stateText(picked.region)}</span>
-          </div>
-          <a class="panel-floor" data-floor href={floorHref(picked.name)}
-            onclick={(e) => go(e, floorHref(picked.name))}>open the page for {picked.title} →</a>
-        {:else}
+        {#if picked.kind === 'unknown'}
           <p class="panel-none">Nothing on this map is named “{name}”.</p>
+        {:else}
+          {#if picked.kind === 'station'}
+            <div class="panel-reading">
+              <span class="panel-figure" data-figure>{countText(picked.region)}</span>
+              <span class="panel-state">{stateText(picked.region)}</span>
+            </div>
+          {/if}
+          <div class="panel-cells">
+            {#each cells as c (c.field)}
+              <div class="panel-cell" data-field={c.field}>
+                <h3 class="cell-label">{c.label}</h3>
+                <ul class="cell-lines">
+                  {#each c.lines as line, i (i)}
+                    <li>{line}</li>
+                  {/each}
+                </ul>
+              </div>
+            {/each}
+          </div>
+          {#if picked.kind === 'station'}
+            <!-- The floor page stays reachable until car N3 retires it;
+                 what it held is below. -->
+            <a class="panel-floor" data-floor href={floorHref(picked.name)}
+              onclick={(e) => go(e, floorHref(picked.name))}>open the page for {picked.title} →</a>
+            <div class="panel-contents" data-contents={picked.name}>
+              {@render contents(picked.name)}
+            </div>
+          {/if}
         {/if}
       </section>
     {/if}
@@ -344,37 +386,45 @@
     </div>
   {/if}
 
-  {#if floorRegion !== null}
-    <!-- THE FLOOR'S DECK, under the region's map: the Train Yard's
-         panels, a component of this page rather than a page of their
-         own (design fe77a1d2, car 3). Keyed on the region so a move
-         from one to another opens the new region's panel rather than
-         keeping the old selection. -->
-    {#key floorRegion}
+  {#if shown !== null}
+    {@render contents(shown)}
+  {/if}
+</div>
+
+<!-- WHAT STANDS IN A REGION — its floor's cards. Under the region's own
+     map at /it/yard/<region>, and inside a station's panel on the
+     Department Map (design e765b3fc, car N2: "region floor cards move
+     into the station panel"), until car N3 retires the region pages and
+     the panel is the one place they are drawn. -->
+{#snippet contents(region: string)}
+  {#if hasInterior(region)}
+    <!-- THE FLOOR'S DECK: the Train Yard's panels, a component of this
+         page rather than a page of their own (design fe77a1d2, car 3).
+         Keyed on the region so a move from one to another opens the new
+         region's panel rather than keeping the old selection. -->
+    {#key region}
       <FloorDeck
-        focus={floorRegion}
+        focus={region}
         onfloor={(s) => (floor = s)}
         onselection={(s) => (selection = s)} />
     {/key}
-  {/if}
-
-  {#if platformRegion !== null}
-    <!-- THE QUEUE BOARD, under the region's map (car 4).
-         The two /it/operate pages this replaced are the SAME
-         components, mounted here with their page header dropped: the
-         territory above draws the platforms from the very reads these
-         make, so nothing is read twice and nothing is derived twice. -->
-    {#key platformRegion}
-      {#if platformRegion === 'receiving'}
+  {:else if hasPlatforms(region)}
+    <!-- THE QUEUE BOARD (car 4). The two /it/operate pages this replaced
+         are the SAME components, mounted here with their page header
+         dropped: the territory above draws the platforms from the very
+         reads these make, so nothing is read twice and nothing is
+         derived twice. -->
+    {#key region}
+      {#if region === 'receiving'}
         <ReceivingYardPage embedded ondeck={(d) => (held = { region: 'receiving', deck: d })} />
-      {:else if platformRegion === 'shop-floor'}
+      {:else if region === 'shop-floor'}
         <CrewBoardPage embedded ondeck={(d) => (held = { region: 'shop-floor', deck: d })} />
       {:else}
         <MarshallingYardPage embedded ondeck={(d) => (held = { region: 'marshalling', deck: d })} />
       {/if}
     {/key}
   {/if}
-</div>
+{/snippet}
 
 <style>
   /* The yard's classes, as FloorDeck.svelte declares them (Svelte scopes
@@ -418,5 +468,20 @@
   .map-panel[data-state='attention'] .panel-state { color: var(--map-warn-ink); }
   .map-panel[data-state='troubled'] .panel-state { color: var(--map-bad-ink); }
   .panel-floor { font-size: 13px; color: var(--map-link); }
+  /* The readings (car N2): a board of cells, each a mono label over the
+     server's own sentences. The long lists — what waits, and the
+     crossings — take the whole row, so a hold sentence is never
+     squeezed into a column; `dense` lets the short cells close up the
+     row a long one leaves behind. On a phone every cell is a row. */
+  .panel-cells { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); grid-auto-flow: dense;
+    gap: var(--s2); margin: var(--s2) 0 var(--s3); }
+  .panel-cell { background: var(--map-bg); border: 1px solid var(--map-rule); padding: var(--s2); min-width: 0; }
+  .panel-cell[data-field='waiting'], .panel-cell[data-field='crossings'] { grid-column: 1 / -1; }
+  .cell-label { margin: 0 0 4px; font-family: var(--font-mono); font-size: 11px; font-weight: 400;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--map-muted); }
+  .cell-lines { margin: 0; padding: 0; list-style: none; font-size: 13px; line-height: 1.45; color: var(--map-ink);
+    overflow-wrap: anywhere; }
+  .cell-lines li + li { margin-top: 2px; }
+  .panel-contents { margin-top: var(--s3); border-top: 1px solid var(--map-rule); }
   .panel-none { margin: var(--s2) 0 0; font-size: 13px; color: var(--map-bad-ink); overflow-wrap: anywhere; }
 </style>

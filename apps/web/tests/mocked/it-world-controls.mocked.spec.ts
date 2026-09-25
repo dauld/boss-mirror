@@ -195,6 +195,9 @@ test('gap 7 (cf7ad2f2) answered: every one of the ten doors lands on the catalog
   // a selection on the one catalogued page, /it.
   await mocks(page);
   await page.goto('/it');
+  // evaluateAll does not wait: read the doors once the map is drawn, or
+  // an early read answers "no doors" (measured red once, car N2's run).
+  await expect(page.locator(`${SVG} .territory`)).toHaveCount(TERRITORIES.length);
   const hrefs = await page
     .locator(`${SVG} .territory`)
     .evaluateAll((els) => els.map((el) => el.getAttribute('href') ?? ''));

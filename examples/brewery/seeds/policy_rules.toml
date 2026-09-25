@@ -578,6 +578,17 @@ resource = "step-signoff:owner"
 action = "sign-off"
 scope = "all"
 
+# weekly-leadership-review's ceo-review step requires a ceo sign-off.
+# Missing until 2026-09-25 (backlog 292c00c2): the sim-origin bypass
+# signed it in the grant's place, which stops once the bypass is bound
+# (car ab1dba92). Pinned by boss-brewery-engine's
+# every_sign_off_role_is_granted test, which reads both seed files.
+[[grants]]
+role = "ceo"
+resource = "step-signoff:ceo"
+action = "sign-off"
+scope = "all"
+
 # ------------------------------------------------------------------
 # Identity + log access as result sets.
 #

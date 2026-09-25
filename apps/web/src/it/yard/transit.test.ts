@@ -14,7 +14,6 @@ import {
   TRANSIT_VIEW,
   alarmsOf,
   gapText,
-  headwayAt,
   headwayText,
   sectionGround,
   stationCount,
@@ -187,15 +186,6 @@ describe('a section', () => {
     });
     expect(headwayText(unread)).toBe('no reading');
     expect(headwayText(undefined)).toBe('no reading');
-  });
-
-  it('writes its headway beside a diagonal, and under a level section', () => {
-    const level = headwayAt(SECTIONS.find((s) => s.key === 'receiving→marshalling')!);
-    expect(level).toEqual({ x: 120, y: 222 });
-    const siding = headwayAt(SECTIONS.find((s) => s.key === 'gates→garage')!);
-    const track = headwayAt(SECTIONS.find((s) => s.key === 'track→garage')!);
-    expect(siding.x).toBeLessThan(track.x);
-    expect(siding.y).toBeGreaterThan(200);
   });
 });
 

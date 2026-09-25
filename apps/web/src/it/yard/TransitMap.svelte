@@ -9,25 +9,37 @@
   // each region is a STATION on a schematic line at fixed angles, each
   // border a SECTION of track in its route's colour, the packets waiting
   // to cross stand as blocks on the approach, a block moves at the
-  // section's real crossing rate replayed ×60, the headway is written on
-  // every section, a section the server judges not flowing is drawn red
-  // on the track itself, and a station's ring is its state — pulsing
-  // when troubled. The verdicts the world map writes inside a territory
-  // stand on an ALARMS BOARD beside the map instead: every non-clear
-  // station with the server's own why, troubled first. The planned
-  // tenant branch (design fd8b5143) is drawn dashed. A station, and an
-  // alarm, opens the region page — the same route a territory opens.
+  // section's real crossing rate replayed ×60, a section the server
+  // judges not flowing is drawn red on the track itself, and a station's
+  // ring is its state — pulsing when troubled. The verdicts the world map
+  // writes inside a territory stand on an ALARMS BOARD beside the map
+  // instead: every non-clear station with the server's own why, troubled
+  // first. The planned tenant branch (design fd8b5143) is drawn dashed. A
+  // station, and an alarm, selects that station — the same route a
+  // territory selects.
+  //
+  // THE DETAIL LEAVES THE MAP (design e765b3fc, car N2; David
+  // 2026-09-25: "put more of that data behind a map selection for
+  // display at the bottom ... we don't need to keep it all on the main
+  // map"). The map carries a station's name, its one number and its
+  // state, and the piles; the headway written on every section, and the
+  // why and flowing rule its hover titles carried, are the selection
+  // panel's now (panel.ts). A section is a door like a station: a click
+  // selects it (`/it?at=dock->track`), and whatever is selected is MARKED
+  // on the map — a casing under a section, a ring round a station — drawn
+  // apart from the station's own state ring, which is the state's alone.
   //
   // The layout and every word are transit.ts, unit-pinned; this owns the
   // strokes and the motion. Colours are --map-* tokens only — the lines
   // are the Design department's --map-line-* (styles.css), the rings the
   // map's own states — so map-palette.test.ts and the a-colour-is-a-token
   // lint hold this file to the one palette. Reduced motion is honoured:
-  // no block moves and no ring pulses, and the headway carries the rate.
+  // no block moves and no ring pulses, and a section's panel carries the
+  // rate.
   import { navigate } from '@boss/web-kit/nav';
   import { MediaQuery } from 'svelte/reactivity';
   import type { Border, Borders } from './borders';
-  import { countText, regionHref, type Region, type Regions } from './regions';
+  import { countText, regionHref, sectionHref, type Region, type Regions } from './regions';
   import {
     LINE_LABEL,
     REPLAY_TEXT,
@@ -36,8 +48,6 @@
     TENANT_BRANCH,
     TRANSIT_VIEW,
     alarmsOf,
-    headwayAt,
-    headwayText,
     ringOf,
     sectionGround,
     sectionKey,
@@ -54,8 +64,12 @@
      *  still draws — the layout is the map — but every section then
      *  reads "no reading" and nothing waits or moves on it. */
     borders?: Borders | null;
+    /** What the page has selected, in the map's own keys — a station's
+     *  name or a section's `from→to` (selection.ts `markOf`); null for
+     *  nothing. Marked, never re-read: the page decides what is selected. */
+    selected?: string | null;
   }>;
-  let { regions, borders = null }: Props = $props();
+  let { regions, borders = null, selected = null }: Props = $props();
 
   const prefersReduced = new MediaQuery('(prefers-reduced-motion: reduce)');
   const reduced = $derived(prefersReduced.current);
@@ -66,13 +80,16 @@
 
   const LINES: ReadonlyArray<TransitLine> = ['delivery', 'publish', 'siding', 'tenant'];
 
-  const sectionTitle = (key: string, b: Border | undefined): string =>
-    b === undefined ? `${key} — the borders read did not carry this section` : `${key} — ${headwayText(b)} — ${b.flowing_why}`;
+  /** A section's name and nothing more: its rate, its queue and its
+   *  verdict are the panel's (car N2). */
+  const sectionTitle = (from: string, to: string): string => `the ${stationLabel(from)} → ${stationLabel(to)} section`;
 
+  /** A station's name, its one number and its state — what the map
+   *  carries. The why is the panel's. */
   const stationTitle = (name: string, r: Region | undefined): string =>
     r === undefined
-      ? `${stationLabel(name)} · troubled — the server answered no reading for this region`
-      : `${stationLabel(name)} · ${countText(r)} · ${r.state} — ${r.why}`;
+      ? `${stationLabel(name)} · troubled · no reading`
+      : `${stationLabel(name)} · ${countText(r)} · ${r.state}`;
 
   function open(e: MouseEvent, href: string): void {
     e.preventDefault();
@@ -101,23 +118,34 @@
 
         <!-- THE SECTIONS: a border each, in its route's colour — red where
              the server says it is not flowing, dotted where it cannot
-             tell — with its headway, its waiting blocks and its trains. -->
+             tell — with its waiting blocks and its trains. Each is a door
+             to its own panel: a wide unpainted stroke takes the click, so
+             an 8-unit line is not a needle to aim at. The selected one
+             stands in an ink casing. -->
         {#each SECTIONS as s (s.key)}
           {@const b = byKey.get(s.key)}
           {@const ground = sectionGround(b)}
-          {@const hw = headwayAt(s)}
           {@const waiting = waitingBlocks(s, b)}
           {@const trains = trainsOf(b, reduced)}
-          <path d={s.d} class="section line-{s.line}" class:held={ground === 'held'} class:unknown={ground === 'unknown'}
-            data-section={s.key} data-line={s.line} data-ground={ground}>
-            <title>{sectionTitle(s.key, b)}</title>
-          </path>
-          <text x={hw.x} y={hw.y} text-anchor="middle" class="hw" class:held={ground === 'held'} data-headway={s.key}>{headwayText(b)}</text>
+          {@const href = sectionHref(s.from, s.to)}
+          {@const isSelected = selected === s.key}
+          <a class="section-link" {href} data-section-link={s.key} data-selected={isSelected ? 'true' : undefined}
+            aria-current={isSelected ? 'true' : undefined} aria-label={sectionTitle(s.from, s.to)}
+            onclick={(e) => open(e, href)}>
+            {#if isSelected}
+              <path d={s.d} class="casing" data-selected-mark={s.key} />
+            {/if}
+            <path d={s.d} class="section line-{s.line}" class:held={ground === 'held'} class:unknown={ground === 'unknown'}
+              data-section={s.key} data-line={s.line} data-ground={ground}>
+              <title>{sectionTitle(s.from, s.to)}</title>
+            </path>
+            <path d={s.d} class="hit" aria-hidden="true" />
+          </a>
           {#each waiting.blocks as p, i (i)}
             <rect x={p.x - 4} y={p.y - 13} width="8" height="7" rx="1.5" class="waiting" data-waiting={s.key} />
           {/each}
           {#if waiting.more !== null}
-            <text x={waiting.more.at.x - 8} y={waiting.more.at.y - 7} text-anchor="end" class="hw" data-more={s.key}>+{waiting.more.n}</text>
+            <text x={waiting.more.at.x - 8} y={waiting.more.at.y - 7} text-anchor="end" class="more" data-more={s.key}>+{waiting.more.n}</text>
           {/if}
           {#if trains !== null}
             {#each trains.begins as begin, i (i)}
@@ -130,13 +158,20 @@
         {/each}
 
         <!-- THE STATIONS: a ring each in the region's state, pulsing when
-             troubled, and a door to the region page. -->
+             troubled, and a door to its panel. The selected one wears a
+             second, ink ring outside its own — the mark is the
+             selection's, the inner ring stays the state's. -->
         {#each STATIONS as st (st.name)}
           {@const r = byName.get(st.name)}
           {@const state = ringOf(r)}
+          {@const isSelected = selected === st.name}
           <a class="station" href={regionHref(st.name)} data-station={st.name} data-state={state}
+            data-selected={isSelected ? 'true' : undefined} aria-current={isSelected ? 'true' : undefined}
             aria-label={stationTitle(st.name, r)} onclick={(e) => open(e, regionHref(st.name))}>
             <title>{stationTitle(st.name, r)}</title>
+            {#if isSelected}
+              <circle cx={st.x} cy={st.y} r="20" class="sel-ring" data-selected-mark={st.name} />
+            {/if}
             {#if state === 'troubled' && !reduced}
               <circle cx={st.x} cy={st.y} r="15" class="pulse" data-pulse={st.name} />
             {/if}
@@ -172,7 +207,7 @@
     <span class="key-item"><svg class="swatch" viewBox="0 0 20 4" aria-hidden="true"><line x1="0" y1="2" x2="20" y2="2" class="held" /></svg>a held section: the server judges nothing is crossing</span>
   </div>
   <p class="replay" data-replay>
-    {REPLAY_TEXT}{reduced ? '. Reduced motion is on: nothing moves, and the headway carries the rate.' : ''}
+    {REPLAY_TEXT}{reduced ? '. Reduced motion is on: nothing moves, and a section\'s panel carries its rate.' : ''}
   </p>
 </section>
 
@@ -189,8 +224,7 @@
   .stn { font-size: 12px; font-weight: 600; }
   .sub { font-size: 10.5px; fill: var(--map-muted); }
   .board text.sub { fill: var(--map-muted); }
-  .board text.hw { font-family: var(--font-mono); font-size: 9.5px; fill: var(--map-muted); font-variant-numeric: tabular-nums; }
-  .board text.hw.held { fill: var(--map-bad-ink); }
+  .board text.more { font-family: var(--font-mono); font-size: 9.5px; fill: var(--map-muted); font-variant-numeric: tabular-nums; }
 
   .line-delivery { stroke: var(--map-line-delivery); }
   .line-publish { stroke: var(--map-line-publish); }
@@ -201,6 +235,17 @@
   .section { fill: none; stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }
   .section.held { stroke: var(--map-bad-edge); }
   .section.unknown { stroke-dasharray: 2 6; opacity: 0.6; }
+  /* The section's door: a wide stroke nobody sees takes the click. */
+  .section-link { cursor: pointer; }
+  .section-link:focus-visible { outline: none; }
+  .hit { fill: none; stroke: transparent; stroke-width: 22; stroke-linecap: round; pointer-events: stroke; }
+  /* THE SELECTION'S MARK (car N2), in the map's ink: a casing under the
+     selected section, as a transit diagram draws an interchange, and a
+     ring outside the selected station's own. Neither is a state colour,
+     so the mark never reads as a verdict. */
+  .casing { fill: none; stroke: var(--map-ink); stroke-width: 16; stroke-linecap: round; stroke-linejoin: round; }
+  .section-link:focus-visible .section, .section-link:hover .section { stroke-width: 11; }
+  .sel-ring { fill: none; stroke: var(--map-ink); stroke-width: 3; }
   .branch { fill: none; stroke-width: 6; stroke-dasharray: 10 7; stroke-linecap: round; stroke-linejoin: round; }
   .branch-stop { fill: var(--map-surface); stroke: var(--map-line-tenant); stroke-width: 3; }
   .branch-stop.owned { stroke: var(--map-ink); stroke-width: 4; }

@@ -64,13 +64,17 @@ describe('the floor deck flows in protocol order', () => {
 
   it('is a component the map page mounts, and the Train Yard page is deleted', () => {
     // No page header of its own and no `embedded` switch: the deck is
-    // only ever mounted under a region map, whose page carries the one
-    // header. A second mount site would be a second page.
+    // only ever mounted by the map page, whose page carries the one
+    // header. A second mount site would be a second page. Since car N2
+    // of design e765b3fc that one site is a snippet the page renders
+    // under a region's map AND inside a station's panel — still one
+    // `<FloorDeck`, focused on the region it is handed.
     expect(src).not.toContain('PageHeader');
     expect(src).not.toContain('embedded');
     const map = readFileSync(join(import.meta.dir, 'MapPage.svelte'), 'utf8');
     expect(map).toContain("import FloorDeck from './FloorDeck.svelte'");
-    expect(map).toMatch(/<FloorDeck\s+focus=\{floorRegion\}/);
+    expect(map).toMatch(/<FloorDeck\s+focus=\{region\}/);
+    expect(map.split('<FloorDeck').length - 1).toBe(1);
     expect(map).not.toMatch(/import YardPage|<YardPage/);
     expect(existsSync(join(import.meta.dir, 'YardPage.svelte'))).toBe(false);
   });

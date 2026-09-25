@@ -411,6 +411,14 @@ export function regionHref(name: string): string {
   return isRegion(name) ? `/it?at=${encodeURIComponent(name)}` : '/it';
 }
 
+/** The link a SECTION selects itself by (design e765b3fc, car N2) — the
+ *  Department Map with the border in the query, `/it?at=dock->track`,
+ *  built here beside `regionHref` so the map's links are built in one
+ *  place. selection.ts reads it back. */
+export function sectionHref(from: string, to: string): string {
+  return `/it?at=${encodeURIComponent(`${from}->${to}`)}`;
+}
+
 /** A region's floor page, `/it/yard/<name>` — opened from its
  *  selection's detail, until the panel carries the floor itself and the
  *  page retires (design e765b3fc, cars N2 and N3). Not a region: the
