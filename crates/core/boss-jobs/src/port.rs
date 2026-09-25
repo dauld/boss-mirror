@@ -41,6 +41,17 @@ pub enum JobsError {
     /// (backlog 570e72bd, road 5).
     #[error("job {id} is {status} — a finished packet's status does not move")]
     TerminalJob { id: JobId, status: String },
+    /// A whole-row step write was computed from a read whose metadata
+    /// the row no longer holds: another writer (the merge door, most
+    /// often) changed it between that read and this write. Written, the
+    /// stale copy would erase the other write while this one answered
+    /// success — measured on run 6b6fe011, 2026-09-25 (backlog
+    /// e381689d). Refused atomically with the row check instead; the
+    /// caller re-reads and re-sends.
+    #[error(
+        "step {id} changed since this write read it — its metadata is no longer what the write was computed from"
+    )]
+    StepChanged { id: StepId },
 }
 
 /// Optional filters for listing jobs.
@@ -1071,6 +1082,35 @@ pub trait JobsRepository: Send + Sync {
     async fn update_step_at(
         &self,
         step: &Step,
+        now: DateTime<Utc>,
+        events: &[boss_core::event::Event],
+    ) -> Result<(), JobsError>;
+
+    /// [`JobsRepository::update_step_at`] for a write computed from a
+    /// READ: `read` is the metadata the caller's copy of the step was
+    /// built from, and the write lands only while the live row still
+    /// holds exactly that. Otherwise it is refused with
+    /// [`JobsError::StepChanged`] and nothing — row or events — is
+    /// written.
+    ///
+    /// WHY (backlog e381689d, measured 2026-09-25 on run 6b6fe011).
+    /// `boss dispatch` merged `prompt_bytes` onto a step through the
+    /// merge door (204, and its STEP_UPDATED carries the key) at
+    /// 11:01:14.649Z; the dispatcher's assignment PUT, whose handler had
+    /// read the step a moment BEFORE, wrote the whole row back at
+    /// 11:01:14.651Z with the metadata it had read, and answered 204
+    /// too. The key was gone and both writers had been told success.
+    /// Every read-modify-write step writer has that shape, so every one
+    /// in the service writes through this door; the check rides the
+    /// write's own statement, so no window is left between them.
+    ///
+    /// A TERMINAL ROW IS NOT JUDGED: its metadata is frozen by
+    /// `update_step_at`'s rule whatever the write carries, so nothing a
+    /// stale copy holds can reach it.
+    async fn update_step_if_unchanged_at(
+        &self,
+        step: &Step,
+        read: &serde_json::Value,
         now: DateTime<Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError>;

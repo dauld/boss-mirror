@@ -1709,12 +1709,36 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             .into_response();
     }
 
-    if let Err(e) = state
+    // WRITTEN ONLY OVER THE ROW IT WAS COMPUTED FROM (backlog e381689d).
+    // Everything above judged, and every event above describes, `old`
+    // overlaid with the body — so if another writer moved the row's
+    // metadata since `old` was read, writing this copy would erase that
+    // write while both answered success. A status-only PUT is exactly
+    // that shape: the dispatcher's assignment PUT erased a merged
+    // `prompt_bytes` 2 ms after the merge door stored it (run 6b6fe011,
+    // 2026-09-25). Refused by name instead; a re-send reads the row
+    // afresh and lands.
+    match state
         .jobs
-        .update_step_at(&step, stamp.timestamp, &step_events)
+        .update_step_if_unchanged_at(&step, &old.metadata, stamp.timestamp, &step_events)
         .await
     {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        Ok(()) => {}
+        Err(crate::port::JobsError::StepChanged { .. }) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "step changed while this write was computed — its metadata \
+                              is no longer what the write read, so writing it would erase \
+                              the other write",
+                    "step_id": step_id.to_string(),
+                    "hint": "nothing was written; send the same request again — the \
+                             handler reads the row afresh",
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 
     // Re-evaluate readiness: the just-updated step's status change may
@@ -2873,6 +2897,62 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
     Json(step).into_response()
 }
 
+/// Mark one still-open step `Skipped` for a terminal close, written only
+/// over the metadata it was read with (backlog e381689d). A step another
+/// writer moved since the read is read again and skipped as it now
+/// stands — a skip decides nothing from metadata, so the fresh copy is
+/// the same decision without erasing that write — and one that went
+/// terminal in between needs no skip. Bounded: a row that keeps moving
+/// is left open and logged, which the catch-all close sees next pass.
+async fn skip_open_step<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    job_id: &boss_core::job::JobId,
+    mut s: Step,
+    terminal_stamp: &boss_core::publisher::EventStamp,
+) {
+    const ATTEMPTS: usize = 3;
+    for _ in 0..ATTEMPTS {
+        if !matches!(
+            s.status,
+            StepStatus::Pending | StepStatus::Ready | StepStatus::Active
+        ) {
+            return;
+        }
+        let read = s.metadata.clone();
+        s.status = StepStatus::Skipped;
+        // OUTBOX (phase 2): the skip's state event records in the SAME
+        // transaction as the row.
+        let skip_event = terminal_stamp.event(events::STEP_UPDATED, events::step_state_payload(&s));
+        match state
+            .jobs
+            .update_step_if_unchanged_at(&s, &read, terminal_stamp.timestamp, &[skip_event])
+            .await
+        {
+            Ok(()) => return,
+            Err(crate::port::JobsError::StepChanged { .. }) => {
+                match state.jobs.get_step(&s.id).await {
+                    Ok(Some(fresh)) => s = fresh,
+                    _ => break,
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %job_id,
+                    step_id = %s.id,
+                    error = %e,
+                    "terminal close: failed to skip non-terminal step",
+                );
+                return;
+            }
+        }
+    }
+    tracing::warn!(
+        job_id = %job_id,
+        step_id = %s.id,
+        "terminal close: step kept changing under the skip — left open",
+    );
+}
+
 /// Close a Job because a *declared terminal* step reached
 /// `Completed`. Mirrors the `compute_job_status`-driven close (same
 /// JOB_UPDATED / JOB_STATUS_CHANGED / JOB_CLOSED events, same
@@ -2914,30 +2994,8 @@ async fn close_job_on_terminal<R: JobsRepository + 'static, B: EventBus + 'stati
     // Skip every still-non-terminal step. The Job is closing on its
     // terminal outcome; any Pending/Ready/Active step is now moot.
     if let Ok(steps) = state.jobs.list_steps(job_id).await {
-        for mut s in steps {
-            if matches!(
-                s.status,
-                StepStatus::Pending | StepStatus::Ready | StepStatus::Active
-            ) {
-                s.status = StepStatus::Skipped;
-                // OUTBOX (phase 2): the skip's state event records in
-                // the SAME transaction as the row.
-                let skip_event =
-                    terminal_stamp.event(events::STEP_UPDATED, events::step_state_payload(&s));
-                if let Err(e) = state
-                    .jobs
-                    .update_step_at(&s, terminal_stamp.timestamp, &[skip_event])
-                    .await
-                {
-                    tracing::warn!(
-                        job_id = %job_id,
-                        step_id = %s.id,
-                        error = %e,
-                        "terminal close: failed to skip non-terminal step",
-                    );
-                    continue;
-                }
-            }
+        for s in steps {
+            skip_open_step(state, job_id, s, &terminal_stamp).await;
         }
     }
 
@@ -3117,9 +3175,20 @@ pub(super) async fn reevaluate_and_persist<R: JobsRepository + 'static, B: Event
                     reeval_events
                         .push(build_step_ready_event(state, job, changed_step, actor).await);
                 }
+                // Judged against the metadata `list_steps` read — the
+                // re-evaluator moves status only, so the copy's metadata
+                // IS the read (backlog e381689d). A refusal means another
+                // writer moved the row since; every step writer ends in
+                // this same pass, so that writer's own pass re-judges the
+                // promotion over the row as it now stands.
                 if let Err(e) = state
                     .jobs
-                    .update_step_at(changed_step, stamp.timestamp, &reeval_events)
+                    .update_step_if_unchanged_at(
+                        changed_step,
+                        &changed_step.metadata,
+                        stamp.timestamp,
+                        &reeval_events,
+                    )
                     .await
                 {
                     tracing::warn!(

@@ -57,6 +57,9 @@ struct State {
     /// Packets whose own row read fails, set by
     /// [`InMemoryJobs::fail_job_read`].
     unreadable_jobs: BTreeSet<String>,
+    /// Merges that land the moment a step is next read, set by
+    /// [`InMemoryJobs::merge_after_next_read`].
+    merge_after_read: HashMap<String, serde_json::Map<String, serde_json::Value>>,
 }
 
 impl InMemoryJobs {
@@ -115,6 +118,86 @@ impl InMemoryJobs {
         if let Ok(mut state) = self.inner.lock() {
             state.unreadable_jobs.insert(job_key(job_id));
         }
+    }
+
+    /// Land `patch` on this step's metadata (null removes, as the merge
+    /// door does) straight AFTER its next `get_step` answers — the
+    /// reader gets the row as it stood, and the row moves under it. The
+    /// in-memory stand-in for a merge committing between a
+    /// read-modify-write handler's read and its write, which is how
+    /// run 6b6fe011 lost `prompt_bytes` on 2026-09-25 while both writes
+    /// answered 204 (backlog e381689d). One-shot.
+    pub fn merge_after_next_read(
+        &self,
+        step_id: &StepId,
+        patch: serde_json::Map<String, serde_json::Value>,
+    ) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.merge_after_read.insert(step_key(step_id), patch);
+        }
+    }
+
+    /// The one whole-row step write behind both `update_step_at` (`read`
+    /// = `None`) and `update_step_if_unchanged_at` — the Pg adapter's
+    /// `write_step`, judged under this adapter's lock as that one judges
+    /// in its UPDATE's WHERE clause (backlog e381689d).
+    fn write_step(
+        &self,
+        step: &Step,
+        read: Option<&serde_json::Value>,
+        now: chrono::DateTime<chrono::Utc>,
+        events: &[boss_core::event::Event],
+    ) -> Result<(), JobsError> {
+        let mut state = self.inner.lock().expect("poisoned");
+        let key = step_key(&step.id);
+        let Some(existing) = state.steps.get(&key) else {
+            return Err(JobsError::StepNotFound(step.id));
+        };
+        if let Some(read) = read
+            && !matches!(existing.status, StepStatus::Completed | StepStatus::Skipped)
+            && existing.metadata != *read
+        {
+            return Err(JobsError::StepChanged { id: step.id });
+        }
+        // Mirror the SQL adapter: the generic update never writes the
+        // stamp fields — stamps are append-only via append_sign_off,
+        // requirements are set at materialization —
+        // and terminal statuses are immutable at the row, so a write
+        // merged against a stale pre-completion fetch cannot demote.
+        let mut next = step.clone();
+        next.sign_offs = existing.sign_offs.clone();
+        next.sign_offs_required = existing.sign_offs_required.clone();
+        // The SQL UPDATE never names `spec_slug`, and writes `fields`
+        // on a live row while freezing them on a terminal one (a07cfddd).
+        // This adapter did the opposite of both — stored the slug,
+        // froze the fields everywhere — so the two answered one write
+        // two ways (backlog b433bdf3). Now it says what the SQL says.
+        next.spec_slug = existing.spec_slug.clone();
+        // Nor does it name `assurance_required` or `step_plugin_version`:
+        // this adapter stored a body's, so `null` lowered a Presence
+        // step here while Pg kept it (backlog 36352452). A re-pin writes
+        // both through its own statement, never through this one.
+        next.assurance_required = existing.assurance_required;
+        next.step_plugin_version = existing.step_plugin_version;
+        if matches!(existing.status, StepStatus::Completed | StepStatus::Skipped) {
+            next.fields = existing.fields.clone();
+            next.status = existing.status;
+            next.completed_on = existing.completed_on;
+            next.completed_by = existing.completed_by.clone();
+            next.completed_at = existing.completed_at;
+            next.metadata = existing.metadata.clone();
+        }
+        // The ready stamp is written once, at the write that lands the
+        // step in Ready, and no later write moves it — the COALESCE in
+        // the Pg adapter's UPDATE.
+        if next.status == StepStatus::Ready {
+            state.step_ready_at.entry(key.clone()).or_insert(now);
+        }
+        state.step_touched_at.insert(key.clone(), now);
+        state.steps.insert(key, next);
+        drop(state);
+        self.record_all(events);
+        Ok(())
     }
 
     /// `step` as this adapter will write it: a `step_plugin_version`
@@ -873,8 +956,23 @@ impl JobsRepository for InMemoryJobs {
     }
 
     async fn get_step(&self, id: &StepId) -> Result<Option<Step>, JobsError> {
-        let state = self.inner.lock().expect("poisoned");
-        Ok(state.steps.get(&step_key(id)).cloned())
+        let mut state = self.inner.lock().expect("poisoned");
+        let key = step_key(id);
+        let read = state.steps.get(&key).cloned();
+        if let Some(patch) = state.merge_after_read.remove(&key)
+            && let Some(row) = state.steps.get_mut(&key)
+        {
+            let mut md = row.metadata.as_object().cloned().unwrap_or_default();
+            for (k, v) in patch {
+                if v.is_null() {
+                    md.remove(&k);
+                } else {
+                    md.insert(k, v);
+                }
+            }
+            row.metadata = serde_json::Value::Object(md);
+        }
+        Ok(read)
     }
 
     async fn update_step_at(
@@ -883,50 +981,17 @@ impl JobsRepository for InMemoryJobs {
         now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
-        let mut state = self.inner.lock().expect("poisoned");
-        let key = step_key(&step.id);
-        let Some(existing) = state.steps.get(&key) else {
-            return Err(JobsError::StepNotFound(step.id));
-        };
-        // Mirror the SQL adapter: the generic update never writes the
-        // stamp fields — stamps are append-only via append_sign_off,
-        // requirements are set at materialization —
-        // and terminal statuses are immutable at the row, so a write
-        // merged against a stale pre-completion fetch cannot demote.
-        let mut next = step.clone();
-        next.sign_offs = existing.sign_offs.clone();
-        next.sign_offs_required = existing.sign_offs_required.clone();
-        // The SQL UPDATE never names `spec_slug`, and writes `fields`
-        // on a live row while freezing them on a terminal one (a07cfddd).
-        // This adapter did the opposite of both — stored the slug,
-        // froze the fields everywhere — so the two answered one write
-        // two ways (backlog b433bdf3). Now it says what the SQL says.
-        next.spec_slug = existing.spec_slug.clone();
-        // Nor does it name `assurance_required` or `step_plugin_version`:
-        // this adapter stored a body's, so `null` lowered a Presence
-        // step here while Pg kept it (backlog 36352452). A re-pin writes
-        // both through its own statement, never through this one.
-        next.assurance_required = existing.assurance_required;
-        next.step_plugin_version = existing.step_plugin_version;
-        if matches!(existing.status, StepStatus::Completed | StepStatus::Skipped) {
-            next.fields = existing.fields.clone();
-            next.status = existing.status;
-            next.completed_on = existing.completed_on;
-            next.completed_by = existing.completed_by.clone();
-            next.completed_at = existing.completed_at;
-            next.metadata = existing.metadata.clone();
-        }
-        // The ready stamp is written once, at the write that lands the
-        // step in Ready, and no later write moves it — the COALESCE in
-        // the Pg adapter's UPDATE.
-        if next.status == StepStatus::Ready {
-            state.step_ready_at.entry(key.clone()).or_insert(now);
-        }
-        state.step_touched_at.insert(key.clone(), now);
-        state.steps.insert(key, next);
-        drop(state);
-        self.record_all(events);
-        Ok(())
+        self.write_step(step, None, now, events)
+    }
+
+    async fn update_step_if_unchanged_at(
+        &self,
+        step: &Step,
+        read: &serde_json::Value,
+        now: chrono::DateTime<chrono::Utc>,
+        events: &[boss_core::event::Event],
+    ) -> Result<(), JobsError> {
+        self.write_step(step, Some(read), now, events)
     }
 
     async fn merge_step_metadata_at(

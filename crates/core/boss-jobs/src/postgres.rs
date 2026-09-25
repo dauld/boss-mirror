@@ -31,6 +31,144 @@ impl PgJobs {
         }
     }
 
+    /// The one whole-row step write behind both
+    /// [`JobsRepository::update_step_at`] (`read` = `None`, no judgement)
+    /// and [`JobsRepository::update_step_if_unchanged_at`] (`read` = the
+    /// metadata the caller's copy was computed from). One statement, so
+    /// the two doors cannot disagree about anything but the judgement.
+    async fn write_step(
+        &self,
+        step: &Step,
+        read: Option<&serde_json::Value>,
+        now: chrono::DateTime<chrono::Utc>,
+        events: &[boss_core::event::Event],
+    ) -> Result<(), JobsError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        let result = sqlx::query(
+            r#"
+            UPDATE steps SET kind = $2, title = $3, assignee_id = $4,
+                -- Terminal statuses are immutable at the row (the
+                -- state-machine invariant): a write whose merge was
+                -- computed against a pre-completion fetch (dispatcher
+                -- assign retries, JetStream redeliveries, any racing
+                -- read-modify-write) cannot demote a Completed/Skipped
+                -- step back to live.
+                status = CASE
+                    WHEN status IN ('completed', 'skipped') THEN status
+                    ELSE $5
+                END,
+                completed_on = CASE
+                    WHEN status IN ('completed', 'skipped') THEN completed_on
+                    ELSE $8
+                END,
+                sort_order = $6, blocked_by = $7,
+                metadata = CASE
+                    WHEN status IN ('completed', 'skipped') THEN metadata
+                    ELSE $9
+                END,
+                notes = $10, embedded_job = $11, updated_at = $12,
+                -- The ready stamp is written ONCE, at the write that
+                -- lands the step in `ready` (a pending → ready
+                -- promotion arrives here), and no later write moves it
+                -- — the property `updated_at` cannot have, and the one
+                -- the queue-age lens (2a0b034e) exists to read. The
+                -- inner CASE reads the OLD `status`: a terminal row
+                -- keeps its status above, so it must not gain a stamp
+                -- here either.
+                became_ready_at = COALESCE(became_ready_at, CASE
+                    WHEN status NOT IN ('completed', 'skipped')
+                         AND $5 = 'ready' THEN $12
+                END),
+                -- The authored completion contract (`fields`) takes
+                -- the same freeze as metadata: live rows accept the
+                -- write, terminal rows keep theirs. This column was
+                -- absent from the list entirely, so a 204'd update
+                -- silently dropped it and every step's contract was
+                -- write-once at materialization (a07cfddd).
+                fields = CASE
+                    WHEN status IN ('completed', 'skipped') THEN fields
+                    ELSE $13
+                END,
+                -- Who and when (c17871fe): the handler stamps both at
+                -- the flip to `completed`, and the row freezes them
+                -- with the status — the same CASE `completed_on` takes,
+                -- so a stale re-PUT can no more re-attribute a finished
+                -- step than it can demote one.
+                completed_by = CASE
+                    WHEN status IN ('completed', 'skipped') THEN completed_by
+                    ELSE $14
+                END,
+                completed_at = CASE
+                    WHEN status IN ('completed', 'skipped') THEN completed_at
+                    ELSE $15
+                END
+            -- A write that names the metadata it was computed from
+            -- ($16) lands only while a live row still holds exactly
+            -- that (backlog e381689d): otherwise it would erase what
+            -- another writer stored since its read. A terminal row's
+            -- metadata is frozen above whatever the write carries, so
+            -- it is not judged. jsonb `=` is structural — key order
+            -- and whitespace do not count.
+            WHERE id = $1
+              AND ($16::jsonb IS NULL
+                   OR status IN ('completed', 'skipped')
+                   OR metadata = $16::jsonb)
+            "#,
+        )
+        .bind(*step.id.inner().as_uuid())
+        .bind(&step.kind)
+        .bind(&step.title)
+        .bind(&step.assignee_id)
+        .bind(step_status_str(step.status))
+        .bind(step.sort_order)
+        .bind(blocked_by_uuids(&step.blocked_by))
+        .bind(step.completed_on)
+        .bind(&step.metadata)
+        .bind(&step.notes)
+        .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
+        .bind(now)
+        .bind(serde_json::to_value(&step.fields).unwrap_or_default())
+        .bind(step.completed_by.as_ref().map(ToString::to_string))
+        .bind(step.completed_at)
+        .bind(read)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| JobsError::Storage(e.to_string()))?;
+
+        if result.rows_affected() == 0 {
+            // Missing, or moved since the caller's read? Only a write
+            // that named its read can be the second, and the refusal
+            // must say which — "not found" for a row that is plainly
+            // there sends the caller looking for the wrong fault.
+            if read.is_some() {
+                let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM steps WHERE id = $1")
+                    .bind(*step.id.inner().as_uuid())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| JobsError::Storage(e.to_string()))?;
+                if exists.is_some() {
+                    return Err(JobsError::StepChanged { id: step.id });
+                }
+            }
+            return Err(JobsError::StepNotFound(step.id));
+        }
+        // OUTBOX (phase 2): the caller's events (STEP_UPDATED +
+        // completion/ready/done markers) record with the row.
+        for event in events {
+            boss_events::outbox::record_event_in_tx(&mut tx, event)
+                .await
+                .map_err(JobsError::Storage)?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| JobsError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     /// Constructor variant that retains the connection URLs for the
     /// demo-loop reset: `db_url` for the `boss-rebuild-all` subprocess,
     /// `nats_url` for the delivery-buffer purge. `db_url` falls back to
@@ -1486,105 +1624,17 @@ impl JobsRepository for PgJobs {
         now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| JobsError::Storage(e.to_string()))?;
-        let result = sqlx::query(
-            r#"
-            UPDATE steps SET kind = $2, title = $3, assignee_id = $4,
-                -- Terminal statuses are immutable at the row (the
-                -- state-machine invariant): a write whose merge was
-                -- computed against a pre-completion fetch (dispatcher
-                -- assign retries, JetStream redeliveries, any racing
-                -- read-modify-write) cannot demote a Completed/Skipped
-                -- step back to live.
-                status = CASE
-                    WHEN status IN ('completed', 'skipped') THEN status
-                    ELSE $5
-                END,
-                completed_on = CASE
-                    WHEN status IN ('completed', 'skipped') THEN completed_on
-                    ELSE $8
-                END,
-                sort_order = $6, blocked_by = $7,
-                metadata = CASE
-                    WHEN status IN ('completed', 'skipped') THEN metadata
-                    ELSE $9
-                END,
-                notes = $10, embedded_job = $11, updated_at = $12,
-                -- The ready stamp is written ONCE, at the write that
-                -- lands the step in `ready` (a pending → ready
-                -- promotion arrives here), and no later write moves it
-                -- — the property `updated_at` cannot have, and the one
-                -- the queue-age lens (2a0b034e) exists to read. The
-                -- inner CASE reads the OLD `status`: a terminal row
-                -- keeps its status above, so it must not gain a stamp
-                -- here either.
-                became_ready_at = COALESCE(became_ready_at, CASE
-                    WHEN status NOT IN ('completed', 'skipped')
-                         AND $5 = 'ready' THEN $12
-                END),
-                -- The authored completion contract (`fields`) takes
-                -- the same freeze as metadata: live rows accept the
-                -- write, terminal rows keep theirs. This column was
-                -- absent from the list entirely, so a 204'd update
-                -- silently dropped it and every step's contract was
-                -- write-once at materialization (a07cfddd).
-                fields = CASE
-                    WHEN status IN ('completed', 'skipped') THEN fields
-                    ELSE $13
-                END,
-                -- Who and when (c17871fe): the handler stamps both at
-                -- the flip to `completed`, and the row freezes them
-                -- with the status — the same CASE `completed_on` takes,
-                -- so a stale re-PUT can no more re-attribute a finished
-                -- step than it can demote one.
-                completed_by = CASE
-                    WHEN status IN ('completed', 'skipped') THEN completed_by
-                    ELSE $14
-                END,
-                completed_at = CASE
-                    WHEN status IN ('completed', 'skipped') THEN completed_at
-                    ELSE $15
-                END
-            WHERE id = $1
-            "#,
-        )
-        .bind(*step.id.inner().as_uuid())
-        .bind(&step.kind)
-        .bind(&step.title)
-        .bind(&step.assignee_id)
-        .bind(step_status_str(step.status))
-        .bind(step.sort_order)
-        .bind(blocked_by_uuids(&step.blocked_by))
-        .bind(step.completed_on)
-        .bind(&step.metadata)
-        .bind(&step.notes)
-        .bind(step.embedded_job.map(|j| *j.inner().as_uuid()))
-        .bind(now)
-        .bind(serde_json::to_value(&step.fields).unwrap_or_default())
-        .bind(step.completed_by.as_ref().map(ToString::to_string))
-        .bind(step.completed_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| JobsError::Storage(e.to_string()))?;
+        self.write_step(step, None, now, events).await
+    }
 
-        if result.rows_affected() == 0 {
-            return Err(JobsError::StepNotFound(step.id));
-        }
-        // OUTBOX (phase 2): the caller's events (STEP_UPDATED +
-        // completion/ready/done markers) record with the row.
-        for event in events {
-            boss_events::outbox::record_event_in_tx(&mut tx, event)
-                .await
-                .map_err(JobsError::Storage)?;
-        }
-        tx.commit()
-            .await
-            .map_err(|e| JobsError::Storage(e.to_string()))?;
-        Ok(())
+    async fn update_step_if_unchanged_at(
+        &self,
+        step: &Step,
+        read: &serde_json::Value,
+        now: chrono::DateTime<chrono::Utc>,
+        events: &[boss_core::event::Event],
+    ) -> Result<(), JobsError> {
+        self.write_step(step, Some(read), now, events).await
     }
 
     async fn merge_step_metadata_at(
