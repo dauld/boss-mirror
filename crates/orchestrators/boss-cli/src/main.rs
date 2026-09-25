@@ -1772,7 +1772,7 @@ async fn main() -> Result<()> {
                 car: given,
                 merge_ref,
                 dry_run,
-            } => car_unland::unland(&given, &merge_ref, dry_run).await,
+            } => car_unland::unland(&given, &merge_ref, dry_run, chrono::Utc::now()).await,
         },
         Commands::Workflow { action } => match action {
             WorkflowAction::Publish {

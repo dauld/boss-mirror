@@ -383,7 +383,12 @@ pub(crate) async fn unland_car(
 }
 
 /// `boss car unland`.
-pub(crate) async fn unland(given: &str, merge_ref: &str, dry_run: bool) -> Result<()> {
+pub(crate) async fn unland(
+    given: &str,
+    merge_ref: &str,
+    dry_run: bool,
+    now: DateTime<Utc>,
+) -> Result<()> {
     let http = reqwest::Client::new();
     // The actor FIRST: a write nobody names is refused, and the refusal
     // costs a line rather than a half-unlanded car (5083d6f5).
@@ -408,16 +413,9 @@ pub(crate) async fn unland(given: &str, merge_ref: &str, dry_run: bool) -> Resul
             return Ok(());
         }
     }
-    let done = unland_car(
-        &Http(&http),
-        Path::new("."),
-        &id,
-        merge_ref,
-        dry_run,
-        Utc::now(),
-    )
-    .await
-    .map_err(|e| anyhow!("boss car unland: {e}"))?;
+    let done = unland_car(&Http(&http), Path::new("."), &id, merge_ref, dry_run, now)
+        .await
+        .map_err(|e| anyhow!("boss car unland: {e}"))?;
     if let Some(evidence) = &done.evidence {
         println!("  evidence: {evidence}");
     }
