@@ -5,6 +5,8 @@ use super::*;
 
 use axum::extract::Path;
 
+use crate::registry::ProtocolReading;
+
 /// How deep the concurrency gate reads an actor's assignments when it
 /// counts its runs in flight (backlog 57c108c2). A limit is not a
 /// filter: truncation here could only UNDER-count, which under-refuses,
@@ -1093,10 +1095,10 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // PUT, and a refusal of every one would lose those writes — two of
     // the plugins do not read the answer. A step with nothing blocking
     // it still starts; one with open blockers is refused naming them.
-    // (What this gate reads is the edge list, not the predicate: a
-    // Pending step whose blockers are all resolved but whose `ready_when`
-    // also waits on job metadata can be opened here, and completed
-    // straight from Pending, exactly as before this change.)
+    // (What this gate reads is the edge list, not the predicate; the
+    // predicate is read by the gate after this one, 570e72bd, so a
+    // Pending step whose blockers are resolved but whose `ready_when`
+    // also waits on job metadata is refused there.)
     //
     // The terminal set is `Completed | Skipped`. A Skipped blocker
     // means that branch was provably not-taken (its ready_when is
@@ -1222,6 +1224,83 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                 )
                     .into_response();
             }
+        }
+    }
+
+    // THE STEP'S OWN PREDICATE DECIDES, NOT ONLY ITS EDGE LIST (backlog
+    // 570e72bd, road 4). The gate above reads `blocked_by`, which is
+    // drawn FROM `ready_when` and cannot carry a `job.metadata` clause:
+    // ship-a-change's `merged` terminal waits on `steps.review.done AND
+    // job.metadata.merged = "true"`, and with review done a hand PUT
+    // completed it — closing the packet `merged` — with no marker. So a
+    // step the engine has not opened is opened or completed by hand
+    // only where its own `ready_when`, read against the packet as
+    // stored, holds: exactly the predicate the engine opens it by. A
+    // step the engine opened (Ready / Active) keeps the trust the gate
+    // above gives it, and the abort keeps its exemption.
+    //
+    // Every in-tree closer of a marker-gated terminal writes the marker
+    // FIRST — the conductor's `merged`, `boss car retire` / `boss
+    // disprove`, the sweep judge's `action_needed` — and both metadata
+    // doors re-evaluate, so the terminal is Ready by the completion.
+    let is_skipping_by_hand = !is_terminal && step.status == StepStatus::Skipped;
+    let judged_by_its_predicate = (is_flipping_to_done || is_opening_by_hand)
+        && old.status == StepStatus::Pending
+        && !abort_from_any_state;
+    if judged_by_its_predicate || is_skipping_by_hand {
+        let reading = match protocol_reading(&state, parent_job.as_ref(), &old).await {
+            Ok(reading) => reading,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("reading the step's protocol failed: {e}"),
+                )
+                    .into_response();
+            }
+        };
+        match reading {
+            // A HAND SKIP OF A PROTOCOL STEP (road 1). Skipped reads as
+            // resolved to the blocker gate, and a skip passes no gate of
+            // its own — no blockers, no required-at-done fields — so
+            // `PUT work {status: skipped}` and a completion of the
+            // terminal behind it closed a packet `merged` with its
+            // work, its review and its marker all absent (measured on
+            // the in-memory router, 2026-09-25). Skipped is the
+            // protocol's word: the engine writes it for a step whose
+            // predicate can no longer hold, and the terminal close for
+            // what is left. Callers measured before refusing: nothing
+            // in the tree — CLI, dispatcher, conductor, web, step
+            // plugins, sim — PUTs a step to skipped; the abort is a
+            // COMPLETION of the aborted terminal, untouched here. A
+            // step no protocol describes (a kind with none) still
+            // skips by hand, as before.
+            ProtocolReading::Holds { .. } | ProtocolReading::Waits { .. }
+                if is_skipping_by_hand =>
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "a protocol step is skipped by its protocol, not by hand",
+                        "step_id": step_id.to_string(),
+                        "step_status": status_word(old.status),
+                        "hint": crate::job_outcome::HAND_SKIP_HINT,
+                    })),
+                )
+                    .into_response();
+            }
+            ProtocolReading::Waits { ready_when } => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "step's ready_when does not hold",
+                        "step_id": step_id.to_string(),
+                        "ready_when": ready_when,
+                        "hint": crate::job_outcome::READY_WHEN_HINT,
+                    })),
+                )
+                    .into_response();
+            }
+            ProtocolReading::Holds { .. } | ProtocolReading::Unpaired => {}
         }
     }
 
@@ -2968,6 +3047,39 @@ pub(super) async fn reevaluate_and_persist<R: JobsRepository + 'static, B: Event
             tracing::warn!(error = %e, job_id = %job.id, version = job.workflow_version, "re-eval: pinned Workflow version not resolvable");
         }
     }
+}
+
+/// What the packet's PINNED protocol says about `step`, read against the
+/// packet as stored ([`crate::registry::read_step`]). `Unpaired` when
+/// there is no protocol to read — no registry plumbed, no parent packet,
+/// a kind the registry has no spec for — so such a step is judged
+/// exactly as before (backlog 570e72bd). A failed read is an error, not
+/// an `Unpaired`: a gate that cannot read its protocol does not open.
+async fn protocol_reading<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    job: Option<&Job>,
+    step: &Step,
+) -> Result<ProtocolReading, String> {
+    let (Some(reg), Some(job)) = (&state.kind_registry, job) else {
+        return Ok(ProtocolReading::Unpaired);
+    };
+    let spec = match reg.get_version(&job.kind, job.workflow_version).await {
+        Ok(spec) => spec,
+        Err(crate::registry::WorkflowError::NotFound(_)) => return Ok(ProtocolReading::Unpaired),
+        Err(e) => return Err(e.to_string()),
+    };
+    let steps = state
+        .jobs
+        .list_steps(&job.id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(crate::registry::read_step(
+        &spec,
+        &steps,
+        &job.subject,
+        &job.metadata,
+        &step.id,
+    ))
 }
 
 pub(super) async fn build_step_ready_event<R: JobsRepository + 'static, B: EventBus + 'static>(

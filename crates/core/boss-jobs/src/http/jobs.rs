@@ -734,6 +734,40 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         }
     };
 
+    // A PACKET IS ADMITTED UNFINISHED, AND WITH NO OUTCOME (backlog
+    // 570e72bd, road 2). This route took `status: closed` and any
+    // `metadata.outcome` whole, so a packet could be born closed through
+    // a terminal none of its steps ever reached — the admission-time
+    // twin of the step roads the gate refuses. A packet ends through
+    // its protocol's terminal, or through the job PUT's close, which
+    // takes the Close authority; `outcome` is the close's to write
+    // (crate::job_outcome), and a catch-all close would otherwise carry
+    // an admitted one forward as the record. Refused, not stripped: a
+    // caller sending either is trying to record something that did not
+    // happen. Measured before refusing: no in-tree caller admits a
+    // packet in either shape (the sim opens its packets `open`).
+    let born_finished = matches!(job.status, JobStatus::Closed | JobStatus::Cancelled);
+    let born_with_outcome = job
+        .metadata
+        .get(crate::job_outcome::OUTCOME_KEY)
+        .is_some_and(|v| !v.is_null());
+    if born_finished || born_with_outcome {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({
+                "error": if born_finished {
+                    "a packet is admitted open or draft, never finished"
+                } else {
+                    "a packet is admitted with no outcome"
+                },
+                "status": job.status,
+                "outcome": job.metadata.get(crate::job_outcome::OUTCOME_KEY),
+                "hint": crate::job_outcome::ADMISSION_HINT,
+            })),
+        )
+            .into_response();
+    }
+
     // THE ADMISSION INSTANT, server-owned (backlog 6c2eba00, design
     // f2cdff23). Stamped here and only here: the adapters keep the
     // column out of every UPDATE, so a later PUT cannot move when the
@@ -1541,9 +1575,15 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
         crate::repin::REPINS_KEY,
     );
 
-    // Pick the right policy action: transitioning to Closed is a Close
-    // action (more restricted than Update); everything else is Update.
-    let action = if job.status == JobStatus::Closed && old_status != JobStatus::Closed {
+    // Pick the right policy action: ENDING a packet is a Close action
+    // (more restricted than Update); everything else is Update. A cancel
+    // is an end exactly as a close is — it retires the packet from every
+    // queue — and it took only Update until backlog 570e72bd, so a role
+    // granted `update` without `close` — a shape the demo tenant's own
+    // policy seeds grant to two roles — could end a packet it could not
+    // close.
+    let ends = |s: JobStatus| matches!(s, JobStatus::Closed | JobStatus::Cancelled);
+    let action = if ends(job.status) && !ends(old_status) {
         Action::Close
     } else {
         Action::Update
@@ -1633,6 +1673,24 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
         )
             .into_response();
     }
+    // NOR DOES ITS END STATE FLIP (backlog 570e72bd). Closed to
+    // cancelled needed only Update, and cancelled back to closed
+    // re-emitted JOB_CLOSED below — so the pair re-fired every close
+    // rule (the spawn rules, clear_waiting, the subjob resolve) for a
+    // packet that had closed once. How a packet ended is a record.
+    if was_terminal && job.status != old_status {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "a finished packet's end state does not move",
+                "job_id": job_id.to_string(),
+                "stored_status": old_status,
+                "requested_status": job.status,
+                "hint": crate::job_outcome::REOPEN_HINT,
+            })),
+        )
+            .into_response();
+    }
     let closes_here =
         !was_terminal && matches!(job.status, JobStatus::Closed | JobStatus::Cancelled);
     if !closes_here {
@@ -1667,8 +1725,10 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // the same timing stamps, so a Job the operator closes by hand
     // measures a cycle time like every other AND carries the date it
     // closed. The caller's own `closed_at` / `closed_on`, if it sent
-    // them, win; what this guarantees is that neither is absent.
-    if action == Action::Close {
+    // them, win; what this guarantees is that neither is absent. (A
+    // cancel takes the Close authority but was never stamped, and still
+    // is not: nothing that reads a cycle time reads a cancel.)
+    if action == Action::Close && job.status == JobStatus::Closed {
         let now = boss_clock_client::now_from(&state.clock).await;
         stamp_close_instant(&mut job, &now);
     }
@@ -1728,12 +1788,29 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
             ));
         }
     }
-    if let Err(e) = state
+    match state
         .jobs
         .update_job_at(&job, stamp.timestamp, &job_events)
         .await
     {
-        return persist_error_response(e);
+        Ok(()) => {}
+        // The refusal above judged the row as READ; this is the same
+        // refusal for a close that committed after that read (backlog
+        // 570e72bd, road 5) — answered with the same 409, not a 500.
+        Err(crate::port::JobsError::TerminalJob { status, .. }) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "a finished packet's status does not move",
+                    "job_id": job_id.to_string(),
+                    "stored_status": status,
+                    "requested_status": job.status,
+                    "hint": crate::job_outcome::REOPEN_HINT,
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => return persist_error_response(e),
     }
 
     // A Job update can flip a metadata-gated `ready_when` (the v3
