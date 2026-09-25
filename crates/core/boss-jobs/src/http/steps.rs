@@ -1072,10 +1072,31 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // caller is flipping this step to `done`, every step in
     // `blocked_by` must already be in a terminal state. Otherwise the
     // machine is firing a transition whose upstream data dependencies
-    // aren't satisfied. Moving a step to `active` or any other
-    // non-terminal state is still fine even with open blockers (a tech
-    // may start prep work before a sign-off lands); the gate only fires
-    // at `done`.
+    // aren't satisfied.
+    //
+    // AND WHEN A WRITER OPENS A PENDING STEP BY HAND (backlog 36352452).
+    // This comment used to say moving a step to `active` was fine with
+    // open blockers — a tech starting prep work before a sign-off lands
+    // — and the gate fired only at `done`. That stopped being safe when
+    // the gate learned to trust a step stored Ready or Active as one the
+    // ENGINE opened (below): a hand PUT of a Pending terminal to `ready`
+    // or `active`, then a bare completion, walked past the gate, and the
+    // review of car 9392b8b5 closed a packet `done` whose work was never
+    // done. So the promotion out of Pending is judged by this same gate,
+    // which makes a Ready or Active step one that was opened either by
+    // the engine or past its blockers — both of which the trust below is
+    // entitled to. The engine's own promotion never comes through here.
+    //
+    // Judged rather than refused outright: the web's Start and Save
+    // surfaces and four step plugins (checklist, review-design,
+    // sr-triage, diagnostic-call) move a Pending step to `active` by
+    // PUT, and a refusal of every one would lose those writes — two of
+    // the plugins do not read the answer. A step with nothing blocking
+    // it still starts; one with open blockers is refused naming them.
+    // (What this gate reads is the edge list, not the predicate: a
+    // Pending step whose blockers are all resolved but whose `ready_when`
+    // also waits on job metadata can be opened here, and completed
+    // straight from Pending, exactly as before this change.)
     //
     // The terminal set is `Completed | Skipped`. A Skipped blocker
     // means that branch was provably not-taken (its ready_when is
@@ -1089,6 +1110,8 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // a resolved branch, not a broken hand-off.
     let is_flipping_to_done =
         old.status != StepStatus::Completed && step.status == StepStatus::Completed;
+    let is_opening_by_hand = old.status == StepStatus::Pending
+        && matches!(step.status, StepStatus::Ready | StepStatus::Active);
 
     // AN ABORT COMPLETES FROM ANY OPEN STATE (fd0f92ae, 2026-09-15).
     //
@@ -1134,7 +1157,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             from = status_word(old.status),
             "abort-from-any-state: aborted terminal completing past its blockers",
         );
-    } else if is_flipping_to_done
+    } else if (is_flipping_to_done || is_opening_by_hand)
         && !old.blocked_by.is_empty()
         // A STEP THE ENGINE HAS ALREADY OPENED IS NOT BLOCKED.
         //

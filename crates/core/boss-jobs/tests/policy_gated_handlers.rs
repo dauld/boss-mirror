@@ -733,10 +733,15 @@ async fn auto_close_stamps_step_completed_on_when_supplied() {
 }
 
 #[tokio::test]
-async fn put_step_active_allowed_with_open_blockers() {
-    // The gate fires only at `done`. Moving to `active` (or any
-    // non-terminal status) is always fine; a tech may stage work
-    // while waiting on a sign-off upstream.
+async fn put_step_active_is_refused_with_open_blockers() {
+    // This test used to pin the opposite: the gate fired only at `done`,
+    // so a tech could stage work on a Pending step while a sign-off
+    // upstream was still open. That became a hole once the gate began
+    // trusting a step stored Active as one the engine had opened: a
+    // hand move to `active`, then a bare completion, skipped the gate
+    // entirely (backlog 36352452). Leaving Pending by hand is now judged
+    // by the same gate as completing — and once the blocker is done,
+    // the same move lands.
     let policy: Arc<dyn PolicyClient> = Arc::new(
         // The step PUT first clears a coarse (Update, step) gate before
         // the mechanics under test run; grant it to the caller's role.
@@ -758,22 +763,32 @@ async fn put_step_active_allowed_with_open_blockers() {
     let gated_id = gated.id;
     jobs.add_step(&gated).await.unwrap();
 
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("PUT")
-                .uri(format!("/api/jobs/{}/steps/{}", job.id, gated_id))
-                .header("content-type", "application/json")
-                .header("x-boss-user", user_header(&tech))
-                .body(Body::from(r#"{"status":"active"}"#))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let start = || {
+        Request::builder()
+            .method("PUT")
+            .uri(format!("/api/jobs/{}/steps/{}", job.id, gated_id))
+            .header("content-type", "application/json")
+            .header("x-boss-user", user_header(&tech))
+            .body(Body::from(r#"{"status":"active"}"#))
+            .unwrap()
+    };
+    let resp = app.clone().oneshot(start()).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CONFLICT,
+        "a Pending step is not opened past an open blocker"
+    );
+    let after = jobs.get_step(&gated_id).await.unwrap().expect("step");
+    assert_eq!(after.status, StepStatus::Pending);
+
+    let mut approved = jobs.get_step(&blocker_id).await.unwrap().expect("step");
+    approved.status = StepStatus::Completed;
+    jobs.update_step(&approved).await.unwrap();
+    let resp = app.oneshot(start()).await.unwrap();
     assert_eq!(
         resp.status(),
         StatusCode::NO_CONTENT,
-        "active transition must be allowed even with open blockers"
+        "with the blocker done, the same move lands"
     );
 }
 

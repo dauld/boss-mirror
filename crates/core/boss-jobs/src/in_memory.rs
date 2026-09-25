@@ -827,6 +827,12 @@ impl JobsRepository for InMemoryJobs {
         // froze the fields everywhere — so the two answered one write
         // two ways (backlog b433bdf3). Now it says what the SQL says.
         next.spec_slug = existing.spec_slug.clone();
+        // Nor does it name `assurance_required` or `step_plugin_version`:
+        // this adapter stored a body's, so `null` lowered a Presence
+        // step here while Pg kept it (backlog 36352452). A re-pin writes
+        // both through its own statement, never through this one.
+        next.assurance_required = existing.assurance_required;
+        next.step_plugin_version = existing.step_plugin_version;
         if matches!(existing.status, StepStatus::Completed | StepStatus::Skipped) {
             next.fields = existing.fields.clone();
             next.status = existing.status;

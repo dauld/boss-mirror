@@ -41,6 +41,7 @@ pub mod http;
 pub mod human_only;
 pub mod in_memory;
 pub mod job_edges;
+pub mod job_outcome;
 pub mod jobs_config;
 pub mod landing;
 pub mod metadata_containment;

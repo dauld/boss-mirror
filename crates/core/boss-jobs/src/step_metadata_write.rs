@@ -77,6 +77,13 @@ pub fn protocol_keys_changed(stored: &Value, after: &Value) -> Vec<&'static str>
 /// `blocked_by` is what the blocker gate reads; `fields` is the
 /// required-at-done contract. A read-merge-write sends each back as it
 /// stands and is not judged.
+///
+/// `assurance_required` is the weakest stamp the step accepts — the
+/// Workflow may raise it, never a writer (36352452: `null` lowered a
+/// Presence step in memory, while the Pg UPDATE, which never names the
+/// column, answered 204 over a write that did not land).
+/// `step_plugin_version` is the plugin bundle the step was pinned to
+/// when it was written, and drifted between the adapters the same way.
 pub fn reshaped_fields(
     stored: &boss_core::job::Step,
     after: &boss_core::job::Step,
@@ -87,6 +94,14 @@ pub fn reshaped_fields(
         ("sort_order", stored.sort_order != after.sort_order),
         ("blocked_by", stored.blocked_by != after.blocked_by),
         ("fields", stored.fields != after.fields),
+        (
+            "assurance_required",
+            stored.assurance_required != after.assurance_required,
+        ),
+        (
+            "step_plugin_version",
+            stored.step_plugin_version != after.step_plugin_version,
+        ),
     ]
     .into_iter()
     .filter_map(|(name, moved)| moved.then_some(name))
@@ -94,9 +109,9 @@ pub fn reshaped_fields(
 }
 
 /// The hint the step PUT's reshape refusal carries.
-pub const RESHAPED_FIELDS_HINT: &str = "a step's kind, slug, index, blocker edges and \
-     required-at-done fields are its place in the protocol the packet was admitted under, and \
-     a step PUT does not move them. Send them back as read, or leave them out. A packet moves \
+pub const RESHAPED_FIELDS_HINT: &str = "a step's kind, slug, index, blocker edges, \
+     required-at-done fields, assurance requirement and plugin version are its place in the \
+     protocol the packet was admitted under, and a step PUT does not move them. Send them back as read, or leave them out. A packet moves \
      between protocol versions only through `boss job convert <packet> [--to vN]`, which \
      records the move.";
 
@@ -230,6 +245,39 @@ mod tests {
             reshaped_fields(&with_fields, &after),
             vec!["kind", "spec_slug", "sort_order", "blocked_by", "fields"]
         );
+    }
+
+    /// 36352452: the assurance requirement and the plugin version were
+    /// taken from the body — stored in memory, dropped by Pg — so `null`
+    /// lowered a Presence step in one adapter and 204'd over nothing in
+    /// the other. Each is named when it moves, lowered or raised.
+    #[test]
+    fn the_assurance_requirement_and_plugin_version_are_named_when_moved() {
+        let job = boss_core::job::JobId::new();
+        let mut stored = boss_core::job::Step::new(job, "task", "Approve", 1);
+        stored.assurance_required = Some(boss_core::job::Assurance::Presence);
+        stored.step_plugin_version = 3;
+        assert!(reshaped_fields(&stored, &stored.clone()).is_empty());
+
+        let mut lowered = stored.clone();
+        lowered.assurance_required = None;
+        assert_eq!(
+            reshaped_fields(&stored, &lowered),
+            vec!["assurance_required"]
+        );
+        let mut raised = lowered.clone();
+        raised.assurance_required = Some(boss_core::job::Assurance::Presence);
+        assert_eq!(
+            reshaped_fields(&lowered, &raised),
+            vec!["assurance_required"]
+        );
+        let mut repinned = stored.clone();
+        repinned.step_plugin_version = 4;
+        assert_eq!(
+            reshaped_fields(&stored, &repinned),
+            vec!["step_plugin_version"]
+        );
+        assert!(RESHAPED_FIELDS_HINT.contains("assurance requirement"));
     }
 
     #[test]

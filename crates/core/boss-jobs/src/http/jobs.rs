@@ -1610,6 +1610,52 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     }
     job.workflow_version = existing.workflow_version;
 
+    // A CLOSED PACKET DOES NOT REOPEN, AND ITS OUTCOME IS THE CLOSE'S
+    // (backlog 36352452). After a terminal close this route took
+    // `{status: open, metadata: {outcome: aborted}}` whole: the packet
+    // reopened with its steps still skipped and its record rewritten.
+    // Closure says every packet reaches a terminal and stays there;
+    // provenance says the outcome is what the close wrote. Both refused,
+    // out loud. The write that CLOSES the packet still names its outcome
+    // — that is the hand close, the third close site below — and a body
+    // that omits the key keeps the stored one, as `corrections` does.
+    let was_terminal = matches!(old_status, JobStatus::Closed | JobStatus::Cancelled);
+    if was_terminal && matches!(job.status, JobStatus::Open | JobStatus::Draft) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "a closed packet does not reopen",
+                "job_id": job_id.to_string(),
+                "stored_status": old_status,
+                "requested_status": job.status,
+                "hint": crate::job_outcome::REOPEN_HINT,
+            })),
+        )
+            .into_response();
+    }
+    let closes_here =
+        !was_terminal && matches!(job.status, JobStatus::Closed | JobStatus::Cancelled);
+    if !closes_here {
+        if crate::job_outcome::put_changes_outcome(&existing.metadata, &job.metadata) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "a packet's outcome is written by its close",
+                    "job_id": job_id.to_string(),
+                    "refused_keys": [crate::job_outcome::OUTCOME_KEY],
+                    "stored_outcome": existing.metadata.get(crate::job_outcome::OUTCOME_KEY),
+                    "hint": crate::job_outcome::PUT_REFUSAL_HINT,
+                })),
+            )
+                .into_response();
+        }
+        crate::corrections::carry_forward_key(
+            &mut job.metadata,
+            &existing.metadata,
+            crate::job_outcome::OUTCOME_KEY,
+        );
+    }
+
     // Same opt-in subject validation as create_job. Catches a body that
     // swaps Subject::System(…) for Subject::Custom { custom_kind:
     // "made-up" } on update.
@@ -1735,7 +1781,7 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
         Ok(job_id) => job_id,
         Err(refusal) => return refusal,
     };
-    let serde_json::Value::Object(patch) = patch else {
+    let serde_json::Value::Object(mut patch) = patch else {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             "metadata patch must be a JSON object of top-level keys",
@@ -1783,6 +1829,61 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
     };
     if !scope_matches(&user, &scope, &existing) {
         return (StatusCode::FORBIDDEN, "job is outside your scope").into_response();
+    }
+
+    // And `outcome`, which the close writes (backlog 36352452): this door
+    // answered 204 to `{outcome: forged}` on a closed packet. Unlike the
+    // two lists above it has one other legitimate writer — `boss job
+    // outcome`, the repair of a close that lost it (228c9a7d) — so the
+    // key is judged rather than refused on sight: an unchanged re-send
+    // lands, and so does exactly the outcome the packet's completed
+    // terminal declares while none is recorded. The server derives that
+    // value itself; the repair's own derivation is not taken on trust.
+    if let Some(sent) = patch.get(crate::job_outcome::OUTCOME_KEY).cloned() {
+        let sent = &sent;
+        let lost = existing.status == JobStatus::Closed
+            && existing
+                .metadata
+                .get(crate::job_outcome::OUTCOME_KEY)
+                .is_none_or(serde_json::Value::is_null);
+        let derived = match (&state.kind_registry, lost) {
+            (Some(reg), true) => match (
+                reg.get_version(&existing.kind, existing.workflow_version)
+                    .await,
+                state.jobs.list_steps(&job_id).await,
+            ) {
+                (Ok(spec), Ok(steps)) => crate::job_outcome::derived(&spec, &steps),
+                _ => None,
+            },
+            _ => None,
+        };
+        if !crate::job_outcome::patch_may_write(
+            existing.status,
+            &existing.metadata,
+            sent,
+            derived.as_deref(),
+        ) {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "a packet's outcome is written by its close",
+                    "job_id": job_id.to_string(),
+                    "refused_keys": [crate::job_outcome::OUTCOME_KEY],
+                    "stored_outcome": existing.metadata.get(crate::job_outcome::OUTCOME_KEY),
+                    "derived_outcome": derived,
+                    "hint": crate::job_outcome::PATCH_REFUSAL_HINT,
+                })),
+            )
+                .into_response();
+        }
+        // An unchanged re-send is judged against the row as READ; the
+        // merge runs against the row as it stands, and a close may land
+        // between the two. Dropping the no-op key means only the repair
+        // ever reaches the merge with it, so a racing close keeps what
+        // it wrote.
+        if !lost {
+            patch.remove(crate::job_outcome::OUTCOME_KEY);
+        }
     }
 
     let actor = user
