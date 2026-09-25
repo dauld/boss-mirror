@@ -1,28 +1,25 @@
-//! A completed step keeps what was completed: its title, its holder,
-//! its notes, and the day the SERVER says it was completed.
+//! A completed step keeps what was completed: its title, its holder and
+//! its notes.
 //!
 //! THE DEFECT (backlog 42e7c6b9), reproduced on a merged tree by the
-//! review of car 52ad60e6, 2026-09-25. Two holes, both provenance:
+//! review of car 52ad60e6, 2026-09-25: after a ticketed completion of a
+//! presence step (204), a bare `PUT {"title": ...}` answered 204 and
+//! changed the stored title of the COMPLETED step. The terminal freeze
+//! in `update_step` checked only `completed_on` and `metadata`, and the
+//! Pg UPDATE wrote `title`, `assignee_id` and `notes` with no terminal
+//! CASE. The ops runner fails closed (its stamp no longer matches), but
+//! the record then shows a passkey approval of a title no passkey saw.
 //!
-//! (A) After a ticketed completion of a presence step (204), a bare
-//!     `PUT {"title": ...}` answered 204 and changed the stored title of
-//!     the COMPLETED step. The terminal freeze in `update_step` checked
-//!     only `completed_on` and `metadata`, and the Pg UPDATE wrote
-//!     `title`, `assignee_id` and `notes` with no terminal CASE. The ops
-//!     runner fails closed (its stamp no longer matches), but the record
-//!     then shows a passkey approval of a title no passkey saw.
+//! THE RULE: a completed or skipped step's title, assignee and notes are
+//! frozen like its metadata — a write that would change one is refused
+//! 409 naming it, an unchanged re-send stays 204.
 //!
-//! (B) The completing PUT could carry its own `completed_on`, so a
-//!     caller chose the day of its own completion — a backdate — while
-//!     `completed_at` and `completed_by` beside it were already the
-//!     server's. A body that set `completed_on` on a step it did NOT
-//!     complete stored it too, and the flip later kept it.
-//!
-//! THE RULE, for both: a completed or skipped step's title, assignee
-//! and notes are frozen like its metadata — a write that would change
-//! one is refused 409 naming it, an unchanged re-send stays 204 — and
-//! `completed_on` is the server clock's date at the flip, whatever the
-//! body says, on every step.
+//! NOT HERE: who dates a completion. The packet's second half — a
+//! completing PUT may carry its own `completed_on` — rode this car's
+//! first version as a pin to the server clock, and its review held it:
+//! that date came from a clock read separate from `completed_at`'s, and
+//! boss-sim does not advance the service clock, so the pin collapsed sim
+//! completions onto the flush date. It is its own item, f3e78bdf.
 
 use std::sync::Arc;
 
@@ -47,19 +44,14 @@ use uuid::Uuid;
 
 const JOB: &str = "00000000-0000-0000-0000-00000000e001";
 const GUARDED: &str = "00000000-0000-0000-0000-00000000f001";
-const ORDINARY: &str = "00000000-0000-0000-0000-00000000f002";
 const DONE: &str = "00000000-0000-0000-0000-00000000f003";
 
 const PRESENCE_KEY: &[u8] = b"completed-step-keeps-presence-key-0123";
 
-/// The day the server's clock reads. A body's `completed_on` is never
-/// this, so a stored date equal to it can only have come from the clock.
+/// The day the server's clock reads.
 fn server_day() -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 9, 25).unwrap()
 }
-
-/// The backdate a caller tried to choose.
-const BACKDATE: &str = "2020-01-01";
 
 fn operator() -> User {
     User {
@@ -168,7 +160,6 @@ async fn seed() -> (Router, Arc<InMemoryJobs>) {
     .unwrap();
     for s in [
         step(GUARDED, StepStatus::Ready, Some(Assurance::Presence)),
-        step(ORDINARY, StepStatus::Ready, None),
         step(DONE, StepStatus::Completed, None),
     ] {
         jobs.add_step(&s).await.unwrap();
@@ -340,85 +331,6 @@ async fn an_unchanged_resend_of_a_completed_step_still_succeeds() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-}
-
-/// (B) on the presence step: the ticketed completion cannot choose its
-/// own day.
-#[tokio::test]
-async fn a_ticketed_completion_cannot_backdate_itself() {
-    let (app, jobs) = seed().await;
-    let before = stored(&jobs, GUARDED).await;
-    let (status, body) = put(
-        &app,
-        GUARDED,
-        serde_json::json!({ "status": "completed", "completed_on": BACKDATE }),
-        Some(ticket_for(&before, "ceremony-2")),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    let after = stored(&jobs, GUARDED).await;
-    assert_eq!(
-        after.completed_on,
-        Some(server_day()),
-        "completed_on is the server clock's day, as completed_at is its instant"
-    );
-    assert_eq!(
-        after.completed_at.map(|t| t.date_naive()),
-        after.completed_on,
-        "the day and the instant of one completion agree"
-    );
-}
-
-/// (B) on every step, not only presence ones: no caller dates its own
-/// completion.
-#[tokio::test]
-async fn an_ordinary_completion_cannot_backdate_itself() {
-    let (app, jobs) = seed().await;
-    let (status, body) = put(
-        &app,
-        ORDINARY,
-        serde_json::json!({ "status": "completed", "completed_on": BACKDATE }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    assert_eq!(
-        stored(&jobs, ORDINARY).await.completed_on,
-        Some(server_day())
-    );
-}
-
-/// The two-step walk round: plant a date on an OPEN step, then send a
-/// bare completion. Neither write gets to choose the day.
-#[tokio::test]
-async fn a_date_planted_on_an_open_step_does_not_survive_its_completion() {
-    let (app, jobs) = seed().await;
-    let (status, body) = put(
-        &app,
-        ORDINARY,
-        serde_json::json!({ "completed_on": BACKDATE }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    assert_eq!(
-        stored(&jobs, ORDINARY).await.completed_on,
-        None,
-        "an open step has no completion day to store"
-    );
-
-    let (status, body) = put(
-        &app,
-        ORDINARY,
-        serde_json::json!({ "status": "completed" }),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
-    assert_eq!(
-        stored(&jobs, ORDINARY).await.completed_on,
-        Some(server_day())
-    );
 }
 
 /// The adapter half: a write that reaches the in-memory row without the
