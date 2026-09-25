@@ -1691,8 +1691,11 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
         )
             .into_response();
     }
-    let closes_here =
-        !was_terminal && matches!(job.status, JobStatus::Closed | JobStatus::Cancelled);
+    // A CANCEL WRITES NO OUTCOME (backlog 570e72bd). An outcome names
+    // how the work ended, and a cancel is the record that it did not —
+    // so a cancel carrying `merged` stood as a packet that merged. Only
+    // the close names one; a cancel is judged like any other PUT.
+    let closes_here = !was_terminal && job.status == JobStatus::Closed;
     if !closes_here {
         if crate::job_outcome::put_changes_outcome(&existing.metadata, &job.metadata) {
             return (
