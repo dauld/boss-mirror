@@ -1192,6 +1192,13 @@ async fn assign(ctx: &DispatcherCtx, job_id: &str, step_id: &str, emp_id: &str) 
             );
             return Ok(());
         }
+        if held_before_assignment(status.as_u16(), &text) {
+            debug!(
+                job_id,
+                step_id, emp_id, "step was claimed before its assignment arrived; nothing to hold"
+            );
+            return Ok(());
+        }
         anyhow::bail!("PUT {url} returned {status}: {text}");
     }
 }
@@ -1222,13 +1229,37 @@ fn finished_before_assignment(status: u16, body: &str) -> bool {
     terminal && holder_refused
 }
 
+/// The jobs API's refusal of a holder change on an ACTIVE step someone
+/// already holds (backlog 650ebd0c). The nomination is judged off the
+/// event payload, which cannot know a claim landed after it was
+/// emitted: the first PUT then meets the row-version refusal, JetStream
+/// redelivers, and the redelivered PUT used to write this pick over the
+/// claimant. The jobs API now refuses that write, and for this caller
+/// the refusal is the answer "somebody holds it": ack, as for a step
+/// that finished first, rather than NAK the same refusal to the
+/// dead-letter stream.
+fn held_before_assignment(status: u16, body: &str) -> bool {
+    if status != 409 {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    let active = v.get("step_status").and_then(|s| s.as_str()) == Some("active");
+    let holder_refused = v
+        .get("refused_fields")
+        .and_then(|f| f.as_array())
+        .is_some_and(|f| f.iter().any(|x| x.as_str() == Some("assignee_id")));
+    active && holder_refused
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         Partition, StepEventPayload, born_placed, capability_executor, eligible_candidates,
-        event_partition, executor_for, finished_before_assignment, is_active_holder,
-        left_for_role_queue, owner_assignee, owner_id_from_job_body, partition_permits, pick_index,
-        pick_index_for, roster_union, stable_hash,
+        event_partition, executor_for, finished_before_assignment, held_before_assignment,
+        is_active_holder, left_for_role_queue, owner_assignee, owner_id_from_job_body,
+        partition_permits, pick_index, pick_index_for, roster_union, stable_hash,
     };
 
     /// The jobs API's refusal body for a holder change on a finished step
@@ -1273,6 +1304,50 @@ mod tests {
             &terminal_refusal("completed", &["assignee_id"])
         ));
         assert!(!finished_before_assignment(409, "step is completed"));
+    }
+
+    /// The jobs API's refusal of a holder change on an ACTIVE step
+    /// someone holds (backlog 650ebd0c; its shape is pinned on the jobs
+    /// side by `a_nomination_after_a_claim_does_not_replace_the_claimant`).
+    fn held_refusal(step_status: &str, fields: &[&str]) -> String {
+        serde_json::json!({
+            "error": "step is active and held — a PUT does not replace its holder",
+            "step_id": "00000000-0000-0000-0000-000000000001",
+            "step_status": step_status,
+            "holder": "emp-claimant",
+            "refused_fields": fields,
+        })
+        .to_string()
+    }
+
+    /// A redelivered nomination that finds the step claimed is done:
+    /// the claimant holds it, so there is nothing to assign and nothing
+    /// to redeliver — an ack, not a NAK towards the dead-letter stream.
+    #[test]
+    fn a_step_claimed_before_its_assignment_is_nothing_to_hold() {
+        assert!(held_before_assignment(
+            409,
+            &held_refusal("active", &["assignee_id"])
+        ));
+    }
+
+    #[test]
+    fn a_held_refusal_is_read_only_in_its_own_shape() {
+        // Not about the holder, not an active step, or not a 409: still
+        // an error, so a real failure keeps NAKing as before.
+        assert!(!held_before_assignment(
+            409,
+            &held_refusal("active", &["metadata"])
+        ));
+        assert!(!held_before_assignment(
+            409,
+            &held_refusal("ready", &["assignee_id"])
+        ));
+        assert!(!held_before_assignment(
+            422,
+            &held_refusal("active", &["assignee_id"])
+        ));
+        assert!(!held_before_assignment(409, "step changed"));
     }
     use crate::config::AssignmentStrategy;
     use boss_jobs::step_registry::StepRegistry;

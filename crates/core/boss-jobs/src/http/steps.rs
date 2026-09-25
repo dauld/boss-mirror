@@ -471,6 +471,12 @@ const PRESENCE_CONTENT_HINT: &str = "write the content first through the merge d
      complete with {\"status\":\"completed\"} alone and the ticket that ceremony issued. \
      A presence-assured step is not skipped: leave it open, or cancel the packet.";
 
+/// The way to move an active step to another holder, named in the
+/// refusal that stops a PUT doing it in one write (backlog 650ebd0c).
+const ACTIVE_HOLDER_HINT: &str = "an active step changes hands in two writes: free it with \
+     {\"status\":\"ready\",\"assignee_id\":null}, then the next holder claims it through \
+     POST .../claim. A nominator that finds the step already held has nothing to do.";
+
 pub(super) fn judge_assurance(
     floor: boss_core::job::Assurance,
     step: &boss_core::job::Step,
@@ -827,6 +833,48 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                 "step_id": step_id.to_string(),
                 "refused_keys": protocol_keys,
                 "hint": crate::step_metadata_write::PROTOCOL_KEYS_HINT,
+            })),
+        )
+            .into_response();
+    }
+
+    // AN ACTIVE STEP KEEPS ITS HOLDER (backlog 650ebd0c, the review of
+    // car e341f7cd). A claim is the Ready→Active CAS; nothing else may
+    // take the step off the actor who won it. The dispatcher nominates
+    // with a bare `PUT {assignee_id}`: when a claim landed between its
+    // read and its write the version compare refused it (STEP_CHANGED),
+    // JetStream redelivered, and the redelivered PUT read the fresh
+    // row — active, held by the claimant — passed the compare it had
+    // just read for itself, and wrote the dispatcher's pick over the
+    // claimant about a second after the claim. So the boundary is here,
+    // for every caller, as the human-only one below is: a PUT naming a
+    // DIFFERENT holder of an ACTIVE, held step is refused, naming the
+    // holder, in the terminal freeze's shape (`step_status` +
+    // `refused_fields`) so the dispatcher reads both refusals as
+    // "nothing to hold".
+    //
+    // What still moves: a re-send of the stored holder is not a change;
+    // a READY step's nomination is not a claim, so it can be moved; and
+    // a RELEASE (`assignee_id: null`, the abandoned-step reclaim's
+    // body) frees the step — freeing it and then claiming it through
+    // the CAS is how an active step changes hands, two writes, each on
+    // the record. Exact spelling: an alias of the holder is refused
+    // too, which is harmless, since the claim door already rewrote the
+    // holder to the registered id (d7fef617).
+    if old.status == StepStatus::Active
+        && let Some(holder) = old.assignee_id.as_deref().filter(|h| !h.trim().is_empty())
+        && let Some(next) = step.assignee_id.as_deref().filter(|n| !n.trim().is_empty())
+        && next != holder
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "step is active and held — a PUT does not replace its holder",
+                "step_id": step_id.to_string(),
+                "step_status": status_word(old.status),
+                "holder": holder,
+                "refused_fields": ["assignee_id"],
+                "hint": ACTIVE_HOLDER_HINT,
             })),
         )
             .into_response();
