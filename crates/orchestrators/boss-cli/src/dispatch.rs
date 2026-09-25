@@ -667,6 +667,42 @@ pub(crate) fn briefed_unheld_refusal(
     )
 }
 
+/// The test stubs' step merge door, as the jobs API's: `body`'s keys land
+/// on the step `path` names in the filed run. ONE copy for every stub
+/// that serves a dispatch, because dispatch reads `briefed`'s field back
+/// before completing it (backlog e381689d) and a stub that answered 204
+/// and stored nothing would be refused exactly as run 6b6fe011 now is. A
+/// path naming no step of `run_id` changes nothing.
+#[cfg(test)]
+pub(crate) fn stub_merge(
+    run: &std::sync::Mutex<Option<Value>>,
+    run_id: &str,
+    path: &str,
+    body: &Value,
+) {
+    let Ok(mut guard) = run.lock() else {
+        return;
+    };
+    let Some(filed) = guard.as_mut() else {
+        return;
+    };
+    let Some(sid) = path
+        .strip_prefix(&format!("/api/jobs/{run_id}/steps/"))
+        .map(|rest| rest.trim_end_matches("/metadata"))
+    else {
+        return;
+    };
+    for step in filed["steps"].as_array_mut().into_iter().flatten() {
+        if step["id"] == sid
+            && let (Some(md), Some(sent)) = (step["metadata"].as_object_mut(), body.as_object())
+        {
+            for (k, v) in sent {
+                md.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
 /// The second write of a run step's completion: the status alone, so
 /// the PUT carries no metadata to replace or drop.
 pub(crate) fn completed() -> Value {
@@ -4104,20 +4140,8 @@ mod wire_tests {
                         let mut left = lost.lock().unwrap();
                         if *left > 0 {
                             *left -= 1;
-                        } else if let Some(filed) = run.lock().unwrap().as_mut() {
-                            let sid = p
-                                .trim_start_matches(&format!("/api/jobs/{RUN}/steps/"))
-                                .trim_end_matches("/metadata");
-                            for s in filed["steps"].as_array_mut().into_iter().flatten() {
-                                if s["id"] == sid
-                                    && let (Some(md), Some(sent)) =
-                                        (s["metadata"].as_object_mut(), body.as_object())
-                                {
-                                    for (k, v) in sent {
-                                        md.insert(k.clone(), v.clone());
-                                    }
-                                }
-                            }
+                        } else {
+                            stub_merge(&run, RUN, p, body);
                         }
                         ("204 No Content", String::new())
                     }
@@ -5250,6 +5274,7 @@ mod wire_tests {
                     run_step_put(body)
                 }
                 ("PATCH", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
+                    stub_merge(&run, RUN, p, body);
                     ("204 No Content", String::new())
                 }
                 // The run edge (dd6d44b7): dispatch writes `agent_run`
@@ -5353,7 +5378,10 @@ mod wire_tests {
                 ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
                     run_step_put(body)
                 }
-                ("PATCH", p) if p.contains("/steps/") => ("204 No Content", String::new()),
+                ("PATCH", p) if p.contains("/steps/") => {
+                    stub_merge(&run, RUN, p, body);
+                    ("204 No Content", String::new())
+                }
                 _ => ("404 Not Found", format!("unstubbed {method} {target}")),
             })
             .await
@@ -5891,6 +5919,7 @@ mod wire_tests {
                         run_step_put(body)
                     }
                     ("PATCH", p) if p.starts_with(&format!("/api/jobs/{INBOX_RUN}/steps/")) => {
+                        crate::dispatch::stub_merge(&run, INBOX_RUN, p, body);
                         ("204 No Content", String::new())
                     }
                     // The edge onto the claimed step (dd6d44b7): a
