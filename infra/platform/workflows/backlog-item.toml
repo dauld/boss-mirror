@@ -38,7 +38,32 @@ audience = { role = "platform-admin" }
 # file the packet named. Prose in a doc is read by whoever goes
 # looking; a procedure is read by whoever is doing the triage, at the
 # moment they do it, and is versioned with the protocol.
+#
+# HOW AN AGENT RUNS IT (backlog cf6be734, 2026-09-25). Measured 05:20Z:
+# 295 open backlog-items, 95 waiting HERE, the oldest six days, and
+# `boss dispatch` refused every one by name — this step declared no
+# block — so each was triaged by agent-claude by hand while builder
+# slots and gate bays sat idle downstream. An `analyst`, not a builder:
+# a route is reads and a verdict, no car, the call `draft-design` below
+# makes. Medium effort at $2, the analyst setting: the judgement is
+# real (an absence verdict is the expensive one to get wrong, see
+# below), but it is ONE claim's measurement and one read of the open
+# list, not page-audit's joined walk of a component tree.
+#
+# THE FIRST FOUR PARAGRAPHS ARE THE SAME CHANGE. A dispatched run is
+# briefed with this text and nothing a session carries in memory, so
+# the acts an operator's startup made habitual — measure on origin/main
+# (CLAUDE.md §Engineering Session Startup, step 4), read the open list
+# before filing a route, record through the verb's `-file` twin — ride
+# here, on the step, or the run does not do them.
+agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
 metadata_defaults = { procedure = """Measure the claim yourself before you route it, and put the measurement in `evidence` — a route chosen off the packet's own text is the failure this step exists to refuse.
+
+MEASURE ON origin/main, NOT ON THE DAY IT WAS FILED. Run `git fetch origin`, then read the site as it stands now: `git show origin/main:<path>` for the file the claim names, `git log origin/main --oneline -S '<the string>' -- <path>` for a change that already removed it, and `boss merged <branch>` when the packet names a branch. A claim filed against an older tree may already be fixed — on 2026-09-01 a session closed five 'open' packets whose fixes were already on main. A claim about the live system (a count, a queue, an answer a service gives) is re-read now through `boss-api GET`, never quoted from the description, and an empty answer gets a control read whose answer you already know before it counts as absence.
+
+DEDUP AGAINST WHAT IS OPEN. Read `boss-api GET '/api/jobs?kind=backlog-item&status=open&limit=500'` into a file in your run directory, compare the rows you hold to `.total` and page with `offset=` until they agree — a limit is not a filter — and search the titles and descriptions for the claim's own nouns: the file, the verb, the step, the error string. Then the cars: `boss-api GET /api/stations/loading-dock/queue` and `boss-api GET '/api/jobs?kind=gate-run&limit=40'`, because a branch already carrying the fix makes this item that car's item. A duplicate names what it duplicates, and the older item is the one that stays: `boss triage <this packet> duplicate --of <that packet> --evidence-file <PATH>`.
+
+CHOOSE THE ROUTE THE MEASUREMENT SUPPORTS, AND RECORD IT WITH THE VERB. `build` when the claim holds on origin/main and the fix is a car; `design` when it holds and the fix is a choice (the `draft-design` step files the design next); `verify` when it cannot be measured from here yet, naming what would measure it; `stale` when origin/main no longer carries it, naming the commit that removed it; `decline` when it holds and is not worth a car, with the reason. Write the evidence to a file in your run directory and run `boss triage <this packet> <route> --evidence-file <PATH>`: the verb checks the route against this step's `disposition` set, writes `evidence`, and reads the packet back, and the file keeps a backtick intact where argv would run it as a command (2376b89e). The evidence names what you read, the origin/main sha you read it at (`git rev-parse origin/main`), when (`date -u`), the open list's `.total`, and each near-duplicate you ruled out and why — so the next reader can re-run it rather than trust it.
 
 AN ABSENCE VERDICT — does-not-reproduce, already-fixed, `stale` — is the most expensive one to get wrong, because a well-evidenced wrong answer is a worse record than no answer at all: the next reader trusts it. Two rules, both bought on 2026-09-21 (backlog fac521bc).
 
@@ -95,6 +120,30 @@ authority_role = "platform-admin"
 # step that exists to produce it: `evidence` is triage's name for the
 # same thing, and every machine withdrawal (sensor.poll, estate.recover,
 # cadence silence) already writes it when it completes this step.
+#
+# HOW AN AGENT RUNS IT (backlog cf6be734, 2026-09-25): `boss dispatch`
+# refused this step on 70da1212 and 8db1d6a6 the day before, for want
+# of this block. The same analyst setting as `triage` and for the same
+# reason — reads and a verdict, no car. `audience`/`authority_role`
+# stays as it was: the convert door compares authority, and an
+# unchanged one keeps every open item's move automatic.
+#
+# THE PROCEDURE SAYS WHAT A CONFIRMED CLAIM DOES, because the row alone
+# does not: a measurement with no disposition reaches `closed`, the
+# `completed` terminal, since the measurement was the work this route
+# asked for. A claim that HOLDS and needs a change therefore leaves
+# that change as its own filed item — otherwise the finding closes
+# with the packet and nobody acts on it (analyst rule 7).
+agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
+metadata_defaults = { procedure = """Re-measure the claim triage could not settle, and put the measurement in `evidence` — it is required: no evidence is not a pass (828381c0). Triage routed here with `verify`, and its evidence names what would measure the claim; start there.
+
+MEASURE ON origin/main AND THE LIVE SYSTEM, NOW. Run `git fetch origin`, read the site with `git show origin/main:<path>` — the file the packet names, reproduced in the shape it actually has, not the shape its prose describes — and look for the change that removed it with `git log origin/main --oneline -S '<the string>' -- <path>`. A claim about the live system is re-read through `boss-api GET` with the time you read it; an empty answer gets a control read whose answer you already know before it counts as absence. An absence verdict names the shape you tested and where that shape came from: the triage step on this packet carries the two rules and the case that paid for them (fac521bc), and they bind here too.
+
+DEDUP AGAINST WHAT IS OPEN. Read `boss-api GET '/api/jobs?kind=backlog-item&status=open&limit=500'` into a file in your run directory, page with `offset=` until the rows you hold match `.total`, and search titles and descriptions for the claim's own nouns. Another open item making the same claim makes this one the duplicate when it is the younger; name the other by its full id in the evidence.
+
+THE DISPOSITION IS THE OUTCOME. `stale` when origin/main or the live system no longer shows the claim, naming the commit or the read; `duplicate` when another item covers it; `decline` when it holds and is not worth acting on, with the reason. When it HOLDS and needs a change, leave the disposition off: this item closes `completed`, because the measurement was the work it asked for — so file the change the measurement found as its own item (`boss job file --kind backlog-item --channel <lane>`, the verb's refusal names the lanes) and put its id in the evidence, or the finding dies with this packet.
+
+RECORD IT WITH THE VERB. Write the evidence to a file in your run directory and run `boss step complete <this packet> --step measure --field-file evidence=<PATH>`, adding `--field disposition=<stale|duplicate|decline>` when one applies. The verb refuses a field this row does not declare, lays the write over this step's metadata so this procedure and the agent keys stay, and reads the packet back. The evidence names what you read, the origin/main sha (`git rev-parse origin/main`), when (`date -u`), the open list's `.total`, and anything filed.""" }
 fields = [
   { name = "disposition", field_type = "stale|duplicate|decline", required = false },
   { name = "evidence", field_type = "string", required = true },

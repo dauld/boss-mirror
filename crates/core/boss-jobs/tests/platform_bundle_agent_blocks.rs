@@ -68,6 +68,12 @@ fn the_steps_agents_execute_today_declare_their_agent_block() {
     let want: BTreeSet<String> = [
         "backlog-item/build builder $5.00 high",
         "backlog-item/draft-design analyst $2.00 medium",
+        // The front of the item (backlog cf6be734, 2026-09-25): 95
+        // items waited at `triage` while `boss dispatch` refused it by
+        // name, and `measure` the same. A route and a re-measurement
+        // are reads and a verdict, no car — the analyst setting.
+        "backlog-item/triage analyst $2.00 medium",
+        "backlog-item/measure analyst $2.00 medium",
         "user-feedback/build builder $5.00 high",
         "user-feedback/draft-design analyst $2.00 medium",
         "protocol-retro/collect analyst $2.00 medium",
