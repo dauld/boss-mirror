@@ -24,9 +24,14 @@ hex = "0.4"
 base64 = "0.22"
 hmac = "0.13"
 subtle = "2"
+# The machine gate (src/machine_gate.rs): the middleware every service
+# binary mounts, so it lives in the crate every one of them depends on
+# (design 6805c764, car 1). Every such binary already links axum.
+axum = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"
+tower = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [lints]

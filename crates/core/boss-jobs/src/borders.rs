@@ -65,7 +65,7 @@ use boss_core::job::Job;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::region_states::{BORDER_STILL, STILL_AFTER_GAPS, duration_text};
+use crate::region_states::{BORDER_STILL, OutRail, STILL_AFTER_GAPS, duration_text};
 use crate::regions::{
     Instant, RegionInputs, RegionState, Trend, Windows, awaiting_proof, closed_at, count_split,
     find_step, marshalling_view, meta_instant, opened_at, parse_instant, plural, rate_trend,
@@ -1231,6 +1231,33 @@ pub fn borders(inputs: &BorderInputs<'_>) -> Borders {
             })
             .collect(),
     }
+}
+
+/// THE RAILS LEAVING A REGION, as the capacity rule reads them (design
+/// e765b3fc §4a, car F1): every declared border whose `from` is the
+/// region, with its crossings in the window and its newest crossing —
+/// the same [`flow_of`] the border itself is drawn from, so a region
+/// judged full and the rail beside it cannot disagree about what
+/// crossed. Which rails leave a region is [`BORDERS`], never a list here.
+pub(crate) fn out_rails(
+    region: &str,
+    r: &RegionInputs<'_>,
+    w: &Windows,
+    stuck: &BTreeSet<String>,
+) -> Vec<OutRail> {
+    BORDERS
+        .iter()
+        .filter(|spec| spec.from == region)
+        .map(|spec| {
+            let flow = flow_of(spec, r, w, stuck);
+            OutRail {
+                name: format!("{} -> {}", spec.from, spec.to),
+                // Unread is `motion`'s own test: no rate, no motion.
+                crossings: flow.rate.current.map(|_| flow.rate.samples),
+                last: flow.last,
+            }
+        })
+        .collect()
 }
 
 /// Whether a rail is flowing, and since when it has been held.

@@ -30,7 +30,7 @@ export type Role = string;
 export type RouteName =
   | 'shop' | 'exec' | 'catalog' | 'accounts' | 'assets' | 'sales' | 'service'
   | 'parts' | 'products' | 'finance' | 'people' | 'qa' | 'warehouse' | 'support'
-  | 'system-monitoring' | 'inbox' | 'shipping' | 'views' | 'system-feedback'
+  | 'system-monitoring' | 'inbox' | 'shipping' | 'views'
   | 'vendors' | 'marketing-assets' | 'schedule' | 'jobs'
   // Platform-administration surfaces. Same `permKey: 'it'` gate
   // as the legacy ADMIN footer; these route names exist so a role's
@@ -102,9 +102,9 @@ export function canSeeRoute(role: Role, route: RouteName, row?: RoleRow): boolea
   // there is nothing to gate. What a View can READ is still policed
   // by the endpoints it reads through.
   if (route === 'views') return true;
-  // Feedback triage is IT work; the board itself is readable by any
-  // operator, and the Job/step writes behind it are policy-gated.
-  if (route === 'system-feedback') return true;
+  // 'system-feedback' was an always-on route here until car N3 of
+  // design e765b3fc (2026-09-25): the feedback board is the receiving
+  // station's panel on the Department Map now, which `system-yard` gates.
   const declared = declaredSurfaces(row);
   return declared ? declared.includes(route) : true;
 }

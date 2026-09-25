@@ -334,69 +334,50 @@ describe("a region map draws its own slice of the floor", () => {
   });
 });
 
-// The region map draws FROM the view, so the checks above are a claim
-// about the picture rather than about a module nothing renders — and
-// every mark on it is a button into the entity panel, as YardMap's
-// were. Pinned at source in the yard-page-*.test.ts idiom; the mocked
-// spec (it-region-map) clicks one.
-describe('the region map renders its slice, and every mark on it selects', () => {
-  const floor = readFileSync(join(import.meta.dir, 'RegionFloor.svelte'), 'utf8');
-  const map = readFileSync(join(import.meta.dir, 'RegionMap.svelte'), 'utf8');
+// THE REGION MAP RETIRED WITH ITS PAGE (design e765b3fc, car N3,
+// 2026-09-25). /it/yard/<region> swapped the world for the region's own
+// map, which drew its slice of the floor through RegionFloor, every mark
+// a button into the entity panel. The Department Map keeps ONE map on top
+// and opens a station's detail below it — "the region's second map
+// retires, because the map is already on top" — so both components went
+// with the route. The slices above stay pinned while the floor deck's
+// departure board still reads them (region-page.ts `boardFor`).
+describe('the region map retired with its page', () => {
+  const mapPage = readFileSync(join(import.meta.dir, 'MapPage.svelte'), 'utf8');
   const page = readFileSync(join(import.meta.dir, 'FloorDeck.svelte'), 'utf8');
   const strip = (s: string) => s.replace(/<!--[\s\S]*?-->/g, '');
 
-  it('draws its wagons, bays and locomotives from the view, keeping no placement of its own', () => {
-    expect(floor).toContain("from './floor-slices'");
-    expect(floor).toMatch(/\{#each view\.slice\.wagons as p \(p\.wagon\.id\)\}/);
-    expect(floor).toMatch(/\{#each view\.slice\.bays as p \(p\.bay\.index\)\}/);
-    expect(floor).toMatch(/\{#each view\.slice\.locos as p \(p\.loco\.id\)\}/);
-    expect(floor).not.toContain('function wagonXY');
-    expect(floor).not.toContain('function locoX');
-  });
-
-  it('makes every wagon, bay and locomotive a button that selects it', () => {
-    for (const key of ['`car:${w.id}`', '`bay:${b.index}`', '`train:${l.id}`']) {
-      expect(floor, key).toContain(`onclick={pick(${key})}`);
-      expect(floor, key).toContain(`onkeydown={pickKey(${key})}`);
-    }
-    expect(floor).toMatch(/class="token wagon[^"]*"[\s\S]*?role="button"[\s\S]*?tabindex="0"/);
-  });
-
-  it('is mounted by the region map with the selection, in place of the plates', () => {
-    expect(map).toContain("import RegionFloor from './RegionFloor.svelte'");
-    expect(strip(map)).toMatch(/<RegionFloor[^>]*\{selected\}[^>]*\{onselect\}/);
-    expect(map).not.toContain('interiorLayout');
+  it('RegionMap and RegionFloor are gone, and the Department Map mounts no second map', () => {
+    expect(existsSync(join(import.meta.dir, 'RegionMap.svelte'))).toBe(false);
+    expect(existsSync(join(import.meta.dir, 'RegionFloor.svelte'))).toBe(false);
+    expect(strip(mapPage)).not.toContain('<RegionMap');
+    expect(mapPage).not.toContain("import RegionMap");
   });
 
   it('leaves no second map under it: the floor deck draws none, and YardMap is gone', () => {
     expect(strip(page)).not.toContain('<YardMap');
     expect(page).not.toContain("import YardMap");
     expect(existsSync(join(import.meta.dir, 'YardMap.svelte'))).toBe(false);
-    // …and the page that drew it went with it (car 3).
+    // …and the page that drew it went with it (fe77a1d2 car 3).
     expect(existsSync(join(import.meta.dir, 'YardPage.svelte'))).toBe(false);
   });
 });
 
-// A REGION MAP THAT CANNOT BE DRAWN SAYS SO (backlog 846ab934). On
+// A STATION THAT CANNOT BE DRAWN SAYS SO (backlog 846ab934). On
 // 2026-09-24 the shop floor threw each_key_duplicate on live data and
 // the page sat on "Reading the regions…" for good: nothing caught the
-// render failure, so it looked like a read still coming. The mocked
-// spec pins the key fix; this pins the net under whatever throws next,
-// which no fixture can plant without planting a defect.
-describe('the region map is mounted inside an error boundary', () => {
+// render failure, so it looked like a read still coming. The net was
+// around the region map; since car N3 what a station holds is drawn in
+// its panel on the Department Map, so the net is around that — a board
+// that throws turns into the failure line, and the map above it stands.
+describe("a station's contents are mounted inside an error boundary", () => {
   const mapPage = readFileSync(join(import.meta.dir, 'MapPage.svelte'), 'utf8');
-  const map = readFileSync(join(import.meta.dir, 'RegionMap.svelte'), 'utf8');
   const strip = (s: string) => s.replace(/<!--[\s\S]*?-->/g, '');
 
   it('turns a render failure into the failure line, never the loading line', () => {
     const bounded = strip(mapPage).match(/<svelte:boundary>([\s\S]*?)<\/svelte:boundary>/);
     expect(bounded).not.toBeNull();
-    expect(bounded![1]).toContain('<RegionMap');
+    expect(bounded![1]).toContain('{@render contents(');
     expect(bounded![1]).toMatch(/\{#snippet failed\(error\)\}[\s\S]*?class="yard-empty load-failed"[\s\S]*?\{\/snippet\}/);
-  });
-
-  it('keys its platforms by what they ARE, never by their label', () => {
-    expect(map).toContain('{#each laid.placed as p (p.platform.key)}');
-    expect(map).not.toContain('(p.platform.name)}');
   });
 });

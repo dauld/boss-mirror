@@ -295,6 +295,7 @@ pub async fn serve(bind: String, telemetry: SharedTelemetry, seeds: PathBuf) -> 
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "sim control + telemetry server listening");
+    let app = boss_core::machine_gate::mount(app, "sim-control", &["/health"]);
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -14,15 +14,30 @@
 //! a red that comes and goes is a check nobody reads (CLAUDE.md
 //! §Diagnosis).
 //!
-//! THREE WORDS, ONE MEANING EACH, EVERYWHERE — regions and borders:
+//! FOUR WORDS, ONE MEANING EACH, EVERYWHERE — regions and borders:
 //!
 //!   * `clear`: flowing within its declared bounds. That INCLUDES busy
-//!     and healthy — a dock with a train due, a full rail moving.
+//!     and healthy — a dock with a train due, a rail moving.
+//!   * `full`: a CAPACITY region at its bound while what leaves it keeps
+//!     leaving — gates 3/3 with verdicts landing. A GOOD state, and the
+//!     only one a border never wears (design e765b3fc §4a, car F1).
 //!   * `attention`: a declared band crossed — a number past a line this
 //!     table draws, which someone should look at.
 //!   * `troubled`: ours, and not moving (the shed's rule, 3881f5c9,
 //!     applied to every region), or a reading that could not be taken,
 //!     which is refused like a failure rather than drawn as clear.
+//!
+//! FULL, NOT ATTENTION (David, 2026-09-25, on feedback 84cba7e2: "I want
+//! to be able to see that the Gates are full without reading the small
+//! text"). Until car F1 a capacity region at its bound turned attention
+//! after a hold (`gates-at-bound`, 30m; `shop-floor-at-cap`, 15m), so
+//! the gates read amber most of a working day for doing exactly what
+//! they are for — a colour on a working bottleneck carries no
+//! information. Both bands are retired. At its bound a capacity region
+//! is now `full` while its out-route moves and troubled
+//! ([`STUCK_AT_CAPACITY`]) when it does not; the one thing still worth a
+//! look is the LINE behind it growing past its service time
+//! ([`GATES_LINE_LONG`]). The rule is [`at_capacity`].
 //!
 //! EVERY NON-CLEAR STATE NAMES THE BAND THAT DECIDED IT, so the state
 //! can always be checked against the number beside it ("oldest 7d > 3d
@@ -96,7 +111,7 @@ const fn band(
     }
 }
 
-use RegionState::{Attention, Troubled};
+use RegionState::{Attention, Full, Troubled};
 
 // --- shared -----------------------------------------------------------
 
@@ -143,17 +158,47 @@ pub const DOCK_EDGE_NEVER_CLEARS: Band = band(
     0,
 );
 
+// --- every capacity region (design e765b3fc §4a, car F1) ---------------
+
+/// AT ITS CAPACITY, AND MOVING: a region whose bound is a capacity
+/// (`BoundKind::Capacity` — the three gate bays, the one track, the run
+/// cap) holds as much as it can while what leaves it keeps leaving. The
+/// good state the map fills in solid; see [`at_capacity`].
+pub const FULL: Band = band(
+    "full",
+    "*",
+    Full,
+    "its capacity, with its out-route moving",
+    0,
+);
+/// AT ITS CAPACITY, AND NOTHING LEAVING: ours, and not moving. No hold,
+/// because the quiet it is judged by is already a span of time — past
+/// [`STILL_AFTER_GAPS`] of the out-route's own mean gap — and the
+/// finding dates itself from the moment that span ran out.
+pub const STUCK_AT_CAPACITY: Band = band(
+    "stuck-at-capacity",
+    "*",
+    Troubled,
+    "its capacity, nothing leaving past 4× the out-route's mean gap",
+    0,
+);
+
 // --- gates ------------------------------------------------------------
 
-/// Every bay in use, or a run waiting for one. A gate takes ~11 minutes,
-/// so bays full for half an hour is a queue longer than two gates — the
-/// saturation the review said is "worth knowing", and nothing shorter.
-pub const GATES_AT_BOUND: Band = band(
-    "gates-at-bound",
+/// How many of the station's own service times the OLDEST wait in its
+/// line may stand before the line is worth a look (design e765b3fc §4a).
+pub const LINE_PAST_SERVICE_TIMES: i64 = 2;
+/// A run waiting for a bay longer than [`LINE_PAST_SERVICE_TIMES`] of
+/// the median gate duration: the line is growing faster than the bays
+/// drain it. This replaces `gates-at-bound` (every bay in use for 30m),
+/// which coloured the bays for being used; a queue behind a full
+/// station is expected, and only its LENGTH says anything.
+pub const GATES_LINE_LONG: Band = band(
+    "gates-line-long",
     "gates",
     Attention,
-    "every bay in use for 30m",
-    30,
+    "2× the median gate duration",
+    0,
 );
 /// A run active past the gate Job's own deadline
 /// (`yard::GATE_MAX_ACTIVE_HOURS`): a corpse holding a bay.
@@ -305,15 +350,6 @@ pub const SHOP_FLOOR_UNREPORTED: Band = band(
     "a finished run unreported for 10m",
     10,
 );
-/// Runs in flight at the registry's cap: the next dispatch is refused.
-pub const SHOP_FLOOR_AT_CAP: Band = band(
-    "shop-floor-at-cap",
-    "shop-floor",
-    Attention,
-    "the run cap, held for 15m",
-    15,
-);
-
 // --- publish ----------------------------------------------------------
 
 /// A scan read red and nobody recorded a disposition (design cb38d806
@@ -373,12 +409,14 @@ pub const BORDER_STILL: Band = band(
 /// EVERY BAND, once. A region names a band by referring to its constant,
 /// so an undeclared band cannot be named at all; this list is what the
 /// uniqueness and coverage pins read.
-pub const BANDS: [Band; 26] = [
+pub const BANDS: [Band; 27] = [
     UNREAD,
     MACHINE_FAILED,
+    FULL,
+    STUCK_AT_CAPACITY,
     DOCK_CANNOT_BOARD,
     DOCK_EDGE_NEVER_CLEARS,
-    GATES_AT_BOUND,
+    GATES_LINE_LONG,
     GATES_CORPSE,
     TRACK_BLOCKED,
     TRACK_GATE_FALLBACK,
@@ -395,7 +433,6 @@ pub const BANDS: [Band; 26] = [
     MARSHALLING_OVER_LIMIT,
     MARSHALLING_NOT_DRAINING,
     SHOP_FLOOR_UNREPORTED,
-    SHOP_FLOOR_AT_CAP,
     PUBLISH_UNJUDGED_RED,
     PUBLISH_PR_STALLED,
     PUBLISH_HELD,
@@ -461,11 +498,14 @@ pub struct Settled {
     pub band: Option<Decided>,
 }
 
+/// Full outranks clear and nothing else: it is a good state, so any band
+/// that asks for a look — a long line, a corpse in a bay — still decides.
 fn rank(s: RegionState) -> u8 {
     match s {
         RegionState::Clear => 0,
-        RegionState::Attention => 1,
-        RegionState::Troubled => 2,
+        RegionState::Full => 1,
+        RegionState::Attention => 2,
+        RegionState::Troubled => 3,
     }
 }
 
@@ -544,6 +584,134 @@ pub fn decide(f: &Finding, now: Instant) -> Decided {
     }
 }
 
+/// ONE OUT-ROUTE OF A REGION, as the capacity rule reads it: a declared
+/// border leaving the region (`crate::borders::BORDERS`, `from` = the
+/// region), with the same two facts the border's own `flowing` is judged
+/// from. Built by `crate::borders::out_rails`, so the region and the
+/// rail can never count a crossing differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutRail {
+    /// `gates -> dock`, as the sentences name it.
+    pub name: String,
+    /// Crossings in the current window. `None` when they could not be
+    /// read — which is not zero.
+    pub crossings: Option<usize>,
+    /// The newest crossing the read holds, in either window.
+    pub last: Option<Instant>,
+}
+
+/// THE CAPACITY RULE (design e765b3fc §4a, car F1): what a capacity
+/// region at its bound IS. `None` below the bound — the rule says
+/// nothing there, and the region's own bands decide.
+///
+/// The region's out-route is ALL of its out-rails taken together — for
+/// the gates a green parked and a red judged are both a verdict landed —
+/// so the mean gap is the window over every crossing out, and the quiet
+/// runs from the newest of them. It is the border's own mean-gap rule
+/// ([`STILL_AFTER_GAPS`]) with ONE refinement the region can make and a
+/// rail cannot: the quiet is measured from the later of the last
+/// crossing and the moment the region FILLED (`filled`, read off its
+/// members' own stamps). Without it, bays that fill at 08:00 after a
+/// quiet night read stuck the minute they fill, because the rail has
+/// been quiet since the last verdict at 02:00 — silence with nothing
+/// there to cross is not a stall. Where the record holds no fill
+/// instant the rule is the border's exactly: a crossing inside four
+/// mean gaps, or still.
+///
+///   * `full` ([`FULL`]): some crossing, or the fill, inside
+///     [`STILL_AFTER_GAPS`] mean gaps. Held since it filled.
+///   * troubled, [`STUCK_AT_CAPACITY`]: past them. Held since the quiet
+///     ran out; at once where the record dates neither end.
+///   * troubled, [`UNREAD`]: an out-rail whose crossings could not be
+///     read — whether it moves cannot be told, and a bound reached with
+///     no evidence of motion is not drawn as a good state.
+///
+/// `what` is the region's own count sentence ("3 of 3 bays in use"),
+/// which leads every `why` this writes.
+pub fn at_capacity(
+    count: usize,
+    bound: usize,
+    what: &str,
+    filled: Option<Instant>,
+    rails: &[OutRail],
+    window_hours: i64,
+    now: Instant,
+) -> Option<Finding> {
+    if bound == 0 || count < bound {
+        return None;
+    }
+    let names = || {
+        rails
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if let Some(unread) = rails.iter().find(|r| r.crossings.is_none()) {
+        return Some(Finding::new(
+            UNREAD,
+            None,
+            String::new(),
+            format!(
+                "{what} — at its capacity, and whether it moves cannot be told: the crossings of {} could not be read",
+                unread.name
+            ),
+        ));
+    }
+    let crossings: usize = rails.iter().filter_map(|r| r.crossings).sum();
+    let newest = rails
+        .iter()
+        .filter_map(|r| r.last.map(|at| (at, r.name.as_str())))
+        .max_by_key(|(at, _)| *at);
+    // The mean gap is the window over every crossing out. With none in
+    // the window the record can say only "fewer than one a window", so
+    // the window itself is the gap — a region that filled inside it is
+    // not called stuck on a rate nobody measured.
+    let gap = window_hours * 60 / i64::try_from(crossings.max(1)).unwrap_or(i64::MAX);
+    let from = [newest.map(|(at, _)| at), filled]
+        .into_iter()
+        .flatten()
+        .max();
+    // No fill instant and no crossing in the window: the border's own
+    // rule — still — stated at once, since the record dates neither end.
+    let judgeable = filled.is_some() || crossings > 0;
+    let quiet = from.map(|f| (now - f).num_minutes().max(0));
+    match quiet.filter(|q| judgeable && *q <= STILL_AFTER_GAPS * gap) {
+        Some(q) => Some(Finding::new(
+            FULL,
+            filled,
+            String::new(),
+            match newest {
+                Some((at, rail)) if filled.is_none_or(|f| at >= f) => format!(
+                    "{what} — at its capacity, and moving: {rail} last crossed {} ago",
+                    duration_text((now - at).num_minutes().max(0))
+                ),
+                _ => format!(
+                    "{what} — at its capacity, and moving: filled {} ago, inside {STILL_AFTER_GAPS}× the {} mean gap of {}",
+                    duration_text(q),
+                    duration_text(gap),
+                    names()
+                ),
+            },
+        )),
+        None => Some(Finding::new(
+            STUCK_AT_CAPACITY,
+            from.filter(|_| judgeable)
+                .map(|f| f + chrono::Duration::minutes(STILL_AFTER_GAPS * gap)),
+            quiet
+                .filter(|_| judgeable)
+                .map(|q| format!("quiet {}", duration_text(q)))
+                .unwrap_or_default(),
+            format!(
+                "{what} — at its capacity, and nothing has left: {} quiet {}, past {STILL_AFTER_GAPS}× its mean gap of {}",
+                names(),
+                quiet.map_or_else(|| "for the whole read".to_string(), duration_text),
+                duration_text(gap)
+            ),
+        )),
+    }
+}
+
 /// How long, as a header says it: `45m`, `6h`, `3d` — the largest unit
 /// that is whole, so a reading never claims more precision than it
 /// has. Written once, here, and carried on the payload as
@@ -610,6 +778,11 @@ mod tests {
                 BORDER_STILL,
                 format!("{STILL_AFTER_GAPS}× the rail's own mean gap"),
             ),
+            (
+                STUCK_AT_CAPACITY,
+                format!("{STILL_AFTER_GAPS}× the out-route's mean gap"),
+            ),
+            (GATES_LINE_LONG, format!("{LINE_PAST_SERVICE_TIMES}×")),
         ] {
             assert!(
                 b.band.contains(&says),
@@ -713,6 +886,153 @@ mod tests {
             s.band.unwrap().reads,
             "oldest 5d > the 3-day triage band",
             "the header reads the measurement against the band"
+        );
+    }
+
+    // --- the capacity rule (design e765b3fc §4a, car F1) ---------------
+
+    fn rail(name: &str, crossings: Option<usize>, last: Option<&str>) -> OutRail {
+        OutRail {
+            name: name.into(),
+            crossings,
+            last: last.map(t),
+        }
+    }
+
+    /// 24 crossings in a 24h window is a mean gap of an hour, so the
+    /// out-route is still after four quiet hours.
+    fn hourly(last: &str) -> Vec<OutRail> {
+        vec![rail("gates -> dock", Some(24), Some(last))]
+    }
+
+    fn judged(filled: Option<&str>, rails: &[OutRail]) -> Settled {
+        let f = at_capacity(3, 3, "3 of 3 bays in use", filled.map(t), rails, 24, t(NOW));
+        settle(f.into_iter().collect(), "3 of 3 bays in use".into(), t(NOW))
+    }
+
+    #[test]
+    fn below_its_bound_a_capacity_region_is_not_judged_by_the_rule_at_all() {
+        let rails = hourly("2026-09-24T11:50:00Z");
+        assert_eq!(at_capacity(2, 3, "2 of 3", None, &rails, 24, t(NOW)), None);
+        // A bound of nothing bounds nothing (an undeclared cap is not 0).
+        assert_eq!(at_capacity(0, 0, "0", None, &rails, 24, t(NOW)), None);
+    }
+
+    /// FULL: at the bound, and a verdict landed ten minutes ago — well
+    /// inside four mean gaps. A good state, named by its own band, held
+    /// since the bay that filled it opened.
+    #[test]
+    fn at_its_bound_with_its_out_route_moving_a_region_is_full() {
+        let s = judged(
+            Some("2026-09-24T11:20:00Z"),
+            &hourly("2026-09-24T11:50:00Z"),
+        );
+        assert_eq!(s.state, RegionState::Full, "{}", s.why);
+        let band = s.band.expect("full names the band that decided it");
+        assert_eq!(band.id, "full");
+        assert_eq!(band.held_minutes, Some(40), "full since it filled");
+        assert!(
+            s.why.starts_with("3 of 3 bays in use") && s.why.contains("gates -> dock"),
+            "{}",
+            s.why
+        );
+    }
+
+    /// STUCK: at the bound, and nothing has left for five hours against an
+    /// hourly mean gap — ours, and not moving. Dated from the moment the
+    /// four gaps ran out (06:30 + 4h), so "troubled for 1h30m" is the
+    /// record's.
+    #[test]
+    fn at_its_bound_with_its_out_route_still_a_region_is_stuck() {
+        let s = judged(
+            Some("2026-09-24T06:00:00Z"),
+            &hourly("2026-09-24T06:30:00Z"),
+        );
+        assert_eq!(s.state, RegionState::Troubled, "{}", s.why);
+        let band = s.band.unwrap();
+        assert_eq!(band.id, "stuck-at-capacity");
+        assert_eq!(band.since.as_deref(), Some("2026-09-24T10:30:00+00:00"));
+        assert_eq!(band.held_minutes, Some(90));
+        assert!(s.why.contains("nothing has left"), "{}", s.why);
+    }
+
+    /// THE REFINEMENT: bays that filled five minutes ago after a quiet
+    /// night are not stuck because the rail has been quiet since the last
+    /// verdict at 02:00 — nothing was there to cross. The quiet runs from
+    /// the fill. With no fill instant on record, the border's own rule
+    /// stands, and the same rail reads stuck at once.
+    #[test]
+    fn the_quiet_runs_from_the_fill_and_without_one_the_borders_own_rule_stands() {
+        let rails = hourly("2026-09-24T02:00:00Z");
+        let s = judged(Some("2026-09-24T11:55:00Z"), &rails);
+        assert_eq!(s.state, RegionState::Full, "{}", s.why);
+        let s = judged(None, &rails);
+        assert_eq!(s.state, RegionState::Troubled, "{}", s.why);
+        assert_eq!(s.band.unwrap().id, "stuck-at-capacity");
+    }
+
+    /// Every way out counts: a red judged ten minutes ago is a verdict
+    /// landed even when no green has parked for hours, and the mean gap
+    /// is taken over both rails together.
+    #[test]
+    fn the_out_route_is_every_rail_leaving_the_region_taken_together() {
+        let rails = vec![
+            rail("gates -> dock", Some(20), Some("2026-09-24T02:00:00Z")),
+            rail("gates -> garage", Some(4), Some("2026-09-24T11:50:00Z")),
+        ];
+        let s = judged(Some("2026-09-24T06:00:00Z"), &rails);
+        assert_eq!(s.state, RegionState::Full, "{}", s.why);
+        assert!(s.why.contains("gates -> garage"), "{}", s.why);
+    }
+
+    /// An out-rail whose crossings could not be read: whether the region
+    /// moves cannot be told, which is refused like a failure — never drawn
+    /// as the good state.
+    #[test]
+    fn an_unread_out_route_at_the_bound_is_troubled_never_full() {
+        let rails = vec![
+            rail("gates -> dock", None, None),
+            rail("gates -> garage", Some(4), Some("2026-09-24T11:50:00Z")),
+        ];
+        let s = judged(Some("2026-09-24T11:00:00Z"), &rails);
+        assert_eq!(s.state, RegionState::Troubled, "{}", s.why);
+        assert_eq!(s.band.unwrap().id, "unread");
+        assert!(s.why.contains("gates -> dock"), "{}", s.why);
+    }
+
+    /// Full is good, so anything that asks for a look outranks it: a long
+    /// line (attention) and a corpse in a bay (troubled) both decide.
+    #[test]
+    fn full_outranks_clear_and_nothing_else() {
+        let full = at_capacity(
+            3,
+            3,
+            "3 of 3 bays in use",
+            Some(t("2026-09-24T11:00:00Z")),
+            &hourly("2026-09-24T11:50:00Z"),
+            24,
+            t(NOW),
+        )
+        .unwrap();
+        let at = Some(t("2026-09-24T11:00:00Z"));
+        let line = Finding::new(
+            GATES_LINE_LONG,
+            at,
+            "oldest wait 50m".into(),
+            "a line".into(),
+        );
+        let s = settle(vec![full.clone(), line], "clear".into(), t(NOW));
+        assert_eq!(s.state, RegionState::Attention, "{}", s.why);
+        let corpse = Finding::new(GATES_CORPSE, at, String::new(), "a corpse".into());
+        let s = settle(vec![full, corpse], "clear".into(), t(NOW));
+        assert_eq!(s.state, RegionState::Troubled, "{}", s.why);
+    }
+
+    #[test]
+    fn full_is_spelled_full_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(RegionState::Full).unwrap(),
+            serde_json::json!("full")
         );
     }
 

@@ -70,8 +70,15 @@ pub fn router<R: MessageRepository + 'static>(state: MessageApiState<R>) -> Rout
 
 async fn batch_messages<R: MessageRepository + 'static>(
     State(state): State<Arc<MessageApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Json(body): Json<Vec<Message>>,
 ) -> Response {
+    // Each row names its own sender and recipient, so this door writes
+    // as anybody to anybody: a bulk-import and sim-seed door, gated like
+    // expire — trusted callers only (backlog 4dd10336).
+    if !is_trusted(&user) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     // OUTBOX (phase 2): the adapter records MESSAGE_SENT per row in
     // the domain transaction, so the messages rebuilder can reproduce
     // the projection from audit_log alone — otherwise sim-seeded
@@ -105,8 +112,8 @@ async fn health() -> Json<boss_core::startup::HealthResponse> {
     ))
 }
 
-/// Resolve the outbox event stamp for this request. Messages write
-/// handlers carry no CurrentUser extractor; the publisher's
+/// Resolve the outbox event stamp for this request. The stamp does not
+/// read the handler's CurrentUser (which only gates the door); the publisher's
 /// `default_actor` resolves the request identity from the task-local
 /// context (else `automation:messages`), and its clock probe settles
 /// `_simulated` — the same envelope the retired post-commit emits
@@ -258,10 +265,53 @@ async fn expire_signals<R: MessageRepository + 'static>(
     }
 }
 
+/// The gate on the doors that act on ONE message by id (backlog
+/// 4dd10336, which subsumes 1bfb0a4f). Until 2026-09-25 they checked no
+/// caller at all: any session could read, mark read, archive or delete
+/// anyone's message. Now they apply the rule inbox, unread and send
+/// already apply in this file — the message's owner, as `is_owner`
+/// defines it for the door, or a trusted caller.
+///
+/// An untrusted caller asking about an id that does not exist is
+/// refused, not told 404: it cannot own what is not there, and a 403
+/// for a foreign id beside a 404 for a missing one would tell a stranger
+/// which ids exist. A trusted caller is not looked up here at all, so
+/// its answers — 404 included — are the ones the door always gave.
+async fn owner_or_trusted<R: MessageRepository>(
+    state: &MessageApiState<R>,
+    user: &User,
+    id: &str,
+    is_owner: fn(&Message, &str) -> bool,
+) -> Result<(), Response> {
+    if is_trusted(user) {
+        return Ok(());
+    }
+    match state.messages.message_by_id(id).await {
+        Ok(Some(msg)) if is_owner(&msg, &user.id) => Ok(()),
+        Ok(_) => Err(StatusCode::FORBIDDEN.into_response()),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
+    }
+}
+
+/// A message is READ by the two people it passes between.
+fn sender_or_recipient(msg: &Message, user_id: &str) -> bool {
+    msg.recipient_id == user_id || msg.sender_id == user_id
+}
+
+/// Marking read, archiving and deleting change the recipient's inbox,
+/// so only the recipient does them — not the sender.
+fn recipient(msg: &Message, user_id: &str) -> bool {
+    msg.recipient_id == user_id
+}
+
 async fn get_message<R: MessageRepository + 'static>(
     State(state): State<Arc<MessageApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
+    if let Err(refused) = owner_or_trusted(&state, &user, &id, sender_or_recipient).await {
+        return refused;
+    }
     match state.messages.message_by_id(&id).await {
         Ok(Some(msg)) => Json(msg).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, format!("no message with ID {id}")).into_response(),
@@ -271,8 +321,12 @@ async fn get_message<R: MessageRepository + 'static>(
 
 async fn thread<R: MessageRepository + 'static>(
     State(state): State<Arc<MessageApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
+    if let Err(refused) = owner_or_trusted(&state, &user, &id, sender_or_recipient).await {
+        return refused;
+    }
     match state.messages.thread(&id).await {
         Ok(msgs) => Json(msgs).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -281,8 +335,12 @@ async fn thread<R: MessageRepository + 'static>(
 
 async fn mark_read<R: MessageRepository + 'static>(
     State(state): State<Arc<MessageApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
+    if let Err(refused) = owner_or_trusted(&state, &user, &id, recipient).await {
+        return refused;
+    }
     // Generate the timestamp once and use it for both the projection
     // write and the event payload, so a rebuild from audit_log
     // produces an identical `read_at` value.
@@ -296,8 +354,12 @@ async fn mark_read<R: MessageRepository + 'static>(
 
 async fn delete_message<R: MessageRepository + 'static>(
     State(state): State<Arc<MessageApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
+    if let Err(refused) = owner_or_trusted(&state, &user, &id, recipient).await {
+        return refused;
+    }
     let now = boss_clock_client::now_from(&state.clock).await;
     let stamp = event_stamp(&state).await;
     match state.messages.delete_message(&id, now, &stamp).await {
@@ -309,8 +371,12 @@ async fn delete_message<R: MessageRepository + 'static>(
 
 async fn archive_message<R: MessageRepository + 'static>(
     State(state): State<Arc<MessageApiState<R>>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
 ) -> Response {
+    if let Err(refused) = owner_or_trusted(&state, &user, &id, recipient).await {
+        return refused;
+    }
     let now = boss_clock_client::now_from(&state.clock).await;
     let stamp = event_stamp(&state).await;
     match state.messages.archive_message(&id, now, &stamp).await {
@@ -704,6 +770,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/messages/msg-001")
+                    .header("x-boss-user", caller("emp-001", AccessTier::User))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -718,6 +785,10 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/messages/msg-999")
+                    .header(
+                        "x-boss-user",
+                        caller("automation:test", AccessTier::Operator),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -733,6 +804,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/messages/msg-001/read")
+                    .header("x-boss-user", caller("emp-001", AccessTier::User))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -753,6 +825,7 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/messages/msg-001")
+                    .header("x-boss-user", caller("emp-001", AccessTier::User))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -768,6 +841,10 @@ mod tests {
                 Request::builder()
                     .method("DELETE")
                     .uri("/api/messages/msg-999")
+                    .header(
+                        "x-boss-user",
+                        caller("automation:test", AccessTier::Operator),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -783,6 +860,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/messages/msg-001/archive")
+                    .header("x-boss-user", caller("emp-001", AccessTier::User))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -798,11 +876,168 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/messages/msg-999/archive")
+                    .header(
+                        "x-boss-user",
+                        caller("automation:test", AccessTier::Operator),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // -----------------------------------------------------------------
+    // Backlog 4dd10336 (and 1bfb0a4f): the six doors that act on ONE
+    // message, or on a batch, checked no caller at all — any session
+    // could read, mark, archive or delete anyone's message by id. They
+    // now take the rule inbox, unread and send already apply here.
+    // -----------------------------------------------------------------
+
+    /// The `x-boss-user` a caller presents: `id` at `tier`. The role is
+    /// deliberately NOT `guest`, which this file's `is_trusted` still
+    /// admits until e84de48e lands — these tests hold under both.
+    fn caller(id: &str, tier: AccessTier) -> String {
+        serde_json::to_string(&User {
+            id: id.into(),
+            role: "employee".into(),
+            access_tier: tier,
+            territory_account_ids: vec![],
+            direct_report_ids: vec![],
+            department: None,
+        })
+        .unwrap()
+    }
+
+    async fn call(app: Router, method: &str, uri: &str, user: &str) -> StatusCode {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("x-boss-user", user);
+        let body = if uri.ends_with("/batch") {
+            req = req.header("content-type", "application/json");
+            let batch = vec![test_message("msg-batch", "emp-001", false)];
+            Body::from(serde_json::to_string(&batch).unwrap())
+        } else {
+            Body::empty()
+        };
+        app.oneshot(req.body(body).unwrap()).await.unwrap().status()
+    }
+
+    /// msg-001 is from sender-001 to emp-001; emp-002 is neither.
+    const FOREIGN: &str = "emp-002";
+
+    /// A message is read by the two people it passes between: its
+    /// recipient or its sender. Anyone else is refused.
+    #[tokio::test]
+    async fn a_message_and_its_thread_are_read_only_by_its_sender_or_recipient() {
+        for uri in ["/api/messages/msg-001", "/api/messages/msg-001/thread"] {
+            for (who, tier, want) in [
+                (FOREIGN, AccessTier::User, StatusCode::FORBIDDEN),
+                ("emp-001", AccessTier::User, StatusCode::OK),
+                ("sender-001", AccessTier::User, StatusCode::OK),
+                ("automation:test", AccessTier::Operator, StatusCode::OK),
+            ] {
+                let got = call(test_app(), "GET", uri, &caller(who, tier)).await;
+                assert_eq!(got, want, "GET {uri} as {who}");
+            }
+        }
+    }
+
+    /// Marking read, archiving and deleting change the RECIPIENT's
+    /// inbox, so only the recipient may — the sender may not, and
+    /// neither may anyone else.
+    #[tokio::test]
+    async fn only_the_recipient_marks_read_archives_or_deletes_a_message() {
+        for (method, uri, ok) in [
+            ("POST", "/api/messages/msg-001/read", StatusCode::OK),
+            (
+                "POST",
+                "/api/messages/msg-001/archive",
+                StatusCode::NO_CONTENT,
+            ),
+            ("DELETE", "/api/messages/msg-001", StatusCode::NO_CONTENT),
+        ] {
+            for (who, tier, want) in [
+                (FOREIGN, AccessTier::User, StatusCode::FORBIDDEN),
+                ("sender-001", AccessTier::User, StatusCode::FORBIDDEN),
+                ("emp-001", AccessTier::User, ok),
+                ("automation:test", AccessTier::Operator, ok),
+            ] {
+                let got = call(test_app(), method, uri, &caller(who, tier)).await;
+                assert_eq!(got, want, "{method} {uri} as {who}");
+            }
+        }
+    }
+
+    /// A refusal comes before the write: the message a foreign caller
+    /// tried to mark, archive and delete is still there, unread and
+    /// unarchived, when its owner looks.
+    #[tokio::test]
+    async fn a_refused_write_leaves_the_message_as_it_was() {
+        let app = test_app();
+        let foreign = caller(FOREIGN, AccessTier::User);
+        for (method, uri) in [
+            ("POST", "/api/messages/msg-001/read"),
+            ("POST", "/api/messages/msg-001/archive"),
+            ("DELETE", "/api/messages/msg-001"),
+        ] {
+            let got = call(app.clone(), method, uri, &foreign).await;
+            assert_eq!(got, StatusCode::FORBIDDEN, "{method} {uri}");
+        }
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/messages/msg-001")
+                    .header("x-boss-user", caller("emp-001", AccessTier::User))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let msg: Message = serde_json::from_slice(&body).unwrap();
+        assert!(msg.read_at.is_none(), "a refused mark-read marked it");
+        assert_eq!(msg.kind.as_str(), MessageKind::DIRECT, "a refused archive");
+    }
+
+    /// A caller that is not trusted cannot show it owns a message that
+    /// is not there, so it is refused rather than told whether the id
+    /// exists; a trusted caller still gets the 404.
+    #[tokio::test]
+    async fn an_untrusted_caller_is_refused_a_message_that_does_not_exist() {
+        for (method, uri) in [
+            ("GET", "/api/messages/msg-999"),
+            ("GET", "/api/messages/msg-999/thread"),
+            ("POST", "/api/messages/msg-999/read"),
+            ("POST", "/api/messages/msg-999/archive"),
+            ("DELETE", "/api/messages/msg-999"),
+        ] {
+            let got = call(test_app(), method, uri, &caller(FOREIGN, AccessTier::User)).await;
+            assert_eq!(got, StatusCode::FORBIDDEN, "{method} {uri}");
+        }
+    }
+
+    /// The batch door writes messages as anybody to anybody — a bulk
+    /// import and sim-seed door, like expire — so it is trusted-only.
+    #[tokio::test]
+    async fn only_a_trusted_caller_posts_a_batch() {
+        for (who, tier, want) in [
+            ("emp-001", AccessTier::User, StatusCode::FORBIDDEN),
+            ("automation:test", AccessTier::Operator, StatusCode::OK),
+        ] {
+            let got = call(
+                test_app(),
+                "POST",
+                "/api/messages/batch",
+                &caller(who, tier),
+            )
+            .await;
+            assert_eq!(got, want, "batch as {who}");
+        }
     }
 }

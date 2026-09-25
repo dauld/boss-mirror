@@ -1,6 +1,15 @@
 # Machine token activation (7fcd78fa phase 1)
 
-**Status**: living
+**Status**: superseded — do not run. Design 6805c764 (approved
+2026-09-25) replaces this ceremony: the credential broker mints and
+rotates the token (car 3, which deletes this file), and since its car 1
+the gate no longer reads `BOSS_MACHINE_TOKEN` at all. It is
+`boss_core::machine_gate`, mounted on every service port, and takes its
+mode (`off | report | enforce`, default `off`) from the file named by
+`BOSS_MACHINE_GATE_MODE_FILE` and its `current`/`next`/`previous`
+slots from the directory named by `BOSS_MACHINE_TOKEN_DIR`. Setting the
+env var below on the jobs API therefore arms nothing, and unsetting it
+rolls nothing back. The text below is kept for the history of phase 1.
 
 The code side is done and dormant: the jobs API refuses tokenless
 writes ONLY once `BOSS_MACHINE_TOKEN` is set in its environment, and

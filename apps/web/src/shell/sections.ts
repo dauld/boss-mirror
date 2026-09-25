@@ -192,21 +192,17 @@ const SECTION_FOR_KIND: Readonly<Record<Route['kind'], string>> = {
   systemMonitoringPerf: 'system-incidents',
   systemMonitoringEvents: 'system-incidents',
   systemMonitoringAtlas: 'system-incidents',
-  systemMonitoringConductor: 'system-incidents',
   systemFleet: 'system-incidents',
-  systemYardStatus: 'system-incidents',
   systemStepPlugins: 'system-step-plugins',
   systemStepPluginDetail: 'system-step-plugins',
   systemSubjects: 'system-subjects',
   systemRegistryDrift: 'system-registry-drift',
-  systemFeedback: 'system-feedback',
-  systemBacklog: 'system-backlog',
-  // The Department Map (design e765b3fc, car N1): the landing, every
-  // region's floor, and the crew board — the shop floor's own board —
-  // all light its one row.
+  // The Department Map (design e765b3fc, car N1): the landing and every
+  // selection on it light its one row. The floors, the crew board, yard
+  // status, the conductor's feed and the feedback and backlog boards
+  // were pages with rows of their own until car N3 made each one a
+  // selection's panel.
   systemYard: 'system-yard',
-  systemYardFloor: 'system-yard',
-  systemCrew: 'system-yard',
   systemEstate: 'system-estate',
   incidents: 'system-incidents',
   systemKb: 'system-kb',

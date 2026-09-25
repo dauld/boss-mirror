@@ -71,13 +71,17 @@ test('a failed workflows read fails the board — routed cards do not print unde
     json(r, { data: [ROUTED_JOB], total: 1 }));
   await page.route(/\/api\/workflows$/, (r) => json(r, 'registry down', 500));
 
-  await page.goto('/it/design/feedback');
-  await expect(page.locator('.tb-err')).toBeVisible();
-  await expect(page.locator('.tb-err')).toContainText('workflows');
+  // The feedback board is the Receiving station's panel since car N3 of
+  // design e765b3fc retired /it/design/feedback; the backlog board beside
+  // it fails the same read, so the feedback board's line is the one read.
+  await page.goto('/it?at=receiving');
+  const board = page.locator('[data-station-board="feedback"]');
+  await expect(board.locator('.tb-err')).toBeVisible();
+  await expect(board.locator('.tb-err')).toContainText('workflows');
   // The false-empty this replaces: the routed card misfiled as
   // untriaged under a column claiming nobody has routed it.
-  await expect(page.getByText('Nobody has routed these yet.')).toHaveCount(0);
-  await expect(page.locator('.tb-card')).toHaveCount(0);
+  await expect(board.getByText('Nobody has routed these yet.')).toHaveCount(0);
+  await expect(board.locator('.tb-card')).toHaveCount(0);
 });
 
 test('a truly empty queue still reads as empty, not as a failure', async ({ page }) => {
@@ -85,9 +89,10 @@ test('a truly empty queue still reads as empty, not as a failure', async ({ page
   await page.route(/\/api\/jobs\?kind=user-feedback/, (r) => json(r, { data: [], total: 0 }));
   await page.route(/\/api\/workflows$/, (r) => json(r, [KIND]));
 
-  await page.goto('/it/design/feedback');
-  await expect(page.locator('.tb-msg')).toBeVisible();
-  await expect(page.locator('.tb-err')).toHaveCount(0);
+  await page.goto('/it?at=receiving');
+  const board = page.locator('[data-station-board="feedback"]');
+  await expect(board.locator('.tb-msg')).toBeVisible();
+  await expect(board.locator('.tb-err')).toHaveCount(0);
 });
 
 // ---- inbox ------------------------------------------------------------

@@ -27,8 +27,6 @@ use crate::registry::{WorkflowError, WorkflowRegistry, WorkflowSpec};
 use crate::step_plugins::{StepPluginError, StepPluginRegistry, StepPluginSpec};
 use crate::step_registry::StepRegistry;
 
-pub mod machine_gate;
-
 mod borders;
 mod census;
 mod flights;

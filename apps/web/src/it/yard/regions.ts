@@ -46,9 +46,15 @@ export type RegionName = (typeof REGION_NAMES)[number];
  *  that could not be taken, refused like a failure rather than drawn as
  *  clear. `busy` is gone rather than aliased: it meant three things on
  *  six of ten regions, and a server still sending it fails this parse
- *  loudly instead of drawing a new meaning under an old word. */
-export type RegionState = 'clear' | 'attention' | 'troubled';
-const STATES: ReadonlyArray<RegionState> = ['clear', 'attention', 'troubled'];
+ *  loudly instead of drawing a new meaning under an old word.
+ *
+ *  Full (design e765b3fc §4a, car F1): a CAPACITY region at its bound
+ *  while its out-route keeps moving — the gates 3/3 with verdicts
+ *  landing. A GOOD state, drawn as a solid disk and never as an alarm;
+ *  it replaced the amber the gates wore for being used. No border is
+ *  ever full (borders.ts keeps the other three). */
+export type RegionState = 'clear' | 'full' | 'attention' | 'troubled';
+const STATES: ReadonlyArray<RegionState> = ['clear', 'full', 'attention', 'troubled'];
 
 /** What a bound IS (decision 5): the most a place holds, or the depth at
  *  which something is due. "DOCK 6 / 1" read as six cars in a space for
@@ -419,16 +425,12 @@ export function sectionHref(from: string, to: string): string {
   return `/it?at=${encodeURIComponent(`${from}->${to}`)}`;
 }
 
-/** A region's floor page, `/it/yard/<name>` — opened from its
- *  selection's detail, until the panel carries the floor itself and the
- *  page retires (design e765b3fc, cars N2 and N3). Not a region: the
- *  map, because /it/yard alone is the TRACK's floor. */
-export function floorHref(name: string): string {
-  return isRegion(name) ? `/it/yard/${name}` : '/it';
-}
+// `floorHref` — a region's floor page, `/it/yard/<name>` — retired with
+// the page (design e765b3fc, car N3): the station's panel carries the
+// floor itself.
 
-/** The selection a `/it/yard/<region>` floor opens the yard on; the
- *  track for anything else, as parseSelection falls back. */
+/** The selection a station's floor deck opens on; the track for
+ *  anything else, as parseSelection falls back. */
 export function floorSelection(region: string): string {
   return YARD_SELECTION[region] ?? 'track';
 }
@@ -437,9 +439,10 @@ export function floorSelection(region: string): string {
 // Words — pure, testable without a DOM.
 // ---------------------------------------------------------------------
 
-/** The yard's lamp for a state (`.yard-lamp-dot.<lamp>`). */
+/** The yard's lamp for a state (`.yard-lamp-dot.<lamp>`). Full is a good
+ *  state, so it lights the same lamp as clear. */
 export function lampOf(state: RegionState): 'ok' | 'warn' | 'err' {
-  return state === 'clear' ? 'ok' : state === 'attention' ? 'warn' : 'err';
+  return state === 'clear' || state === 'full' ? 'ok' : state === 'attention' ? 'warn' : 'err';
 }
 
 /** What is here, in its unit, against its bound — "3 / 3 bays in use"

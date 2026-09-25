@@ -225,7 +225,8 @@
    *  server) gives the why every line. */
   function verdictLines(lt: TerritoryText, r: Region | undefined): ReadonlyArray<string> {
     const state = stateOf(r);
-    if (state === 'clear') return [];
+    // Full (design e765b3fc §4a) is a good state: like clear, no verdict.
+    if (state === 'clear' || state === 'full') return [];
     const n = lt.verdictLines;
     const band = bandText(r);
     if (band === null) return wrapWords(whyOf(r), lt.verdictChars, n);
@@ -324,7 +325,7 @@
             {/each}
           </text>
         {/if}
-        {#if state !== 'clear'}
+        {#if state !== 'clear' && state !== 'full'}
           <!-- THE BAND THAT DECIDED IT (decision 1), read against its
                number, where the state is — and for trouble the why:
                a verdict must name what failed (whole in the title) -->
@@ -694,7 +695,7 @@
   .motion .traffic { animation: none; }
   .motion .traffic:not([data-density='unknown']) { display: none; }
   .motion .lamp.err, .motion .machine-lamp.err { animation: none; }
-  .motion .territory:not([data-state='clear']) .piston, .reduced .piston { animation: none; }
+  .motion .territory:not([data-state='clear']):not([data-state='full']) .piston, .reduced .piston { animation: none; }
   .motion .rail[data-still='held'] { stroke: var(--map-bad-edge); }
   .yard text.held { fill: var(--map-bad-ink); letter-spacing: 0; }
   .stage { position: relative; min-width: 900px; }

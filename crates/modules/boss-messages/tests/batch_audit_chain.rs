@@ -72,7 +72,13 @@ async fn batch_messages_survive_rebuild() {
         },
     ]);
 
+    // The batch door is trusted-only (backlog 4dd10336): the sim and a
+    // bulk import sign as an operator-tier automation.
     TestRequest::post("/api/messages/batch")
+        .header(
+            "x-boss-user",
+            r#"{"id":"automation:messages-test","role":"platform-admin","access_tier":"operator"}"#,
+        )
         .json(&batch)
         .send(&app)
         .await

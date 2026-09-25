@@ -262,21 +262,26 @@ export function trainsOf(
 // The alarms board.
 // ---------------------------------------------------------------------
 
-export type Alarm = Readonly<{ name: string; label: string; state: Exclude<RegionState, 'clear'>; why: string }>;
+/** The states that raise an alarm: not clear, and not full — a station
+ *  at its capacity and moving is the good state (design e765b3fc §4a). */
+type Alarming = Exclude<RegionState, 'clear' | 'full'>;
 
-const SEVERITY: Readonly<Record<Exclude<RegionState, 'clear'>, number>> = { troubled: 0, attention: 1 };
+export type Alarm = Readonly<{ name: string; label: string; state: Alarming; why: string }>;
 
-/** Every station that is not clear, with the server's own why —
- *  troubled first, then attention, each in line order, then any region
- *  the payload carries that the map has no station for. A station the
- *  read did not carry is an alarm: an unread station is not a quiet one. */
+const SEVERITY: Readonly<Record<Alarming, number>> = { troubled: 0, attention: 1 };
+
+/** Every station that is neither clear nor full, with the server's own
+ *  why — troubled first, then attention, each in line order, then any
+ *  region the payload carries that the map has no station for. A station
+ *  the read did not carry is an alarm: an unread station is not a quiet
+ *  one. */
 export function alarmsOf(read: Regions): ReadonlyArray<Alarm> {
   const names = [...new Set([...STATIONS.map((s) => s.name), ...read.regions.map((r) => r.name)])];
   return names
     .flatMap((name): Alarm[] => {
       const r = read.regions.find((x) => x.name === name);
       const state = ringOf(r);
-      if (state === 'clear') return [];
+      if (state === 'clear' || state === 'full') return [];
       return [{ name, label: stationLabel(name), state, why: r?.why ?? NO_READING }];
     })
     .map((a, i) => ({ a, i }))

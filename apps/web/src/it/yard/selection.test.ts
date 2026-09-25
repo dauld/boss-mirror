@@ -3,7 +3,7 @@
 // nothing, one of its stations, or a name the map does not carry —
 // which is SAID, never an empty panel that reads as a quiet station.
 import { describe, expect, it } from 'bun:test';
-import { markOf, selectionOf } from './selection';
+import { markOf, selectionOf, unreadStationOf } from './selection';
 import { sectionHref } from './regions';
 import type { Border, Borders } from './borders';
 import type { Region, Regions } from './regions';
@@ -124,5 +124,26 @@ describe('sectionHref — the link a section selects itself by', () => {
     expect(markOf(selectionOf('gates', REGIONS, BORDERS))).toBe('gates');
     expect(markOf(selectionOf('dock->track', REGIONS, BORDERS))).toBe('dock→track');
     expect(markOf(selectionOf('gatez', REGIONS, BORDERS))).toBeNull();
+  });
+});
+
+// A STATION WHOSE READING FAILED STILL OPENS (design e765b3fc, car N3).
+// The floor pages at /it/yard/<region> drew their boards whatever the
+// regions read did, because each board reads its own endpoints; the
+// retired page's content lives in the station's panel now, and a failed
+// regions read must not take the boards down with the readings it could
+// not take. So a name that IS a station opens its panel on the name
+// alone — the readings said to be unread, the boards reading their own.
+describe('unreadStationOf — a station named while the regions read is out', () => {
+  it('names a station the map lays out, titled as its panel titles it', () => {
+    expect(unreadStationOf('marshalling')).toEqual({ name: 'marshalling', title: 'Marshalling' });
+    expect(unreadStationOf('shop-floor')).toEqual({ name: 'shop-floor', title: 'Shop floor' });
+  });
+
+  it('names nothing for no selection, a section, or a name that is no station', () => {
+    expect(unreadStationOf(undefined)).toBeNull();
+    expect(unreadStationOf('')).toBeNull();
+    expect(unreadStationOf('dock->track')).toBeNull();
+    expect(unreadStationOf('gatez')).toBeNull();
   });
 });

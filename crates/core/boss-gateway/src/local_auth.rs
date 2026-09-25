@@ -505,11 +505,11 @@ pub async fn login(
         .into_response()
 }
 
-/// The guest's fixed identity. It is a real address on the demo
-/// tenant's domain rather than something like `anonymous@local`
-/// because it shows up in the audit log as an actor, and an actor
-/// in the log should be a name you can look up.
-pub const GUEST_EMAIL: &str = "guest@algedonic.dev";
+/// The guest's fixed identity, spelled once in `boss_core::roles`
+/// because the policy service must recognise it too (backlog
+/// b8e75382: it refuses policy authority to the ids this gateway
+/// mints for anonymous visitors).
+pub use boss_core::roles::GUEST_EMAIL;
 
 #[derive(Serialize)]
 pub struct GuestAvailability {

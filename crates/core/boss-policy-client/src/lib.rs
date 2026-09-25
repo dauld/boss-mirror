@@ -91,16 +91,23 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CurrentUser {
 /// hand. Outside a request (CLI, bootstrap, background tasks) the
 /// actor is unset and the publisher falls back to the service's own
 /// `automation:<source>` identity.
+///
+/// The header opens a sim chain ONLY on an instance that runs a
+/// simulator ([`sim_enabled`]); elsewhere it is ignored (backlog
+/// 85e7f10f, 2026-09-25). Before, any caller that reached a service
+/// port directly — the LAN machine door, an in-cluster pod — could
+/// send `x-sim-origin: true` and have its real work admitted
+/// `Simulated` and stamped `_simulated`, the set the cutover trims.
 pub async fn request_context_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let sim = req
-        .headers()
-        .get(boss_core::sim_origin::SIM_ORIGIN_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+    let sim = sim_chain_from_header(
+        sim_enabled(),
+        req.headers()
+            .get(boss_core::sim_origin::SIM_ORIGIN_HEADER)
+            .and_then(|v| v.to_str().ok()),
+    );
     let actor = req
         .headers()
         .get("x-boss-user")
@@ -145,35 +152,122 @@ pub trait PolicyClient: Send + Sync {
 // Sim-origin bypass — the permissive auth handler for simulator traffic
 // ---------------------------------------------------------------------------
 
-/// Wraps a [`PolicyClient`] and short-circuits to `Allow` for requests
-/// that are part of a simulated event chain — i.e. when
-/// [`boss_core::sim_origin::is_in_sim_chain`] is true because the
-/// caller sent `x-sim-origin: true`.
+/// The deployment switch that says this instance runs a simulator. The
+/// launcher derives it from the tenant manifest's `sim` key (or the
+/// deployment sets it — prod's boss.yaml says `"false"`, the
+/// playground renders `"true"`) and every service inherits it.
+pub const SIM_ENABLED_ENV: &str = "BOSS_SIM_ENABLED";
+
+/// Whether this process runs beside a simulator: [`SIM_ENABLED_ENV`] is
+/// `true` or `1`. UNSET IS OFF — the bypass is something an instance
+/// asks for, never something it gets by saying nothing (backlog
+/// 85e7f10f: until 2026-09-25 the bypass was wired unconditionally, so
+/// prod, whose sim has been parked since 2026-09-05, carried it too).
+pub fn sim_enabled() -> bool {
+    sim_enabled_value(std::env::var(SIM_ENABLED_ENV).ok().as_deref())
+}
+
+fn sim_enabled_value(value: Option<&str>) -> bool {
+    value.is_some_and(|v| {
+        let v = v.trim();
+        v == "1" || v.eq_ignore_ascii_case("true")
+    })
+}
+
+/// What the request-context middleware scopes into the sim-chain
+/// task-local: the `x-sim-origin` header's truth, and only on a sim
+/// instance. Pure so both halves are testable without the environment.
+fn sim_chain_from_header(sim_enabled: bool, header: Option<&str>) -> bool {
+    sim_enabled && boss_core::sim_origin::header_is_truthy(header)
+}
+
+/// Whether `user` is an identity a sim chain is driven by:
 ///
-/// The simulator runs on a fully trusted box and masquerades as the
-/// real employees whose work it stands in for; every event it drives
-/// is already stamped `_simulated=true` by the SimOrigin middleware.
-/// Rather than seed a per-role grant matrix for the simulator (or let
-/// it claim a superuser role), we authorize sim traffic here, at the
-/// boundary, with a single permissive decision — while real traffic
-/// flows through the wrapped client unchanged and is enforced per-role.
+/// - `automation:sim` — boss-sim's `LiveApiOutput` and workforce
+///   clients sign every call with it;
+/// - role `system-sim` — the same clients' `put_as`, which names the
+///   simulated EMPLOYEE as `id` (so attribution lands on the person)
+///   and marks itself automation by role;
+/// - the dispatcher continuing a chain it inherited from a simulated
+///   event — `automation:dispatcher` on its reads and `rule:<name>` on
+///   its writes (`boss_dispatcher::rules::actor`).
 ///
-/// The invariant *"no audit write without a policy allow"* still holds:
-/// every write consults policy; sim writes are allowed *because they
-/// are the trusted, clearly-marked simulator*, not because the check
-/// was skipped.
+/// HOW THAT IS PROVEN TODAY: it is not. `x-boss-user` is ASSERTED by the
+/// caller on the LAN machine door (the gateway replaces it from the
+/// session; nothing behind the gateway verifies it), so on a sim
+/// instance a caller can still claim one of these ids. What this closes
+/// is the header ALONE — an anonymous or ordinary caller that adds
+/// `x-sim-origin` — and, with [`sim_enabled`], every instance without a
+/// sim. Proof of the identity arrives with the machine token (design
+/// 6805c764); until then a sim instance is a playground whose data the
+/// cutover trims, not a store of record.
+pub fn is_sim_identity(user: &User) -> bool {
+    user.role == "system-sim"
+        || user.id == "automation:sim"
+        || user.id == "automation:dispatcher"
+        || user.id.starts_with("rule:")
+}
+
+/// The ONE predicate every sim-bypass site asks (backlog 85e7f10f):
+/// this instance runs a sim, the request is on a sim chain, AND the
+/// caller is a sim identity. The operator-tier doors (classes,
+/// locations, calendar, the ledger's chart and tax registry) write
+/// `sim_bypass_allowed(&user) || tier_ok`; no site reads the chain flag
+/// or the switch for authorization on its own, which is what let
+/// `sim || tier_ok` open each of them to a header.
+pub fn sim_bypass_allowed(user: &User) -> bool {
+    sim_bypass_admits(sim_enabled(), user)
+}
+
+fn sim_bypass_admits(sim_enabled: bool, user: &User) -> bool {
+    sim_enabled && sim_chain_admits(user)
+}
+
+fn sim_chain_admits(user: &User) -> bool {
+    boss_core::sim_origin::is_in_sim_chain() && is_sim_identity(user)
+}
+
+/// Wraps a [`PolicyClient`] and short-circuits to `Allow` for a sim
+/// caller on a simulated event chain — see [`sim_bypass_allowed`] for
+/// the three conditions.
 ///
-/// SECURITY: this trusts `x-sim-origin`. A production gateway MUST
-/// strip or reject that header from untrusted ingress, or the bypass
-/// is forgeable. It is safe on the regen/demo box, where only the
-/// simulator sets it.
+/// The simulator masquerades as the real employees whose work it
+/// stands in for; every event it drives is stamped `_simulated=true`
+/// by the request-context middleware. Rather than seed a per-role
+/// grant matrix for the simulator (or let it claim a superuser role),
+/// sim traffic is authorized here, at the boundary, with a single
+/// permissive decision — while every other caller flows through the
+/// wrapped client unchanged and is enforced per-role.
+///
+/// INSTALLED ONLY ON A SIM INSTANCE. There is no public `new`: a
+/// binary gets the bypass through [`SimBypassPolicyClient::from_env`],
+/// which hands back the inner client untouched unless
+/// [`SIM_ENABLED_ENV`] is on. Until 2026-09-25 five binaries (jobs,
+/// search, views, ledger, people) wrapped unconditionally and the
+/// bypass trusted the header alone, so any caller reaching a service
+/// port directly passed every policy check by sending
+/// `x-sim-origin: true` (backlog 85e7f10f). The gateway strips that
+/// header; the LAN machine door and in-cluster callers do not pass the
+/// gateway.
 pub struct SimBypassPolicyClient {
     inner: Arc<dyn PolicyClient>,
 }
 
 impl SimBypassPolicyClient {
-    pub fn new(inner: Arc<dyn PolicyClient>) -> Self {
-        Self { inner }
+    /// The bypass around `inner` when this instance runs a sim, and
+    /// `inner` itself when it does not. What every service binary calls.
+    pub fn from_env(inner: Arc<dyn PolicyClient>) -> Arc<dyn PolicyClient> {
+        Self::wrap(inner, sim_enabled())
+    }
+
+    /// [`Self::from_env`] with the switch passed in — the door a test
+    /// uses to build both instances in one process.
+    pub fn wrap(inner: Arc<dyn PolicyClient>, sim_enabled: bool) -> Arc<dyn PolicyClient> {
+        if sim_enabled {
+            Arc::new(Self { inner })
+        } else {
+            inner
+        }
     }
 }
 
@@ -185,7 +279,9 @@ impl PolicyClient for SimBypassPolicyClient {
         action: Action,
         resource: Resource,
     ) -> Result<Decision, PolicyClientError> {
-        if boss_core::sim_origin::is_in_sim_chain() {
+        // Constructed only on a sim instance (`wrap`), so the switch is
+        // already decided; the chain and the identity are per request.
+        if sim_chain_admits(user) {
             return Ok(Decision::Allow { scope: Scope::All });
         }
         self.inner.check(user, action, resource).await
@@ -196,7 +292,7 @@ impl PolicyClient for SimBypassPolicyClient {
         user: &User,
         resource: Resource,
     ) -> Result<Predicate, PolicyClientError> {
-        if boss_core::sim_origin::is_in_sim_chain() {
+        if sim_chain_admits(user) {
             return Ok(Predicate::Unrestricted);
         }
         self.inner.scope_predicate(user, resource).await
@@ -507,6 +603,136 @@ mod tests {
             .await
             .unwrap();
         assert!(d.is_allowed());
+    }
+
+    // -- The sim bypass (backlog 85e7f10f, 2026-09-25) -------------------
+    //
+    // None of these read the environment: the switch is passed in, so
+    // the sim-on and sim-off instances are both built in this process.
+
+    fn caller(id: &str, role: &str) -> User {
+        User {
+            id: id.to_string(),
+            role: role.to_string(),
+            access_tier: crate::AccessTier::User,
+            territory_account_ids: vec![],
+            direct_report_ids: vec![],
+            department: None,
+        }
+    }
+
+    /// What the `CurrentUser` extractor yields for a headerless request.
+    fn anonymous() -> User {
+        caller("anonymous", "guest")
+    }
+
+    #[test]
+    fn only_an_explicit_yes_turns_the_sim_on() {
+        for on in ["true", "TRUE", "True", "1", " true "] {
+            assert!(sim_enabled_value(Some(on)), "{on:?} is on");
+        }
+        for off in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("0"),
+            Some("no"),
+            Some("yes"),
+        ] {
+            assert!(!sim_enabled_value(off), "{off:?} is off");
+        }
+    }
+
+    #[test]
+    fn the_header_opens_a_chain_only_on_a_sim_instance() {
+        assert!(!sim_chain_from_header(false, Some("true")));
+        assert!(!sim_chain_from_header(false, Some("1")));
+        assert!(sim_chain_from_header(true, Some("true")));
+        assert!(sim_chain_from_header(true, Some("1")));
+        assert!(!sim_chain_from_header(true, Some("false")));
+        assert!(!sim_chain_from_header(true, None));
+    }
+
+    #[test]
+    fn the_sim_identities_are_the_sim_and_the_dispatcher() {
+        assert!(is_sim_identity(&caller("automation:sim", "system-sim")));
+        // put_as: the simulated employee's id, the sim's role.
+        assert!(is_sim_identity(&caller("emp-042", "system-sim")));
+        assert!(is_sim_identity(&caller(
+            "automation:dispatcher",
+            "platform-admin"
+        )));
+        assert!(is_sim_identity(&caller(
+            "rule:people-hire",
+            "platform-admin"
+        )));
+        assert!(!is_sim_identity(&anonymous()));
+        assert!(!is_sim_identity(&caller("emp-042", "clerk")));
+        assert!(!is_sim_identity(&caller("claude:opus-5", "platform-admin")));
+        assert!(!is_sim_identity(&caller(
+            "automation:classes-seed",
+            "platform-admin"
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_sim_header_alone_admits_nobody_with_the_sim_off_or_on() {
+        let admitted = boss_core::sim_origin::with_sim_chain(true, async {
+            [false, true]
+                .into_iter()
+                .flat_map(|on| {
+                    [anonymous(), caller("emp-042", "clerk")]
+                        .into_iter()
+                        .map(move |u| (on, u.id.clone(), sim_bypass_admits(on, &u)))
+                })
+                .filter(|(_, _, admitted)| *admitted)
+                .collect::<Vec<_>>()
+        })
+        .await;
+        assert!(
+            admitted.is_empty(),
+            "admitted on a header alone: {admitted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sim_caller_is_admitted_only_on_a_sim_instance_and_a_sim_chain() {
+        let sim = caller("automation:sim", "system-sim");
+        let on_chain = boss_core::sim_origin::with_sim_chain(true, async {
+            (
+                sim_bypass_admits(true, &sim),
+                sim_bypass_admits(false, &sim),
+            )
+        })
+        .await;
+        assert_eq!(on_chain, (true, false));
+        // Off a chain the identity alone is nothing either.
+        assert!(!sim_bypass_admits(true, &sim));
+    }
+
+    #[tokio::test]
+    async fn the_bypass_is_not_installed_on_an_instance_without_a_sim() {
+        let sim = caller("automation:sim", "system-sim");
+        let off = SimBypassPolicyClient::wrap(Arc::new(FakePolicyClient::deny_all()), false);
+        let on = SimBypassPolicyClient::wrap(Arc::new(FakePolicyClient::deny_all()), true);
+        let (off_sim, on_sim, on_anon, on_anon_scope) =
+            boss_core::sim_origin::with_sim_chain(true, async {
+                (
+                    off.check(&sim, Action::Update, Resource::step()).await,
+                    on.check(&sim, Action::Update, Resource::step()).await,
+                    on.check(&anonymous(), Action::Update, Resource::step())
+                        .await,
+                    on.scope_predicate(&anonymous(), Resource::job()).await,
+                )
+            })
+            .await;
+        assert!(!off_sim.unwrap().is_allowed(), "no sim, no bypass");
+        assert!(on_sim.unwrap().is_allowed(), "the sim on a sim instance");
+        assert!(!on_anon.unwrap().is_allowed(), "the header is not a caller");
+        assert!(
+            !matches!(on_anon_scope.unwrap(), Predicate::Unrestricted),
+            "a header alone reads nothing unrestricted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -317,6 +317,15 @@ async function open(page: Page, route: string): Promise<boolean> {
 
 const pathOf = (page: Page): string => new URL(page.url()).pathname;
 
+/// Where a crawled ROW is — its path, and its query when the row names
+/// one. `/it?at=gates` is the Department Map with the gates selected
+/// (design e765b3fc, car N3, whose station panels are the crawl rows of
+/// the pages they replaced): a selection is a place, so a click that
+/// selects another station has left it and back must return to it. A
+/// query a page writes onto a row that names none — a /ux/jobs filter —
+/// stays that row's own state, judged as a response below, as before.
+const whereOf = (url: URL, route: string): string => (route.includes('?') ? `${url.pathname}${url.search}` : url.pathname);
+
 /// A request as the page's record spells it: method and path.
 const lineOf = (r: Request): string => `${r.method()} ${new URL(r.url()).pathname}`;
 
@@ -588,6 +597,7 @@ async function clickLeg(
     if (errors.length) findings.push({ route, control: next.label, what: `pageerror: ${errors.join(' | ')}` });
 
     const now = pathOf(page);
+    const here = whereOf(new URL(page.url()), route);
     // A navigation leaves the route or pushes an entry. A control that
     // only REPLACES its own route's query — a filter the page keeps in
     // the URL so a reload and a shared link keep it (/ux/jobs, backlog
@@ -597,7 +607,7 @@ async function clickLeg(
     // An unreadable history length counts as pushed, the old reading.
     const pushed =
       navigated && (await page.evaluate(() => history.length).catch(() => historyBefore + 1)) > historyBefore;
-    if (now !== route || pushed) {
+    if (here !== route || pushed) {
       // Navigated. It must be served, and back must return.
       const landed = `${now}${new URL(page.url()).search}`;
       if (process.env['CRAWL_VERBOSE']) console.log(`[click:${leg}] ${route} ${next.key} -> navigated ${landed}`);
@@ -610,9 +620,9 @@ async function clickLeg(
       await page.goBack({ waitUntil: 'commit' }).catch(() => undefined);
       // Back on the route — the event (c) is about — under the suite's
       // navigation budget; it waited a flat 250 ms until backlog 840c5a76.
-      await page.waitForURL((u) => u.pathname === route, { waitUntil: 'commit' }).catch(() => undefined);
-      if (pathOf(page) !== route) {
-        if (leg === 'main') findings.push({ route, control: next.label, what: `navigated to ${landed}; back landed on ${pathOf(page)}` });
+      await page.waitForURL((u) => whereOf(u, route) === route, { waitUntil: 'commit' }).catch(() => undefined);
+      if (whereOf(new URL(page.url()), route) !== route) {
+        if (leg === 'main') findings.push({ route, control: next.label, what: `navigated to ${landed}; back landed on ${whereOf(new URL(page.url()), route)}` });
         if (!(await open(page, route))) break;
       } else {
         await expect(page.locator('.app-shell')).toBeVisible().catch(() => undefined);

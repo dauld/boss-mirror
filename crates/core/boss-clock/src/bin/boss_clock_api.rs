@@ -192,6 +192,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding HTTP listener on {bind}"))?;
     info!(addr = %bind, "boss-clock-api listening");
+    let app = boss_core::machine_gate::mount(app, "clock", &["/api/clock/health"]);
     axum::serve(listener, app).await?;
     Ok(())
 }

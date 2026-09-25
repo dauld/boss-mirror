@@ -141,8 +141,11 @@ test('gap 4 (f9850601) answered: the page says its words, and is named one way â
   await expect(page.locator('h1.exec-title')).toHaveText('Department Map');
   expect(ROUTE_CATALOG['system-yard'].path).toBe('/it');
   expect(ROUTE_CATALOG['system-yard'].label).toBe('Department Map');
+  // Car N3 of the same design added where the boards of the retired
+  // pages live now, so a reader who knew the old tab finds it.
   await expect(page.locator('.exec-header p')).toHaveText(
-    'The territories along the packet flow, and the borders between them carrying what crosses, what waits and the machine that moves it. Select a territory to open its detail below the map.',
+    'The territories along the packet flow, and the borders between them carrying what crosses, what waits and the machine that moves it. Select a territory to open its detail below the map. ' +
+      'Feedback and the IT backlog are in the Receiving station\'s panel (the backlog in Marshalling\'s too), the Crew Board in the Shop floor\'s, and yard status and the conductor\'s activity in the Track\'s, with the Dock\'s and the Garage\'s lanes in theirs.',
   );
 
   // The HUD's words: its title, its age, its three rows, its keys.
@@ -551,9 +554,9 @@ test('the page writes nothing: every control on it is a read or a view change', 
   await page.locator('section[data-map-panel] a[data-close]').click();
   await expect(page).toHaveURL(/\/it$/);
   await page.locator(`${SVG} .territory[data-region="shed"]`).click();
-  await page.locator('section[data-map-panel] a[data-floor]').click();
-  await expect(page).toHaveURL(/\/it\/yard\/shed$/);
+  await expect(page).toHaveURL(/\/it\?at=shed$/);
   await page.goBack();
+  await expect(page).toHaveURL(/\/it$/);
   await expect(page.locator(`${SVG} .territory`)).toHaveCount(TERRITORIES.length);
   expect(writes).toEqual([]);
 });

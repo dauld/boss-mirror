@@ -235,18 +235,18 @@ async fn cancel_by_reason(
 /// `psql -f`. Each calendar is upserted by `code`; its closed-day set is
 /// replaced wholesale.
 ///
-/// Gated to operator-tier callers, with the `x-sim-origin` bypass that
-/// every seed path honors (the trusted simulator/seeder masquerades as
-/// operators; its requests carry `x-sim-origin: true`, which the
-/// request-context middleware scopes into `is_in_sim_chain`). Reads stay
-/// open; only this write is privileged.
+/// Gated to operator-tier callers — every seed path signs operator
+/// tier — or a sim caller on a sim instance
+/// (`boss_policy_client::sim_bypass_allowed`; the header alone opened
+/// it until 2026-09-25, backlog 85e7f10f). Reads stay open; only this
+/// write is privileged.
 async fn batch_business_calendars(
     State(state): State<CalendarApiState>,
     CurrentUser(user): CurrentUser,
     Query(ModeQuery { mode }): Query<ModeQuery>,
     Json(calendars): Json<Vec<BusinessCalendar>>,
 ) -> Response {
-    let sim = boss_core::sim_origin::is_in_sim_chain();
+    let sim = boss_policy_client::sim_bypass_allowed(&user);
     let tier_ok = matches!(user.access_tier, AccessTier::Operator);
     if !(sim || tier_ok) {
         return (StatusCode::FORBIDDEN, "operator tier required").into_response();
@@ -671,10 +671,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_upsert_bypassed_by_sim_origin() {
-        // Sim traffic carries `x-sim-origin: true`, scoped into
-        // `is_in_sim_chain`. The router omits that middleware, so set the
-        // task-local directly to exercise the bypass with an anonymous caller.
+    async fn a_sim_chain_alone_is_not_operator_tier() {
+        // Backlog 85e7f10f (2026-09-25): a sim chain is not an identity.
+        // Anonymous on a chain (the task-local set directly — the router
+        // omits the middleware) is refused and no calendar lands: only a
+        // sim caller on a sim instance takes the bypass
+        // (boss_policy_client::sim_bypass_allowed).
         let app = app();
         let resp = boss_core::sim_origin::with_sim_chain(
             true,
@@ -683,8 +685,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         let (status, _) = get_calendar(&app, "us-banking").await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }

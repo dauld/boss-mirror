@@ -14,9 +14,11 @@
 //    stays on top: a click on a station selects it without tearing the
 //    map down, where it used to swap the map for the region's own.
 //
-// The panel is a SHELL on this car: the station's name, its one number
-// and its state, and the door to the floor page that still holds its
-// detail. Car N2 fills it; car N3 retires the floor pages.
+// The panel was a SHELL on that car: the station's name, its one number
+// and its state, and the door to the floor page that still held its
+// detail. Car N2 filled it; car N3 retired the floor pages, so the door
+// is gone and the panel holds the floor itself (the N3 half of this
+// spec, below).
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { TERRITORIES } from '../../src/it/yard/world';
@@ -108,8 +110,9 @@ test('?at=gates opens the gates panel below the map, with its one number and its
   const mapBox = (await page.locator(MAP).boundingBox())!;
   const panelBox = (await panel.boundingBox())!;
   expect(panelBox.y).toBeGreaterThanOrEqual(mapBox.y + mapBox.height);
-  // The floor page still holds the detail on this car; the panel is its door.
-  await expect(panel.locator('a[data-floor]')).toHaveAttribute('href', '/it/yard/gates');
+  // The floor is IN the panel since car N3 — no door to a page of its own.
+  await expect(panel.locator('a[data-floor]')).toHaveCount(0);
+  await expect(panel.locator('[data-contents="gates"] .yard-deck').first()).toBeVisible();
 });
 
 test('a click on a station selects it and keeps the map on top; close deselects', async ({ page }) => {

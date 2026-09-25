@@ -54,12 +54,10 @@ export const ROUTES: ReadonlyArray<string> = [
   // Modeling + admin surfaces (System Model).
   '/it/registry', '/it/registry/new',
   '/it/registry/seasonal-release', '/it/registry/policy', '/it/auth-admin',
-  // IT surfaces added since the app split. They were absent for three
-  // releases and the crawl reported success the whole time — see the
-  // drift test in route-smoke.mocked.spec.ts for why that can no longer
-  // happen quietly.
-  '/it/design/feedback',
-  '/it/design/backlog',
+  // '/it/design/feedback' and '/it/design/backlog' were crawled here
+  // until car N3 of design e765b3fc (2026-09-25): each board is a
+  // station's panel on the Department Map now, crawled below with the
+  // station that carries it.
   // Incidents (the Operate landing) renders both panels' empty states
   // under the mock's `[]` catch-all — chrome + empty states, no crash.
   '/it/operate',
@@ -67,61 +65,39 @@ export const ROUTES: ReadonlyArray<string> = [
   // the mock's empty /api/workflows — page chrome + picker. The map
   // and flow pages died into the Atlas tab (already crawled above).
   '/it/operate/bottlenecks',
-  // Yard status renders the empty yard under the mock's `[]` catch-all
-  // for /api/yard/status — chrome + "no trains / no cars", no crash.
-  '/it/operate/yard-status',
   // The Audit Log (catalogued as Monitoring). Deferred until 2026-09-23
   // for want of an object-shaped /api/events/stats fixture, which
   // _smokeMocks.ts now carries (EVENTS_STATS); its live stream answers
   // the floor's 204, so the page falls to its snapshot poll. Its own
   // controls are pinned in audit-log-page.mocked.spec.ts (65a273d5).
   '/it/operate/audit',
-  // The yard's FLOORS (design 0524fc95, car 2). /it above is the MAP —
-  // eight region cards read from /api/yard/regions — and each yard
-  // card opens the Train Yard at /it/yard/<region>, focused on that
-  // region's panel; the bare /it/yard is the yard on the track. The
-  // page is the same one /it used to mount, so each floor renders the
-  // yard's empty states under the mocks and its `load-failed` line
-  // under the outage. Receiving and marshalling are floors too since
-  // car 4 of design d2154293, and are listed below with the paths
-  // their retired pages answered at.
-  '/it/yard',
-  '/it/yard/dock',
-  '/it/yard/gates',
-  '/it/yard/track',
-  '/it/yard/shed',
-  '/it/yard/arrivals',
-  '/it/yard/garage',
-  // The Marshalling Yard — the upstream third, a REGION of the world
-  // since car 4 of design d2154293: the territory draws a platform per
-  // station and the board mounts under it. The api floor answers
-  // /api/stations/load, /api/stations/flow and /api/jobs/queue-age with
-  // well-formed empty envelopes, so it renders its "every watched station
-  // is clear" state; a bare `[]` there is a malformed read, painted as
-  // the failure line since 67825067. The drift test in route-smoke.mocked.spec.ts
-  // enforces the catalog row's path, which is this one.
-  '/it/yard/marshalling',
-  // The Receiving Yard — the intake floor, a region beside it. Its
-  // reads are /api/workflows and `/api/jobs?kind=…&closed_within=…`;
-  // under the mock's `[]` catch-all both come back empty, so it
-  // renders its no-intake state, and every read goes through
-  // fetchRemote, so the outage renders a failure line rather than an
-  // empty yard.
-  '/it/yard/receiving',
-  // The two paths the pages answered at before car 4. They still
-  // route — to the same region — and are crawled so a bookmark, a
-  // packet or a brief that names one cannot rot unnoticed.
-  '/it/operate/marshalling',
-  '/it/operate/receiving',
+  // THE DEPARTMENT MAP'S STATIONS (design e765b3fc, car N3). Each was a
+  // floor page at /it/yard/<region> — and the shop floor was the Crew
+  // Board at /it/crew — until car N3 made each one a SELECTION on the
+  // map, its floor, its board and the boards of the pages that retired
+  // into it (yard status, the conductor's feed, the feedback and backlog
+  // boards; panel.ts `STATION_BOARDS`) drawn in its panel under the map.
+  // So the crawl opens the selections, one per station the floors
+  // covered: the panel renders each board's empty states under the
+  // mocks and its `load-failed` line under the outage, exactly as the
+  // pages did. The old paths are not found (router.test.ts pins each).
+  '/it?at=dock',
+  '/it?at=gates',
+  '/it?at=track',
+  '/it?at=shed',
+  '/it?at=arrivals',
+  '/it?at=garage',
+  '/it?at=receiving',
+  '/it?at=marshalling',
+  '/it?at=shop-floor',
   // The codebase — its own sidebar row since feedback 9827c699
   // (2026-09-14; a Design tab before, backlog 06048ade). Its one read is
   // `/api/jobs?kind=maintenance-codebase-metrics`; under the mock's `[]`
   // catch-all it renders "no packet carries a measurement" as a bordered
   // notice, and under the outage it renders `load-failed`. The row's
-  // path is what the catalog registers; the older tab path still routes
-  // and is crawled so a bookmark cannot rot unnoticed.
+  // path is what the catalog registers; the older tab path,
+  // /it/design/codebase, retired with car N3 of design e765b3fc.
   '/it/codebase',
-  '/it/design/codebase',
   // Protocol drift — a Registry tab (4ae9969e). Its one read is
   // `/api/jobs?kind=maintenance-protocol-drift`; under the mock's `[]`
   // catch-all it renders "the 05:20 measurement has not filed" as a
@@ -145,18 +121,6 @@ export const ROUTES: ReadonlyArray<string> = [
   // unit suite pins the failed-never-empty arms; this crawl pins that
   // the route actually mounts.
   '/it/estate',
-  // The Crew Board — the middle third of the operator surface, and a
-  // sidebar row of its own (backlog 04c5bbc0). Its five reads are
-  // `/api/jobs?kind=ship-a-change`, `/api/jobs?kind=gate-run`,
-  // `/api/yard/status`, `/api/jobs/queue-age` and
-  // `/api/jobs?kind=agent-run&status=open` (c87fb59b car 2): all but
-  // the yard come back `[]` from the catch-all and the yard from the
-  // well-formed empty fixture above, so the crawl renders the board's
-  // five empty stage columns, its empty crew list and no runs. Every read
-  // goes through fetchRemote, so an unreachable backend renders a
-  // bordered failure line per lane rather than an idle pipeline — the
-  // same failed-never-empty bar as the estate row above.
-  '/it/crew',
   // A department's jobs view — in / working / out (cc76f755). One
   // surface for every department the Class registry declares, so it
   // has no catalog entry and is crawled here by one code; the mock's
@@ -180,6 +144,25 @@ export const ROUTES: ReadonlyArray<string> = [
 /// '/ux/refurb' while both crawls believed they were crawling a refurb
 /// page. interaction-crawl pins every OTHER row to the router (f2b8a01c).
 export const NOT_FOUND_ROW = '/ux/accounts/agreements/x';
+
+/// THE PAGES THE DEPARTMENT MAP REPLACED — design e765b3fc, car N3
+/// (2026-09-25). Each path answered until then and is not found now, like
+/// any path nothing serves: its content is a selection's panel on the
+/// map (the floors and the Crew Board are their stations', yard status
+/// the track's, dock's and garage's, the conductor's feed the track's,
+/// the feedback and backlog boards receiving's and marshalling's —
+/// src/it/yard/panel.ts `STATION_BOARDS`), and David's word was no
+/// aliases and no redirects before 1.0.0. So none of these may creep
+/// back into ROUTES, and each must render the not-found page with its
+/// one door, the Department Map: router.test.ts pins the route and the
+/// door, and it-department-map-stations.mocked.spec.ts opens each one.
+export const RETIRED_ROUTES: ReadonlyArray<string> = [
+  '/it/yard', '/it/yard/dock', '/it/yard/gates', '/it/yard/track', '/it/yard/shed',
+  '/it/yard/arrivals', '/it/yard/garage', '/it/yard/publish', '/it/yard/shop-floor',
+  '/it/yard/receiving', '/it/yard/marshalling', '/it/crew',
+  '/it/operate/receiving', '/it/operate/marshalling', '/it/operate/yard-status',
+  '/it/operate/conductor', '/it/design/feedback', '/it/design/backlog', '/it/design/codebase',
+];
 
 /// Routes the crawls cannot cover yet, each with why. Shrinking this
 /// list is the work; adding to it is a decision.

@@ -115,13 +115,11 @@ describe('nav catalog — app assignment', () => {
   /// deliberately, one line per surface, so the two properties stay
   /// separable: nothing drifted, and this is what we added.
   const IT_SURFACES_ADDED_SINCE: ReadonlyArray<string> = [
-    // The feedback triage board — user-feedback Jobs, worked Kanban
-    // style. New surface, not a moved one.
-    'system-feedback',
-    // The IT backlog board — the same TriageBoard pointed at
-    // backlog-item Jobs (c1624b94: the backlog lost its page in the
-    // consolidation). A route and a filter, not another board.
-    'system-backlog',
+    // The feedback triage board and the IT backlog board were rows here
+    // ('system-feedback', 'system-backlog') until car N3 of design
+    // e765b3fc (2026-09-25) moved each board into a station's panel on
+    // the Department Map — receiving for feedback, receiving and
+    // marshalling for the backlog — and retired their pages.
     // The Operating System map — the executor network. Sits beside
     // the dispatcher cascade: same IT audience, different question
     // (job traffic, not rule wiring).

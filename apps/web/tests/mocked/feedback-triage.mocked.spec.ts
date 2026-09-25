@@ -11,9 +11,20 @@
 // ending in "Triaged", which made triage a synonym for closing. These
 // tests exist partly to stop that coming back.
 
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { mountPage } from './_helpers';
 import { installApiFloor } from './_smokeMocks';
+
+/// The feedback board is the Receiving station's panel on the Department
+/// Map since car N3 of design e765b3fc (2026-09-25) retired its page,
+/// /it/design/feedback — a feedback packet is inbound. Mount that
+/// selection and wait for the board's own heading. The backlog board
+/// shares the panel, and under these mocks it has no packets, so no
+/// column below is ambiguous.
+async function mountFeedback(page: Page): Promise<void> {
+  await mountPage(page, '/it?at=receiving', { titleMatch: /Department Map/ });
+  await expect(page.locator('[data-station-board="feedback"] .tb-title')).toContainText(/feedback triage/i);
+}
 
 const MANIFEST = { display_name: 'Algedonic Ales', modules: {}, labels: {} };
 
@@ -137,7 +148,7 @@ test.describe('feedback triage board', () => {
   test('builds its columns from the Workflow fork, labelled by each next step', async ({
     page,
   }) => {
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
 
     await expect(page.locator('section[aria-label="Waiting on triage"]')).toBeVisible();
     // One column per disposition, named for the step it opens — not
@@ -158,7 +169,7 @@ test.describe('feedback triage board', () => {
   });
 
   test('sorts each item by its fork step, not a stored column', async ({ page }) => {
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
 
     const waiting = page.locator('section[aria-label="Waiting on triage"]');
     await expect(waiting).toContainText('Column picker forgets my choice');
@@ -188,7 +199,7 @@ test.describe('feedback triage board', () => {
       return route.fulfill({ json: {} });
     });
 
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
     const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
     await card.getByLabel('Route this item').selectOption('build');
     await card.getByRole('button', { name: /^route$/i }).click();
@@ -211,7 +222,7 @@ test.describe('feedback triage board', () => {
       return route.fulfill({ json: {} });
     });
 
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
     await page
       .locator('article', { hasText: 'Column picker forgets my choice' })
       .dragTo(page.locator('section[aria-label="Reproduce and investigate"]'));
@@ -223,10 +234,15 @@ test.describe('feedback triage board', () => {
   });
 
   test('lifting a card offers every route as a drop target', async ({ page }) => {
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
     await expect(page.locator('.tb-drop-zone')).toHaveCount(0);
 
     const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
+    // The board is the Receiving station's panel, under the Receiving
+    // Yard's own board, so the card may open below the fold: a hand-driven
+    // mouse lands where the card IS on the screen, not where it is on the
+    // page.
+    await card.scrollIntoViewIfNeeded();
     const box = await card.boundingBox();
     if (!box) throw new Error('card has no box');
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -244,7 +260,7 @@ test.describe('feedback triage board', () => {
   });
 
   test('an already-routed card cannot be dragged or re-routed', async ({ page }) => {
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
 
     const routed = page.locator('section[aria-label="Decide the design"]').locator('article');
     // A completed fork step does not un-complete.
@@ -292,7 +308,7 @@ test.describe('feedback triage board', () => {
       return route.fulfill({ json: {} });
     });
 
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
 
     const card = page.locator('article', { hasText: 'Filed before the fork' });
     await expect(page.locator('section[aria-label="Waiting on triage"]')).toContainText(
@@ -327,7 +343,7 @@ test.describe('feedback triage board', () => {
     await page.route(/\/api\/jobs\?kind=user-feedback/, (r) =>
       r.fulfill({ json: { data: withFinding, total: 1 } }),
     );
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
 
     const card = page.locator('article', { hasText: 'Button is unreadable' });
     await expect(card).toContainText('color: inherit on a bar that sets none');
@@ -345,7 +361,7 @@ test.describe('feedback triage board', () => {
       return route.fulfill({ json: {} });
     });
 
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
     const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
     await card.getByRole('button', { name: /record finding/i }).click();
     await card.getByLabel(/what did you find/i).fill('Root cause: the picker never persists.');
@@ -380,7 +396,7 @@ test.describe('feedback triage board', () => {
     await page.route(/\/api\/jobs\?kind=user-feedback/, (r) =>
       r.fulfill({ json: { data: routed, total: 1 } }),
     );
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
 
     const column = page.locator('section[aria-label="Decide the design"]');
     await expect(column).toContainText('Generalises past feedback');
@@ -396,7 +412,7 @@ test.describe('feedback triage board', () => {
       return route.fulfill({ json: {} });
     });
 
-    await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+    await mountFeedback(page);
     const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
     await card.getByRole('button', { name: /hand to agent/i }).click();
 
@@ -427,7 +443,7 @@ test.describe('feedback triage board', () => {
 
     test('answered, each owner is named from its own row and nothing says a read failed', async ({ page }) => {
       await page.route(OWNER, (r) => r.fulfill({ json: { id: 'emp-bootstrap-admin', name: 'David Hauld' } }));
-      await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+      await mountFeedback(page);
 
       const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
       await expect(card.locator('.tb-by')).toHaveText('David Hauld');
@@ -436,7 +452,7 @@ test.describe('feedback triage board', () => {
 
     test('refused, the cards keep the id and the board says the names did not load', async ({ page }) => {
       await page.route(OWNER, (r) => r.fulfill({ status: 503, json: { error: 'people down' } }));
-      await mountPage(page, '/it/design/feedback', { titleMatch: /feedback triage/i });
+      await mountFeedback(page);
 
       const card = page.locator('article', { hasText: 'Column picker forgets my choice' });
       await expect(card.locator('.tb-by')).toHaveText('emp-bootstrap-admin');

@@ -36,12 +36,13 @@ async fn main() -> Result<()> {
 
     // A View reads policy-scoped tables, so the resolver needs the
     // policy engine the same way every other scoped read surface does.
-    // Same wrapping jobs-api uses: sim traffic is authorized at the
-    // boundary, real traffic is enforced per-role by the inner client.
+    // Same wrapping jobs-api uses: on a sim instance a sim caller is
+    // authorized at the boundary; everything else is enforced per-role
+    // by the inner client (backlog 85e7f10f).
     let policy: Arc<dyn boss_policy_client::PolicyClient> =
-        Arc::new(boss_policy_client::SimBypassPolicyClient::new(Arc::new(
+        boss_policy_client::SimBypassPolicyClient::from_env(Arc::new(
             boss_policy_client::ReqwestPolicyClient::new(cli.policy_url),
-        )));
+        ));
 
     let app = boss_views::http::router(boss_views::http::ViewsApiState {
         repo: Arc::new(boss_views::PgViewsRepo::new(pool.clone())),
@@ -60,6 +61,7 @@ async fn main() -> Result<()> {
     let addr = format!("127.0.0.1:{}", cli.http_port);
     tracing::info!(addr = %addr, "boss-views-api listening");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let app = boss_core::machine_gate::mount(app, "views", &["/api/views/health"]);
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -107,7 +107,6 @@ export type UngatedSurfaceId =
   // RouteName vocabulary (4ae9969e, 2026-09-15).
   | 'system-registry-drift'
   | 'system-fleet'
-  | 'system-backlog'
   | 'hr'
   | 'watchlist'
   | 'manual';
@@ -171,8 +170,12 @@ export const ROUTE_CATALOG: Readonly<Record<RouteName | UngatedSurfaceId, NavIte
   'system-dispatcher-rule':  { id: 'system-dispatcher-rule',  label: 'Dispatcher rule — editor',     path: '/it/registry/rules/:ruleName', permKey: 'system-dispatcher-rule',  app: 'it' },
   'system-design':           { id: 'system-design',           label: 'Design',              path: '/it/design',       permKey: 'system-design',           app: 'it' },
   'system-experiments':      { id: 'system-experiments',      label: 'Experiments',         path: '/it/design/experiments', permKey: 'system-experiments', app: 'it' },
-  'system-feedback':         { id: 'system-feedback',         label: 'Feedback triage',     path: '/it/design/feedback', permKey: 'system-feedback',      app: 'it' },
-  'system-backlog':          { id: 'system-backlog',          label: 'IT backlog',          path: '/it/design/backlog', permKey: 'system-feedback',      app: 'it' },
+  // 'system-feedback' (Feedback triage, /it/design/feedback) and
+  // 'system-backlog' (IT backlog, /it/design/backlog) were Design tabs
+  // until car N3 of design e765b3fc (2026-09-25): the feedback board is
+  // the receiving station's panel on the Department Map, and the backlog
+  // board the receiving and marshalling stations' — a packet of either
+  // kind is inbound until triaged, then stands at a station.
   // The Codebase — a SIDEBAR ROW, not the Design tab it was: David's
   // feedback 9827c699 (2026-09-14) asked for "a page to the IT department
   // showing the Code base stats" while the trend sat one tab in. permKey-

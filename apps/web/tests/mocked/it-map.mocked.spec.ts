@@ -234,7 +234,8 @@ test('a state that is not clear says how long it has held and names the band tha
 // function knew nine regions, while the transit map linked the same
 // region to /it/yard/publish. Every territory, as rendered, selects
 // its own region (design e765b3fc, car N1: `/it?at=<name>`), and
-// publish's selection opens publish's floor — not the track's.
+// publish's selection opens publish's panel — not the track's. The floor
+// pages retired with car N3, so the panel is the whole answer.
 test('every territory selects its own region, and publish opens publish — not the track', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');
@@ -246,54 +247,50 @@ test('every territory selects its own region, and publish opens publish — not 
   await svg.locator('.territory[data-region="publish"]').click();
   await expect(page).toHaveURL(/\/it\?at=publish$/);
   await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-selection', 'publish');
-  await page.locator('section[data-map-panel] a[data-floor]').click();
-  await expect(page).toHaveURL(/\/it\/yard\/publish$/);
-  await expect(page.locator('section[aria-label="the publish region map"]')).toHaveCount(1);
-  await expect(page.locator('section[aria-label="the track region map"]')).toHaveCount(0);
+  await expect(page.locator('section[data-map-panel] .panel-title')).toHaveText('Publish');
+  await expect(page.locator('section[data-map-panel] [data-contents="publish"]')).toHaveCount(1);
+  await expect(page.locator('section[data-map-panel] [data-contents="track"]')).toHaveCount(0);
 });
 
-test('a territory click selects it, and its floor opens with the region\'s state and why at the head of its panel', async ({ page }) => {
+test('a territory click selects it, and its panel carries the floor with the region\'s state and why at its head', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');
   const svg = page.locator('section.yard svg');
   await expect(svg.locator('.territory')).toHaveCount(TERRITORIES.length);
 
   // A troubled yard region: selected on the map, its panel carries the
-  // map's own state, and its floor opens on the gates' panel headed by
-  // the same verdict — the floor cannot contradict the map.
+  // map's own state, and the floor in it opens on the gates' entity
+  // panel headed by the same verdict — the floor cannot contradict the
+  // map. It is IN the panel since car N3 retired the floor pages.
   await svg.locator('.territory[data-region="gates"]').click();
   await expect(page).toHaveURL(/\/it\?at=gates$/);
   await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-state', 'troubled');
-  await page.locator('section[data-map-panel] a[data-floor]').click();
-  await expect(page).toHaveURL(/\/it\/yard\/gates$/);
-  await expect(page.locator('.yard-panel-h', { hasText: 'Entity · approach' })).toBeVisible();
+  await expect(page.locator('section[data-map-panel] a[data-floor]')).toHaveCount(0);
+  await expect(page.locator('section[data-map-panel] .yard-panel-h', { hasText: 'Entity · approach' })).toBeVisible();
   const head = page.locator('.yard-region-head');
   await expect(head).toHaveAttribute('data-region', 'gates');
   await expect(head).toHaveAttribute('data-state', 'troubled');
   await expect(head).toContainText('1 bay holds a corpse');
   await expect(head.locator('.yard-lamp-dot.err')).toHaveCount(1);
 
-  // Back returns to the map, the selection still made.
+  // A clear region's floor says so at its head, too.
+  await page.locator('section.yard svg .territory[data-region="dock"]').click();
+  await expect(page).toHaveURL(/\/it\?at=dock$/);
+  await expect(page.locator('.yard-panel-h', { hasText: 'Entity · loading dock' })).toBeVisible();
+  await expect(page.locator('.yard-region-head')).toContainText('dock · clear — 3 cars parked');
+
+  // Back returns to the previous selection — it is on the history.
   await page.goBack();
   await expect(page).toHaveURL(/\/it\?at=gates$/);
   await expect(page.locator('section.yard svg .territory')).toHaveCount(TERRITORIES.length);
 
-  // A clear region's floor says so at its head, too.
-  await page.locator('section.yard svg .territory[data-region="dock"]').click();
-  await expect(page).toHaveURL(/\/it\?at=dock$/);
-  await page.locator('section[data-map-panel] a[data-floor]').click();
-  await expect(page).toHaveURL(/\/it\/yard\/dock$/);
-  await expect(page.locator('.yard-panel-h', { hasText: 'Entity · loading dock' })).toBeVisible();
-  await expect(page.locator('.yard-region-head')).toContainText('dock · clear — 3 cars parked');
-
   // A region whose floor is a QUEUE BOARD. Its page retired on car 4
-  // of design d2154293: its selection opens its floor like every other,
-  // and the board mounts under it.
+  // of design d2154293: its selection opens its board in the panel like
+  // every other floor.
   await page.goto('/it');
   await page.locator('section.yard svg .territory[data-region="receiving"]').click();
   await expect(page).toHaveURL(/\/it\?at=receiving$/);
-  await page.locator('section[data-map-panel] a[data-floor]').click();
-  await expect(page).toHaveURL(/\/it\/yard\/receiving$/);
+  await expect(page.locator('section[data-map-panel] .ry-root')).toHaveCount(1);
 });
 
 // THE HUD FRAME (design 00774ca8): whole-system figures, one row per
@@ -350,10 +347,7 @@ test('the HUD frame stands above the map, one row per third, each figure the ser
   await machines.locator('a[data-machine="station:design-review"]').click();
   await expect(page).toHaveURL(/\/it\?at=marshalling$/);
   await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-selection', 'marshalling');
-  // The same frame stands over the selection, and over the floor too.
-  await expect(page.locator('[data-hud] .hud-row')).toHaveCount(3);
-  await page.locator('section[data-map-panel] a[data-floor]').click();
-  await expect(page).toHaveURL(/\/it\/yard\/marshalling$/);
+  // The same frame stands over the selection.
   await expect(page.locator('[data-hud] .hud-row')).toHaveCount(3);
   await expect(page.locator('[data-hud] [data-strip]')).toHaveCount(1);
 });

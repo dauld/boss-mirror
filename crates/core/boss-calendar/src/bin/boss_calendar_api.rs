@@ -104,6 +104,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding HTTP listener on {http_addr}"))?;
     info!(addr = %http_addr, "calendar HTTP API listening");
+    let app = boss_core::machine_gate::mount(app, "calendar", &["/api/calendar/health"]);
     axum::serve(listener, app).await?;
     Ok(())
 }

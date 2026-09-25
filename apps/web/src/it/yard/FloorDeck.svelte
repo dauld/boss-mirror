@@ -17,6 +17,12 @@
   // writes; nothing here is new state. Reads are audit-readonly-safe
   // by construction.
   //
+  // SINCE CAR N3 OF DESIGN e765b3fc (2026-09-25) the floor pages and the
+  // region map above this deck are retired: MapPage mounts it in a
+  // station's panel on the Department Map, under the one map on top, and
+  // the departure board's own rows drive the entity panel. The routes
+  // named above (/it/yard, /it/yard/<region>) are not found now.
+  //
   // ONE write (backlog 7a24caf3): the cancel button stamps
   // `cancel_requested` on a troubled, not-yet-merged train through the
   // metadata merge, and the conductor honours it on its next reconcile.

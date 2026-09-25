@@ -121,7 +121,7 @@ async fn update_class(
     Path((subject_kind, code)): Path<(String, String)>,
     Json(body): Json<ClassInput>,
 ) -> Response {
-    let sim = boss_core::sim_origin::is_in_sim_chain();
+    let sim = boss_policy_client::sim_bypass_allowed(&user);
     let tier_ok = matches!(user.access_tier, AccessTier::Operator);
     if !(sim || tier_ok) {
         return (StatusCode::FORBIDDEN, "operator tier required").into_response();
@@ -150,7 +150,7 @@ async fn retire_class(
     CurrentUser(user): CurrentUser,
     Path((subject_kind, code)): Path<(String, String)>,
 ) -> Response {
-    let sim = boss_core::sim_origin::is_in_sim_chain();
+    let sim = boss_policy_client::sim_bypass_allowed(&user);
     let tier_ok = matches!(user.access_tier, AccessTier::Operator);
     if !(sim || tier_ok) {
         return (StatusCode::FORBIDDEN, "operator tier required").into_response();
@@ -249,17 +249,18 @@ pub fn class_differs(held: &Class, declared: &Class) -> Vec<String> {
 /// inserts `ON CONFLICT (subject_kind, code) DO NOTHING`, so the call
 /// is idempotent.
 ///
-/// Gated to operator-tier callers, with the `x-sim-origin` bypass that
-/// every seed path honors (the trusted simulator/seeder masquerades as
-/// operators; its requests carry `x-sim-origin: true`, which the
-/// request-context middleware scopes into `is_in_sim_chain`). Reads
-/// stay open; only this write is privileged.
+/// Gated to operator-tier callers — every seed path signs operator
+/// tier — or a sim caller on a sim instance
+/// (`boss_policy_client::sim_bypass_allowed`). The header alone opened
+/// this door to any caller that reached :7800 directly until
+/// 2026-09-25 (backlog 85e7f10f). Reads stay open; only this write is
+/// privileged.
 async fn batch_upsert(
     State(state): State<ClassesApiState>,
     CurrentUser(user): CurrentUser,
     Json(rows): Json<Vec<ClassInput>>,
 ) -> Response {
-    let sim = boss_core::sim_origin::is_in_sim_chain();
+    let sim = boss_policy_client::sim_bypass_allowed(&user);
     let tier_ok = matches!(user.access_tier, AccessTier::Operator);
     if !(sim || tier_ok) {
         return (StatusCode::FORBIDDEN, "operator tier required").into_response();
@@ -776,12 +777,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_upsert_bypassed_by_sim_origin() {
-        // Sim traffic carries `x-sim-origin: true`, which the request-
-        // context middleware scopes into `is_in_sim_chain`. The router
-        // under test omits that middleware, so we set the task-local
-        // directly to exercise the bypass branch with a non-operator
-        // (anonymous) caller.
+    async fn a_sim_chain_alone_is_not_operator_tier() {
+        // Backlog 85e7f10f (2026-09-25): `sim || tier_ok` let ANY caller
+        // that reached :7800 directly write the registry by sending
+        // `x-sim-origin: true`. The chain flag is set here directly (the
+        // router under test omits the middleware) and the caller is
+        // anonymous — no sim identity, no operator tier — so the door
+        // refuses and nothing lands, whatever the deployment's sim switch
+        // says (the sim-on leg, through the real middleware, is
+        // tests/a_sim_header_alone_writes_no_class.rs).
         let repo = Arc::new(InMemoryClasses::new(vec![]));
         let app = router(ClassesApiState {
             classes: repo.clone(),
@@ -793,10 +797,10 @@ mod tests {
             boss_core::sim_origin::with_sim_chain(true, app.oneshot(batch_request(None, body)))
                 .await
                 .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         assert_eq!(
             repo.list_for_subject_kind("employee").await.unwrap().len(),
-            1
+            0
         );
     }
     fn retire_request(user_header: Option<&str>, code: &str) -> Request<axum::body::Body> {

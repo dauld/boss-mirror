@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
         }
     };
     info!(%bind, "boss-policy-api listening (postgres-backed)");
+    let app = boss_core::machine_gate::mount(app, "policy", &["/api/policy/health"]);
     axum::serve(listener, app).await?;
     Ok(())
 }

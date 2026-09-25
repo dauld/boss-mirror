@@ -1,28 +1,27 @@
-// /it/operate/marshalling — every control the page renders, pinned
-// (page audit 7c228914, step `test`).
+// The Marshalling Yard — every control its board renders, pinned (page
+// audit 7c228914, step `test`).
 //
-// The route is an ALIAS: router.ts resolves it to the same
-// `systemYardFloor` route as the floor page /it/yard/marshalling (the
-// Marshalling Yard sidebar row until car N1 of design e765b3fc folded
-// it into the Department Map row; the alias and the floor retire with
-// car N3). So this spec mounts the alias and asserts it IS the floor,
-// then pins the surface.
-// it-region-map.mocked.spec.ts pins the region MAP's platforms, the
-// overlap line and the waits count at the floor's path; this spec
-// pins what nothing did — every control, each read's own failure line,
-// the empty leg, and the words the page says.
+// It was a page at /it/operate/marshalling, then the floor page
+// /it/yard/marshalling; since car N3 of design e765b3fc (2026-09-25)
+// both paths are not found and the board is the MARSHALLING STATION'S
+// PANEL on the Department Map, `/it?at=marshalling` — with the backlog
+// board beside it (panel.ts `STATION_BOARDS`). So this spec mounts that
+// selection and pins the board in it. The region's own map, its
+// breadcrumb, its "← the world" button and its Escape key retired with
+// the floor page: the map is on top, and the panel's close deselects.
+// it-station-contents.mocked.spec.ts pins the overlap line and the waits
+// count in the same panel; this spec pins every control, each read's
+// own failure line, the empty leg, and the words the board says.
 //
-// The inventory, measured on origin/main 507d2308 on 2026-09-25 (the
-// measure step read 25f5e8b8 on 2026-09-23; since then the page gained
-// a breadcrumb, the HUD frame and the region's own rails, and its
-// overlap line and waits count):
-//   links     3 kinds — the breadcrumb "Department Map" (→ /it); one per
-//                        row of the waits table, up to 12 (→ the job
-//                        detail surface); one per failed or unjudged
+// The inventory, measured on origin/main 507d2308 on 2026-09-25 and
+// re-read for car N3:
+//   links     3 kinds — one per row of the waits table, up to 12 (→ the
+//                        job detail surface); one per failed or unjudged
 //                        machine in the HUD frame (→ that machine's
-//                        region, selected on the map: /it?at=<region>)
-//   buttons   4         — "← the world" (→ /it); the window 24 h / 3 d / 7 d
-//   keys      1         — Escape (→ /it)
+//                        region, selected on the map: /it?at=<region>);
+//                        the panel's close (→ /it)
+//   buttons   3         — the window 24 h / 3 d / 7 d
+//   keys      0
 //   forms     0, inputs 0
 //   reads     5         — /api/yard/regions, /api/yard/borders (10 s);
 //                        /api/stations/load, /api/stations/flow,
@@ -60,15 +59,13 @@ import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 import { parseRoute } from '../../src/router';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 import { TERRITORIES } from '../../src/it/yard/world';
-import { floorHref, regionHref } from '../../src/it/yard/regions';
+import { regionHref } from '../../src/it/yard/regions';
 
-const PATH = '/it/operate/marshalling';
-// The region's floor page. It was catalogued as the Marshalling Yard
-// sidebar row until car N1 of design e765b3fc (2026-09-25), which folded
-// the row into the one Department Map row; the floor still answers here
-// until car N3 retires it.
-const FLOOR = floorHref('marshalling');
-const TITLE = { titleMatch: /IT · Marshalling/ };
+// The marshalling station's selection on the Department Map — where the
+// board lives since car N3 retired the page and the floor.
+const PATH = regionHref('marshalling');
+const AT_PATH = /\/it\?at=marshalling$/;
+const TITLE = { titleMatch: /Department Map/ };
 
 const json = (r: Route, body: unknown, status = 200): Promise<void> =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
@@ -219,60 +216,46 @@ async function install(
 }
 
 const board = (page: Page) => page.locator('.my-root');
-const regionMap = (page: Page) => page.locator('section[aria-label="the marshalling region map"]');
-const WORLD_SVG = 'section[aria-label="the IT world map"] svg';
+const panel = (page: Page) => page.locator('section[data-map-panel][data-selection="marshalling"]');
 const sidingRows = (page: Page) => board(page).locator('table.my-table').first().locator('tbody tr');
 const waitsTable = (page: Page) => board(page).locator('table.my-table').nth(1);
 const failures = (page: Page) => page.locator(FAILURE_MARKER);
-/// The SVG's failure sentence, its wrapped lines joined back up.
-const svgWhy = (page: Page) =>
-  regionMap(page).locator('svg text.why').evaluate((t) =>
-    Array.from(t.querySelectorAll('tspan')).map((s) => s.textContent ?? '').join(' '));
 
 // ---------------------------------------------------------------------
 // The route, the chrome and the words
 // ---------------------------------------------------------------------
 
-test.describe('/it/operate/marshalling — the alias, and the words it says', () => {
-  test('the alias IS the Marshalling region floor, headed by the region under its way back', async ({ page }) => {
-    expect(parseRoute(PATH)).toEqual(parseRoute(FLOOR));
-    expect(parseRoute(PATH)).toEqual({ kind: 'systemYardFloor', region: 'marshalling' });
+test.describe('the marshalling station — the selection, and the words it says', () => {
+  test('the selection opens the Marshalling station under the map, with its board in the panel', async ({ page }) => {
+    expect(parseRoute('/it', '?at=marshalling')).toEqual({ kind: 'systemYard', at: 'marshalling' });
+    // The two paths the board answered at are not found (car N3).
+    expect(parseRoute('/it/operate/marshalling').kind).toBe('notFound');
+    expect(parseRoute('/it/yard/marshalling').kind).toBe('notFound');
     await install(page);
     await mountPage(page, PATH, TITLE);
 
-    await expect(page).toHaveURL(new RegExp(`${PATH}$`));
-    await expect(page.getByRole('heading', { level: 1 })).toHaveText('IT · Marshalling');
-    await expect(page.getByRole('heading', { name: 'Department Map' })).toHaveCount(0);
-    // The board's own page header is dropped: the region heads the page.
+    await expect(page).toHaveURL(AT_PATH);
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText('Department Map');
+    // The board's own page header is dropped: the station's panel heads it.
     await expect(page.getByRole('heading', { name: 'Marshalling Yard' })).toHaveCount(0);
-    const crumbs = page.locator('nav.crumbs[data-region="marshalling"]');
-    await expect(crumbs).toHaveText('Department Map › Marshalling');
-    await expect(crumbs.locator('[aria-current="page"]')).toHaveText('› Marshalling');
 
-    // The region's head, off the regions read.
-    const map = regionMap(page);
-    await expect(map.locator('button.leave')).toHaveText('← the world');
-    await expect(map.locator('button.leave')).toHaveAttribute('aria-label', 'back to the IT world');
-    await expect(map.locator('.region-name')).toHaveText('marshalling');
-    await expect(map.locator('.region-count')).toHaveText('303 packets at stations');
-    await expect(map.locator('.region-state')).toHaveText('attention');
-    await expect(map.locator('.region-why')).toHaveText('303 packets standing at 3 stations');
-    // Five platforms stand 517 against a head of 303, and the map says why.
-    await expect(page.locator('[data-drawn="marshalling"]')).toHaveText(
-      'the platforms stand 517 — the head counts 303 packets at stations: a packet stands at every station it matches, including one still in receiving or held by another region, and the head counts each once, only while it is marshalling’s',
-    );
-    // The world line under the map.
-    await expect(page.locator('.yard-flow:not(.region-rails)')).toContainText('window 24h against the 24h before · read ');
+    // The station's head, off the regions read.
+    const p = panel(page);
+    await expect(p.locator('.panel-title')).toHaveText('Marshalling');
+    await expect(p.locator('[data-figure]')).toHaveText('303 packets at stations');
+    await expect(p).toHaveAttribute('data-state', 'attention');
+    await expect(p.locator('[data-field="verdict"]')).toContainText('303 packets standing at 3 stations');
+    await expect(p.locator('[data-contents="marshalling"] .my-root')).toBeVisible();
+    // The map's own line under it.
+    await expect(page.locator('.yard-flow')).toContainText('window 24h against the 24h before · read ');
   });
 
-  test("the region's own rails, in then out — gap 5 (c4c77ddd) is FIXED on main", async ({ page }) => {
+  test("the station's rails, in then out, are its panel's rate — gap 5 (c4c77ddd) is FIXED on main", async ({ page }) => {
     await install(page);
     await mountPage(page, PATH, TITLE);
-    const rails = page.locator('.region-rails[data-rails="marshalling"] .rail-line');
-    await expect(rails).toHaveText([
-      'in from receiving · 5/day · 12 waiting · nothing · worked by actors',
-      'out to shop-floor · 215/day · 303 waiting · dispatch-agent-runs · fired 7m ago · attention — 303 waiting against 68 a day',
-    ]);
+    const rate = panel(page).locator('[data-field="rate"] li');
+    await expect(rate.first()).toContainText('in from receiving');
+    await expect(rate.last()).toContainText('out to shop floor');
   });
 
   test('the HUD frame stands above the region with stuck and waiting side by side — gap 6 (4142d821) is FIXED', async ({ page }) => {
@@ -361,13 +344,10 @@ test.describe('/it/operate/marshalling — the alias, and the words it says', ()
     await expect(box).not.toContainText('q.platform-admin.task');
   });
 
-  test('CURRENT, gap 4 (f49f21b7): the dock\'s own station stands on the marshalling floor, on the board and as a platform', async ({ page }) => {
+  test('CURRENT, gap 4 (f49f21b7): the dock\'s own station stands on the marshalling board', async ({ page }) => {
     await install(page);
     await mountPage(page, PATH, TITLE);
     await expect(sidingRows(page).nth(3).locator('td').first()).toHaveText('loading-dock');
-    const interior = regionMap(page).locator('svg .interior[data-interior="marshalling"]');
-    await expect(interior.locator('.platform')).toHaveCount(5);
-    await expect(interior.locator('.platform[data-platform="loading-dock"]')).toHaveCount(1);
   });
 
   test('CURRENT, gap 7 (f9b75688): a claimed obligation reads exactly like a ready one — no WORKING split', async ({ page }) => {
@@ -387,7 +367,6 @@ test.describe('/it/operate/marshalling — the alias, and the words it says', ()
     const hrefs = await links.evaluateAll((as) => as.map((a) => a.getAttribute('href')));
     expect(hrefs).toEqual([`/jobs/${WAIT_ACTIVE}`, `/jobs/${WAIT_FLOOR}`, `/jobs/${WAIT_READY}`]);
     await expect(board(page).locator('.my-constraint a, .my-blind a, .my-clear a')).toHaveCount(0);
-    await expect(regionMap(page).locator('svg a')).toHaveCount(0);
   });
 });
 
@@ -395,44 +374,8 @@ test.describe('/it/operate/marshalling — the alias, and the words it says', ()
 // The controls — each does what its label says, and back returns
 // ---------------------------------------------------------------------
 
-test.describe('/it/operate/marshalling — every control', () => {
-  test('the breadcrumb lands on the catalogued Department Map, and back returns to the alias', async ({ page }) => {
-    await install(page);
-    await mountPage(page, PATH, TITLE);
-    const crumb = page.locator('nav.crumbs').getByRole('link', { name: 'Department Map' });
-    await expect(crumb).toHaveAttribute('href', ROUTE_CATALOG['system-yard'].path);
-    expect(parseRoute(ROUTE_CATALOG['system-yard'].path)).toEqual({ kind: 'systemYard' });
-
-    await crumb.click();
-    await expect(page).toHaveURL(/\/it$/);
-    await expect(page.getByRole('heading', { level: 1 })).toHaveText('Department Map');
-    await page.goBack();
-    await expect(page).toHaveURL(new RegExp(`${PATH}$`));
-    await expect(page.getByRole('heading', { level: 1 })).toHaveText('IT · Marshalling');
-  });
-
-  test('"← the world" goes back to the world, and back returns to the alias', async ({ page }) => {
-    await install(page);
-    await mountPage(page, PATH, TITLE);
-    await regionMap(page).locator('button.leave').click();
-    await expect(page).toHaveURL(/\/it$/);
-    await expect(page.locator(WORLD_SVG)).toHaveCount(1);
-    await expect(regionMap(page)).toHaveCount(0);
-    await page.goBack();
-    await expect(page).toHaveURL(new RegExp(`${PATH}$`));
-    await expect(regionMap(page)).toHaveCount(1);
-  });
-
-  test('Escape leaves for the world too', async ({ page }) => {
-    await install(page);
-    await mountPage(page, PATH, TITLE);
-    await expect(regionMap(page)).toHaveCount(1);
-    await page.keyboard.press('Escape');
-    await expect(page).toHaveURL(/\/it$/);
-    await expect(page.locator(WORLD_SVG)).toHaveCount(1);
-  });
-
-  test('a packet link lands on the catalogued job detail surface, and back returns to the alias', async ({ page }) => {
+test.describe('the marshalling station — every control', () => {
+  test('a packet link lands on the catalogued job detail surface, and back returns to the selection', async ({ page }) => {
     await install(page);
     // The packet the link opens, so the detail page has something to
     // mount rather than throwing on the catch-all's `[]`.
@@ -453,17 +396,16 @@ test.describe('/it/operate/marshalling — every control', () => {
 
     await link.click();
     await expect(page).toHaveURL(new RegExp(`/jobs/${WAIT_ACTIVE}$`));
-    await expect(regionMap(page)).toHaveCount(0);
+    await expect(panel(page)).toHaveCount(0);
     await expect(page.locator('h1').first()).toContainText('Teach the dock to breathe');
     await page.goBack();
-    await expect(page).toHaveURL(new RegExp(`${PATH}$`));
+    await expect(page).toHaveURL(AT_PATH);
     await expect(waitsTable(page).getByRole('link', { name: 'Teach the dock to breathe' })).toBeVisible();
   });
 
   test("the HUD's machine link selects the machine's region on the Department Map", async ({ page }) => {
-    // A selection since car N1 of design e765b3fc: the map comes back on
-    // top with marshalling's panel under it, where the link used to open
-    // this floor again.
+    // A selection since car N1 of design e765b3fc — here, the station
+    // already selected, so the panel stays where it is.
     await install(page);
     await mountPage(page, PATH, TITLE);
     const link = page.locator('section[data-hud] .hud-listed a');
@@ -476,7 +418,7 @@ test.describe('/it/operate/marshalling — every control', () => {
     await expect(page.getByRole('heading', { level: 1 })).toHaveText('Department Map');
     await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-selection', 'marshalling');
     await page.goBack();
-    await expect(page).toHaveURL(new RegExp(`${PATH}$`));
+    await expect(page).toHaveURL(AT_PATH);
   });
 
   test('each window button re-reads the board over its window, says it is pressed, and judges in its hours', async ({ page }) => {
@@ -560,7 +502,7 @@ test.describe('/it/operate/marshalling — every control', () => {
       await board(page).locator('.my-controls button', { hasText: label }).click();
     }
     await expect.poll(() => counts.load).toBe(4);
-    await regionMap(page).locator('button.leave').click();
+    await panel(page).locator('a[data-close]').click();
     await expect(page).toHaveURL(/\/it$/);
     expect(writes).toEqual([]);
   });
@@ -584,11 +526,10 @@ async function expectClearPaint(page: Page): Promise<void> {
   await expect(b.locator('.my-constraint-why')).toHaveText('Nothing is waiting at any watched station.');
   await expect(b.locator('.my-quiet')).toHaveText(['Every watched station is clear.', 'Nothing is outstanding.']);
   await expect(b.locator('table.my-table')).toHaveCount(0);
-  await expect(regionMap(page).locator('svg')).toContainText('no queue is declared here');
   await expect(failures(page)).toHaveCount(0);
 }
 
-test.describe('/it/operate/marshalling — the empty leg and every failure line', () => {
+test.describe('the marshalling station — the empty leg and every failure line', () => {
   test('an EMPTY network paints as clear, with no failure marker', async ({ page }) => {
     await install(page, EMPTY);
     await mountPage(page, PATH, TITLE);
@@ -622,7 +563,6 @@ test.describe('/it/operate/marshalling — the empty leg and every failure line'
     await expect(board(page)).not.toContainText('Every watched station is clear.');
     await expect(board(page).locator('.my-quiet')).toHaveCount(0);
     await expect(board(page).locator('.my-section')).toHaveCount(0);
-    expect(await svgWhy(page)).toContain('the queues cannot be read — /api/stations/load: HTTP 200, but the body is');
   });
 
   test('gap 10 (67825067): a malformed 200 from the station flow alone is its failure line, and no constraint is named', async ({ page }) => {
@@ -645,41 +585,42 @@ test.describe('/it/operate/marshalling — the empty leg and every failure line'
     await expect(sidingRows(page)).toHaveCount(4);
   });
 
-  test('a failed regions read is said, and the HUD says when; the board still reads its own', async ({ page }) => {
+  test('a failed regions read is said, and the HUD says when; the station still opens and its board reads its own', async ({ page }) => {
     await install(page, { regions: (r) => json(r, 'down', 500) });
-    await mountPage(page, PATH, { titleMatch: /IT · Marshalling/ });
-    await expect(page.locator('.yard-empty.load-failed')).toHaveText('The regions cannot be read — /api/yard/regions: HTTP 500');
+    await mountPage(page, PATH, TITLE);
+    await expect(page.locator('.yard-empty.load-failed').first()).toHaveText('The regions cannot be read — /api/yard/regions: HTTP 500');
     await expect(page.locator('section[data-hud] .hud-age')).toHaveText(/^read failed \d\d:\d\dZ · no good read yet$/);
-    await expect(regionMap(page)).toHaveCount(0);
+    // The station's panel opens on its name, its readings said unread
+    // (car N3) — the floor page it replaced drew its board regardless.
+    await expect(panel(page)).toHaveAttribute('data-state', 'unknown');
+    await expect(panel(page)).toContainText('Its readings come with the regions read, which failed');
     await expect(board(page).locator('.my-constraint-name')).toHaveText('q.platform-admin.sign-off');
   });
 
-  test('a failed borders read is said, in place of the rails', async ({ page }) => {
+  test('a failed borders read is said, and the panel says its rails are unread', async ({ page }) => {
     await install(page, { borders: (r) => json(r, 'down', 500) });
     await mountPage(page, PATH, TITLE);
     await expect(page.locator('.yard-empty.load-failed')).toHaveText('The borders cannot be read — /api/yard/borders: HTTP 500');
-    await expect(page.locator('.region-rails')).toHaveCount(0);
+    await expect(board(page).locator('.my-constraint-name')).toHaveText('q.platform-admin.sign-off');
   });
 
-  test('a failed station load is said on the board AND on the map, never as a clear yard', async ({ page }) => {
+  test('a failed station load is said on the board, never as a clear yard', async ({ page }) => {
     await install(page, { load: (r) => json(r, 'down', 500) });
     await mountPage(page, PATH, TITLE);
     await expect(board(page).locator('.my-fail.load-failed')).toHaveText(
       'The station load did not answer: /api/stations/load: HTTP 500. An unreachable read is not an empty yard, so this page shows nothing rather than a clear one.',
     );
-    expect(await svgWhy(page)).toBe('the queues cannot be read — /api/stations/load: HTTP 500');
     // Neither empty state, and no section at all under a failed load.
     await expect(board(page).locator('.my-quiet')).toHaveCount(0);
     await expect(board(page).locator('.my-section')).toHaveCount(0);
   });
 
-  test('a failed station flow is said on the board AND on the map, and no constraint is named', async ({ page }) => {
+  test('a failed station flow is said on the board, and no constraint is named', async ({ page }) => {
     await install(page, { flow: (r) => json(r, 'down', 500) });
     await mountPage(page, PATH, TITLE);
     await expect(board(page).locator('.my-fail.load-failed')).toHaveText(
       'The station flow did not answer: /api/stations/flow?window_hours=24: HTTP 500. Depth without a rate cannot say whether anything is forming, so the constraint is not named.',
     );
-    expect(await svgWhy(page)).toBe('the queues cannot be read — /api/stations/flow?window_hours=24: HTTP 500');
     await expect(board(page).locator('.my-constraint')).toHaveCount(0);
     await expect(board(page).locator('.my-quiet')).toHaveCount(0);
   });

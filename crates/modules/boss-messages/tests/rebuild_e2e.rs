@@ -87,6 +87,12 @@ async fn send_message(router: &Router, sender: &str, recipient: &str, subject: &
     body["id"].as_str().unwrap().to_string()
 }
 
+/// The `x-boss-user` of the person a message was sent to: marking read,
+/// archiving and deleting are the recipient's to do (backlog 4dd10336).
+fn signed_in(id: &str) -> String {
+    serde_json::json!({ "id": id, "role": "employee", "access_tier": "user" }).to_string()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn rebuild_reproduces_projection_after_drop() {
     let db = TestDb::new().await;
@@ -101,18 +107,22 @@ async fn rebuild_reproduces_projection_after_drop() {
     let m4 = send_message(&router, "emp-a", "emp-c", "fourth").await;
 
     TestRequest::post(format!("/api/messages/{m1}/read"))
+        .header("x-boss-user", signed_in("emp-b"))
         .send(&router)
         .await
         .assert_status(StatusCode::OK);
     TestRequest::post(format!("/api/messages/{m3}/read"))
+        .header("x-boss-user", signed_in("emp-b"))
         .send(&router)
         .await
         .assert_status(StatusCode::OK);
     TestRequest::post(format!("/api/messages/{m2}/archive"))
+        .header("x-boss-user", signed_in("emp-b"))
         .send(&router)
         .await
         .assert_status(StatusCode::NO_CONTENT);
     TestRequest::delete(format!("/api/messages/{m4}"))
+        .header("x-boss-user", signed_in("emp-c"))
         .send(&router)
         .await
         .assert_status(StatusCode::NO_CONTENT);
@@ -203,6 +213,7 @@ async fn rebuild_is_idempotent() {
     let _m1 = send_message(&router, "emp-a", "emp-b", "alpha").await;
     let m2 = send_message(&router, "emp-a", "emp-b", "beta").await;
     TestRequest::post(format!("/api/messages/{m2}/read"))
+        .header("x-boss-user", signed_in("emp-b"))
         .send(&router)
         .await
         .assert_status(StatusCode::OK);

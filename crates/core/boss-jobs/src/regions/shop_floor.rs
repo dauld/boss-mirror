@@ -32,10 +32,12 @@ pub fn run_capacity(rows: &[crate::agents::AgentRow]) -> Option<usize> {
 /// failure the cap makes expensive: a run whose `building` step is
 /// done while its `reported` step is still open has FINISHED and is
 /// still holding a slot, which is invisible from every count of "runs
-/// in flight" that does not read the steps. The trend is the build
-/// duration — a run's own open-to-close, for the runs that closed in
-/// each window.
-pub(super) fn shop_floor(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
+/// in flight" that does not read the steps. At the cap the floor is
+/// FULL while runs keep reaching the gates and troubled when none has
+/// (`out`, the rail leaving the floor — [`at_capacity`]). The trend is
+/// the build duration — a run's own open-to-close, for the runs that
+/// closed in each window.
+pub(super) fn shop_floor(inputs: &RegionInputs<'_>, w: &Windows, out: &[OutRail]) -> Region {
     const UNIT: &str = "runs in flight";
     let bound = inputs.run_capacity.map(|c| (c, BoundKind::Capacity));
     let Some(runs) = inputs.agent_runs else {
@@ -95,32 +97,34 @@ pub(super) fn shop_floor(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
             ),
         ));
     }
-    if let Some(cap) = inputs.run_capacity.filter(|cap| count >= *cap) {
-        findings.push(Finding::new(
-            bands::SHOP_FLOOR_AT_CAP,
+    let what = [
+        Some(plural(count, "run in flight", "runs in flight")),
+        crews,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<String>>()
+    .join(", ");
+    // AT THE CAP (design e765b3fc §4a, car F1): the floor building as
+    // much as the registry allows is full while runs keep reaching the
+    // gates, and stuck when none has. `shop-floor-at-cap` turned it amber
+    // after 15m until 2026-09-25 — for being used. An undeclared cap
+    // bounds nothing, so the rule says nothing without one.
+    if let Some(cap) = inputs.run_capacity {
+        findings.extend(at_capacity(
+            count,
+            cap,
+            &what,
             onset_of_count(
                 in_flight.iter().filter_map(|(j, _)| opened_at(j)).collect(),
                 cap,
             ),
-            String::new(),
-            format!(
-                "{} — at the cap, the next dispatch is refused",
-                plural(count, "run in flight", "runs in flight")
-            ),
+            out,
+            w.hours,
+            inputs.now,
         ));
     }
-    let settled = settle(
-        findings,
-        [
-            Some(plural(count, "run in flight", "runs in flight")),
-            crews,
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<String>>()
-        .join(", "),
-        inputs.now,
-    );
+    let settled = settle(findings, what, inputs.now);
     // THE KPI (decision 9): runs in flight against the cap, and the
     // sessions silent past the crew board's idle line — each only where
     // it was read.
@@ -232,11 +236,30 @@ mod tests {
         assert_eq!(f.trend.current, Some(60.0), "the one run that closed");
     }
 
-    /// At the cap the next dispatch is refused — a band crossed, so
-    /// ATTENTION once it has held its quarter hour (both runs opened at
-    /// 11:00, an hour before NOW).
+    /// Twenty-four gate-runs opened a quarter hour apart, the last at
+    /// `last`: the floor's out-route (`shop-floor -> gates`) at a mean
+    /// gap of an hour.
+    fn gated_until(last: &str) -> Vec<Job> {
+        let last = t(last);
+        (0..24)
+            .map(|i| {
+                let at = (last - chrono::Duration::minutes(15 * i)).to_rfc3339();
+                job(
+                    "gate-run",
+                    &format!("fix/{i}"),
+                    JobStatus::Open,
+                    json!({ "opened_at": at }),
+                )
+            })
+            .collect()
+    }
+
+    /// AT THE CAP, RUNS REACHING THE GATES: FULL — the floor building as
+    /// much as the registry allows, which until car F1 (design e765b3fc)
+    /// turned amber after a quarter hour (`shop-floor-at-cap`). Both runs
+    /// opened at 11:00, so full for an hour.
     #[test]
-    fn a_floor_at_the_registrys_capacity_asks_for_attention_because_the_next_dispatch_is_refused() {
+    fn a_floor_at_the_registrys_capacity_with_runs_reaching_the_gates_is_full() {
         let status = empty_status();
         let runs: Vec<(Job, Vec<Step>)> = (0..2)
             .map(|_| (run(true, "2026-09-19T11:00:00Z", None), Vec::new()))
@@ -245,17 +268,51 @@ mod tests {
             session("a@x", Some("2026-09-19T11:50:00Z")),
             session("b@x", Some("2026-09-19T09:00:00Z")),
         ];
-        let base = inputs(&status, &[], &[], &[], &[], Some(&[]), Some(&[]));
+        let gated = gated_until("2026-09-19T11:45:00Z");
+        let base = inputs(&status, &[], &[], &[], &gated, Some(&[]), Some(&[]));
         let r = regions(&floor(base, &runs, &sessions, Some(2)));
         let f = by_name(&r, "shop-floor");
-        assert_eq!(f.state, RegionState::Attention, "{}", f.why);
-        assert!(f.why.contains("at the cap"), "{}", f.why);
-        assert_eq!(f.band.as_ref().unwrap().held_minutes, Some(60));
+        assert_eq!(f.state, RegionState::Full, "{}", f.why);
+        let band = f.band.as_ref().unwrap();
+        assert_eq!(band.id, "full");
+        assert_eq!(band.held_minutes, Some(60));
+        assert!(f.why.starts_with("2 runs in flight"), "{}", f.why);
+        assert!(bands::BANDS.iter().all(|b| b.id != "shop-floor-at-cap"));
         assert_eq!(f.kpi[0].text, "2 of 2 runs in flight");
         assert_eq!(
             f.kpi[1].text, "1 session silent past 60 minutes",
             "the crew board's idle line, in minutes"
         );
+    }
+
+    /// AT THE CAP, NOTHING REACHING THE GATES since 05:00 against an
+    /// hourly gap: stuck, from when the four gaps ran out (09:00). Below
+    /// the cap the same quiet rail says nothing.
+    #[test]
+    fn a_floor_at_the_cap_with_nothing_reaching_the_gates_is_stuck() {
+        let status = empty_status();
+        let runs: Vec<(Job, Vec<Step>)> = (0..2)
+            .map(|_| (run(true, "2026-09-19T05:00:00Z", None), Vec::new()))
+            .collect();
+        let sessions = Vec::new();
+        let gated = gated_until("2026-09-19T05:00:00Z");
+        let base = inputs(&status, &[], &[], &[], &gated, Some(&[]), Some(&[]));
+        let f = by_name(
+            &regions(&floor(base.clone(), &runs, &sessions, Some(2))),
+            "shop-floor",
+        )
+        .clone();
+        assert_eq!(f.state, RegionState::Troubled, "{}", f.why);
+        let band = f.band.unwrap();
+        assert_eq!(band.id, "stuck-at-capacity");
+        assert_eq!(band.since.as_deref(), Some("2026-09-19T09:00:00+00:00"));
+
+        let f = by_name(
+            &regions(&floor(base, &runs, &sessions, Some(3))),
+            "shop-floor",
+        )
+        .clone();
+        assert_eq!(f.state, RegionState::Clear, "{}", f.why);
     }
 
     /// THE FLAP THE REVIEW MEASURED (design 62de32ae, decision 2): a run

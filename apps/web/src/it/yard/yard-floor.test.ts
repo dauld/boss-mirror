@@ -815,16 +815,13 @@ describe('the track — wagons behind a locomotive', () => {
     expect(scene(yard, statusOf(), NOW).locos[0]?.channel).toBeNull();
   });
 
-  // The two render sites, pinned at source in the yard-page-*.test.ts
-  // idiom: the map's locomotive names its channel off the loco, the
-  // page's train card off the server row — both as '<channel> train',
-  // both guarded so an unstamped train draws nothing.
-  test("the locomotive and the train card name the channel as '<channel> train', guarded", () => {
+  // The render site, pinned at source in the yard-page-*.test.ts idiom:
+  // the deck's train card names the channel off the server row as
+  // '<channel> train', guarded so an unstamped train draws nothing. The
+  // track region's own map drew it on the locomotive too, until that map
+  // retired with its page (design e765b3fc, car N3).
+  test("the train card names the channel as '<channel> train', guarded", () => {
     const strip = (s: string) => s.replace(/<!--[\s\S]*?-->/g, '');
-    // The track region's map draws the locomotives since design
-    // fe77a1d2 car 2 deleted the whole-floor YardMap.
-    const map = strip(readFileSync(join(import.meta.dir, 'RegionFloor.svelte'), 'utf8'));
-    expect(map).toMatch(/\{#if l\.channel\}\s*<text[^>]*class="plate">\{l\.channel\} train<\/text>/);
     const page = strip(readFileSync(join(import.meta.dir, 'FloorDeck.svelte'), 'utf8'));
     expect(page).toMatch(/\{@const channel = serverTrainById\.get\(t\.id\)\?\.channel \?\? null\}/);
     expect(page).toMatch(/\{#if channel\}\s*<span class="yard-chip"[^>]*>\{channel\} train<\/span>/);

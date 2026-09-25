@@ -2990,7 +2990,20 @@ async fn chart_batch_is_operator_tier_and_refuses_an_auditor_and_an_anonymous_ca
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, _) = post_json(router(chart_state(&db)), "/api/ledger/accounts/batch", rows).await;
+    let (status, _) = post_json(
+        router(chart_state(&db)),
+        "/api/ledger/accounts/batch",
+        rows.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Backlog 85e7f10f: a sim chain is not an identity. Anonymous ON one
+    // — what a forged `x-sim-origin` produced — is refused the same way.
+    let (status, _) = boss_core::sim_origin::with_sim_chain(
+        true,
+        post_json(router(chart_state(&db)), "/api/ledger/accounts/batch", rows),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (n,): (i64,) = sqlx::query_as("SELECT count(*) FROM gl_accounts WHERE code = '4300'")
         .fetch_one(&db.pool)
@@ -3172,7 +3185,19 @@ async fn tax_batch_is_operator_tier_and_refuses_an_auditor_and_an_anonymous_call
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-    let (status, _) = post_json(router(chart_state(&db)), "/api/ledger/tax/batch", body).await;
+    let (status, _) = post_json(
+        router(chart_state(&db)),
+        "/api/ledger/tax/batch",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Backlog 85e7f10f: anonymous on a sim chain is refused too.
+    let (status, _) = boss_core::sim_origin::with_sim_chain(
+        true,
+        post_json(router(chart_state(&db)), "/api/ledger/tax/batch", body),
+    )
+    .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     let (n,): (i64,) =
         sqlx::query_as("SELECT count(*) FROM sales_tax_rate_by_state WHERE state = 'HI'")

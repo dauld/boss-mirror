@@ -1,92 +1,63 @@
+<script lang="ts" module>
+  /** The window the map is PINNED in (design e765b3fc, car N3): wider
+   *  than a phone's 720px and at least 900px tall. The map stands about
+   *  430px (transit) to 470px (world) at a desktop width, under the 44px
+   *  perspective bar, so 900px of window leaves the panel under it about
+   *  400px — room for a board's card whole. Measured at 1280×800 with
+   *  the map pinned: the panel kept 286px, and a feedback card's Route
+   *  button could be scrolled to nowhere visible (Playwright: "element is
+   *  outside of the viewport"), so a shorter window scrolls the map with
+   *  the page, as a phone does. The one number to move if the maps grow
+   *  or shrink. */
+  export const PIN_QUERY = '(min-width: 721px) and (min-height: 900px)';
+</script>
+
 <script lang="ts">
-  // THE IT WORLD — the /it landing. Since design d2154293 (decided by
-  // David 2026-09-19; this is car 1) it is ONE SVG world: world.ts lays
-  // the regions out as territories along the packet flow and
-  // WorldMap.svelte draws them, each with its count, state and trend
-  // inside its outline and the why on a troubled one. The 4x2 card
-  // grid that stood here (0524fc95 car 2) had no shared coordinate
-  // space, no adjacency and no flow — "a world map in a video game
-  // where the physical layout and connections make sense" (feedback
-  // c3105b2a) is the ask, and the world is becoming THE IT surface
-  // (Q2): the floors zoom in on car 3, receiving and marshalling grow
-  // interiors on car 4.
+  // THE DEPARTMENT MAP — the /it landing (design e765b3fc; David,
+  // 2026-09-25: "the operating map sits at the top always and clicking
+  // stations or lines pulls up detail below"). The map on top — the
+  // transit map under its flight, the world map without it, the strip on
+  // a phone — and, below it, the panel of whatever `/it?at=<name>`
+  // selects (regions.ts `regionHref`): a station or a section of track.
+  // A selection is a query on this one route, so the map is mounted once
+  // and a click never tears it down.
   //
-  // Every number is read from ONE endpoint, /api/yard/regions, and the
-  // page derives nothing — it used to be the other way: yard.ts read
-  // six endpoints and derived every number the Train Yard showed, boss
-  // orient derived the same numbers again, and nothing held the two
-  // equal.
+  // THE MAP IS PINNED (car N3). "Pinned at the top, always visible": the
+  // map holds under the perspective bar while the panel scrolls beneath
+  // it, so the thing selected and the detail it opened are on the screen
+  // together. Where a pinned map would leave the panel no room — a
+  // phone, or a window too short (PIN_QUERY) — it scrolls with the page
+  // instead, and the panel is brought into view on a selection either
+  // way.
   //
-  // CLICKING SWAPS THE VIEW (David, 2026-09-20; backlog ca37478f).
-  // /it/yard/<region> is this same page with `region` set, and it
-  // renders the REGION's map in place of the world's — not the world
-  // drawn nearer. Car 3 read "zoom into the region by clicking to see"
-  // (feedback c3105b2a) as a camera walking the viewBox into a
-  // territory's rect; David's correction: "I just wanted the world map
-  // view to get replaced with the more detailed region map view on
-  // click but not literally increase the size of content on the world
-  // map." The route was already right — only what it drew was wrong,
-  // and the camera is gone. The floor's
-  // panels — the alerts, the departure board, the entity deck and its
-  // verbs, production and signals — mount UNDER the region map as
-  // FloorDeck. The region map is fed by the scene FloorDeck ALREADY
-  // reads, handed up through `onfloor`: one read of the floor on the
-  // page, not two — the same rule that made the regions endpoint the
-  // only reading of a region.
+  // WHAT A PAGE WAS IS A PANEL NOW (car N3). A region's floor was its own
+  // page at /it/yard/<region>, with a second map of its own (design
+  // d2154293 car 3, fe77a1d2, 62de32ae decision 7); car N2 drew the
+  // floor's cards in the station's panel, and car N3 retired the page,
+  // its map and its route. The Crew Board is the shop floor's panel, and
+  // four more pages MOVED here before they retired (panel.ts
+  // `STATION_BOARDS` is the table): yard status is the track's, dock's
+  // and garage's, the conductor's feed the track's, and the feedback and
+  // backlog boards receiving's (the backlog marshalling's too). No alias
+  // and no redirect: each old path is not found, and its one door is
+  // this map.
   //
-  // ONE MAP PER FLOOR (design fe77a1d2). Car 2: the region map draws
-  // its region's slice of the floor and the deck draws no map at all,
-  // so the selection that drives the entity panel crosses between the
-  // two: the deck hands up what is selected and the function that
-  // selects (`onselection`), and a click on the region map goes
-  // through that function — one selection, whichever surface took it.
-  // Car 3: the deck was still the Train Yard page (YardPage), mounted
-  // with its header switched off — a page in name only, with this as
-  // its one mount site — so it became the FloorDeck component and the
-  // page was deleted. Every route is unchanged.
+  // NO NEW STYLING (the visual redesign reskins): the map is drawn in the
+  // yard's own strokes and tokens.
   //
-  // A REGION OWNS ITS PAGE (design 62de32ae, decision 7). The view
-  // swapped and the page around it did not: the heading still read "The
-  // IT world" inside every region, and the world's summary line sat
-  // between the region map and its floor (review 2026-09-24, finding
-  // 8). On a region the heading is the region's — "IT · Dock", under a
-  // breadcrumb back to the world — and the summary line gives way to
-  // the region's own rails in and out (region-page.ts), from the same
-  // borders read. The deck scopes its board and alerts the same way.
-  //
-  // THE DEPARTMENT MAP (design e765b3fc, car N1; David 2026-09-25):
-  // "the operating map sits at the top always and clicking stations or
-  // lines pulls up detail below". At /it a click SELECTS — `/it?at=<name>`
-  // (regions.ts `regionHref`) — and the selection's panel opens under
-  // the map, which is not torn down: the route is the same one with a
-  // query, and App.svelte mounts this page once for both. Car N1 opened
-  // the panel as a shell (the station's one number, its state and the
-  // door to its floor page). Car N2 fills it: a station's or a section's
-  // readings (`?at=dock->track` selects a section) and a station's floor
-  // cards, while the map marks what is selected and stops writing the
-  // detail itself. Car N3 retires the floor pages, the `region` view
-  // below with them.
-  //
-  // NO NEW STYLING (the visual redesign reskins): the world is drawn in
-  // the yard's own strokes and tokens.
-  //
-  // Polling stays as the yard's: a 10s tick. Reads go through
-  // fetchRemote, so an outage renders a failure line (`load-failed`),
-  // never an empty map that reads as a calm one.
+  // Every number is read from ONE endpoint, /api/yard/regions (the rails
+  // from /api/yard/borders), on the yard's 10s tick, through fetchRemote
+  // — so an outage renders a failure line (`load-failed`), never an empty
+  // map that reads as a calm one.
   import { onMount, untrack } from 'svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
-  import Breadcrumb from '@boss/web-kit/ui/Breadcrumb.svelte';
   import { navigate } from '@boss/web-kit/nav';
-  import { railLines, regionTitle } from './region-page';
   import type { Remote } from '../../data/remote';
-  import { countText, fetchRegions, floorHref, lampOf, stateText, type Regions } from './regions';
-  import { markOf, selectionOf, type MapSelection } from './selection';
-  import { sectionCells, stationCells, type PanelCell } from './panel';
-  import { territoryOf } from './world';
+  import { countText, fetchRegions, lampOf, stateText, type Regions } from './regions';
+  import { markOf, selectionOf, unreadStationOf, type MapSelection } from './selection';
+  import { boardsOf, sectionCells, stationCells, type PanelCell } from './panel';
   import { hasInterior } from './region-contents';
-  import RegionMap from './RegionMap.svelte';
-  import { hasPlatforms, type Deck } from './world-interior';
-  import type { FloorSelection, Scene } from './yard-floor';
+  import { hasPlatforms } from './world-interior';
   import { fetchBorders, type Borders } from './borders';
   import type { LastGood } from './hud';
   import HudFrame from './HudFrame.svelte';
@@ -95,50 +66,30 @@
   import { flightOn } from '@boss/web-kit/session/flights.svelte';
   import PlantStrip from './PlantStrip.svelte';
   import FloorDeck from './FloorDeck.svelte';
+  import YardStatusPanel from './YardStatusPanel.svelte';
+  import ConductorFeed from '../monitoring/ConductorFeed.svelte';
   import CrewBoardPage from '../crew/CrewBoardPage.svelte';
   import ReceivingYardPage from '../receiving/ReceivingYardPage.svelte';
   import MarshallingYardPage from '../marshalling/MarshallingYardPage.svelte';
+  import FeedbackTriagePage from '../feedback/FeedbackTriagePage.svelte';
+  import BacklogBoardPage from '../backlog/BacklogBoardPage.svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import PhoneStrip from './PhoneStrip.svelte';
   import { PHONE_QUERY } from './phone-strip';
 
   type Props = Readonly<{
-    /** The territory the camera is in — the `/it/yard/<region>` route.
-     *  Absent at `/it`, which is the whole world. */
-    region?: string | null;
-    /** The Department Map's selection — `/it?at=<name>`. Read only on
-     *  the map itself; a region's own view selects nothing. */
+    /** The Department Map's selection — `/it?at=<name>`. Absent, nothing
+     *  is selected and no panel opens. */
     at?: string;
   }>;
-  let { region = null, at = undefined }: Props = $props();
+  let { at = undefined }: Props = $props();
 
-  /** A region the layout does not know leaves the WORLD on screen
-   *  rather than swapping to a map of nothing. */
-  const shown = $derived(region !== null && territoryOf(region) !== undefined ? region : null);
-  /** The regions whose floor is a queue board — receiving, marshalling
-   *  and the shop floor (car 4). Their map draws PLATFORMS rather than wagons in transit,
-   *  and the board itself mounts under it the way the yard's floor
-   *  does. */
-  const platformRegion = $derived(shown !== null && hasPlatforms(shown) ? shown : null);
-  /** The floor, handed up by the yard page below — the scene its own
-   *  reads already built. Null until the first read lands. */
-  let floor = $state<Scene | null>(null);
-  /** The floor's selection, handed up by the same page — null until it
-   *  has mounted, when the map selects nothing and a click is dropped
-   *  rather than aimed at a panel that is not there. */
-  let selection = $state<FloorSelection | null>(null);
-  /** The platform deck, handed up by whichever queue board is mounted,
-   *  WITH the region it was read for: a deck left over from the region
-   *  just left would draw the wrong queues for a moment. */
-  let held = $state<Readonly<{ region: string; deck: Deck }> | null>(null);
-  const deck = $derived<Deck | null>(
-    platformRegion !== null && held !== null && held.region === platformRegion ? held.deck : null,
-  );
   /** A phone: the world is drawn as the strip map rather than the SVG
    *  shrunk (design 62de32ae decision 12, car G). ONE of the two is
    *  mounted, never both hidden by CSS — a hidden world would still be
    *  read, counted and crawled as if it were on the screen. */
   const phone = new MediaQuery(PHONE_QUERY);
+  const pinnable = new MediaQuery(PIN_QUERY);
   /** THE TRANSIT MONITOR (design 16091dfb, Q2 decided 2026-09-25):
    *  behind its flight, on for David first. Off — and for every viewer
    *  the flight does not list — the world map is the map; the phone
@@ -182,9 +133,9 @@
     new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
   /** What `?at=` selects, against the regions the server served — none
-   *  while the read is out, and none on a region's own view. */
+   *  while the read is out. */
   const picked = $derived<MapSelection>(
-    shown === null && regions.kind === 'ready'
+    regions.kind === 'ready'
       ? selectionOf(at, regions.data, borders.kind === 'ready' ? borders.data : null)
       : { kind: 'none' },
   );
@@ -198,15 +149,51 @@
         : [],
   );
 
-  /** The panel sits under the map, so on a short screen it can open
-   *  below the fold and a click would look like it did nothing. Brought
-   *  into view when the SELECTION changes — keyed on `at`, not on the
-   *  10 s poll, which must never pull the page back down. */
+  /** Whether the map is pinned in this window, and how tall it stands. */
+  const pinned = $derived(pinnable.current && !phone.current);
+  let pin = $state<HTMLElement | null>(null);
+  let pinHeight = $state(0);
+  /** The perspective bar the shell fixes above every page
+   *  (PerspectiveTabs.svelte: 44px), which the pinned map sits under. */
+  const BAR = 44;
+
+  /** WHAT THE PINNED MAP COVERS IS NOT "IN VIEW". While the map is
+   *  pinned, the document's scroll padding is the bar and the map, so
+   *  whatever brings a control of the panel into view — a keyboard focus
+   *  moving down a board, a link to an anchor — lands it under the map
+   *  rather than behind it, where it would be focused and hidden. Given
+   *  back when the map stops being pinned, or the page goes. It sets a
+   *  style and moves nothing, so it may follow the map's height. */
+  $effect(() => {
+    if (!pinned) return;
+    const root = document.documentElement;
+    root.style.scrollPaddingTop = `${BAR + pinHeight}px`;
+    return () => {
+      root.style.scrollPaddingTop = '';
+    };
+  });
+
+  /** The panel sits under the map, so a click could open it below the
+   *  fold — or, with the page scrolled, behind the pinned map — and look
+   *  like it did nothing. Brought into view when the SELECTION changes —
+   *  keyed on `at`, not on the 10 s poll, which must never move the
+   *  page. Under a pinned map the panel's head goes right under the map:
+   *  the map's height is MEASURED here, when the panel opens, because the
+   *  bound height is still 0 on the first paint of a linked selection. */
   let panel = $state<HTMLElement | null>(null);
   $effect(() => {
     const key = at;
     const el = panel;
-    if (key !== undefined && el !== null) untrack(() => el.scrollIntoView({ block: 'nearest' }));
+    const map = pinned ? pin : null;
+    if (key === undefined || el === null) return;
+    untrack(() => {
+      if (map === null) {
+        el.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      const under = BAR + map.getBoundingClientRect().height;
+      window.scrollTo({ top: window.scrollY + el.getBoundingClientRect().top - under });
+    });
   });
 
   function go(e: MouseEvent, href: string): void {
@@ -214,35 +201,29 @@
     e.preventDefault();
     navigate(href);
   }
+
+  /** Where the boards of the retired pages live now — said on the page,
+   *  so a reader who knew the old tab finds it (David, 2026-09-25: a
+   *  newcomer loses nothing). panel.ts `STATION_BOARDS` is the table. */
+  const WHERE =
+    'Feedback and the IT backlog are in the Receiving station\'s panel (the backlog in Marshalling\'s too), the Crew Board in the Shop floor\'s, and yard status and the conductor\'s activity in the Track\'s, with the Dock\'s and the Garage\'s lanes in theirs.';
 </script>
 
 <div class="theme-exec yard-root">
-  {#if shown !== null}
-    <!-- The region's own heading, under the way back to the world it
-         was opened from — the page says where you are. -->
-    <nav class="crumbs" aria-label="breadcrumb" data-region={shown}>
-      <Breadcrumb to="/it">Department Map</Breadcrumb>
-      <span class="crumb-here" aria-current="page">› {regionTitle(shown)}</span>
-    </nav>
-    <PageHeader title={`IT · ${regionTitle(shown)}`} />
-  {:else}
-    <!-- Named what its sidebar row is named (design e765b3fc, car N1):
-         it answered to "Train Yard", "The IT world" and "IT · Forge
-         line" at once (page audit gap f9850601). -->
-    <PageHeader
-      eyebrow="IT"
-      title="Department Map"
-      subtitle={transit
-        ? 'The network as a transit monitor: each region a station on its line, each border a section of track with what waits on it, and the alarms board beside it. Select a station or a section to open its detail below the map.'
-        : 'The territories along the packet flow, and the borders between them carrying what crosses, what waits and the machine that moves it. Select a territory to open its detail below the map.'}
-    />
-  {/if}
+  <!-- Named what its sidebar row is named (design e765b3fc, car N1):
+       it answered to "Train Yard", "The IT world" and "IT · Forge
+       line" at once (page audit gap f9850601). -->
+  <PageHeader
+    eyebrow="IT"
+    title="Department Map"
+    subtitle={(transit
+      ? 'The network as a transit monitor: each region a station on its line, each border a section of track with what waits on it, and the alarms board beside it. Select a station or a section to open its detail below the map. '
+      : 'The territories along the packet flow, and the borders between them carrying what crosses, what waits and the machine that moves it. Select a territory to open its detail below the map. ') + WHERE}
+  />
 
   <!-- THE HUD FRAME (design 00774ca8): the whole system, one row per
-       third, above the map — and above every region's map too, because
-       it does not follow the zoom. It stands whatever the read did: a
-       failed read turns its cells to `?` rather than taking the frame
-       away. -->
+       third, above the map. It stands whatever the read did: a failed
+       read turns its cells to `?` rather than taking the frame away. -->
   <HudFrame read={regions} {readAt} {lastGood} />
 
   {#if regions.kind === 'loading'}
@@ -251,66 +232,69 @@
     <!-- A failed read is said, in the one class the outage crawl reads:
          a map that could not be read must not look like a clear one. -->
     <div class="yard-empty load-failed">The regions cannot be read — {regions.error}</div>
+    {@const unread = unreadStationOf(at)}
+    {#if unread !== null}
+      <!-- A STATION WHOSE READING FAILED STILL OPENS (car N3): its
+           readings came with the regions read, so they are said to be
+           unread — but what stands in it reads its own endpoints, as the
+           floor page it replaced did, and a failed regions read must not
+           take those boards down with it. -->
+      <section
+        class="map-panel"
+        bind:this={panel}
+        data-map-panel
+        data-selection={unread.name}
+        data-kind="station"
+        data-state="unknown"
+        aria-label="the {unread.name} selection">
+        <header class="panel-head">
+          <span class="panel-kind">Station</span>
+          <h2 class="panel-title">{unread.title}</h2>
+          <a class="panel-close" data-close href="/it" aria-label="close the {unread.name} selection"
+            onclick={(e) => go(e, '/it')}>close</a>
+        </header>
+        <p class="panel-none">Its readings come with the regions read, which failed; what stands in it reads on its own, below.</p>
+        {@render station(unread.name)}
+      </section>
+    {/if}
   {:else}
-    {#if shown !== null}
-      <!-- THE REGION'S OWN MAP, in place of the world's. Its canvas is
-           its own, so what it shows is laid out for the region rather
-           than for the slot its rectangle occupies on the world line. -->
-      <!-- A MAP THAT CANNOT BE DRAWN SAYS SO (backlog 846ab934). On
-           2026-09-24 the shop floor threw each_key_duplicate on live
-           data and, with nothing to catch it, the whole page stayed on
-           "Reading the regions…" — a loading line over a crash, the
-           answer-instead-of-an-error class. The boundary turns any
-           render failure of the region map into the failure line the
-           outage crawl reads, naming the error. -->
-      <svelte:boundary>
-        <RegionMap
-          region={shown}
+    <!-- THE MAP, pinned (car N3) where the window has room for it. -->
+    <div class="map-pin" class:pinned data-map-pin={pinned ? 'pinned' : 'scrolls'} bind:this={pin} bind:clientHeight={pinHeight}>
+      {#if phone.current}
+        <PhoneStrip
           regions={regions.data}
-          {floor}
-          {deck}
-          selected={selection?.selected ?? ''}
-          onselect={(key) => selection?.select(key)}
-          onleave={() => navigate('/it')} />
-        {#snippet failed(error)}
-          <div class="yard-empty load-failed" data-region={shown}>
-            The {shown} region cannot be drawn — {error instanceof Error ? error.message : String(error)}
-          </div>
-        {/snippet}
-      </svelte:boundary>
-    {:else if phone.current}
-      <PhoneStrip
-        regions={regions.data}
-        borders={borders.kind === 'ready' ? borders.data : null} />
-    {:else if transit}
-      <!-- The same two reads, drawn as a transit map (design 16091dfb):
-           stations, sections and the alarms board, with the selection
-           marked on it (design e765b3fc, car N2). -->
-      <TransitMap
-        regions={regions.data}
-        borders={borders.kind === 'ready' ? borders.data : null}
-        selected={markOf(picked)} />
-      <PlantStrip machines={regions.data.plant} />
-    {:else}
-      <WorldMap
-        regions={regions.data}
-        borders={borders.kind === 'ready' ? borders.data : null}
-        {bordersAt} />
-      <!-- THE PLANT along the world's edge (design 62de32ae, decision
-           11): the host runners serve every region, so they stand under
-           the territories rather than in one of them. -->
+          borders={borders.kind === 'ready' ? borders.data : null} />
+      {:else if transit}
+        <!-- The same two reads, drawn as a transit map (design 16091dfb):
+             stations, sections and the alarms board, with the selection
+             marked on it (design e765b3fc, car N2). -->
+        <TransitMap
+          regions={regions.data}
+          borders={borders.kind === 'ready' ? borders.data : null}
+          selected={markOf(picked)} />
+      {:else}
+        <WorldMap
+          regions={regions.data}
+          borders={borders.kind === 'ready' ? borders.data : null}
+          {bordersAt} />
+      {/if}
+    </div>
+    {#if !phone.current}
+      <!-- THE PLANT along the map's edge (design 62de32ae, decision 11):
+           the host runners serve every region, so they stand under the
+           map rather than in one of its stations. -->
       <PlantStrip machines={regions.data.plant} />
     {/if}
     {#if picked.kind !== 'none'}
       <!-- THE SELECTION'S PANEL, under the map (design e765b3fc). Car N1
-           opened it as a shell; car N2 fills it with what the map no
+           opened it as a shell; car N2 filled it with what the map no
            longer writes — a station's or a section's rate, what waits
            and on whom, what is stuck, its trend, the band and the why
            that decided its state, its machines and its crossings
            (panel.ts) — and, for a station, what stands in it: its
-           floor's cards, which used to be a page of their own. A name
-           the read did not carry is said, never drawn as a quiet empty
-           panel. -->
+           floor's cards. Car N3 added the boards of the pages that
+           retired into it. A name the read did not carry is said, never
+           drawn as a quiet empty panel. -->
       {@const name = picked.kind === 'station' ? picked.name : picked.kind === 'section' ? picked.key : picked.at}
       {@const state = picked.kind === 'station' ? picked.region.state : picked.kind === 'section' ? (picked.border?.state ?? 'unknown') : 'unknown'}
       <section
@@ -352,78 +336,76 @@
             {/each}
           </div>
           {#if picked.kind === 'station'}
-            <!-- The floor page stays reachable until car N3 retires it;
-                 what it held is below. -->
-            <a class="panel-floor" data-floor href={floorHref(picked.name)}
-              onclick={(e) => go(e, floorHref(picked.name))}>open the page for {picked.title} →</a>
-            <div class="panel-contents" data-contents={picked.name}>
-              {@render contents(picked.name)}
-            </div>
+            {@render station(picked.name)}
           {/if}
         {/if}
       </section>
     {/if}
     <!-- A failed rails read is SAID — the territories are still drawn,
          but a map whose rails could not be read must not look like a
-         quiet one. The one-line activity summary that stood here summed
-         the border rows on the client and double-counted about 260
-         backlog items; the HUD frame above replaced it (design 00774ca8
-         decision 10). -->
-    {#if borders.kind === 'ready' && shown !== null}
-      <!-- ON A REGION, ITS OWN RAILS (design 62de32ae decision 7): what
-           comes in, what goes out, what waits at each and the machine
-           that moves it — scoped to the borders this region has. -->
-      <div class="yard-flow region-rails" data-rails={shown}>
-        {#each railLines(borders.data, shown) as line, i (i)}
-          <div class="rail-line">{line}</div>
-        {/each}
-      </div>
-    {:else if borders.kind === 'failed'}
+         quiet one. -->
+    {#if borders.kind === 'failed'}
       <div class="yard-empty load-failed">The borders cannot be read — {borders.error}</div>
     {/if}
     <div class="yard-flow">
       window {regions.data.window_hours}h against the {regions.data.window_hours}h before{readAt !== null ? ` · read ${clock(readAt)}` : ''}
     </div>
   {/if}
-
-  {#if shown !== null}
-    {@render contents(shown)}
-  {/if}
 </div>
 
-<!-- WHAT STANDS IN A REGION — its floor's cards. Under the region's own
-     map at /it/yard/<region>, and inside a station's panel on the
-     Department Map (design e765b3fc, car N2: "region floor cards move
-     into the station panel"), until car N3 retires the region pages and
-     the panel is the one place they are drawn. -->
+<!-- A STATION'S CONTENTS, under a net. A STATION THAT CANNOT BE DRAWN
+     SAYS SO (backlog 846ab934): a board that throws on live data becomes
+     the failure line the outage crawl reads, naming the error, and the
+     map above it stands. -->
+{#snippet station(name: string)}
+  <div class="panel-contents" data-contents={name}>
+    <svelte:boundary>
+      {@render contents(name)}
+      {#snippet failed(error)}
+        <div class="yard-empty load-failed" data-region={name}>
+          The {name} station cannot be drawn — {error instanceof Error ? error.message : String(error)}
+        </div>
+      {/snippet}
+    </svelte:boundary>
+  </div>
+{/snippet}
+
+<!-- WHAT STANDS IN A STATION — its floor's cards, and the boards of the
+     pages that retired into it (design e765b3fc, cars N2 and N3). Keyed
+     on the station, so a move from one to another opens the new
+     station's boards rather than keeping the old one's selection. -->
 {#snippet contents(region: string)}
-  {#if hasInterior(region)}
-    <!-- THE FLOOR'S DECK: the Train Yard's panels, a component of this
-         page rather than a page of their own (design fe77a1d2, car 3).
-         Keyed on the region so a move from one to another opens the new
-         region's panel rather than keeping the old selection. -->
-    {#key region}
-      <FloorDeck
-        focus={region}
-        onfloor={(s) => (floor = s)}
-        onselection={(s) => (selection = s)} />
-    {/key}
-  {:else if hasPlatforms(region)}
-    <!-- THE QUEUE BOARD (car 4). The two /it/operate pages this replaced
-         are the SAME components, mounted here with their page header
-         dropped: the territory above draws the platforms from the very
-         reads these make, so nothing is read twice and nothing is
-         derived twice. -->
-    {#key region}
+  {#key region}
+    {#if hasInterior(region)}
+      <!-- THE FLOOR'S DECK: the Train Yard's panels (design fe77a1d2,
+           car 3) — the departure board and the entity panel, whose
+           selection the board's own rows drive. -->
+      <FloorDeck focus={region} />
+    {:else if hasPlatforms(region)}
+      <!-- THE QUEUE BOARD (car 4 of d2154293), with its page header
+           dropped: the station's panel is its heading. -->
       {#if region === 'receiving'}
-        <ReceivingYardPage embedded ondeck={(d) => (held = { region: 'receiving', deck: d })} />
+        <ReceivingYardPage embedded />
       {:else if region === 'shop-floor'}
-        <CrewBoardPage embedded ondeck={(d) => (held = { region: 'shop-floor', deck: d })} />
+        <CrewBoardPage embedded />
       {:else}
-        <MarshallingYardPage embedded ondeck={(d) => (held = { region: 'marshalling', deck: d })} />
+        <MarshallingYardPage embedded />
       {/if}
-    {/key}
-  {/if}
+    {/if}
+    {#each boardsOf(region) as board (board)}
+      <div class="panel-board" data-station-board={board}>
+        {#if board === 'yard-status'}
+          <YardStatusPanel part={region === 'track' ? 'track' : region === 'dock' ? 'dock' : 'garage'} />
+        {:else if board === 'conductor'}
+          <ConductorFeed />
+        {:else if board === 'feedback'}
+          <FeedbackTriagePage />
+        {:else}
+          <BacklogBoardPage />
+        {/if}
+      </div>
+    {/each}
+  {/key}
 {/snippet}
 
 <style>
@@ -439,9 +421,12 @@
   .yard-flow { font-family: var(--font-mono); font-size: 11px;
     letter-spacing: var(--ls-nav); color: var(--map-muted);
     border-top: 1px solid var(--map-rule); margin-top: 28px; padding-top: 12px; }
-  .region-rails .rail-line + .rail-line { margin-top: 4px; }
-  .crumbs { font-size: 13px; color: var(--map-muted); padding-top: 16px; }
-  .crumb-here { margin-left: 4px; color: var(--map-ink); }
+  /* THE PIN (car N3): the map holds under the 44px perspective bar, on
+     the page's own ground so the panel scrolling beneath it does not
+     show through, above the panel's boards and below the shell's
+     sidebar (20) and bar (60). */
+  .map-pin.pinned { position: sticky; top: 44px; z-index: 10; background: var(--map-bg);
+    padding-bottom: var(--s2); border-bottom: 1px solid var(--map-rule); }
   /* The selection's panel — a departure-board plate under the map, in the
      crossing panel's grammar (WorldMap.svelte): a hairline frame, a mono
      uppercase head with the state's lamp, the figure large beneath. */
@@ -467,7 +452,6 @@
   .panel-state { font-family: var(--font-mono); font-size: 12px; color: var(--map-muted); }
   .map-panel[data-state='attention'] .panel-state { color: var(--map-warn-ink); }
   .map-panel[data-state='troubled'] .panel-state { color: var(--map-bad-ink); }
-  .panel-floor { font-size: 13px; color: var(--map-link); }
   /* The readings (car N2): a board of cells, each a mono label over the
      server's own sentences. The long lists — what waits, and the
      crossings — take the whole row, so a hold sentence is never
@@ -483,5 +467,6 @@
     overflow-wrap: anywhere; }
   .cell-lines li + li { margin-top: 2px; }
   .panel-contents { margin-top: var(--s3); border-top: 1px solid var(--map-rule); }
+  .panel-board { margin-top: var(--s3); }
   .panel-none { margin: var(--s2) 0 0; font-size: 13px; color: var(--map-bad-ink); overflow-wrap: anywhere; }
 </style>

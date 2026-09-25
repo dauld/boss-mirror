@@ -18,7 +18,7 @@
 // `markOf` is the one crossing between the two.
 import type { Border, Borders } from './borders';
 import { regionTitle } from './region-page';
-import type { Region, Regions } from './regions';
+import { REGION_NAMES, type Region, type Regions } from './regions';
 import { sectionKey } from './transit';
 
 export type MapSelection =
@@ -55,4 +55,15 @@ export function markOf(s: MapSelection): string | null {
   if (s.kind === 'station') return s.name;
   if (s.kind === 'section') return sectionKey(s.from, s.to);
   return null;
+}
+
+/** A station named while the regions read is out (design e765b3fc, car
+ *  N3): its panel still opens, on the name alone, because what stands in
+ *  it — the floor deck, the queue boards and the boards of the pages
+ *  that retired into it — reads its own endpoints, as the floor page it
+ *  replaced did. Only a name the map lays out is a station; a section, a
+ *  typo or no selection names nothing. */
+export function unreadStationOf(at: string | undefined): Readonly<{ name: string; title: string }> | null {
+  if (at === undefined || !(REGION_NAMES as ReadonlyArray<string>).includes(at)) return null;
+  return { name: at, title: regionTitle(at) };
 }

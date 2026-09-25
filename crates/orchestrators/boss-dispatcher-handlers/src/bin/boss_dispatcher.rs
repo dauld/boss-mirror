@@ -918,6 +918,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding HTTP listener on {bind}"))?;
     info!(addr = %bind, "boss-dispatcher HTTP listening (health-only surface)");
+    let app = boss_core::machine_gate::mount(app, "dispatcher", &["/api/dispatcher/health"]);
     axum::serve(listener, app).await?;
     Ok(())
 }

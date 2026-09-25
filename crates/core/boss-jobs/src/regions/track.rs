@@ -28,14 +28,19 @@ pub fn train_gate_troubled(md: &Value) -> bool {
         })
 }
 
+/// The single track: one train at a time.
+const TRACK_BOUND: usize = 1;
+
 /// THE TRACK: trains in transit. Troubled when the yard names a block
 /// on any of them (`TrainStatus::block` — a red PR, a deploy refusal,
-/// a converge overdue, a stall past the policy) or the conductor is
-/// still waiting to file a train's gate ([`train_gate_troubled`]);
-/// clear while a pre-merge train holds the single track (the track working). The trend is
-/// the time at CI — the `pr` stamp to the `ci` verdict — for trains
-/// that arrived in each window.
-pub(super) fn track(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
+/// a converge overdue, a stall past the policy), when the conductor is
+/// still waiting to file a train's gate ([`train_gate_troubled`]), or
+/// when a train holds the track and none has left it in four of the
+/// out-route's mean gaps; FULL while a train holds the single track and
+/// trains keep leaving it (`out` — [`at_capacity`]). The trend is the
+/// time at CI — the `pr` stamp to the `ci` verdict — for trains that
+/// arrived in each window.
+pub(super) fn track(inputs: &RegionInputs<'_>, w: &Windows, out: &[OutRail]) -> Region {
     let trains = &inputs.status.trains;
     let blocked: Vec<&str> = trains
         .iter()
@@ -121,7 +126,7 @@ pub(super) fn track(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         ));
     }
     // A pre-merge train holding the single track is the track WORKING —
-    // clear, with the train named (decision 1).
+    // with the train named (decision 1).
     let clear_why = if on_track > 0 {
         format!(
             "{} — a train holds the track",
@@ -130,6 +135,30 @@ pub(super) fn track(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     } else {
         plural(trains.len(), "train in transit", "trains in transit")
     };
+    // AT ITS ONE TRAIN (design e765b3fc §4a, car F1): full while trains
+    // keep arriving (or being released), stuck when none has. The track
+    // filled when the train on it boarded — its `collect` step, the
+    // instant the yard reads as `boarded_at` — or, for a train that
+    // carries no such stamp, when it opened.
+    findings.extend(at_capacity(
+        trains.len(),
+        TRACK_BOUND,
+        &clear_why,
+        onset_of_count(
+            inputs
+                .open_trains
+                .iter()
+                .filter_map(|(j, s)| {
+                    step_done_at(find_step(s, "collect", "Collect what is ready to board"))
+                        .or_else(|| opened_at(j))
+                })
+                .collect(),
+            TRACK_BOUND,
+        ),
+        out,
+        w.hours,
+        inputs.now,
+    ));
     let settled = settle(findings, clear_why, inputs.now);
     // THE KPI: how long the oldest train has stood at the stage it is at
     // — from its last completed step (the stage's start), else from its
@@ -164,7 +193,7 @@ pub(super) fn track(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
     region(
         "track",
         Some(trains.len()),
-        Some((1, BoundKind::Capacity)),
+        Some((TRACK_BOUND, BoundKind::Capacity)),
         "trains in transit",
         settled,
         trend,
@@ -283,13 +312,11 @@ mod tests {
         ));
     }
 
-    /// A healthy pre-merge train holds the single track: CLEAR — the
-    /// track working, which is what it is for (design 62de32ae, decision
-    /// 1) — with the train named and its age at the stage as the KPI.
-    #[test]
-    fn a_pre_merge_train_holds_the_track_and_reads_clear() {
-        let train = job("pr-train", "train #472", JobStatus::Open, json!({}));
+    /// A train boarded at `boarded` (its `collect` step), before its merge.
+    fn on_track(title: &str, boarded: &str) -> (Job, Vec<Step>) {
+        let train = job("pr-train", title, JobStatus::Open, json!({}));
         let steps = vec![
+            step(&train, "collect", StepStatus::Completed, Some(boarded)),
             step(
                 &train,
                 "pr",
@@ -299,30 +326,93 @@ mod tests {
             step(&train, "ci", StepStatus::Ready, None),
             step(&train, "merged", StepStatus::Pending, None),
         ];
-        let open = vec![(train, steps)];
+        (train, steps)
+    }
+
+    /// Twenty-four trains arrived a quarter hour apart, the last at
+    /// `last`: a mean gap of an hour over the day's window.
+    fn arrived_until(last: &str) -> Vec<(Job, Vec<Step>)> {
+        let last = t(last);
+        (0..24)
+            .map(|i| {
+                let at = (last - chrono::Duration::minutes(15 * i)).to_rfc3339();
+                let j = job(
+                    "pr-train",
+                    &format!("train {i}"),
+                    JobStatus::Closed,
+                    json!({ "outcome": "arrived", "closed_at": at }),
+                );
+                (j, Vec::new())
+            })
+            .collect()
+    }
+
+    fn read_track(open: &[(Job, Vec<Step>)], closed: &[(Job, Vec<Step>)]) -> Region {
         let status = build_status_for(
             YardInputs {
-                open_trains: &open,
+                open_trains: open,
                 now: Some(t(NOW)),
                 ..Default::default()
             },
             Reading::Read,
             BoardingReadings::default(),
         );
-        let out = regions(&inputs(&status, &open, &[], &[], &[], Some(&[]), Some(&[])));
-        let track = by_name(&out, "track");
-        assert_eq!(track.state, RegionState::Clear, "{}", track.why);
+        by_name(
+            &regions(&inputs(
+                &status,
+                open,
+                closed,
+                &[],
+                &[],
+                Some(&[]),
+                Some(&[]),
+            )),
+            "track",
+        )
+        .clone()
+    }
+
+    /// A healthy pre-merge train holds the single track while trains keep
+    /// arriving: FULL — the track at its one train and moving, which is
+    /// what it is for (design e765b3fc §4a, car F1; until then CLEAR,
+    /// decision 1 of 62de32ae) — with the train named, full since it
+    /// boarded, and its age at the stage as the KPI.
+    #[test]
+    fn a_pre_merge_train_holds_the_track_and_reads_full_while_trains_arrive() {
+        let open = vec![on_track("train #472", "2026-09-19T11:00:00Z")];
+        let track = read_track(&open, &arrived_until("2026-09-19T10:55:00Z"));
+        assert_eq!(track.state, RegionState::Full, "{}", track.why);
         assert!(
             track.why.contains("a train holds the track"),
             "{}",
             track.why
         );
-        assert!(track.band.is_none());
+        let band = track.band.as_ref().expect("full names its band");
+        assert_eq!(band.id, "full");
+        assert_eq!(band.held_minutes, Some(60), "full since the train boarded");
         assert_eq!(track.bound, Some(1));
         assert_eq!(track.bound_kind, Some(BoundKind::Capacity));
         assert_eq!(track.unit, "trains in transit");
         // The `pr` step completed at 11:01 and NOW is 12:00.
         assert_eq!(track.kpi[0].value, Some(59.0));
         assert_eq!(track.kpi[0].text, "oldest train 59 minutes at its stage");
+    }
+
+    /// A train on the track since 06:10 and no train out since 06:00,
+    /// against an hourly gap: STUCK — dated from when four gaps ran out
+    /// after it boarded (10:10). And with the track empty the rule says
+    /// nothing: no train in transit is clear, however quiet the rail.
+    #[test]
+    fn a_train_holding_the_track_with_none_leaving_is_stuck() {
+        let open = vec![on_track("train #473", "2026-09-19T06:10:00Z")];
+        let track = read_track(&open, &arrived_until("2026-09-19T06:00:00Z"));
+        assert_eq!(track.state, RegionState::Troubled, "{}", track.why);
+        let band = track.band.as_ref().unwrap();
+        assert_eq!(band.id, "stuck-at-capacity");
+        assert_eq!(band.since.as_deref(), Some("2026-09-19T10:10:00+00:00"));
+        assert!(track.why.contains("nothing has left"), "{}", track.why);
+
+        let track = read_track(&[], &arrived_until("2026-09-19T06:00:00Z"));
+        assert_eq!(track.state, RegionState::Clear, "{}", track.why);
     }
 }

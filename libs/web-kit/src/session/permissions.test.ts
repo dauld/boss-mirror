@@ -48,7 +48,7 @@ describe('canSeeRoute — a role whose Class row declares surfaces sees exactly 
     expect(canSeeRoute('brewer', 'policy', brewer)).toBe(false);
   });
   test('the always-on routes stay visible regardless — what they READ is policed by the endpoints', () => {
-    for (const r of ['shop', 'inbox', 'workflows', 'system-experiments', 'views', 'system-feedback'] as RouteName[]) {
+    for (const r of ['shop', 'inbox', 'workflows', 'system-experiments', 'views'] as RouteName[]) {
       expect(canSeeRoute('brewer', r, brewer)).toBe(true);
     }
   });

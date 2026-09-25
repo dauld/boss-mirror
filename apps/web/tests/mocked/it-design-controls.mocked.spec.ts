@@ -12,7 +12,10 @@
 // gained an Answers column (the envelope carries steps: design-review
 // v2) and a `decided` panel with its own read, and the failure line
 // wears the shared marker:
-//   links     4 tabs    — Reviews / Experiments / Feedback / Backlog
+//   links     2 tabs    — Reviews / Experiments (Feedback and Backlog
+//                        left the strip with car N3 of design e765b3fc:
+//                        each board is a station's panel on the
+//                        Department Map now)
 //                         (ItTabs group `design`, each a catalogued route)
 //             1 per row of the decided panel, WORKING and OUT
 //                         (→ /jobs/{id}, the job detail route)
@@ -361,11 +364,14 @@ test.describe('/it/design — the route and the words it says', () => {
 // ---------------------------------------------------------------------
 
 test.describe('/it/design — every control', () => {
-  test('the four tabs are catalogued routes, Reviews is this page, and each lands where it says and comes back', async ({ page }) => {
+  test('the two tabs are catalogued routes, Reviews is this page, and each lands where it says and comes back', async ({ page }) => {
     await install(page);
     await mountPage(page, PATH, TITLE);
     const tabs = page.locator('nav.it-tabs a');
-    await expect(tabs).toHaveText(['Reviews', 'Experiments', 'Feedback', 'Backlog']);
+    // Feedback and Backlog left with car N3 of design e765b3fc: the
+    // feedback board is the Receiving station's panel on the Department
+    // Map, the backlog board Receiving's and Marshalling's.
+    await expect(tabs).toHaveText(['Reviews', 'Experiments']);
     await expect(tabs.nth(0)).toHaveAttribute('aria-current', 'page');
     await expect(page.locator('nav.it-tabs a[aria-current]')).toHaveCount(1);
 
@@ -375,8 +381,6 @@ test.describe('/it/design — every control', () => {
     expect(hrefs).toEqual([
       ROUTE_CATALOG['system-design'].path,
       ROUTE_CATALOG['system-experiments'].path,
-      ROUTE_CATALOG['system-feedback'].path,
-      ROUTE_CATALOG['system-backlog'].path,
     ]);
     for (const h of hrefs) {
       expect(catalogued.has(h)).toBe(true);

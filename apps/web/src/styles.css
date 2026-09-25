@@ -229,6 +229,14 @@
   --map-warn-ink: var(--warn); --map-warn-bg: transparent; --map-warn-edge: var(--busy);
   --map-bad-ink: var(--err);   --map-bad-bg: transparent;  --map-bad-edge: var(--troubled);
 
+  /* FULL — a capacity station at its bound and moving (design e765b3fc
+     §4a; the mark is Q2, decided by David 2026-09-25): a SOLID disk in
+     the Transit board's state green, #0B6B4F, with a heavier ring. It is
+     the one state drawn filled, so it reads by fill alone — no text, and
+     no hue to tell from clear's hollow green ring. Re-colouring it is
+     this one line. */
+  --map-full: var(--clear);
+
   /* The transit monitor's LINES (design 16091dfb Q1, decided by David
      2026-09-25): one colour per route, owned by the Design department —
      re-colouring a line is an edit here and nowhere else. They are not

@@ -75,6 +75,24 @@ impl MessageTestApp {
     }
 }
 
+/// The `x-boss-user` of a signed-in person, `id`, at user tier. The
+/// doors that act on one message let its owner through (backlog
+/// 4dd10336); the role is not `guest`, which is not an identity.
+pub fn signed_in(id: &str) -> String {
+    serde_json::json!({ "id": id, "role": "employee", "access_tier": "user" }).to_string()
+}
+
+/// The `x-boss-user` of an operator-tier automation — what a caller
+/// that acts on messages it does not own presents.
+pub fn operator() -> String {
+    serde_json::json!({
+        "id": "automation:messages-test",
+        "role": "platform-admin",
+        "access_tier": "operator",
+    })
+    .to_string()
+}
+
 /// Build a valid Message with sensible defaults.
 pub fn message_fixture(id: &str) -> Message {
     Message {

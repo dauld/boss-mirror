@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use sqlx::PgPool;
 
-use boss_policy_client::port::{PolicyError, PolicyRepository, ReconcileStats};
+use boss_policy_client::port::{Judge, PolicyError, PolicyRepository, ReconcileStats, id_taken};
 use boss_policy_client::types::{Action, PolicyRule, Resource, Scope, UserOverride};
 
 pub struct PgPolicy {
@@ -113,12 +113,31 @@ impl PolicyRepository for PgPolicy {
         row.map(|r| r.into_rule()).transpose()
     }
 
-    async fn upsert_rule(&self, rule: &PolicyRule, changed_by: &str) -> Result<(), PolicyError> {
+    async fn upsert_rule_judged(
+        &self,
+        rule: &PolicyRule,
+        changed_by: &str,
+        judge: Judge<'_, PolicyRule>,
+    ) -> Result<(), PolicyError> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| PolicyError::Storage(e.to_string()))?;
+
+        // The row this write would change, active or not, locked until
+        // the write commits — and judged here, not by an earlier port
+        // call that another writer could race (backlog b8e75382, F5).
+        let existing: Option<RuleRow> = sqlx::query_as(
+            "SELECT id, role, resource, action, scope, active \
+             FROM policy_rules WHERE id = $1 FOR UPDATE",
+        )
+        .bind(&rule.id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PolicyError::Storage(e.to_string()))?;
+        let existing = existing.map(RuleRow::into_rule).transpose()?;
+        judge(existing.as_ref()).map_err(PolicyError::Refused)?;
 
         // Capture the pre-image for the audit log.
         let before: Option<serde_json::Value> =
@@ -128,16 +147,24 @@ impl PolicyRepository for PgPolicy {
                 .await
                 .map_err(|e| PolicyError::Storage(e.to_string()))?;
 
-        sqlx::query(
-            "INSERT INTO policy_rules (id, role, resource, action, scope, active, \
-                created_at, created_by, updated_at, updated_by) \
-             VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, NOW(), $7) \
-             ON CONFLICT (id) DO UPDATE SET \
+        // A missing row cannot be locked, so a write judged against "no
+        // row" inserts or fails: if another writer created the row after
+        // the read above, updating it would apply a Create's judgement to
+        // an Update.
+        let conflict = if existing.is_some() {
+            "ON CONFLICT (id) DO UPDATE SET \
                 scope = EXCLUDED.scope, \
                 active = EXCLUDED.active, \
                 updated_at = NOW(), \
-                updated_by = EXCLUDED.updated_by",
-        )
+                updated_by = EXCLUDED.updated_by"
+        } else {
+            "ON CONFLICT (id) DO NOTHING"
+        };
+        let written = sqlx::query(&format!(
+            "INSERT INTO policy_rules (id, role, resource, action, scope, active, \
+                created_at, created_by, updated_at, updated_by) \
+             VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, NOW(), $7) {conflict}"
+        ))
         .bind(&rule.id)
         .bind(&rule.role)
         .bind(rule.resource.as_str())
@@ -148,6 +175,13 @@ impl PolicyRepository for PgPolicy {
         .execute(&mut *tx)
         .await
         .map_err(|e| PolicyError::Storage(e.to_string()))?;
+        if written.rows_affected() == 0 {
+            return Err(PolicyError::Conflict(format!(
+                "rule {} was created by another write while this one was judged as its \
+                 creation; read it and send the write again",
+                rule.id
+            )));
+        }
 
         let after = serde_json::to_value(rule).ok();
 
@@ -230,10 +264,23 @@ impl PolicyRepository for PgPolicy {
         rows.into_iter().map(|r| r.into_override()).collect()
     }
 
-    async fn upsert_user_override(
+    async fn user_override(&self, id: &str) -> Result<Option<UserOverride>, PolicyError> {
+        let row: Option<OverrideRow> = sqlx::query_as(
+            "SELECT id, user_id, resource, action, scope, reason, expires_at \
+             FROM policy_user_overrides WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| PolicyError::Storage(e.to_string()))?;
+        row.map(OverrideRow::into_override).transpose()
+    }
+
+    async fn upsert_user_override_judged(
         &self,
         ov: &UserOverride,
         changed_by: &str,
+        judge: Judge<'_, UserOverride>,
     ) -> Result<(), PolicyError> {
         let mut tx = self
             .pool
@@ -241,22 +288,68 @@ impl PolicyRepository for PgPolicy {
             .await
             .map_err(|e| PolicyError::Storage(e.to_string()))?;
 
-        let before: Option<serde_json::Value> =
-            sqlx::query_scalar("SELECT row_to_json(o) FROM policy_user_overrides o WHERE id = $1")
-                .bind(&ov.id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| PolicyError::Storage(e.to_string()))?;
+        // The row on the conflict key, expired or not: the upsert below
+        // rewrites THAT row, so it is the one judged (backlog b8e75382,
+        // F5 — the door read live rows only, judged a revival a Create).
+        let existing: Option<OverrideRow> = sqlx::query_as(
+            "SELECT id, user_id, resource, action, scope, reason, expires_at \
+             FROM policy_user_overrides \
+             WHERE user_id = $1 AND resource = $2 AND action = $3 FOR UPDATE",
+        )
+        .bind(&ov.user_id)
+        .bind(ov.resource.as_str())
+        .bind(ov.action.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PolicyError::Storage(e.to_string()))?;
+        let existing = existing.map(OverrideRow::into_override).transpose()?;
+        judge(existing.as_ref()).map_err(PolicyError::Refused)?;
 
-        sqlx::query(
-            "INSERT INTO policy_user_overrides \
-                (id, user_id, resource, action, scope, reason, expires_at, created_at, created_by) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8) \
-             ON CONFLICT (user_id, resource, action) DO UPDATE SET \
+        // A new row under an id another key owns would violate the
+        // primary key, which surfaced as a storage failure (S2 of the
+        // hold review of car a8becd52). Named instead, as the Conflict
+        // it is.
+        if existing.is_none() {
+            let owner: Option<OverrideRow> = sqlx::query_as(
+                "SELECT id, user_id, resource, action, scope, reason, expires_at \
+                 FROM policy_user_overrides WHERE id = $1",
+            )
+            .bind(&ov.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| PolicyError::Storage(e.to_string()))?;
+            if let Some(owner) = owner.map(OverrideRow::into_override).transpose()? {
+                return Err(id_taken(ov, &owner));
+            }
+        }
+
+        // The pre-image is the row the conflict key rewrites, which is
+        // not always the one under the body's id.
+        let before: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT row_to_json(o) FROM policy_user_overrides o \
+             WHERE user_id = $1 AND resource = $2 AND action = $3",
+        )
+        .bind(&ov.user_id)
+        .bind(ov.resource.as_str())
+        .bind(ov.action.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PolicyError::Storage(e.to_string()))?;
+
+        // As for rules: a write judged against no row inserts or fails.
+        let conflict = if existing.is_some() {
+            "ON CONFLICT (user_id, resource, action) DO UPDATE SET \
                 scope = EXCLUDED.scope, \
                 reason = EXCLUDED.reason, \
-                expires_at = EXCLUDED.expires_at",
-        )
+                expires_at = EXCLUDED.expires_at"
+        } else {
+            "ON CONFLICT (user_id, resource, action) DO NOTHING"
+        };
+        let written = sqlx::query(&format!(
+            "INSERT INTO policy_user_overrides \
+                (id, user_id, resource, action, scope, reason, expires_at, created_at, created_by) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8) {conflict}"
+        ))
         .bind(&ov.id)
         .bind(&ov.user_id)
         .bind(ov.resource.as_str())
@@ -268,6 +361,15 @@ impl PolicyRepository for PgPolicy {
         .execute(&mut *tx)
         .await
         .map_err(|e| PolicyError::Storage(e.to_string()))?;
+        if written.rows_affected() == 0 {
+            return Err(PolicyError::Conflict(format!(
+                "an override of {} on {} for {} was created by another write while this one was \
+                 judged as its creation; read it and send the write again",
+                ov.action.as_str(),
+                ov.resource.as_str(),
+                ov.user_id
+            )));
+        }
 
         let after = serde_json::to_value(ov).ok();
 
@@ -289,16 +391,32 @@ impl PolicyRepository for PgPolicy {
         Ok(())
     }
 
-    async fn deactivate_user_override(
+    async fn deactivate_user_override_judged(
         &self,
         id: &str,
         changed_by: &str,
+        judge: Judge<'_, UserOverride>,
     ) -> Result<(), PolicyError> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| PolicyError::Storage(e.to_string()))?;
+
+        // Whether retiring this row widens anyone's access depends on
+        // its scope and expiry now, so it is locked and judged here.
+        let existing: Option<OverrideRow> = sqlx::query_as(
+            "SELECT id, user_id, resource, action, scope, reason, expires_at \
+             FROM policy_user_overrides WHERE id = $1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| PolicyError::Storage(e.to_string()))?;
+        let Some(existing) = existing.map(OverrideRow::into_override).transpose()? else {
+            return Err(PolicyError::NotFound(id.to_string()));
+        };
+        judge(Some(&existing)).map_err(PolicyError::Refused)?;
 
         let before: Option<serde_json::Value> =
             sqlx::query_scalar("SELECT row_to_json(o) FROM policy_user_overrides o WHERE id = $1")

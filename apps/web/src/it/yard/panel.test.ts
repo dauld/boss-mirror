@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'bun:test';
 import type { Border, Borders } from './borders';
 import type { Region } from './regions';
-import { MOVES_NOT_KEPT, classesText, sectionCells, stationCells, type PanelCell, type PanelField } from './panel';
+import { MOVES_NOT_KEPT, STATION_BOARDS, boardsOf, classesText, sectionCells, stationCells, type PanelCell, type PanelField, type StationBoard } from './panel';
 
 const NOW = '2026-09-25T17:21:00Z';
 
@@ -182,5 +182,33 @@ describe('classesText — on whom a queue waits', () => {
   it('names each class that holds any, and nothing for an empty queue', () => {
     expect(classesText({ machine: 5, person: 2, unknown: 1, stuck: 0 })).toBe('5 on a machine · 2 on a person or the world · 1 cannot tell');
     expect(classesText({ machine: 0, person: 0, unknown: 0, stuck: 0 })).toBe('');
+  });
+});
+
+// THE BOARDS THE RETIRED PAGES BECAME (design e765b3fc, car N3). Four
+// pages held content no station drew — yard status, the conductor's
+// feed, the feedback board and the backlog board — and each was MOVED
+// into the panel of the station it describes before its page retired,
+// so nothing a reader used vanished. This is the one table that says
+// where each went; the page draws exactly what it lists.
+describe('boardsOf — the retired pages each station panel carries', () => {
+  it('names, per station, the boards the design moved there', () => {
+    expect(boardsOf('track')).toEqual(['yard-status', 'conductor']);
+    expect(boardsOf('dock')).toEqual(['yard-status']);
+    expect(boardsOf('garage')).toEqual(['yard-status']);
+    expect(boardsOf('receiving')).toEqual(['feedback', 'backlog']);
+    expect(boardsOf('marshalling')).toEqual(['backlog']);
+  });
+
+  it('carries every retired board somewhere — no content was lost with its page', () => {
+    const ALL: ReadonlyArray<StationBoard> = ['yard-status', 'conductor', 'feedback', 'backlog'];
+    const carried = new Set(Object.values(STATION_BOARDS).flat());
+    expect(ALL.filter((b) => !carried.has(b))).toEqual([]);
+  });
+
+  it('a station the table does not name carries none, and a name that is no station carries none', () => {
+    expect(boardsOf('gates')).toEqual([]);
+    expect(boardsOf('plant')).toEqual([]);
+    expect(boardsOf('')).toEqual([]);
   });
 });

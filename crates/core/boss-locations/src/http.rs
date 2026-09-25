@@ -162,14 +162,15 @@ impl From<LocationInput> for Location {
 /// through. Before it (backlog 1ec8312a, measured 2026-09-16) the
 /// only rows were the schema's, so the people door refused an
 /// employee at any site a tenant declared. Gated like the classes
-/// batch: operator tier, or the `x-sim-origin` chain the engines'
-/// seed paths carry. Reads stay open.
+/// batch: operator tier, or a sim caller on a sim instance
+/// (`boss_policy_client::sim_bypass_allowed` — never the header alone,
+/// backlog 85e7f10f). Reads stay open.
 async fn batch_upsert(
     State(state): State<LocationsApiState>,
     CurrentUser(user): CurrentUser,
     Json(rows): Json<Vec<LocationInput>>,
 ) -> Response {
-    let sim = boss_core::sim_origin::is_in_sim_chain();
+    let sim = boss_policy_client::sim_bypass_allowed(&user);
     let tier_ok = matches!(user.access_tier, AccessTier::Operator);
     if !(sim || tier_ok) {
         return (StatusCode::FORBIDDEN, "operator tier required").into_response();
@@ -476,11 +477,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn batch_is_bypassed_by_sim_origin() {
-        // The engines' seed paths carry `x-sim-origin: true`, which
-        // the request-context middleware scopes into `is_in_sim_chain`;
-        // the router under test omits that middleware, so the
-        // task-local is set directly.
+    async fn a_sim_chain_alone_is_not_operator_tier() {
+        // Backlog 85e7f10f (2026-09-25): a sim chain is not an identity.
+        // Anonymous on a chain (the task-local set directly — the router
+        // under test omits the middleware) is refused, and no row lands:
+        // only a sim caller on a sim instance takes the bypass
+        // (boss_policy_client::sim_bypass_allowed).
         let repo = Arc::new(InMemoryLocations::new(vec![]));
         let app = router(LocationsApiState {
             locations: repo.clone(),
@@ -491,8 +493,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert!(repo.exists_active("loc-t-hq").await.unwrap());
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(!repo.exists_active("loc-t-hq").await.unwrap());
     }
 
     #[tokio::test]

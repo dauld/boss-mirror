@@ -65,8 +65,6 @@
   import DispatcherRuleEditPage from './dispatcher/DispatcherRuleEditPage.svelte';
   import SubjectsClassesPage from './it/subjects/SubjectsClassesPage.svelte';
   import MapPage from './it/yard/MapPage.svelte';
-  import YardStatusPage from './it/yard/YardStatusPage.svelte';
-  import CrewBoardPage from './it/crew/CrewBoardPage.svelte';
   import EstatePage from './it/estate/EstatePage.svelte';
   import FleetPage from './it/monitoring/FleetPage.svelte';
   import ItTabs from './it/ItTabs.svelte';
@@ -85,7 +83,6 @@
   import WorkflowsPage from './kb/WorkflowsPage.svelte';
   import PerfPage from './it/monitoring/PerfPage.svelte';
   import EventsPage from './it/monitoring/EventsPage.svelte';
-  import ConductorPage from './it/monitoring/ConductorPage.svelte';
   import PoPage from './po/PoPage.svelte';
   import VendorInvoicePage from './po/VendorInvoicePage.svelte';
   import WatchlistPage from './accounts/WatchlistPage.svelte';
@@ -94,8 +91,6 @@
   import LandingPage from './landing/LandingPage.svelte';
   import SearchResultsPage from './search/SearchResultsPage.svelte';
   import ViewsPage from './views/ViewsPage.svelte';
-  import FeedbackTriagePage from './it/feedback/FeedbackTriagePage.svelte';
-  import BacklogBoardPage from './it/backlog/BacklogBoardPage.svelte';
   import CodebaseTrendPage from './it/metrics/CodebaseTrendPage.svelte';
   import ProtocolDriftPage from './it/registry/ProtocolDriftPage.svelte';
   import IncidentsPage from './it/incidents/IncidentsPage.svelte';
@@ -278,12 +273,6 @@
       <SearchResultsPage q={route.q} />
     {:else if route.kind === 'views'}
       <ViewsPage />
-    {:else if route.kind === 'systemFeedback'}
-      <ItTabs group="design" active="/it/design/feedback" />
-      <FeedbackTriagePage />
-    {:else if route.kind === 'systemBacklog'}
-      <ItTabs group="design" active="/it/design/backlog" />
-      <BacklogBoardPage />
     {:else if route.kind === 'systemCodebase'}
       <!-- No ItTabs: the Codebase is its own sidebar row since feedback
            9827c699 (David, 2026-09-14), not a tab on Design. -->
@@ -411,31 +400,18 @@
     {:else if route.kind === 'systemDesign'}
       <ItTabs group="design" active="/it/design" />
       <DesignReviewPage />
-    {:else if route.kind === 'systemYard' || route.kind === 'systemYardFloor'}
-      <!-- THE WORLD, and a floor is the SAME world zoomed into that
-           territory (design d2154293, car 3; the map itself is
-           0524fc95 car 2). ONE branch for both routes on purpose: two
-           `{:else if}` arms are two blocks to Svelte, so moving between
-           them tears the SVG down and builds another — the camera is
-           lost and the zoom reads as a page change, which is the thing
-           this car removed. Measured: the mocked spec holds a handle to
-           the SVG node across the click and it came back detached.
-           MapPage keys the floor's panels itself. -->
-      <MapPage
-        region={route.kind === 'systemYardFloor' ? route.region : null}
-        at={route.kind === 'systemYard' ? route.at : undefined} />
-    {:else if route.kind === 'systemCrew'}
-      <!-- No ItTabs: the Crew Board is the shop floor's board, lit under
-           the Department Map row (design e765b3fc, car N1). -->
-      <CrewBoardPage />
+    {:else if route.kind === 'systemYard'}
+      <!-- THE DEPARTMENT MAP (design e765b3fc): the map on top and the
+           selection's panel below it. A selection is a query on this one
+           route, so the map is mounted once and never torn down by a
+           click — the floor pages that were a second route here retired
+           with car N3, their content in the panels. -->
+      <MapPage at={route.at} />
     {:else if route.kind === 'systemEstate'}
       <EstatePage />
     {:else if route.kind === 'systemFleet'}
       <ItTabs group="operate" active="/it/operate/bottlenecks" />
       <FleetPage />
-    {:else if route.kind === 'systemYardStatus'}
-      <ItTabs group="operate" active="/it/operate/yard-status" />
-      <YardStatusPage />
     {:else if route.kind === 'experiments'}
       <ItTabs group="design" active="/it/design/experiments" />
       <ExperimentsPage />
@@ -487,9 +463,6 @@
     {:else if route.kind === 'systemMonitoringAtlas'}
       <ItTabs group="operate" active="/it/operate/atlas" />
       <AtlasPage />
-    {:else if route.kind === 'systemMonitoringConductor'}
-      <ItTabs group="operate" active="/it/operate/conductor" />
-      <ConductorPage />
     {:else if route.kind === 'po'}
       <PoPage poId={route.poId} />
     {:else if route.kind === 'vendorInvoice'}

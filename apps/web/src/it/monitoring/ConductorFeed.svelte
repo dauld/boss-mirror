@@ -1,6 +1,9 @@
 <script lang="ts">
-  // /it/operate/conductor — a live, readable feed of the Conductor's
-  // pipeline actions.
+  // The Conductor's feed — a live, readable timeline of its pipeline
+  // actions, in the TRACK station's panel on the Department Map. It was
+  // a page, /it/operate/conductor, until car N3 of design e765b3fc
+  // (2026-09-25): "the conductor is the track's machine", so its feed is
+  // the track's detail, and the page retired with no alias.
   //
   // The Conductor (the `boss train` reconcile loop) works in the
   // background while an operator waits: it boards PR-trains, waits on
@@ -160,11 +163,10 @@
   );
 </script>
 
-<div class="theme-exec conductor-root">
-  <div class="exec-header">
+<div class="conductor-root" data-conductor-feed>
+  <div class="conductor-head">
     <div>
-      <div class="exec-eyebrow">Operations · Conductor</div>
-      <h1 class="exec-title">Conductor activity</h1>
+      <h3 class="conductor-h">Conductor activity</h3>
       <p class="conductor-lede">
         What the delivery Conductor has been doing — boarding trains,
         waiting on CI, merging, deploying, confirming convergence. Live,
@@ -228,9 +230,26 @@
 
 <style>
   .conductor-root {
-    padding: 32px;
     max-width: 960px;
-    margin: 0 auto;
+    margin-top: 24px;
+  }
+  .conductor-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  /* The yard status lanes' heading grammar (YardStatusPanel.svelte), so
+     the track's panel reads as one board. */
+  .conductor-h {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: var(--ls-eyebrow);
+    text-transform: uppercase;
+    color: var(--signal);
   }
   .conductor-lede {
     color: var(--static);

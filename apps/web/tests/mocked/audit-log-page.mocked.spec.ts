@@ -137,21 +137,17 @@ const CATALOGUED = new Set(Object.values(ROUTE_CATALOG).map((i) => i.path));
 
 /// The operate tab strip, in order, as ItTabs.svelte declares it — and
 /// whether the nav catalog (the ONE list, never a second one) carries
-/// each path. Six do not: that is today's catalog, pinned so a change
-/// to it is a decision this file hears about. The two yards were
-/// catalogued as sidebar rows until car N1 of design e765b3fc
-/// (2026-09-25) folded them into the Department Map row; their floor
-/// pages, and these two tabs, go with car N3.
+/// each path. Two do not: that is today's catalog, pinned so a change
+/// to it is a decision this file hears about. Car N3 of design e765b3fc
+/// (2026-09-25) took four tabs off the strip — Yard status, Conductor,
+/// Receiving Yard and Marshalling Yard — each a station's panel on the
+/// Department Map now, its page not found.
 const TABS: ReadonlyArray<{ label: string; path: string; catalogued: boolean }> = [
   { label: 'Incidents', path: '/it/operate', catalogued: true },
-  { label: 'Yard status', path: '/it/operate/yard-status', catalogued: false },
-  { label: 'Conductor', path: '/it/operate/conductor', catalogued: false },
   { label: 'Audit Log', path: '/it/operate/audit', catalogued: true },
   { label: 'Performance', path: '/it/operate/perf', catalogued: false },
   { label: 'Atlas', path: '/it/operate/atlas', catalogued: false },
   { label: 'Bottlenecks', path: '/it/operate/bottlenecks', catalogued: true },
-  { label: 'Receiving Yard', path: '/it/yard/receiving', catalogued: false },
-  { label: 'Marshalling Yard', path: '/it/yard/marshalling', catalogued: false },
 ];
 
 const stream = (page: Page) => page.locator('.events-table tbody tr.events-row');
@@ -176,7 +172,7 @@ test.describe('/it/operate/audit — the page and its names', () => {
 });
 
 test.describe('/it/operate/audit — the tab links', () => {
-  test('nine tabs, each served by the router, three of them catalogued', async ({ page }) => {
+  test('five tabs, each served by the router, three of them catalogued', async ({ page }) => {
     await installAuditReads(page);
     await mountPage(page, PATH, { titleMatch: /Audit Log/ });
     const tabs = page.locator('nav.it-tabs a');

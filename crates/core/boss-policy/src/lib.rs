@@ -12,6 +12,7 @@
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
+pub mod authority;
 pub mod bootstrap;
 pub mod http;
 

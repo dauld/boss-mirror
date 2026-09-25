@@ -247,6 +247,51 @@ impl Scope {
             other => Err(format!("unknown scope: {other}")),
         }
     }
+
+    /// True when every grant of `other` is also a grant of `self`, as
+    /// SHAPES. A scope is relative to whoever holds it — a granter's
+    /// `team` is its own reports, a grantee's is theirs — so this cannot
+    /// compare rows; it compares breadth. `all` contains everything,
+    /// every scope contains `none` and itself, and `team` (owner is
+    /// the holder or a direct report) contains `self`. `territory` and
+    /// a department are otherwise incomparable, so neither contains the
+    /// other. Used to refuse a grant beyond what the granter holds
+    /// (backlog b8e75382).
+    pub fn contains(&self, other: &Scope) -> bool {
+        match (self, other) {
+            (Self::All, _) | (_, Self::None) => true,
+            (Self::Team, Self::Self_) => true,
+            (a, b) => a == b,
+        }
+    }
+}
+
+/// The id every rule is stored and looked up under. The engine finds a
+/// rule ONLY by this id, so a row whose id is not derived from its own
+/// role, resource and action would be displayed as one grant and
+/// enforced as another (backlog b8e75382, F2). One function, so the
+/// constructor, the engine and the write door's check cannot disagree.
+pub fn rule_id(role: &str, resource: &Resource, action: Action) -> String {
+    format!("{}:{}:{}", role, resource.as_str(), action.as_str())
+}
+
+/// The separator [`rule_id`] joins with. A resource may carry one
+/// (`step-signoff:<role>`), so a role that carries one derives the id of
+/// a different grant — role `reviewer:step-signoff` on `x` and role
+/// `reviewer` on `step-signoff:x` are one id — and a write carrying it
+/// is refused (backlog b8e75382, S1 of the hold review of car a8becd52).
+pub const RULE_ID_SEPARATOR: char = ':';
+
+/// A role a rule id can be derived from without ambiguity.
+pub fn refuse_ambiguous_role(role: &str) -> Result<(), String> {
+    if role.contains(RULE_ID_SEPARATOR) {
+        return Err(format!(
+            "role {role} carries '{RULE_ID_SEPARATOR}', the separator a rule id joins role, \
+             resource and action with, so its id would name a different grant; a role never \
+             carries one"
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +312,7 @@ pub struct PolicyRule {
 impl PolicyRule {
     pub fn new(role: impl Into<String>, resource: Resource, action: Action, scope: Scope) -> Self {
         let role = role.into();
-        let id = format!("{}:{}:{}", role, resource.as_str(), action.as_str());
+        let id = rule_id(&role, &resource, action);
         Self {
             id,
             role,
@@ -325,12 +370,12 @@ pub struct User {
 impl User {
     /// The id [`crate::CurrentUser`] gives a request that carried no
     /// `x-boss-user` header at all.
-    pub const ANONYMOUS_ID: &'static str = "anonymous";
+    pub const ANONYMOUS_ID: &'static str = boss_core::roles::ANONYMOUS_USER_ID;
 
     /// The role [`crate::CurrentUser`] gives that request. Named once
     /// so a door can refuse it by name rather than by spelling it
     /// (backlog e84de48e: two doors admitted it by spelling it).
-    pub const ANONYMOUS_ROLE: &'static str = "guest";
+    pub const ANONYMOUS_ROLE: &'static str = boss_core::roles::GUEST_ROLE;
 
     /// The caller a request with no identity header is: nobody, at
     /// user tier. No door trusts it (David, 2026-09-25: "Agreed on
@@ -625,5 +670,46 @@ mod ambient_actor_tests {
             Some(ActorId::human("emp-032"))
         );
         assert_eq!(user("anonymous").ambient_actor(), None);
+    }
+}
+
+#[cfg(test)]
+mod grant_shape_tests {
+    use super::*;
+
+    /// Backlog b8e75382 (rule 1): a granter may hand out only what it
+    /// holds, compared as breadth because a scope is relative to its
+    /// holder.
+    #[test]
+    fn a_scope_contains_itself_and_narrower_shapes_only() {
+        let dept = Scope::Department("service".into());
+        for s in [
+            Scope::None,
+            Scope::Self_,
+            Scope::Territory,
+            Scope::Team,
+            dept.clone(),
+            Scope::All,
+        ] {
+            assert!(Scope::All.contains(&s), "all contains {s:?}");
+            assert!(s.contains(&s), "{s:?} contains itself");
+            assert!(s.contains(&Scope::None), "{s:?} contains none");
+        }
+        assert!(Scope::Team.contains(&Scope::Self_));
+        assert!(!Scope::Self_.contains(&Scope::Team));
+        assert!(!Scope::Team.contains(&Scope::All));
+        assert!(!Scope::None.contains(&Scope::Self_));
+        assert!(!Scope::Territory.contains(&Scope::Self_));
+        assert!(!dept.contains(&Scope::Department("finance".into())));
+        assert!(!dept.contains(&Scope::Team));
+    }
+
+    /// The id the engine looks a rule up by is the one the constructor
+    /// writes.
+    #[test]
+    fn a_rule_is_stored_under_the_id_the_engine_asks_for() {
+        let r = PolicyRule::new("reviewer", Resource::job(), Action::SignOff, Scope::Self_);
+        assert_eq!(r.id, "reviewer:job:sign-off");
+        assert_eq!(r.id, rule_id(&r.role, &r.resource, r.action));
     }
 }

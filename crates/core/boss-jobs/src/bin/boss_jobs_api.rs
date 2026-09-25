@@ -15,7 +15,7 @@ use boss_nats::NatsEventBus;
 use clap::Parser;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -336,14 +336,15 @@ async fn run_server<R: JobsRepository + 'static>(
     // landing page won't load — a guard against the historical
     // 7060/7250 port collision.
     tracing::info!(policy_url = %policy_url, "policy client configured");
-    // Wrap the prod client in the sim-origin bypass: simulator traffic
-    // (x-sim-origin, already stamped _simulated) is authorized at the
-    // boundary on the trusted box; real traffic is enforced per-role by
-    // the inner ReqwestPolicyClient.
+    // The sim-origin bypass, on a sim instance only (BOSS_SIM_ENABLED):
+    // a sim caller on a sim chain is authorized at the boundary; every
+    // other caller, and every caller on an instance without a sim, is
+    // enforced per-role by the inner ReqwestPolicyClient (backlog
+    // 85e7f10f — the header alone used to pass every check).
     let policy: Arc<dyn boss_policy_client::PolicyClient> =
-        Arc::new(boss_policy_client::SimBypassPolicyClient::new(Arc::new(
+        boss_policy_client::SimBypassPolicyClient::from_env(Arc::new(
             boss_policy_client::ReqwestPolicyClient::new(policy_url),
-        )));
+        ));
     // The cadence door's publish / retire ask the same client the
     // workflow routes do; clone before the state takes it.
     let cadence_policy = policy.clone();
@@ -530,26 +531,15 @@ async fn run_server<R: JobsRepository + 'static>(
         boss_jobs::agents::resolve_login,
     ));
     info!("login door mounted: agent logins resolve through actor_aliases (window open)");
-    // The machine door's write gate (7fcd78fa phase 1): when
-    // BOSS_MACHINE_TOKEN is set, state-changing requests must carry
-    // it. Layered in the binary — this process is the one that knows
-    // the door is on a network — and wrapping the merged app so the
-    // scheduling/cadence routers are behind the same gate.
-    let machine_token = boss_core::machine_token::from_env();
-    if machine_token.is_some() {
-        info!(
-            "machine token configured: writes require {}",
-            boss_core::machine_token::HEADER
-        );
-    } else {
-        warn!(
-            "no BOSS_MACHINE_TOKEN configured: the machine door accepts unauthenticated writes \
-             (7fcd78fa phase 1 is dormant)"
-        );
-    }
-    let app = app.layer(axum::middleware::from_fn(move |req, next| {
-        boss_jobs::http::machine_gate::machine_gate(machine_token.clone(), req, next)
-    }));
+    // The machine gate (design 6805c764; it was 7fcd78fa phase 1 here
+    // alone): the shared boss-core middleware every service port
+    // mounts, reading its mode and token slots from mounted files —
+    // `off` until the mode file says otherwise, which is what the jobs
+    // API ran before (its env var was set nowhere). It wraps the merged
+    // app so the scheduling/cadence routers are behind the same gate,
+    // and exempts the health read the off-cluster watchdog
+    // (infra/forge/cluster-watchdog.sh) makes without a token.
+    let app = boss_core::machine_gate::mount(app, "jobs", &["/api/jobs/health"]);
     let http_addr: SocketAddr = http_bind
         .parse()
         .with_context(|| format!("invalid http_bind `{http_bind}`"))?;

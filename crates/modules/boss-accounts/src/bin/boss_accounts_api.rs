@@ -154,6 +154,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("binding HTTP listener on {http_addr}"))?;
     info!(addr = %http_addr, "boss-accounts-api listening");
 
+    let app = boss_core::machine_gate::mount(app, "accounts", &["/api/accounts/health"]);
     axum::serve(listener, app).await?;
     Ok(())
 }

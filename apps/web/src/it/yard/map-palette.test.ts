@@ -21,8 +21,8 @@ import { join } from 'node:path';
 const MAP_FILES = [
   'MapPage.svelte',
   'WorldMap.svelte',
-  'RegionMap.svelte',
-  'RegionFloor.svelte',
+  // 'RegionMap.svelte' and 'RegionFloor.svelte' retired with the floor
+  // pages (design e765b3fc, car N3).
   // The HUD frame above the map (design 00774ca8): the same palette.
   'HudFrame.svelte',
   // The motion layer over the world (design 31bade8f, car M2): its canvas
@@ -40,6 +40,8 @@ const GRAMMAR = [
   ...(['ok', 'warn', 'bad'] as const).flatMap((s) => [`${s}-ink`, `${s}-bg`, `${s}-edge`]),
   // the transit monitor's routes (design 16091dfb Q1): Design's tokens
   ...(['delivery', 'publish', 'siding', 'tenant'] as const).map((l) => `line-${l}`),
+  // the full station's solid disk (design e765b3fc Q2, David 2026-09-25)
+  'full',
 ].map((n) => `--map-${n}`);
 
 /** Custom properties that are not colours, which a map file may still
@@ -93,6 +95,21 @@ describe('the map names every colour through its own tokens', () => {
     const read = MAP_FILES.flatMap((f) => [...here(f).matchAll(/var\(\s*(--map-[a-z0-9-]+)/g)].map((m) => m[1]));
     expect(read.length).toBeGreaterThan(0);
     expect(read.filter((t) => !defined.has(t))).toEqual([]);
+  });
+
+  // Design e765b3fc Q2, decided by David 2026-09-25: full is a SOLID disk
+  // in the state green with a heavier ring, clear stays a hollow ring —
+  // readable by fill alone, with no text and no hue to tell apart.
+  it('TransitMap fills a full station solid with --map-full, rings it heavier than clear, and leaves clear hollow', () => {
+    const rule = (sel: string): string =>
+      here('TransitMap.svelte').match(new RegExp(`^\\s*${sel.replaceAll('.', '\\.')}\\s*\\{([^}]*)\\}`, 'm'))?.[1] ?? '';
+    const width = (css: string): number => Number(css.match(/stroke-width:\s*([\d.]+)/)?.[1] ?? NaN);
+    const full = rule('.ring.full');
+    expect(full).toMatch(/fill:\s*var\(--map-full\)/);
+    expect(full).toMatch(/stroke:\s*var\(--map-full\)/);
+    expect(width(full)).toBeGreaterThan(width(rule('.ring.clear')));
+    expect(rule('.ring.clear')).not.toMatch(/fill:/);
+    expect(rule('.ring')).toMatch(/fill:\s*var\(--map-surface\)/);
   });
 
   it('styles.css declares the whole Transit grammar, so round 2 is one block', () => {

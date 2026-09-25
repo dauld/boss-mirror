@@ -45,9 +45,6 @@ export type Route =
   /// Personal Views — the Home-app surface for composing your own
   /// reads over the information layer.
   | { kind: 'views' }
-  /// IT feedback triage board.
-  | { kind: 'systemFeedback' }
-  | { kind: 'systemBacklog' }
   /// The codebase trend — the daily metrics packets, rendered.
   | { kind: 'systemCodebase' }
   /// Full-page step surface. A step whose UX is a plugin gets the
@@ -99,7 +96,6 @@ export type Route =
   | { kind: 'systemMonitoringPerf' }
   | { kind: 'systemMonitoringEvents' }
   | { kind: 'systemMonitoringAtlas' }
-  | { kind: 'systemMonitoringConductor' }
   | { kind: 'policy' }
   | { kind: 'workflows' }
   | { kind: 'workflowsAdmin' }
@@ -113,23 +109,15 @@ export type Route =
    *  map on top, and below it the detail of `at`, the station the query
    *  selects (`/it?at=gates`). Absent, nothing is selected. */
   | { kind: 'systemYard'; at?: string }
-  /** One of the yard's floors — the Train Yard focused on a region's
-   *  panel (design 0524fc95, car 2). `region` is the map's name for it
-   *  (dock, gates, track, shed, arrivals, garage); the page maps it to
-   *  a selection and an unknown name falls back to the track. */
-  | { kind: 'systemYardFloor'; region: string }
-  /// Yard status — where each train sits and why, computed from the SoR
-  /// (the-cluster-is-the-system.md Phase 0). An Operate tab, beside the
-  /// live-pipeline dashboards it belongs with.
-  | { kind: 'systemYardStatus' }
+  // 'systemYardFloor' (/it/yard/<region>), 'systemCrew' (/it/crew),
+  // 'systemYardStatus', 'systemMonitoringConductor', 'systemFeedback'
+  // and 'systemBacklog' retired 2026-09-25 with car N3 of design
+  // e765b3fc: each page's content is a selection's panel on the
+  // Department Map now (MapPage.svelte says which), and the paths are
+  // not found like any other.
   /// Fleet lives on as Operate's Bottlenecks tab (1f6d55e0 Q3: the
   /// per-kind dashboard is unique, not a duplicate rendering).
   | { kind: 'systemFleet' }
-  /// The Crew Board — who is building what, right now. The MIDDLE third
-  /// of the operator surface (backlog 04c5bbc0): the Train Yard shows
-  /// landed work, the Marshalling Yard shows work waiting, and the
-  /// interval in between had no surface at all.
-  | { kind: 'systemCrew' }
   /// The hardware registry, declared beside observed (59ef456a).
   | { kind: 'systemEstate' }
   /// The IT incidents surface — active incident packets +
@@ -192,7 +180,7 @@ function segment(s: string): string {
 /// suggestion is a guess, which is what the not-found page refuses.
 export function notFoundBack(pathname: string): { href: string; label: string } {
   return underIt(routable(pathname))
-    ? { href: '/it', label: 'Back to the IT yard' }
+    ? { href: '/it', label: 'Back to the Department Map' }
     : { href: '/ux', label: 'Back to My Day' };
 }
 
@@ -220,42 +208,31 @@ export function parseRoute(pathname: string, search = ''): Route {
   if (underIt(raw)) {
     const p = raw.slice('/it'.length) || '/';
     // 1. The landing is the yard — delivery truth first. Since design
-    //    0524fc95 (car 2) the landing is the yard's MAP: eight region
-    //    cards, each a door to a floor. The floors are the yard page
-    //    itself, opened on a region's panel, at /it/yard[/<region>].
-    //    Since design e765b3fc (car N1) it is the DEPARTMENT MAP: the map
-    //    stays on top and a selection opens its detail below, named in
-    //    the query so a link says what it selects. A query, not a path:
-    //    the map is not torn down and rebuilt by a selection.
+    //    0524fc95 (car 2) the landing is the yard's MAP. Since design
+    //    e765b3fc (car N1) it is the DEPARTMENT MAP: the map stays on
+    //    top and a selection opens its detail below, named in the query
+    //    so a link says what it selects. A query, not a path: the map is
+    //    not torn down and rebuilt by a selection. Car N3 retired the
+    //    floor pages at /it/yard[/<region>] and every page whose content
+    //    moved into a selection's panel — /it/crew, yard status, the
+    //    conductor's feed, the feedback and backlog boards — and with
+    //    them the four aliases that still answered (/it/yard,
+    //    /it/operate/receiving, /it/operate/marshalling,
+    //    /it/design/codebase). No alias and no redirect (David,
+    //    2026-09-25: no shims before 1.0.0): each falls to not-found
+    //    below, whose one door is the Department Map.
     if (p === '/') {
       const r: Route = { kind: 'systemYard' };
       const at = new URLSearchParams(search).get('at');
       if (at) (r as { at?: string }).at = at;
       return r;
     }
-    if (p === '/yard') return { kind: 'systemYardFloor', region: 'track' };
-    const floorM = p.match(/^\/yard\/([a-z-]+)$/);
-    if (floorM) return { kind: 'systemYardFloor', region: floorM[1]! };
     // 2. Operate — incidents lead; audit/perf/atlas/bottlenecks tabs.
     if (p === '/operate') return { kind: 'incidents' };
     if (p === '/operate/audit') return { kind: 'systemMonitoringEvents' };
     if (p === '/operate/perf') return { kind: 'systemMonitoringPerf' };
     if (p === '/operate/atlas') return { kind: 'systemMonitoringAtlas' };
     if (p === '/operate/bottlenecks') return { kind: 'systemFleet' };
-    // The Receiving Yard and the Marshalling Yard RETIRED as pages on
-    // car 4 of design d2154293: each is a region of the world, and its
-    // board mounts under the world zoomed into that region. The two
-    // old paths resolve to the same route rather than 404ing, because
-    // they are written down in packets, briefs and this session's own
-    // notes — one surface, two spellings, not two surfaces. Drop them
-    // only once nothing outside apps/web names them — check the tree
-    // AND the packets: a brief naming a dead path is worse than an
-    // alias (backlog c6f91515, 2026-09-20). Their sidebar rows are
-    // decided by the REGION, in `sectionForRoute`, not by this path.
-    if (p === '/operate/marshalling') return { kind: 'systemYardFloor', region: 'marshalling' };
-    if (p === '/operate/receiving') return { kind: 'systemYardFloor', region: 'receiving' };
-    if (p === '/operate/yard-status') return { kind: 'systemYardStatus' };
-    if (p === '/operate/conductor') return { kind: 'systemMonitoringConductor' };
     // 3. Registry — one surface over the registry family.
     if (p === '/registry') return { kind: 'workflows' };
     if (p === '/registry/new') return { kind: 'workflowNew' };
@@ -272,21 +249,12 @@ export function parseRoute(pathname: string, search = ''): Route {
     if (p === '/registry/policy') return { kind: 'policy' };
     if (p === '/registry/subjects') return { kind: 'systemSubjects' };
     if (p === '/registry/drift') return { kind: 'systemRegistryDrift' };
-    // 4. Design — reviews lead; experiments and feedback tabs.
+    // 4. Design — reviews lead; the experiments tab.
     if (p === '/design') return { kind: 'systemDesign' };
     if (p === '/design/experiments') return { kind: 'experiments' };
-    if (p === '/design/feedback') return { kind: 'systemFeedback' };
-    if (p === '/design/backlog') return { kind: 'systemBacklog' };
-    // /it/codebase is the row (9827c699); the old Design-tab path still
-    // answers so a bookmark or a packet link keeps working.
-    if (p === '/codebase' || p === '/design/codebase') return { kind: 'systemCodebase' };
+    // /it/codebase is the row (9827c699).
+    if (p === '/codebase') return { kind: 'systemCodebase' };
     // 5. Estate. 6. KB. Plus the unlisted auth door.
-    // 5a. The Crew Board — a sidebar row of its own from 04c5bbc0
-    // (2026-09-11) until car N1 of design e765b3fc (2026-09-25) folded
-    // it into the Department Map row: it is the shop floor's board, the
-    // detail of that station. The page itself goes with the station
-    // pages (design e765b3fc, car N3).
-    if (p === '/crew') return { kind: 'systemCrew' };
     if (p === '/estate') return { kind: 'systemEstate' };
     if (p === '/kb') return { kind: 'systemKb' };
     if (p === '/auth-admin') return { kind: 'authAdmin' };

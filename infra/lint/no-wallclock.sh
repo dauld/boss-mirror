@@ -117,6 +117,12 @@ ALLOWED_PREFIXES=(
   "crates/core/boss-gateway/src/local_auth.rs"
   # Perf metrics — diagnostic only, never emitted as audit
   "crates/core/boss-gateway/src/perf.rs"
+  # The machine gate's miss tally (design 6805c764): first/last-seen
+  # on an in-process, bounded count of tokenless callers, answered on
+  # /api/machine-gate/misses and lost on restart. Telemetry, never an
+  # audit_log row — and the gate runs in every service, including the
+  # clock's own, so it cannot wait on the clock port to say when.
+  "crates/core/boss-core/src/machine_gate.rs"
   # Diagnostic CLI — checkpoint timestamps in operator output.
   "crates/core/boss-events/src/bin/boss_audit_integrity_check.rs"
   # Deprecated clock helpers, pre-Clock-as-service. The module

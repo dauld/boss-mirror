@@ -125,12 +125,14 @@ async fn main() -> Result<()> {
     // it now meets — the tenant publish, both engines' prepare, the
     // dispatcher — all sign as platform-admin, which the core default
     // rules grant Update on `employee`.
+    // The bypass is installed on a sim instance only, and admits only a
+    // sim caller there (backlog 85e7f10f).
     let policy: Arc<dyn boss_policy_client::PolicyClient> =
-        Arc::new(boss_policy_client::SimBypassPolicyClient::new(Arc::new(
+        boss_policy_client::SimBypassPolicyClient::from_env(Arc::new(
             boss_policy_client::ReqwestPolicyClient::new(
                 std::env::var("BOSS_POLICY_URL").unwrap_or_else(|_| boss_ports::url("policy")),
             ),
-        )));
+        ));
 
     // Mount workflow and search routers first (more-specific routes),
     // then merge the people CRUD router (has catch-all /{id}).
@@ -221,6 +223,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("binding HTTP listener on {http_addr}"))?;
     info!(addr = %http_addr, "people HTTP API listening");
 
+    let app = boss_core::machine_gate::mount(app, "people", &["/api/people/health"]);
     axum::serve(listener, app).await?;
     Ok(())
 }

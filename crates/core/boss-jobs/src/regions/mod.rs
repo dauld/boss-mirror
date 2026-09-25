@@ -57,7 +57,7 @@ use boss_core::job::{Job, JobStatus, Step, StepStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::region_states::{self as bands, Finding, Settled, settle};
+use crate::region_states::{self as bands, Finding, OutRail, Settled, at_capacity, settle};
 use crate::registry::WorkflowSpec;
 use crate::yard::{ConductorHealth, Reading, YardStatus};
 
@@ -177,7 +177,10 @@ pub fn parse_window(raw: Option<&str>) -> Result<i64, String> {
 /// the bands that decide them are [`crate::region_states`]).
 ///
 /// `Clear` is flowing within its declared bounds, which INCLUDES busy
-/// and healthy — a dock with a train due. `Attention` is a declared band
+/// and healthy — a dock with a train due. `Full` is a capacity region at
+/// its bound while its out-route keeps moving — a good state, the one a
+/// border never wears (design e765b3fc §4a, car F1;
+/// [`crate::region_states::at_capacity`]). `Attention` is a declared band
 /// crossed. `Troubled` is ours and not moving, or a reading that could
 /// not be taken, which is refused like a failure rather than drawn as
 /// clear.
@@ -192,6 +195,7 @@ pub fn parse_window(raw: Option<&str>) -> Result<i64, String> {
 #[serde(rename_all = "kebab-case")]
 pub enum RegionState {
     Clear,
+    Full,
     Attention,
     Troubled,
 }
@@ -577,16 +581,21 @@ pub fn packet_value(job: &Job, steps: &[Step]) -> Value {
 /// order.
 pub fn regions(inputs: &RegionInputs<'_>) -> Regions {
     let w = Windows::of(inputs.now, inputs.window_hours);
+    // The rails leaving each CAPACITY region, which its full-or-stuck
+    // reading is judged from (design e765b3fc §4a, car F1) — read off the
+    // borders' own flows, so the region and its rail count one traffic.
+    let stuck_set = stuck_ids(inputs);
+    let out = |name: &str| crate::borders::out_rails(name, inputs, &w, &stuck_set);
     let regions = [
         dock(inputs, &w),
-        gates(inputs, &w),
-        track(inputs, &w),
+        gates(inputs, &w, &out("gates")),
+        track(inputs, &w, &out("track")),
         shed(inputs, &w),
         arrivals(inputs, &w),
         garage(inputs, &w),
         receiving(inputs, &w),
         marshalling(inputs, &w),
-        shop_floor(inputs, &w),
+        shop_floor(inputs, &w, &out("shop-floor")),
         publish(inputs, &w),
     ]
     .into_iter()

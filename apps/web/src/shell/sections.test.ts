@@ -87,7 +87,7 @@ describe('sections resolve in the nav catalog', () => {
     expect(appForRoute({ kind: 'department', code: 'operations' })).toBe('operations');
     // Every other route still answers through the catalog.
     expect(appForRoute({ kind: 'systemYard' })).toBe('it');
-    expect(appForRoute({ kind: 'systemYardFloor', region: 'dock' })).toBe('it');
+    expect(appForRoute({ kind: 'systemYard', at: 'dock' })).toBe('it');
     expect(appForRoute({ kind: 'accounts' })).toBe('sales');
     expect(appForRoute({ kind: 'jobs' })).toBe('home');
     expect(appForRoute({ kind: 'me' })).toBe('home');
@@ -105,15 +105,16 @@ describe('sections resolve in the nav catalog', () => {
   test('every station on the map lights the one Department Map row, not Operate', () => {
     // Design e765b3fc, car N1 (2026-09-25): the Receiving Yard, the
     // Marshalling Yard and the Crew Board lost their sidebar rows to the
-    // one "Department Map" row, so every place on the map — a selection,
-    // any region's floor, the crew board — lights that row. They had
-    // rows of their own from 92921c2f and 04c5bbc0 until then.
-    expect(sectionForRoute({ kind: 'systemYard', at: 'gates' })).toBe('system-yard');
-    for (const region of ['receiving', 'marshalling', 'dock', 'shop-floor']) {
-      expect(sectionForRoute({ kind: 'systemYardFloor', region }), region).toBe('system-yard');
-      expect(appForRoute({ kind: 'systemYardFloor', region }), region).toBe('it');
+    // one "Department Map" row, so every selection on the map lights
+    // that row. Car N3 retired the floor pages and the crew board, so a
+    // selection is the only way in, and a retired path — not found —
+    // still renders in the IT chrome under the same row.
+    for (const at of ['gates', 'receiving', 'marshalling', 'dock', 'shop-floor']) {
+      expect(sectionForRoute({ kind: 'systemYard', at }), at).toBe('system-yard');
+      expect(appForRoute({ kind: 'systemYard', at }), at).toBe('it');
     }
-    expect(sectionForRoute({ kind: 'systemCrew' })).toBe('system-yard');
+    expect(sectionForRoute({ kind: 'notFound', path: '/it/yard/dock' })).toBe('system-yard');
+    expect(sectionForRoute({ kind: 'notFound', path: '/it/crew' })).toBe('system-yard');
   });
 
   test('no exception names a section no longer produced', () => {

@@ -9,6 +9,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { notFoundBack, parseRoute } from './router';
+import { RETIRED_ROUTES } from '../tests/mocked/_routes';
 
 // No window is planted here. parseRoute takes the query string as its
 // second argument; it read `window.location.search` until backlog
@@ -113,13 +114,6 @@ describe('parseRoute — every specific path matches its specific case', () => {
     ['/it/operate/audit', { kind: 'systemMonitoringEvents' }],
     ['/it/operate/atlas', { kind: 'systemMonitoringAtlas' }],
     ['/it/operate/bottlenecks', { kind: 'systemFleet' }],
-    // The two queue boards retired as pages on car 4 of design
-    // d2154293: each is a region of the world, and the old path
-    // resolves to that region rather than 404ing.
-    ['/it/operate/marshalling', { kind: 'systemYardFloor', region: 'marshalling' }],
-    ['/it/operate/receiving', { kind: 'systemYardFloor', region: 'receiving' }],
-    ['/it/yard/receiving', { kind: 'systemYardFloor', region: 'receiving' }],
-    ['/it/operate/conductor', { kind: 'systemMonitoringConductor' }],
     ['/it/kb', { kind: 'systemKb' }],
     ['/it/registry/subjects', { kind: 'systemSubjects' }],
     // The Drift tab (4ae9969e): declared before the workflow-detail
@@ -130,17 +124,8 @@ describe('parseRoute — every specific path matches its specific case', () => {
     // registry's upstream hrefs and the docs all still use them.
     ['/it/design', { kind: 'systemDesign' }],
     ['/it/design/experiments', { kind: 'experiments' }],
-    ['/it/design/feedback', { kind: 'systemFeedback' }],
-    ['/it/design/codebase', { kind: 'systemCodebase' }],
+    ['/it/codebase', { kind: 'systemCodebase' }],
     ['/it', { kind: 'systemYard' }],
-    // The yard's FLOORS (design 0524fc95, car 2): /it is the map of
-    // eight region cards; each yard card opens the Train Yard focused
-    // on its panel, and the bare /it/yard is the yard on its default
-    // selection, the track.
-    ['/it/yard', { kind: 'systemYardFloor', region: 'track' }],
-    ['/it/yard/dock', { kind: 'systemYardFloor', region: 'dock' }],
-    ['/it/yard/shed', { kind: 'systemYardFloor', region: 'shed' }],
-    ['/it/crew', { kind: 'systemCrew' }],
     ['/it/estate', { kind: 'systemEstate' }],
     
     ['/it/operate', { kind: 'incidents' }],
@@ -214,14 +199,9 @@ describe('an unmatched path is notFound, naming the path', () => {
     expect(parseRoute('/dashboard/ux/nope')).toEqual({ kind: 'notFound', path: '/dashboard/ux/nope' });
   });
 
-  test('the deliberate /it aliases above the catch-all still answer', () => {
-    expect(parseRoute('/it/operate/marshalling').kind).toBe('systemYardFloor');
-    expect(parseRoute('/it/design/codebase').kind).toBe('systemCodebase');
-  });
-
   test('the one back link goes to the department the path was under', () => {
-    expect(notFoundBack('/it/no-such')).toEqual({ href: '/it', label: 'Back to the IT yard' });
-    expect(notFoundBack('/dashboard/it/no-such/')).toEqual({ href: '/it', label: 'Back to the IT yard' });
+    expect(notFoundBack('/it/no-such')).toEqual({ href: '/it', label: 'Back to the Department Map' });
+    expect(notFoundBack('/dashboard/it/no-such/')).toEqual({ href: '/it', label: 'Back to the Department Map' });
     expect(notFoundBack('/ux/no-such')).toEqual({ href: '/ux', label: 'Back to My Day' });
     expect(notFoundBack('/items')).toEqual({ href: '/ux', label: 'Back to My Day' });
   });
@@ -529,4 +509,23 @@ describe('/it?at= — the Department Map carries its selection in the query', ()
   test('`at` is read on the landing only — another IT page ignores it', () => {
     expect(parseRoute('/it/estate', '?at=gates')).toEqual({ kind: 'systemEstate' });
   });
+});
+
+// THE PAGES THE DEPARTMENT MAP REPLACED (design e765b3fc, car N3). Each
+// one's content is a selection's panel now — a region's floor is its
+// station's panel, the Crew Board the shop floor's, yard status the
+// track's, dock's and garage's, the conductor's feed the track's, and
+// the feedback and backlog boards receiving's and marshalling's — so the
+// path is not found, like any other. No alias and no redirect (David,
+// 2026-09-25: no shims before 1.0.0): the four aliases that still
+// answered go with them.
+// The list is the crawl roster's (_routes.ts `RETIRED_ROUTES`), so the
+// mocked spec that opens each page and this pin read one definition.
+describe('the retired station and floor pages are not found', () => {
+  for (const path of RETIRED_ROUTES) {
+    test(`${path} is notFound, and its back link is the Department Map`, () => {
+      expect(parseRoute(path)).toEqual({ kind: 'notFound', path });
+      expect(notFoundBack(path)).toEqual({ href: '/it', label: 'Back to the Department Map' });
+    });
+  }
 });

@@ -1149,7 +1149,15 @@ scope_self_test() {
     # "unmapped" has to be a fact about the tree, not a fact about which
     # paths nobody got round to listing.
     _case "other infra implies no crate" "" \
-        "infra/forge/locomotive.sh" "infra/forge/cluster-watchdog.sh"
+        "infra/forge/locomotive.sh" "infra/forge/rollback-to.sh"
+    # cluster-watchdog.sh left the case above on 2026-09-25 because the
+    # answer for it CHANGED, correctly (design 6805c764, car 1):
+    # boss-testing's every_service_mounts_the_machine_gate.rs reads it to
+    # hold every path it curls from the jobs API to that service's
+    # machine-gate exemptions, so editing the watchdog can redden
+    # boss-testing. Derived, not listed — this case is the record of it.
+    _case "a script a pin reads implies that pin's crate" "boss-testing" \
+        "infra/forge/cluster-watchdog.sh"
     # THE RE-PIN (backlog 294bb7c9). Until that car, the case above also
     # asserted `infra/deploy-services.sh` implies no crate — and that
     # answer was WRONG, not merely incomplete: boss-ports `include_str!`d

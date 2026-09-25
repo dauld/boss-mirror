@@ -20,7 +20,11 @@
   // Every fetch decodes defensively at the call site: the route-smoke
   // crawl runs this surface against an adversarial mock, and garbage
   // must render as an empty state, not a crash.
-  import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
+  // A BOARD, NOT A PAGE (design e765b3fc, car N3, 2026-09-25): its two
+  // mount sites — the feedback and backlog boards — are station panels on
+  // the Department Map, under the map's own page heading and the
+  // station's, so the board heads itself as a section of that panel
+  // rather than as a second page title.
   import StepDag, { type DagEdge, type DagNode } from './StepDag.svelte';
   import { workflowToDag } from './workflowToDag';
   import { type Fork, readFork } from './fork';
@@ -186,7 +190,10 @@
   }
 </script>
 
-<PageHeader {title} {subtitle} />
+<header class="tf-head">
+  <h3 class="tf-title">{title}</h3>
+  {#if subtitle}<p class="tf-sub">{subtitle}</p>{/if}
+</header>
 
 {#if loading}
   <p class="tf-msg">Reading the queue…</p>
@@ -258,6 +265,17 @@
 {/if}
 
 <style>
+  .tf-head { margin: 0 0 12px; }
+  .tf-title {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: var(--ls-eyebrow);
+    text-transform: uppercase;
+    color: var(--signal);
+  }
+  .tf-sub { margin: 4px 0 0; font-size: 13px; color: var(--static); max-width: 72ch; }
   .tf-msg {
     margin: 16px 0;
     color: var(--static);

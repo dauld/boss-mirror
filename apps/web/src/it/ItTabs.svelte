@@ -9,19 +9,18 @@
   export type ItTabGroup = 'operate' | 'registry' | 'design';
 
   const GROUPS: Readonly<Record<ItTabGroup, ReadonlyArray<{ label: string; path: string }>>> = {
+    // Car N3 of design e765b3fc (2026-09-25) took five tabs off this
+    // strip, each now a selection's panel on the Department Map: Yard
+    // status (the track, dock and garage stations), Conductor (the
+    // track), Receiving Yard and Marshalling Yard (those two stations),
+    // and on Design, Feedback and Backlog (receiving; the backlog on
+    // marshalling too). What stays is desk work, not a station.
     operate: [
       { label: 'Incidents', path: '/it/operate' },
-      { label: 'Yard status', path: '/it/operate/yard-status' },
-      { label: 'Conductor', path: '/it/operate/conductor' },
       { label: 'Audit Log', path: '/it/operate/audit' },
       { label: 'Performance', path: '/it/operate/perf' },
       { label: 'Atlas', path: '/it/operate/atlas' },
       { label: 'Bottlenecks', path: '/it/operate/bottlenecks' },
-      // The two queue boards are REGIONS of the world since car 4 of
-      // design d2154293 — the tab walks to the zoomed territory, not
-      // to a page of its own.
-      { label: 'Receiving Yard', path: '/it/yard/receiving' },
-      { label: 'Marshalling Yard', path: '/it/yard/marshalling' },
     ],
     registry: [
       { label: 'Workflows', path: '/it/registry' },
@@ -38,8 +37,6 @@
     design: [
       { label: 'Reviews', path: '/it/design' },
       { label: 'Experiments', path: '/it/design/experiments' },
-      { label: 'Feedback', path: '/it/design/feedback' },
-      { label: 'Backlog', path: '/it/design/backlog' },
     ],
   };
 

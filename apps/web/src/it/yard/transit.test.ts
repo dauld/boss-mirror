@@ -285,6 +285,13 @@ describe('the alarms board', () => {
     expect(alarms[0]!.why).toContain('no reading');
   });
 
+  it('a full station is no alarm — at capacity and moving is the good state (design e765b3fc §4a)', () => {
+    const alarms = alarmsOf(
+      read(TERRITORIES.map((t) => (t.name === 'gates' ? region('gates', { state: 'full', why: '3 of 3 bays in use' }) : region(t.name)))),
+    );
+    expect(alarms).toEqual([]);
+  });
+
   it('is empty when every station is clear', () => {
     expect(alarmsOf(read(TERRITORIES.map((t) => region(t.name))))).toEqual([]);
   });

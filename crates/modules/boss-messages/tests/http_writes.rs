@@ -93,6 +93,7 @@ async fn post_read_returns_200_ok() {
     let app = MessageTestApp::with_messages(vec![msg]);
 
     let resp = TestRequest::post("/api/messages/msg-read-1/read")
+        .header("x-boss-user", common::signed_in("emp-recipient"))
         .send(&app.router)
         .await;
 
@@ -105,6 +106,7 @@ async fn post_read_emits_message_read_event() {
     let app = MessageTestApp::with_messages(vec![msg]);
 
     TestRequest::post("/api/messages/msg-read-2/read")
+        .header("x-boss-user", common::signed_in("emp-recipient"))
         .send(&app.router)
         .await
         .assert_status(StatusCode::OK);
@@ -126,6 +128,7 @@ async fn delete_existing_message_returns_204() {
     let app = MessageTestApp::with_messages(vec![msg]);
 
     let resp = TestRequest::delete("/api/messages/msg-del-1")
+        .header("x-boss-user", common::signed_in("emp-recipient"))
         .send(&app.router)
         .await;
 
@@ -138,6 +141,7 @@ async fn delete_existing_message_emits_deleted_event() {
     let app = MessageTestApp::with_messages(vec![msg]);
 
     TestRequest::delete("/api/messages/msg-del-2")
+        .header("x-boss-user", common::signed_in("emp-recipient"))
         .send(&app.router)
         .await
         .assert_status(StatusCode::NO_CONTENT);
@@ -154,6 +158,7 @@ async fn delete_nonexistent_message_returns_404() {
     let app = MessageTestApp::new();
 
     let resp = TestRequest::delete("/api/messages/msg-missing")
+        .header("x-boss-user", common::operator())
         .send(&app.router)
         .await;
 
@@ -165,6 +170,7 @@ async fn delete_nonexistent_message_does_not_emit_event() {
     let app = MessageTestApp::new();
 
     TestRequest::delete("/api/messages/msg-missing")
+        .header("x-boss-user", common::operator())
         .send(&app.router)
         .await
         .assert_status(StatusCode::NOT_FOUND);
@@ -182,6 +188,7 @@ async fn archive_existing_message_returns_204() {
     let app = MessageTestApp::with_messages(vec![msg]);
 
     let resp = TestRequest::post("/api/messages/msg-arch-1/archive")
+        .header("x-boss-user", common::signed_in("emp-recipient"))
         .send(&app.router)
         .await;
 
@@ -194,6 +201,7 @@ async fn archive_existing_message_emits_archived_event() {
     let app = MessageTestApp::with_messages(vec![msg]);
 
     TestRequest::post("/api/messages/msg-arch-2/archive")
+        .header("x-boss-user", common::signed_in("emp-recipient"))
         .send(&app.router)
         .await
         .assert_status(StatusCode::NO_CONTENT);
@@ -210,6 +218,7 @@ async fn archive_nonexistent_message_returns_404() {
     let app = MessageTestApp::new();
 
     let resp = TestRequest::post("/api/messages/msg-missing/archive")
+        .header("x-boss-user", common::operator())
         .send(&app.router)
         .await;
 
@@ -221,6 +230,7 @@ async fn archive_nonexistent_message_does_not_emit_event() {
     let app = MessageTestApp::new();
 
     TestRequest::post("/api/messages/msg-missing/archive")
+        .header("x-boss-user", common::operator())
         .send(&app.router)
         .await
         .assert_status(StatusCode::NOT_FOUND);
@@ -245,6 +255,7 @@ async fn get_thread_returns_reply_chain() {
     let app = MessageTestApp::with_messages(vec![root, reply1, reply2]);
 
     let resp = TestRequest::get("/api/messages/msg-root/thread")
+        .header("x-boss-user", common::signed_in("emp-recipient"))
         .send(&app.router)
         .await;
     resp.assert_status(StatusCode::OK);
@@ -284,6 +295,7 @@ async fn compose_with_reply_to_creates_reply() {
 
     // Fetch the new message and verify reply_to is set.
     let fetch = TestRequest::get(format!("/api/messages/{new_id}"))
+        .header("x-boss-user", common::signed_in("emp-2"))
         .send(&app.router)
         .await;
     fetch.assert_status(StatusCode::OK);
@@ -387,6 +399,7 @@ async fn an_archived_message_leaves_the_inbox_read_and_records_its_event() {
     let app = MessageTestApp::with_messages(vec![m]);
 
     TestRequest::post("/api/messages/msg-done/archive")
+        .header("x-boss-user", common::signed_in("emp-42"))
         .send(&app.router)
         .await
         .assert_status(StatusCode::NO_CONTENT);

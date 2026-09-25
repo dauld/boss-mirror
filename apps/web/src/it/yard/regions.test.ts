@@ -6,7 +6,6 @@ import {
   bandText,
   compactCountText,
   countText,
-  floorHref,
   floorSelection,
   kpiText,
   lampOf,
@@ -181,8 +180,8 @@ describe('the names are the server\'s, in map order', () => {
 // A SELECTION, NOT A PAGE (design e765b3fc, car N1). The door no longer
 // swaps the map for the region's: the Department Map stays on top and
 // the station is SELECTED, its detail opening below it — `/it?at=<name>`.
-// The region's floor page is reached from that detail (`floorHref`)
-// until the panel carries the floor itself (cars N2 and N3).
+// The region's floor page that the detail linked to (`floorHref`) retired
+// with car N3: the panel carries the floor itself.
 describe('regionHref — every region the server serves is a selection on the Department Map', () => {
   it('each name opens /it?at=<name>, the router reads it as that selection, and the map has its territory', () => {
     const { names } = serverRegions();
@@ -212,20 +211,6 @@ describe('regionHref — every region the server serves is a selection on the De
         return src.includes('/it/yard/${') || src.includes('?at=${');
       });
     expect(spelled).toEqual([]);
-  });
-});
-
-describe('floorHref — a region\'s floor page, opened from its selection', () => {
-  it('each name the server serves opens /it/yard/<name>, which the router reads as that region\'s floor', () => {
-    for (const name of serverRegions().names) {
-      expect(floorHref(name), name).toBe(`/it/yard/${name}`);
-      expect(parseRoute(floorHref(name)), name).toEqual({ kind: 'systemYardFloor', region: name });
-    }
-  });
-
-  it('a name that is not a region opens the map — /it/yard alone would be the TRACK\'s floor', () => {
-    expect(floorHref('plant')).toBe('/it');
-    expect(floorHref('')).toBe('/it');
   });
 });
 
@@ -271,6 +256,9 @@ describe('trendText — this window against the previous, in the unit', () => {
 describe('lampOf — the yard\'s own lamp for a state', () => {
   it('clear is ok, attention is warn, troubled is err', () => {
     expect(lampOf('clear')).toBe('ok');
+    // Full is a GOOD state (design e765b3fc §4a): a working bottleneck
+    // lights no warning lamp.
+    expect(lampOf('full')).toBe('ok');
     expect(lampOf('attention')).toBe('warn');
     expect(lampOf('troubled')).toBe('err');
   });
@@ -280,7 +268,7 @@ describe('lampOf — the yard\'s own lamp for a state', () => {
 // one vocabulary, every non-clear state with the declared band that
 // decided it and how long it has held, every count and KPI with its unit.
 describe('one state vocabulary, each state with its band (62de32ae decisions 1, 2, 5, 9)', () => {
-  it('the three words are the server\'s RegionState, in its order (CLAUDE.md §9a)', () => {
+  it('the four words are the server\'s RegionState, in its order (CLAUDE.md §9a)', () => {
     const src = readFileSync(
       join(import.meta.dir, '..', '..', '..', '..', '..', 'crates', 'core', 'boss-jobs', 'src', 'regions', 'mod.rs'),
       'utf8',
@@ -288,7 +276,12 @@ describe('one state vocabulary, each state with its band (62de32ae decisions 1, 
     const block = src.match(/pub enum RegionState \{([^}]*)\}/);
     expect(block, 'boss_jobs::regions::RegionState is where the words live').not.toBeNull();
     const words = [...block![1]!.matchAll(/^\s*([A-Z][a-z]+),/gm)].map((m) => m[1]!.toLowerCase());
-    expect(words).toEqual(['clear', 'attention', 'troubled']);
+    expect(words).toEqual(['clear', 'full', 'attention', 'troubled']);
+  });
+
+  it('parses full — a capacity region at its bound and moving (design e765b3fc §4a)', () => {
+    const full = { ...PAYLOAD, regions: [{ ...PAYLOAD.regions[1], state: 'full' }] };
+    expect(parseRegions(full).regions[0]!.state).toBe('full');
   });
 
   it('refuses the retired word rather than drawing a new meaning under it', () => {

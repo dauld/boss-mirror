@@ -573,9 +573,9 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // (Update, step) decision — the caller's role must be permitted to
     // update steps at all. The sign-off transition adds the role-scoped
     // `step-signoff:<role>` authority on top (see further down).
-    // Simulator traffic is allowed by the SimBypassPolicyClient (trusted
-    // box; the write is still stamped `_simulated`), so this gate never
-    // stalls a regen.
+    // Simulator traffic is allowed by the SimBypassPolicyClient on a sim
+    // instance, for a sim caller only (backlog 85e7f10f; the write is
+    // still stamped `_simulated`), so this gate never stalls a regen.
     match state
         .policy
         .check(&user, Action::Update, Resource::step())

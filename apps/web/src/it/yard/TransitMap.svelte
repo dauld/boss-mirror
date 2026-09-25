@@ -195,7 +195,7 @@
           <span class="why">{a.why}</span>
         </a>
       {:else}
-        <p class="none" data-alarms-clear>No alarms — every station is clear.</p>
+        <p class="none" data-alarms-clear>No alarms — every station is clear or full.</p>
       {/each}
     </aside>
   </div>
@@ -258,6 +258,10 @@
   .station:focus-visible .ring { stroke-width: 6; }
   .ring { fill: var(--map-surface); stroke-width: 5; }
   .ring.clear { stroke: var(--map-ok-edge); stroke-width: 3; }
+  /* FULL (design e765b3fc Q2, David 2026-09-25): at capacity and moving
+     is a SOLID disk with a heavier ring — clear stays hollow — so "the
+     gates are full" reads by fill alone, without the small text. */
+  .ring.full { fill: var(--map-full); stroke: var(--map-full); stroke-width: 6; }
   .ring.attention { stroke: var(--map-warn-edge); }
   .ring.troubled { stroke: var(--map-bad-edge); }
   .pulse { fill: none; stroke: var(--map-bad-edge); stroke-width: 3; transform-box: fill-box; transform-origin: center;

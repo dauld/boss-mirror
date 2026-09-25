@@ -18,8 +18,9 @@ use super::*;
 use crate::chart::AccountInput;
 
 /// Gated to operator-tier callers — the tier `boss tenant publish`
-/// signs with (`automation:tenant-seed`) — with the `x-sim-origin`
-/// bypass every seed path honors. The read layer below already holds
+/// signs with (`automation:tenant-seed`) — or a sim caller on a sim
+/// instance (`boss_policy_client::sim_bypass_allowed`; never the
+/// header alone, backlog 85e7f10f). The read layer below already holds
 /// the `ledger` read grant; this is the write gate, and an auditor
 /// (never operator tier) is refused here too.
 pub(super) async fn declare_accounts_batch(
@@ -30,7 +31,7 @@ pub(super) async fn declare_accounts_batch(
     if let Some(r) = reject_if_auditor(&user) {
         return r;
     }
-    let sim = boss_core::sim_origin::is_in_sim_chain();
+    let sim = boss_policy_client::sim_bypass_allowed(&user);
     let tier_ok = matches!(user.access_tier, AccessTier::Operator);
     if !(sim || tier_ok) {
         return (StatusCode::FORBIDDEN, "operator tier required").into_response();

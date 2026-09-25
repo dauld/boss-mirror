@@ -127,15 +127,14 @@ test('flight ON: the same reads drawn as a transit monitor', async ({ page }) =>
   await expect(alarms.nth(1)).toContainText('80 packets standing, the oldest 5 days');
 
   // A station selects itself (design e765b3fc, car N1): the transit map
-  // stays on top, the dock's panel opens under it, and the panel is the
-  // door to the dock's floor.
+  // stays on top, and the dock's panel opens under it carrying the dock's
+  // floor — the floor page it used to be a door to retired with car N3.
   await transit.locator('[data-station="dock"]').click();
   await expect(page).toHaveURL(/\/it\?at=dock$/);
   await expect(transit).toBeVisible();
   await expect(page.locator('section[data-map-panel]')).toHaveAttribute('data-selection', 'dock');
-  await page.locator('section[data-map-panel] a[data-floor]').click();
-  await expect(page).toHaveURL(/\/it\/yard\/dock$/);
-  await expect(page.locator('nav.crumbs[data-region="dock"]')).toBeVisible();
+  await expect(page.locator('section[data-map-panel] a[data-floor]')).toHaveCount(0);
+  await expect(page.locator('section[data-map-panel] [data-contents="dock"] .yard-deck').first()).toBeVisible();
 });
 
 test('reduced motion: nothing moves and nothing pulses, and the stall still reads', async ({ page }) => {

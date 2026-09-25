@@ -11,6 +11,16 @@ pub struct PolicyEngine<R: PolicyRepository> {
     repo: Arc<R>,
 }
 
+/// The instant an override's expiry is judged at. Expiry is local
+/// decision logic that stamps no record, which is why this file may read
+/// the wall clock (infra/lint/no-wallclock.sh). One reading, so the
+/// engine deciding whether an override applies and the write door
+/// deciding whether retiring one widens access (backlog b8e75382) judge
+/// "expired" the same way.
+pub fn expiry_now() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+}
+
 impl<R: PolicyRepository> PolicyEngine<R> {
     pub fn new(repo: Arc<R>) -> Self {
         Self { repo }
@@ -28,48 +38,67 @@ impl<R: PolicyRepository> PolicyEngine<R> {
         action: Action,
         resource: Resource,
     ) -> Result<Decision, PolicyError> {
-        let now = chrono::Utc::now();
+        self.check_until(user, action, resource)
+            .await
+            .map(|(decision, _)| decision)
+    }
+
+    /// [`Self::check`], and when the decision stops holding: the expiry
+    /// of the user override that decided it, or `None` when nothing in
+    /// it expires — a role rule, or an override with no expiry. The
+    /// policy service caps what a caller grants at this, so an override
+    /// that ends in an hour is not authority for a grant that never
+    /// does (backlog b8e75382, H3 of the hold review of car a8becd52).
+    pub async fn check_until(
+        &self,
+        user: &User,
+        action: Action,
+        resource: Resource,
+    ) -> Result<(Decision, Option<chrono::DateTime<chrono::Utc>>), PolicyError> {
+        let now = expiry_now();
 
         // 1. User overrides first.
         let overrides = self.repo.list_user_overrides(&user.id).await?;
         for ov in &overrides {
             if ov.resource == resource && ov.action == action && ov.is_active_at(now) {
-                return Ok(match &ov.scope {
+                let decision = match &ov.scope {
                     Scope::None => Decision::Deny {
                         reason: format!("user override: {}", ov.reason),
                     },
                     other => Decision::Allow {
                         scope: other.clone(),
                     },
-                });
+                };
+                return Ok((decision, ov.expires_at));
             }
         }
 
         // 2. Role rule.
-        let rule_id = format!("{}:{}:{}", user.role, resource.as_str(), action.as_str());
+        let rule_id = crate::types::rule_id(&user.role, &resource, action);
         let rule = self.repo.rule_for(&rule_id).await?;
 
-        match rule {
+        let decision = match rule {
             Some(r) if r.active => match r.scope {
-                Scope::None => Ok(Decision::Deny {
+                Scope::None => Decision::Deny {
                     reason: format!(
                         "role {} is denied {} on {}",
                         user.role,
                         action.as_str(),
                         resource.as_str()
                     ),
-                }),
-                other => Ok(Decision::Allow { scope: other }),
+                },
+                other => Decision::Allow { scope: other },
             },
-            _ => Ok(Decision::Deny {
+            _ => Decision::Deny {
                 reason: format!(
                     "no active rule for role {} on {}:{}",
                     user.role,
                     resource.as_str(),
                     action.as_str(),
                 ),
-            }),
-        }
+            },
+        };
+        Ok((decision, None))
     }
 
     /// The Predicate a list endpoint should apply to filter rows to

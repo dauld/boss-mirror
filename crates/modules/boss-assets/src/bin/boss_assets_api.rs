@@ -202,6 +202,7 @@ async fn run_server<R: AssetsRepository + 'static>(
     let app = app.layer(axum::middleware::from_fn(
         boss_policy_client::request_context_middleware,
     ));
+    let app = boss_core::machine_gate::mount(app, "assets", &["/api/assets/health"]);
     let mut http_rx = cancel_rx.clone();
     let http_task = tokio::spawn(async move {
         let shutdown = async move {

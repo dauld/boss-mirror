@@ -27,7 +27,11 @@
   // the same record with no human clicking.
   import type { Snippet } from 'svelte';
   import { onMount } from 'svelte';
-  import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
+  // A BOARD, NOT A PAGE (design e765b3fc, car N3, 2026-09-25): its two
+  // mount sites — the feedback and backlog boards — are station panels on
+  // the Department Map, under the map's own page heading and the
+  // station's, so the board heads itself as a section of that panel
+  // rather than as a second page title.
   import PacketModal from '@boss/web-kit/ui/PacketModal.svelte';
   import { session } from '@boss/web-kit/session/session.svelte';
   import type { Job, Step } from './types';
@@ -472,7 +476,10 @@
   onMount(load);
 </script>
 
-<PageHeader {title} {subtitle} />
+<header class="tb-head">
+  <h3 class="tb-title">{title}</h3>
+  {#if subtitle}<p class="tb-sub">{subtitle}</p>{/if}
+</header>
 
 {#if loading}
   <p class="tb-msg">Loading…</p>
@@ -669,6 +676,17 @@
 {/if}
 
 <style>
+  .tb-head { margin: 0 0 12px; }
+  .tb-title {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 400;
+    letter-spacing: var(--ls-eyebrow);
+    text-transform: uppercase;
+    color: var(--signal);
+  }
+  .tb-sub { margin: 4px 0 0; font-size: 13px; color: var(--static); max-width: 72ch; }
   /* Columns scroll sideways rather than squeezing: a fork can declare
      six routes, and a 140px column is unreadable. The page body never
      scrolls horizontally — this container does. */

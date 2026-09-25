@@ -1623,7 +1623,31 @@ invalidation as the convenience overlay. (The packet model's
 stage-2 re-key of `Self_`/`Team` onto queue-derived ownership —
 §The network substrate — is the one decision that would move this
 predicate; it is resolved but unscheduled, and until it lands the
-owner-keyed compilation above is the truth.) SPA auth is file-backed
+owner-keyed compilation above is the truth.)
+
+**A policy writer grants only what it holds** (backlog b8e75382,
+2026-09-25; the rules are `crates/core/boss-policy/src/authority.rs`).
+Every write to the policy table authorizes its caller against
+`policy-rule`, and is then judged on the row it changes, inside the
+write's transaction: a grant of (action, resource, scope) needs the
+caller's own decision on that action and resource to allow a scope that
+contains it, and it ends no later than that decision does — authority a
+user override gives ends with the override, so it grants no role rule
+and no override that outlives it. Ending a live override narrower than
+`all` early, by retiring it or by bringing its expiry forward, is a
+grant at `all`. Break-glass restores a rule core ships, exactly, and
+writes no override; it may retire one. A rule id is derived from its
+role, resource and action, and a role never carries the `:` that joins
+them. Two limits are deliberate and worth knowing. **Scopes are compared
+by breadth, not by reach:** `self`, `team` and `territory` are relative
+to whoever holds them, so a granter holding `team` may grant another
+role `team`, and that grantee's team is its own reports, not the
+granter's. **The caller's authority is read before the transaction:**
+only the row being written is locked and judged inside it, so a change
+to the caller's own grants that commits between the read and the write
+— a revocation racing a write — is not seen by that one write.
+
+SPA auth is file-backed
 credentials managed by the gateway's admin CLI; SSH is
 bring-your-own-keys with the SSH-CA flow parked as an opt-in
 blueprint.

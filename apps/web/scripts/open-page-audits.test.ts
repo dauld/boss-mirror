@@ -36,8 +36,11 @@ describe('the roster is the catalog', () => {
     // second example tenant, so its audit (0ceeffa6) is withdrawn. 44
     // since car N1 of design e765b3fc (2026-09-25): the Receiving Yard,
     // the Marshalling Yard and the Crew Board left the catalog for the
-    // one Department Map row — each is a station selected on /it.
-    expect(paths.length).toBe(44);
+    // one Department Map row — each is a station selected on /it. 42
+    // since car N3 of the same design: Feedback triage and the IT
+    // backlog left the catalog with their pages — each board is a
+    // station's panel on /it now.
+    expect(paths.length).toBe(42);
   });
 
   it('a parameterised catalog path is a page the march audits', () => {

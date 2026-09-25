@@ -108,6 +108,54 @@ pub fn can_administer_auth(role: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// The identities minted for someone nobody can name
+// ---------------------------------------------------------------------------
+//
+// Spelled once, here, because two crates mint them and a third must
+// recognise them: the gateway mints the guest session, the policy
+// client's `CurrentUser` extractor mints the identity of a request that
+// carries none, and the policy service refuses both any policy authority
+// (backlog b8e75382, 2026-09-25: an override on `guest@algedonic.dev`
+// let a guest session write policy rules). `GUEST_EMAIL` lived in
+// `boss-gateway::local_auth` until then; a copy of it in the policy
+// service would have been a second list to drift.
+
+/// The guest session's fixed identity. It is a real address on the demo
+/// tenant's domain rather than something like `anonymous@local`
+/// because it shows up in the audit log as an actor, and an actor in
+/// the log should be a name you can look up.
+pub const GUEST_EMAIL: &str = "guest@algedonic.dev";
+
+/// The id `CurrentUser` gives a request that reached a service with no
+/// `x-boss-user` header at all.
+pub const ANONYMOUS_USER_ID: &str = "anonymous";
+
+/// The role `CurrentUser` gives that same identity-less request: every
+/// rule denies it except the unauth landing surface's workflow read.
+pub const GUEST_ROLE: &str = "guest";
+
+/// Every id an anonymous visitor can carry downstream: the guest
+/// session's, and the identity-less request's.
+pub const ANONYMOUS_VISITOR_IDS: [&str; 2] = [GUEST_EMAIL, ANONYMOUS_USER_ID];
+
+/// True when `role` is one an anonymous visitor can carry downstream:
+/// the identity-less request's `guest`, or any role in the read-only
+/// set — `audit-readonly` today, the role `POST /api/auth/guest` mints
+/// and the gateway falls back to for a session that names none. Built
+/// ON [`is_read_only_role`] rather than beside it, so a role design
+/// 2830b6b7 adds to that set is refused policy authority too. The
+/// seeded `emp-audit` login shares `audit-readonly`, and its contract
+/// says it never writes either.
+pub fn is_anonymous_visitor_role(role: &str) -> bool {
+    role == GUEST_ROLE || is_read_only_role(role)
+}
+
+/// True when `id` or `role` is one an anonymous visitor can carry.
+pub fn is_anonymous_visitor(id: &str, role: &str) -> bool {
+    ANONYMOUS_VISITOR_IDS.contains(&id) || is_anonymous_visitor_role(role)
+}
+
+// ---------------------------------------------------------------------------
 // Broad-account-access role set
 // ---------------------------------------------------------------------------
 //
@@ -267,6 +315,20 @@ mod tests {
                 "{role} must not administer auth"
             );
         }
+    }
+
+    /// Backlog b8e75382: the ids and roles the policy service refuses
+    /// policy authority to are the ones the gateway and the extractor
+    /// actually mint — a real employee and the deploy superuser are
+    /// not among them.
+    #[test]
+    fn anonymous_visitors_are_the_minted_identities_and_no_one_else() {
+        assert!(is_anonymous_visitor(GUEST_EMAIL, AUDIT_READONLY_ROLE));
+        assert!(is_anonymous_visitor(ANONYMOUS_USER_ID, GUEST_ROLE));
+        assert!(is_anonymous_visitor("emp-audit", AUDIT_READONLY_ROLE));
+        assert!(is_anonymous_visitor(GUEST_EMAIL, PLATFORM_ADMIN_ROLE));
+        assert!(!is_anonymous_visitor("emp-founder", PLATFORM_ADMIN_ROLE));
+        assert!(!is_anonymous_visitor("emp-oncall", BREAK_GLASS_ROLE));
     }
 
     /// The admitted set is named, not derived: exactly these two.
