@@ -241,6 +241,26 @@ describe('completeWithPresence answers a presence refusal once', () => {
     expect(seen.begins.length).toBe(1);
   });
 
+  // Backlog d82b5f60: every refusal of the retry read "refused again after
+  // a fresh passkey tap", so a 409 for stale stamps looked like presence.
+  test('a retry refused for another reason carries its own reason, not "refused again"', async () => {
+    withPasskey();
+    let puts = 0;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith('/assert/begin')) return new Response(JSON.stringify(BEGIN), { status: 200 });
+      if (url.endsWith('/assert/finish'))
+        return new Response(JSON.stringify({ ticket: 'fresh-1' }), { status: 200 });
+      puts += 1;
+      return puts === 1
+        ? new Response(REFUSAL, { status: 422 })
+        : new Response(JSON.stringify({ missing_or_stale_roles: ['ceo'] }), { status: 409 });
+    }) as unknown as typeof fetch;
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN);
+    expect(res).toEqual({ kind: 'failed', error: 'sign-offs outstanding: ceo' });
+    expect(puts).toBe(2);
+  });
+
   test('a ceremony that fails is named, and the completion is not re-sent', async () => {
     const seen = server(() => false, { status: 409, body: 'no passkey' });
     const res = await completeWithPresence('job-1', 'step-1', SHOWN);

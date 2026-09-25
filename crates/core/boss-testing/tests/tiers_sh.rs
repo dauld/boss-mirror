@@ -12,7 +12,7 @@
 //! and on a synthetic violation is what it was when the prefixes were
 //! its own text.
 
-use boss_testing::{repo_root, scratch_dir};
+use boss_testing::{feed_stdin, repo_root, scratch_dir};
 use std::path::Path;
 use std::process::Command;
 
@@ -134,7 +134,6 @@ fn the_shell_reader_lists_a_tiers_prefixes_and_rank_from_the_same_file() {
 /// above the level, `Ok(None)` when every path is admitted, `Err` when
 /// the lib refused the level (exit 3, the CANNOT ANSWER vocabulary).
 fn shell_first_above(level: &str, paths: &[&str]) -> Result<Option<String>, String> {
-    use std::io::Write;
     use std::process::Stdio;
     let lib = repo_root().join("infra/lint/lib/tiers.sh");
     let mut child = Command::new("bash")
@@ -150,12 +149,11 @@ fn shell_first_above(level: &str, paths: &[&str]) -> Result<Option<String>, Stri
         .stderr(Stdio::piped())
         .spawn()
         .expect("bash runs");
-    {
-        let mut stdin = child.stdin.take().expect("piped");
-        for p in paths {
-            writeln!(stdin, "{p}").unwrap();
-        }
-    }
+    // A refused level exits 3 before it reads a path, so the write races
+    // the exit; a closed pipe is the child's verdict, read below from its
+    // status (boss_testing::feed_stdin; train 11:23, backlog fec29a02).
+    let input: String = paths.iter().map(|p| format!("{p}\n")).collect();
+    feed_stdin(&mut child, input.as_bytes());
     let out = child.wait_with_output().expect("bash finishes");
     let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
     match out.status.code() {
@@ -213,6 +211,23 @@ fn the_shell_predicate_names_the_same_first_path_above_every_level_as_the_rust_o
 #[test]
 fn the_shell_predicate_refuses_a_level_that_is_not_a_tier_with_exit_3() {
     let err = shell_first_above("full", &["docs/a.md"]).expect_err("full is not a tier");
+    assert!(err.starts_with("exit Some(3)"), "{err}");
+    assert!(err.contains("full") && err.contains("core"), "{err}");
+}
+
+/// The same refusal, made deterministic: the lib exits 3 without reading
+/// stdin, so a write the pipe buffer cannot hold MUST meet a closed pipe.
+/// With one short path the write usually lands first — train 11:23 went
+/// red the one time it did not (gate-run 10cdfa86, backlog fec29a02).
+/// The closed pipe is the refusal's own shape, and the exit code and the
+/// message stay the verdict.
+#[test]
+fn a_refusal_that_exits_before_reading_its_paths_is_still_exit_3() {
+    let many: Vec<String> = (0..20_000)
+        .map(|i| format!("docs/a-path-long-enough-to-fill-the-pipe-{i}.md"))
+        .collect();
+    let paths: Vec<&str> = many.iter().map(String::as_str).collect();
+    let err = shell_first_above("full", &paths).expect_err("full is not a tier");
     assert!(err.starts_with("exit Some(3)"), "{err}");
     assert!(err.contains("full") && err.contains("core"), "{err}");
 }

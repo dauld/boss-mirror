@@ -24,8 +24,7 @@
 //! in; `/proc` is how the sweep sees live git processes. Both are what
 //! the forge host has.
 
-use boss_testing::repo_root;
-use std::io::Write;
+use boss_testing::{feed_stdin, repo_root};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -166,7 +165,8 @@ fn a_stale_index_lock_is_removed_only_when_no_git_process_holds_the_checkout() {
         &[],
     );
     let kept = index_lock.exists();
-    live.stdin.take().unwrap().write_all(b"\n").unwrap();
+    // Only a release; `kept` above is the verdict (backlog fec29a02).
+    feed_stdin(&mut live, b"\n");
     let _ = live.wait();
     assert!(
         kept,

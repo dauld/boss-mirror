@@ -35,7 +35,9 @@
 //!     that refuse a short sha, a bare number and a short id, and
 //!     declares a timeout.
 
-use boss_testing::{dispatcher_rules_dir, repo_root, scratch_dir, write_exec, write_file};
+use boss_testing::{
+    dispatcher_rules_dir, feed_stdin, repo_root, scratch_dir, write_exec, write_file,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -198,7 +200,6 @@ impl Case {
     /// run; the count makes one certain (the birthday bound at 28
     /// bits: n²/2²⁹ expected pairs, seven at n = 50 000).
     fn ambiguous_prefix(&self, n: usize) -> String {
-        use std::io::Write;
         let mut stream = String::new();
         for i in 0..n {
             let msg = format!("noise {i}\n");
@@ -215,12 +216,9 @@ impl Case {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .expect("git fast-import runs");
-        child
-            .stdin
-            .take()
-            .expect("stdin")
-            .write_all(stream.as_bytes())
-            .expect("the stream is written");
+        // fast-import's exit status, asserted below, is the verdict
+        // (backlog fec29a02).
+        feed_stdin(&mut child, stream.as_bytes());
         let out = child.wait_with_output().expect("fast-import finishes");
         assert!(
             out.status.success(),

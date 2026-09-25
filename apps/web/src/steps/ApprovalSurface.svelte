@@ -55,6 +55,21 @@
   });
 
   async function decide(d: string): Promise<void> {
+    // The step this click was aimed at, captured BEFORE the first await
+    // and the only step any write below names (backlog d82b5f60, review
+    // of car 66de0e4b). The instance is reused when the rail switches
+    // steps, so `step` read after an await is whichever step is on
+    // screen NOW: a switch mid-gesture sent the stamp, the ceremony's
+    // `shown` and the completion PUT to a step the approver never
+    // clicked — and an ordinary step was completed by it.
+    const target = {
+      id: step.id,
+      title: step.title,
+      metadata: { ...step.metadata },
+      signOffsRequired: [...(step.sign_offs_required ?? [])],
+    };
+    const job = jobId;
+    const role = userRole;
     saving = true;
     signError = '';
     try {
@@ -76,23 +91,23 @@
       // Each leg is checked: a refused decision aborts the chain —
       // stamping and completing a step whose decision the server
       // rejected is how phantom approvals happen (packet cc9d7fc6).
-      const decided = await saveStep(jobId, step.id, body);
+      const decided = await saveStep(job, target.id, body);
       if (decided.kind === 'failed') {
         signError = decided.error;
         return;
       }
-      const required = step.sign_offs_required ?? [];
+      const required = target.signOffsRequired;
       // The ticket this gesture's own ceremony was issued, if one ran.
       // The completion below carries it: the jobs API judges a
       // presence-gated step again on the request that completes it, and
       // a bare PUT after the presence stamp answered 422 (backlog
       // b568044a). Same step, same person, same shape — nothing wider.
       let presenceTicket: string | undefined;
-      if (required.includes(userRole)) {
-        let stamp = await fetch(`/api/jobs/${jobId}/steps/${step.id}/sign-offs`, {
+      if (required.includes(role)) {
+        let stamp = await fetch(`/api/jobs/${job}/steps/${target.id}/sign-offs`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role: userRole }),
+          body: JSON.stringify({ role }),
         });
         // A presence-gated step refuses a plain session stamp; run
         // the passkey ceremony against this step's current shape and
@@ -102,17 +117,17 @@
           try {
             // The step as this surface showed it, with the decision it
             // just saved folded in — what the passkey may sign (fd7090cc).
-            const ticket = await performPresenceCeremony(jobId, step.id, {
-              title: step.title,
-              metadata: shownAfter(step.metadata, body.metadata),
+            const ticket = await performPresenceCeremony(job, target.id, {
+              title: target.title,
+              metadata: shownAfter(target.metadata, body.metadata),
             });
-            stamp = await fetch(`/api/jobs/${jobId}/steps/${step.id}/sign-offs`, {
+            stamp = await fetch(`/api/jobs/${job}/steps/${target.id}/sign-offs`, {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
                 'x-presence-ticket': ticket,
               },
-              body: JSON.stringify({ role: userRole }),
+              body: JSON.stringify({ role }),
             });
             presenceTicket = ticket;
           } catch (e) {
@@ -138,9 +153,9 @@
         // sign-offs this user's role does not carry — is answered with
         // ONE tap on the step as shown and ONE retry (backlog 3ce3c15f).
         const done = await completeWithPresence(
-          jobId,
-          step.id,
-          { title: step.title, metadata: shownAfter(step.metadata, body.metadata) },
+          job,
+          target.id,
+          { title: target.title, metadata: shownAfter(target.metadata, body.metadata) },
           presenceTicket,
         );
         // 409 (stamps missing or stale) renders as the same

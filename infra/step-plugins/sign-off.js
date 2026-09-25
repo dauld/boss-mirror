@@ -415,7 +415,11 @@
         // does not. The app's own copy of the ceremony says the same
         // since 2e893e27 (backlog f3436d99).
         const text = await begin.text().catch(() => '');
-        throw new Error(`presence ceremony unavailable (${begin.status}): ${text}`);
+        const refused = new Error(`presence ceremony unavailable (${begin.status}): ${text}`);
+        // The status travels with the error: a 412 means the step moved
+        // under this surface, which its callers answer differently.
+        refused.status = begin.status;
+        throw refused;
       }
       const opts = await begin.json();
       const cred = await navigator.credentials.get({
@@ -457,6 +461,18 @@
         throw new Error(`assertion rejected (${finish.status}): ${text}`);
       }
       return (await finish.json()).ticket;
+    }
+
+    // A begin refused 412 says the step no longer matches what this
+    // surface shows — another writer moved it (backlog d82b5f60, review of
+    // car 66de0e4b). What this mount rendered, "Decision saved" included,
+    // is no longer what the step holds, and nothing was signed. So the
+    // stale claim comes down, the host is asked to refresh, and the
+    // approver is told to reopen the step rather than sign a copy this
+    // mount can no longer vouch for.
+    function stepMovedUnderUs() {
+      progress = ['The step changed since it was shown, so nothing was signed — reopen it to read it as it stands'];
+      if (typeof onUpdate === 'function') onUpdate();
     }
 
     async function sign(role) {
@@ -504,6 +520,7 @@
         }
       } catch (e) {
         error = `Could not record the ${role} signature: ${e}`;
+        if (e && e.status === 412) stepMovedUnderUs();
         return false;
       } finally {
         busy = wasBusy;
@@ -607,11 +624,17 @@
             body: JSON.stringify({ status: 'completed' }),
           });
         };
-        let done = await complete(presenceTicketHeld);
         // The held ticket is spent on the attempt it rode, whatever the
         // answer: kept, it rode every later completion from this mount
-        // long past its two-minute life (backlog 3ce3c15f).
-        presenceTicketHeld = null;
+        // long past its two-minute life (backlog 3ce3c15f). In a finally,
+        // because a request that THREW has no answer, and the ticket
+        // outlived it (d82b5f60).
+        let done;
+        try {
+          done = await complete(presenceTicketHeld);
+        } finally {
+          presenceTicketHeld = null;
+        }
         // A completion refused for PRESENCE — after a reload the stamp is
         // already on the step and this mount holds no ticket; a held one
         // may have expired; or no role this user signs is required — is
@@ -621,34 +644,44 @@
         // was forced. The ticket is the gateway's, minted by that
         // ceremony for this step and this person; the server judges it on
         // the retry exactly as on a stamp. Never a second ceremony.
-        let retried = false;
-        if (done.status === 422) {
-          const refusal = await done
+        const refusedForPresence = async (res) => {
+          if (res.status !== 422) return false;
+          const refusal = await res
             .clone()
             .json()
             .catch(() => null);
-          if (refusal && refusal.required === 'presence') {
-            progress.push('Completing needs your passkey');
-            renderAll();
-            let ticket;
-            try {
-              ticket = await presenceTicket();
-            } catch (e) {
-              error = `Could not complete: ${e && e.message ? e.message : e}`;
-              return;
-            }
-            done = await complete(ticket);
-            retried = true;
+          return Boolean(refusal && refusal.required === 'presence');
+        };
+        let retried = false;
+        if (await refusedForPresence(done)) {
+          progress.push('Completing needs your passkey');
+          renderAll();
+          let ticket;
+          try {
+            ticket = await presenceTicket();
+          } catch (e) {
+            error = `Could not complete: ${e && e.message ? e.message : e}`;
+            // The decision DID land: the host re-reads the step, and a
+            // 412 also takes down the claim this mount can no longer
+            // vouch for (d82b5f60).
+            if (e && e.status === 412) stepMovedUnderUs();
+            else if (typeof onUpdate === 'function') onUpdate();
+            return;
           }
+          done = await complete(ticket);
+          retried = true;
         }
         if (!done.ok) {
           // 400: a required-at-done contract this surface did not
           // satisfy — name it, never swallow it (v1's ApprovalSurface
           // sibling swallowed these, which is how a click could
           // silently do nothing). 409: stale stamps; the server's own
-          // text names which roles.
+          // text names which roles. Only a retry refused for PRESENCE
+          // again is "refused again after a fresh passkey tap" — a 409
+          // after the tap is labelled by its own reason (d82b5f60).
+          const again = retried && (await refusedForPresence(done));
           const text = await done.text();
-          error = retried
+          error = again
             ? `The completion was refused again after a fresh passkey tap — ${done.status}: ${text}`
             : `${done.status}: ${text}`;
           // The 409 names the roles whose stamps the server will not
