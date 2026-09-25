@@ -6,6 +6,8 @@ use axum::extract::State;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
+#[cfg(test)]
+mod a_read_only_session_cannot_write;
 mod api;
 mod inquiries;
 mod perf;
@@ -911,9 +913,23 @@ async fn handle_perf(State(state): State<Arc<AppState>>) -> axum::Json<perf::Per
 
 /// Clears all recorded histograms. Useful before/after a specific
 /// benchmark or fix so percentiles aren't diluted by old data.
-async fn handle_perf_reset(State(state): State<Arc<AppState>>) -> &'static str {
+///
+/// The gateway's one own write that is not an auth ceremony, and until
+/// backlog 07e797b4 it answered anyone — no session asked for. It now
+/// passes the same edge gate as every proxied write: a session (401),
+/// and not a read-only one (the named 403).
+async fn handle_perf_reset(
+    State(state): State<Arc<AppState>>,
+    method: axum::http::Method,
+    uri: axum::http::Uri,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Some(refusal) = proxy::writer_gate(&headers, &method, uri.path(), &state) {
+        return refusal;
+    }
     state.perf.reset();
-    "ok"
+    "ok".into_response()
 }
 
 /// Load the HMAC session key from disk, or generate one on first run.

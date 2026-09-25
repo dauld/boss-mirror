@@ -188,7 +188,6 @@ write_config ledger <<EOF
 postgres_url = "$DB_URL"
 http_bind = "0.0.0.0:$(p ledger)"
 nats_url = "$NATS_URL"
-classes_api_url = "http://127.0.0.1:$(p classes)"
 EOF
 
 # file_refs — the content-addressed per-packet blob store (backlog

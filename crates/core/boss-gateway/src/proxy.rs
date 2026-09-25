@@ -5,6 +5,9 @@
 //!   1. Require a valid `boss_session` cookie; return 401 on miss.
 //!      Login + cookie minting runs through local-auth (the v1 OSS
 //!      auth path).
+//!   1a. Refuse any method but GET/HEAD/OPTIONS from a read-only
+//!      session (the guest's `audit-readonly`) with a named 403, before
+//!      any upstream is contacted — [`read_only_write_refusal`].
 //!   2. Forward the request to the owning service's HTTP port,
 //!      stripping hop-by-hop headers both ways, streaming the body.
 //!   3. Surface upstream errors as 502 with a short reason string.
@@ -26,6 +29,10 @@ use tracing::{debug, warn};
 
 use crate::AppState;
 use boss_gateway::session::{self, Session, find_cookie};
+
+/// The named refusal a read-only session's write gets at the edge —
+/// see [`read_only_write_refusal`].
+pub(crate) const READ_ONLY_REFUSAL: &str = "a read-only session cannot write";
 
 /// Static configuration for a single reverse-proxy mount point.
 pub struct ProxyConfig {
@@ -102,11 +109,80 @@ pub async fn handle(
     req: Request,
     config: &'static ProxyConfig,
 ) -> Response {
-    if !has_valid_session(req.headers(), &state.session_key) {
-        return unauthorized();
+    if let Some(refusal) = writer_gate(req.headers(), req.method(), req.uri().path(), &state) {
+        return refusal;
     }
-
     forward_to_upstream(state, req, config).await
+}
+
+/// The edge's two questions, in order: is there a session (401 if
+/// not), and may it send this method (the named 403 if not). `Some` is
+/// the refusal to answer with; `None` lets the request through. Shared
+/// by every session-gated proxy and by the gateway's own writes that
+/// are not auth ceremonies (`/api/gateway/perf/reset`).
+pub(crate) fn writer_gate(
+    headers: &HeaderMap,
+    method: &Method,
+    path: &str,
+    state: &AppState,
+) -> Option<Response> {
+    match valid_session(headers, &state.session_key) {
+        None => Some(unauthorized()),
+        Some(session) => read_only_write_refusal(&session, method, path),
+    }
+}
+
+/// A read-only session may read and must never write, and the gateway
+/// says so HERE, before any upstream sees the request (backlog
+/// 07e797b4, 2026-09-25). The blast-radius sweep of car e2209174 found
+/// about 110 upstream write routes — dispatcher rule publish/retire,
+/// `POST /api/jobs`, the scheduling calendar token, ~27 ledger writes,
+/// messages with no ownership check — that authorize no caller, so any
+/// valid session reached them, including the anonymous one
+/// `POST /api/auth/guest` mints on a guest-enabled instance. Each
+/// service's own authorization follows as its own item; this is the
+/// floor under all of them, and it holds for a route added tomorrow.
+///
+/// "Write" is every method but GET, HEAD and OPTIONS — the methods the
+/// SPA and every service here use for reads. A read spelled as a POST
+/// would be refused too, and deliberately: none is reached from a
+/// read-only session's browsing (the policy `my-scope` POST the
+/// fallback below names is no longer fetched by the web), and an
+/// allowlist of "POSTs that are really reads" is a list of holes.
+///
+/// Read-only is `boss_core::roles::is_read_only_role` of the session's
+/// effective role (a roleless session is audit-readonly, as the
+/// role-header layer tells every service). Design 2830b6b7's `visitor`
+/// role joins that ONE predicate and is refused here with no edit.
+pub(crate) fn read_only_write_refusal(
+    session: &Session,
+    method: &Method,
+    path: &str,
+) -> Option<Response> {
+    let role = session.effective_role();
+    let safe = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
+    if safe || !boss_core::roles::is_read_only_role(role) {
+        return None;
+    }
+    warn!(
+        user = %session.username,
+        role,
+        method = %method,
+        path,
+        "refused a write from a read-only session at the edge"
+    );
+    Some(
+        (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": READ_ONLY_REFUSAL,
+                "role": role,
+                "method": method.as_str(),
+                "path": path,
+            })),
+        )
+            .into_response(),
+    )
 }
 
 /// App-shaped proxy variant — for sub-apps the browser NAVIGATES to
@@ -121,7 +197,7 @@ pub async fn handle_app(
     req: Request,
     config: &'static ProxyConfig,
 ) -> Response {
-    if !has_valid_session(req.headers(), &state.session_key) {
+    let Some(session) = valid_session(req.headers(), &state.session_key) else {
         if is_document_navigation(req.method(), req.headers()) {
             let next: String = req
                 .uri()
@@ -141,6 +217,12 @@ pub async fn handle_app(
             return (StatusCode::SEE_OTHER, headers).into_response();
         }
         return unauthorized();
+    };
+    // The simulator's control writes were refused to audit-readonly by
+    // the service's own operator gate; the edge now refuses them first,
+    // the same as every other upstream's (backlog 07e797b4).
+    if let Some(refusal) = read_only_write_refusal(&session, req.method(), req.uri().path()) {
+        return refusal;
     }
     forward_to_upstream(state, req, config).await
 }
@@ -226,14 +308,10 @@ fn is_blocked_request_header(name_lower: &str) -> bool {
     HOP_BY_HOP.contains(&name_lower) || name_lower == boss_core::sim_origin::SIM_ORIGIN_HEADER
 }
 
-fn has_valid_session(headers: &HeaderMap, key: &[u8]) -> bool {
-    let Some(cookie_header) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) else {
-        return false;
-    };
-    let Some(raw) = find_cookie(cookie_header, session::COOKIE_NAME) else {
-        return false;
-    };
-    Session::decode(raw, key).is_ok()
+fn valid_session(headers: &HeaderMap, key: &[u8]) -> Option<Session> {
+    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+    let raw = find_cookie(cookie_header, session::COOKIE_NAME)?;
+    Session::decode(raw, key).ok()
 }
 
 fn unauthorized() -> Response {

@@ -89,6 +89,20 @@ impl Session {
         }
     }
 
+    /// The role this session acts as. A session with no role is read
+    /// as `audit-readonly` — read everywhere, write nothing — and that
+    /// fallback lives here once, because two readers must agree on it:
+    /// the role-header layer that tells every service who is calling,
+    /// and the proxy that refuses a read-only session's writes before
+    /// any service is called (backlog 07e797b4). Were they to disagree,
+    /// a roleless session would be read-only downstream and a writer
+    /// at the edge.
+    pub fn effective_role(&self) -> &str {
+        self.role
+            .as_deref()
+            .unwrap_or(boss_core::roles::AUDIT_READONLY_ROLE)
+    }
+
     /// Encode and sign into a cookie value.
     pub fn encode(&self, key: &[u8]) -> String {
         let payload = serde_json::to_vec(self).expect("serialize Session");

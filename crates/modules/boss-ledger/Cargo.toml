@@ -50,7 +50,6 @@ hex = "0.4"
 boss-core = { path = "../../core/boss-core" }
 boss-clock-client = { path = "../../core/boss-clock-client" }
 boss-ports = { path = "../../core/boss-ports" }
-boss-classes-client = { path = "../../core/boss-classes-client" }
 boss-events = { path = "../../core/boss-events" }
 boss-nats = { path = "../../core/boss-nats" }
 boss-policy = { path = "../../core/boss-policy" }

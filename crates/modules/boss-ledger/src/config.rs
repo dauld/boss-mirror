@@ -15,12 +15,6 @@ pub struct LedgerApiConfig {
     /// won't have audit_log rows to replay).
     #[serde(default)]
     pub nats_url: Option<String>,
-    /// boss-classes HTTP API used at startup to seed the executive
-    /// role cache (`metadata.is_executive = true`). When absent,
-    /// `has_global_read` skips the executive set and only
-    /// platform-admin / audit-readonly grant global read.
-    #[serde(default)]
-    pub classes_api_url: Option<String>,
 }
 
 impl LedgerApiConfig {

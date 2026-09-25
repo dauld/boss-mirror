@@ -51,6 +51,21 @@ pub const PLATFORM_ADMIN_ROLE: &str = "platform-admin";
 /// gateway perf, etc.) don't reject anonymous OSS visitors.
 pub const AUDIT_READONLY_ROLE: &str = "audit-readonly";
 
+/// True for a role that may read and must never write — the ONE
+/// predicate for "read-only role" (backlog 07e797b4, 2026-09-25). The
+/// gateway refuses every method but GET/HEAD/OPTIONS from a session
+/// whose role answers true here, before any upstream sees the request,
+/// because about 110 upstream write routes authorized no caller and the
+/// guest session carries this role.
+///
+/// `audit-readonly` alone today. Design 2830b6b7 adds a `visitor` role
+/// and reuses THIS function for it rather than growing a second list:
+/// a role joins the read-only set here, and every edge that asks
+/// inherits it.
+pub fn is_read_only_role(role: &str) -> bool {
+    role == AUDIT_READONLY_ROLE
+}
+
 /// Break-glass role — the emergency session minted by the gateway's
 /// hardware-key WebAuthn ceremony (docs/design/break-glass-is-a-key-
 /// you-hold.md). Deliberately NARROW (Q4): it carries exactly the
@@ -182,6 +197,27 @@ mod tests {
         assert!(has_global_read(AUDIT_READONLY_ROLE));
         assert!(!has_global_read("service-tech"));
         assert!(!has_global_read("admin")); // legacy "admin" is not platform-admin
+    }
+
+    /// The read-only set is audit-readonly and nothing else today: not
+    /// the roles that merely READ everything (platform-admin, a seeded
+    /// executive), not break-glass, not an empty or unknown code — the
+    /// gateway refuses every write from a role in this set, so a false
+    /// positive would lock a writer out at the edge.
+    #[test]
+    fn only_audit_readonly_is_a_read_only_role() {
+        seed_executive_set();
+        assert!(is_read_only_role(AUDIT_READONLY_ROLE));
+        for role in [
+            PLATFORM_ADMIN_ROLE,
+            BREAK_GLASS_ROLE,
+            "ceo",
+            "service-tech",
+            "",
+            "Audit-Readonly",
+        ] {
+            assert!(!is_read_only_role(role), "{role:?} is not read-only");
+        }
     }
 
     /// Q4 (break-glass-is-a-key-you-hold): the emergency role is

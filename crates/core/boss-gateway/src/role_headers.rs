@@ -158,8 +158,9 @@ fn build_user_json(session: &Session) -> String {
     // Default-fall-through is `audit-readonly` so that any session
     // reaching a backend without an explicit role gets read-everywhere
     // / write-nothing semantics — belt-and-suspenders for any path
-    // that lands here with role == None.
-    let role = session.role.as_deref().unwrap_or("audit-readonly");
+    // that lands here with role == None. The fallback is the Session's
+    // own, shared with the proxy's read-only refusal.
+    let role = session.effective_role();
     // serde_json for robust escaping of id/role — some usernames
     // contain characters (`.`, `-`) that are header-safe but we want
     // to be defensive.
