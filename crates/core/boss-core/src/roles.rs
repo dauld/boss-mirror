@@ -67,14 +67,29 @@ pub fn has_global_read(role: &str) -> bool {
     role == PLATFORM_ADMIN_ROLE || role == AUDIT_READONLY_ROLE || is_executive(role)
 }
 
-/// True for roles allowed to administer the gateway's auth surface
-/// (onboard local credentials, issue resets). Global-read roles keep
-/// the authority they have always had; `break-glass` joins them
-/// because auth administration is one of its three named levers —
-/// without it, a lockout emergency could not repair the door it came
-/// in through.
+/// The roles allowed to administer the gateway's auth surface
+/// (onboard local credentials, issue resets) — named, never derived.
+///
+/// - `platform-admin`: the deploy superuser, who onboards the first
+///   users and holds every registry write in core's policy defaults.
+/// - `break-glass`: auth administration is one of its three named
+///   levers; without it a lockout emergency could not repair the door
+///   it came in through.
+///
+/// This set used to be `has_global_read` plus break-glass (backlog
+/// 34242f9a, 2026-09-25). Global read is a READ grant, and inheriting
+/// it handed a write to two members that were never meant to hold
+/// one: `audit-readonly`, the role `POST /api/auth/guest` mints for
+/// any anonymous visitor and whose own contract says it never writes;
+/// and every tenant-flagged executive, whose `is_executive` flag
+/// means "reads everything" and was never a grant to overwrite any
+/// credential — the platform-admin's included, which makes onboard a
+/// path from a tenant role to the deploy superuser.
+pub const AUTH_ADMINISTRATOR_ROLES: [&str; 2] = [PLATFORM_ADMIN_ROLE, BREAK_GLASS_ROLE];
+
+/// True for exactly the roles in [`AUTH_ADMINISTRATOR_ROLES`].
 pub fn can_administer_auth(role: &str) -> bool {
-    has_global_read(role) || role == BREAK_GLASS_ROLE
+    AUTH_ADMINISTRATOR_ROLES.contains(&role)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +201,51 @@ mod tests {
         seed_executive_set();
         assert!(can_administer_auth(BREAK_GLASS_ROLE));
         assert!(can_administer_auth(PLATFORM_ADMIN_ROLE));
-        assert!(can_administer_auth("ceo"));
         assert!(!can_administer_auth("service-tech"));
+    }
+
+    /// Backlog 34242f9a (2026-09-25). `audit-readonly` is the role
+    /// the guest endpoint mints for any anonymous visitor, and its own
+    /// contract above says it never writes. It held global read, and
+    /// auth administration used to inherit that set whole — so a
+    /// guest could overwrite any local credential. Global read is not
+    /// write authority; this pins the two apart.
+    #[test]
+    fn audit_readonly_cannot_administer_auth() {
+        seed_executive_set();
+        assert!(has_global_read(AUDIT_READONLY_ROLE), "the read half stays");
+        assert!(!can_administer_auth(AUDIT_READONLY_ROLE));
+    }
+
+    /// Same defect, second member: a tenant-flagged executive's
+    /// `is_executive` is a READ flag, and onboard overwrites ANY
+    /// credential — the platform-admin's included — so inheriting it
+    /// would let a tenant role make itself the deploy superuser.
+    #[test]
+    fn a_seeded_executive_cannot_administer_auth() {
+        seed_executive_set();
+        assert!(has_global_read("ceo"), "the read half stays");
+        for role in ["ceo", "coo", "cto", "cfo"] {
+            assert!(
+                !can_administer_auth(role),
+                "{role} must not administer auth"
+            );
+        }
+    }
+
+    /// The admitted set is named, not derived: exactly these two.
+    #[test]
+    fn auth_administrators_are_named_explicitly() {
+        seed_executive_set();
+        for role in ["", "guest", "admin", "smoke-tester", "owner"] {
+            assert!(
+                !can_administer_auth(role),
+                "{role:?} must not administer auth"
+            );
+        }
+        assert_eq!(
+            AUTH_ADMINISTRATOR_ROLES,
+            [PLATFORM_ADMIN_ROLE, BREAK_GLASS_ROLE]
+        );
     }
 }

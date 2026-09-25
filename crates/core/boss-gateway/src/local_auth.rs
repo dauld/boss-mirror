@@ -35,8 +35,9 @@
 //!
 //! Onboarding (admin-only):
 //! - `POST /api/auth/onboard {email, password}` — creates a
-//!   credential row. Caller must be authenticated as a role with
-//!   `policy:auth-admin` (which platform-admin / ceo / coo carry).
+//!   credential row. Caller's session role must pass
+//!   `boss_core::roles::can_administer_auth` — platform-admin or
+//!   break-glass, and nothing else (backlog 34242f9a).
 //! - `POST /api/auth/issue-reset {email}` — issues a one-time
 //!   reset token (returns it to the admin; admin shares with the
 //!   user out-of-band).
@@ -634,7 +635,7 @@ pub struct OnboardRequest {
 
 /// `POST /api/auth/onboard` — admin-only. Creates a credential
 /// row for an existing Employee email. Verified via the caller's
-/// role (must be platform-admin / ceo / coo).
+/// role (`can_administer_auth`: platform-admin or break-glass).
 pub async fn onboard(
     State(state): State<Arc<LocalAuthState>>,
     headers: HeaderMap,
@@ -798,9 +799,11 @@ fn is_admin(headers: &HeaderMap, key: &[u8]) -> bool {
     let Some(s) = extract_session(headers, key) else {
         return false;
     };
-    // `can_administer_auth`, not `has_global_read`: the same set plus
+    // `can_administer_auth`, not `has_global_read`: platform-admin and
     // the narrow break-glass role, whose auth-administration lever is
     // exactly these endpoints (break-glass-is-a-key-you-hold.md Q4).
+    // It used to be the global-read set plus break-glass, which let
+    // the guest's `audit-readonly` session through (backlog 34242f9a).
     s.role
         .as_deref()
         .map(boss_core::roles::can_administer_auth)
@@ -1212,6 +1215,157 @@ mod tests {
                 .consume_reset_token("op@example.com", &token, "yet-pw")
                 .is_err()
         );
+    }
+
+    // ---- who may administer auth (backlog 34242f9a) ------------------
+    //
+    // `is_admin` admitted every `has_global_read` role, and that set
+    // includes `audit-readonly` — the role `guest()` hands any
+    // anonymous visitor on a guest-enabled deployment, and the seeded
+    // `emp-audit` external auditor's. So a guest could set a known
+    // password on any employee's email and sign in as them, or mail
+    // reset links outside `forgot`'s rate limit.
+
+    fn admin_gate_state() -> (TempDir, Arc<LocalAuthState>, Arc<CapturingTransport>) {
+        let (td, store) = temp_store();
+        let cap = Arc::new(CapturingTransport::default());
+        let st = Arc::new(LocalAuthState {
+            store,
+            session_key: vec![7u8; 32],
+            http: reqwest::Client::new(),
+            audit: crate::audit::AuthAudit::disabled(),
+            guest_access: true,
+            oidc: None,
+            mail: cap.clone(),
+            public_url: "https://boss.test".into(),
+            forgot_seen: Default::default(),
+        });
+        (td, st, cap)
+    }
+
+    /// Runtime-generated, like `a_bad_password_lands_a_denied_event`:
+    /// no credential-shaped literal in the test binary.
+    fn fresh_password() -> String {
+        use rand::RngExt;
+        format!("pw-{}", rand::rng().random::<u64>())
+    }
+
+    fn cookie_headers(cookie: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{}={cookie}", session::COOKIE_NAME)).unwrap(),
+        );
+        headers
+    }
+
+    /// A session signed with the state's own key, as `login` would
+    /// mint it for an employee holding `role`.
+    fn session_headers(st: &LocalAuthState, role: &str, employee_id: &str) -> HeaderMap {
+        let mut sess = Session::new(format!("{employee_id}@example.com"), 60);
+        sess.role = Some(role.to_string());
+        sess.employee_id = Some(employee_id.to_string());
+        cookie_headers(&sess.encode(&st.session_key))
+    }
+
+    async fn try_onboard(st: &Arc<LocalAuthState>, headers: HeaderMap, email: &str) -> Response {
+        onboard(
+            State(st.clone()),
+            headers,
+            Json(OnboardRequest {
+                email: email.into(),
+                password: fresh_password(),
+            }),
+        )
+        .await
+    }
+
+    async fn try_issue_reset(
+        st: &Arc<LocalAuthState>,
+        headers: HeaderMap,
+        email: &str,
+    ) -> Response {
+        issue_reset(
+            State(st.clone()),
+            headers,
+            Json(IssueResetRequest {
+                email: email.into(),
+            }),
+        )
+        .await
+    }
+
+    /// The live shape of the defect: a cookie minted by `guest()`
+    /// itself, not a hand-built one, so the role it carries is exactly
+    /// the one an anonymous visitor would present.
+    #[tokio::test]
+    async fn a_guest_session_may_not_onboard_or_reset_a_credential() {
+        let (_td, st, cap) = admin_gate_state();
+        let victim_pw = fresh_password();
+        st.store
+            .upsert("victim@example.com", &victim_pw)
+            .expect("seed");
+
+        let minted = guest(State(st.clone())).await;
+        assert_eq!(minted.status(), StatusCode::OK);
+        let guest_cookie = cookie_value(&minted);
+
+        let over = try_onboard(&st, cookie_headers(&guest_cookie), "victim@example.com").await;
+        assert_eq!(over.status(), StatusCode::FORBIDDEN, "overwrite refused");
+        let new = try_onboard(&st, cookie_headers(&guest_cookie), "new@example.com").await;
+        assert_eq!(new.status(), StatusCode::FORBIDDEN, "create refused");
+        let reset = try_issue_reset(&st, cookie_headers(&guest_cookie), "victim@example.com").await;
+        assert_eq!(reset.status(), StatusCode::FORBIDDEN, "reset refused");
+
+        assert!(
+            st.store.verify("victim@example.com", &victim_pw).is_ok(),
+            "the victim's password must be untouched"
+        );
+        assert!(!st.store.contains("new@example.com"), "nothing created");
+        assert!(cap.sent.lock().expect("lock").is_empty(), "no mail sent");
+    }
+
+    /// The seeded `emp-audit` external auditor carries the same role
+    /// through an ordinary login; its contract is read-only too.
+    #[tokio::test]
+    async fn an_audit_readonly_login_may_not_onboard_or_reset_a_credential() {
+        let (_td, st, cap) = admin_gate_state();
+        let victim_pw = fresh_password();
+        st.store
+            .upsert("victim@example.com", &victim_pw)
+            .expect("seed");
+        let auditor = || session_headers(&st, boss_core::roles::AUDIT_READONLY_ROLE, "emp-audit");
+
+        let over = try_onboard(&st, auditor(), "victim@example.com").await;
+        assert_eq!(over.status(), StatusCode::FORBIDDEN);
+        let reset = try_issue_reset(&st, auditor(), "victim@example.com").await;
+        assert_eq!(reset.status(), StatusCode::FORBIDDEN);
+
+        assert!(st.store.verify("victim@example.com", &victim_pw).is_ok());
+        assert!(cap.sent.lock().expect("lock").is_empty());
+    }
+
+    /// The control that makes the two refusals above mean something:
+    /// the same cookie plumbing, carrying an admitted role, is let
+    /// through — so a 403 there is the gate's answer, not a cookie
+    /// the handler failed to read.
+    #[tokio::test]
+    async fn the_named_auth_administrators_may_onboard_and_reset() {
+        for role in [
+            boss_core::roles::PLATFORM_ADMIN_ROLE,
+            boss_core::roles::BREAK_GLASS_ROLE,
+        ] {
+            let (_td, st, cap) = admin_gate_state();
+            let created =
+                try_onboard(&st, session_headers(&st, role, "emp-op"), "u@example.com").await;
+            assert_eq!(created.status(), StatusCode::CREATED, "{role} onboards");
+            assert!(st.store.contains("u@example.com"));
+
+            let reset =
+                try_issue_reset(&st, session_headers(&st, role, "emp-op"), "u@example.com").await;
+            assert_eq!(reset.status(), StatusCode::OK, "{role} issues a reset");
+            assert_eq!(cap.sent.lock().expect("lock").len(), 1, "{role}: one mail");
+        }
     }
 
     #[test]

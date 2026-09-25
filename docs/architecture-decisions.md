@@ -2145,10 +2145,10 @@ stand-down above: a department with no protocol at all has nothing to
 dogfood. Nothing to build; the batch fix landed on its own (#586).
 
 **Every page belongs to a department or to Home, at `/<code>/<slug>`;
-`/ux` dissolves and its old links keep working** (design `8c3e9599`,
-David 2026-09-25, the design approved and its one question answered as
-proposed: "that roster looks right, go ahead with the design"; while it
-was being measured he added: "let's not get trapped by forgetting that
+`/ux` is deleted outright and its old links stop resolving** (design
+`8c3e9599`, David 2026-09-25, the design approved and its one question
+answered as proposed: "that roster looks right, go ahead with the
+design"; while it was being measured he added: "let's not get trapped by forgetting that
 something like Design might be a department and a function within a
 department"). Measured on `d093f6e6`: the router's `/ux` block matched
 50 patterns and already answered every one without the prefix, so the
@@ -2196,16 +2196,22 @@ and a test holds that list against the catalog and the gateway router.
 first entry, else its jobs view. The design's table maps all 50
 patterns and deletes no page. A page whose owner is not a department on
 this instance renders not-found with one door back to Home, never a
-module-off notice. (4) **Old paths stay permanently, in one
-definition:** each catalog entry and detail pattern carries `legacy:
-[...]`, resolved with `history.replaceState` to its canonical path. A
-legacy path is a recorded move, not a guess, so bookmarks, surface-opens
-telemetry and page-audit routes all converge on one spelling. Pins hold
-that every legacy path parses to its canonical route, that no alias
-names an alias, and that no legacy path is canonical. The page-audit
-opener canonicalises through the same aliases. The gateway is
-untouched, because a Rust copy of the map would be a fact living
-twice. (5) **Navigation derives from the registry.** Tabs are Home,
+module-off notice. (4) **Old `/ux` paths stop resolving, deliberately,
+before 1.0.0.** The design as approved kept every old path working
+permanently, through a `legacy: [...]` field on each catalog entry,
+alias pins, and a page-audit opener that canonicalised through them.
+David superseded that the same day, ~14:30Z: "We can just retire the
+UX pages. Remember, this is only a 1-person operation at the moment,
+and I know the changes we are making." So `/ux` is deleted outright,
+with no legacy field, no alias and no redirect. The stored `/ux` URLs
+counted above, the page-audit routes and any bookmark stop resolving
+and render not-found. That is a choice, not an oversight: one operator
+knows every move made, so an alias would carry nothing he needs.
+Keeping old addresses working is still the good habit, and it becomes
+a requirement at 1.0.0. Car 1 (`163fdf7b`, the legacy field) was
+declined (backlog `d61ba8a0`). The gateway is untouched, because it
+already serves the SPA for every path. (5) **Navigation derives from
+the registry.** Tabs are Home,
 then Simulator when the sim module is on, then every live root
 department in `sort_order`. A sidebar lists the department's own
 entries, then its practices' surfaces, then its child units, then
@@ -2219,13 +2225,14 @@ and design language, `9230dfe4`), `marketing`, `sales`, `support`,
 actor's name keeps a page, with its sidebar stood down (`36b79159`).
 `production`, `warehouse`, `distribution`, `maintenance`, `service` and
 `qa` are retired on this instance and kept for the Ales playground.
-Not built: all of it. The plan is ten cars, filed as backlog items
-that cite the design. The departments write door and the LLC roster
-come first and block nothing. The legacy field and Home at the root
-must land before any page moves. Registry-derived routing comes next,
-then the four department moves, then the links. Deleting `/ux` comes
-last in the routing chain, and the practice axis rides with
-`9230dfe4` after the write door.
+Not built: all of it. The plan was ten cars, filed as backlog items
+that cite the design, and car 1 was declined. The departments write
+door and the LLC roster come first and block nothing. Registry-derived
+routing comes next, then the four department moves, then the links.
+Deleting `/ux` comes last in the routing chain, and Home's pages move
+to the root with that deletion, on car 8 (`924ace8b`), because car 1
+had carried them. The practice axis rides with `9230dfe4` after the
+write door.
 
 **The look is one light theme, Transit, and the map's colours are the
 first to route through it** (design `dea94998`, David 2026-09-23: "I

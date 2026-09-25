@@ -13,10 +13,11 @@
   //      one-time plaintext token (1h TTL). Admin shares it
   //      out-of-band; user consumes it on /login (mode=reset).
   //
-  // Server-side gating already requires platform-admin / ceo /
-  // coo / cto. The SPA gate below is just for affordance — a
-  // non-admin who navigates here sees the "no access" notice
-  // instead of forms that would 403 anyway.
+  // Server-side gating requires platform-admin or break-glass
+  // (boss_core::roles::can_administer_auth; backlog 34242f9a took
+  // the executives and audit-readonly out of it). The SPA gate below
+  // is just for affordance — a non-admin who navigates here sees the
+  // "no access" notice instead of forms that would 403 anyway.
 
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import Section from '@boss/web-kit/ui/Section.svelte';
@@ -53,9 +54,7 @@
     })();
   });
 
-  let isAdmin = $derived(
-    role === 'platform-admin' || role === 'ceo' || role === 'coo' || role === 'cto',
-  );
+  let isAdmin = $derived(role === 'platform-admin' || role === 'break-glass');
 
   async function onboard(e: Event): Promise<void> {
     e.preventDefault();
@@ -154,8 +153,7 @@
   {#if !isAdmin}
     <div class="no-access">
       <strong>Admin only.</strong> The onboard + reset flows require a
-      <code>platform-admin</code>, <code>ceo</code>, <code>coo</code>, or
-      <code>cto</code> role. {#if me}You're signed in as <code>{me}</code>{#if role}
+      <code>platform-admin</code> or <code>break-glass</code> session. {#if me}You're signed in as <code>{me}</code>{#if role}
       with role <code>{role}</code>{/if}.{:else}You're not signed in.{/if}
     </div>
   {:else}
