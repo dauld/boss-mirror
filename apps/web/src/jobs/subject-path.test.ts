@@ -18,6 +18,7 @@
 // its own lands on its own packets without a branch naming it.
 import { describe, expect, it } from 'bun:test';
 import { subjectPath } from './types';
+import { parseRoute, type Route } from '../router';
 import type { Subject } from './types';
 
 const subject = (subject_kind: string, id: string): Subject =>
@@ -26,31 +27,52 @@ const subject = (subject_kind: string, id: string): Subject =>
 describe('subjectPath', () => {
   it('sends a campaign to its own packets, not to a workflow kind', () => {
     expect(subjectPath(subject('campaign', 'camp-2026-spring'))).toBe(
-      '/jobs?subject_id=camp-2026-spring',
+      '/ux/jobs?subject_id=camp-2026-spring',
     );
   });
 
   it('url-encodes a campaign id', () => {
-    expect(subjectPath(subject('campaign', 'camp a/b'))).toBe('/jobs?subject_id=camp%20a%2Fb');
+    expect(subjectPath(subject('campaign', 'camp a/b'))).toBe('/ux/jobs?subject_id=camp%20a%2Fb');
   });
 
   it('sends a custom subject to its own packets, not to Home', () => {
-    expect(subjectPath(subject('custom', '/ux/jobs'))).toBe('/jobs?subject_id=%2Fux%2Fjobs');
+    expect(subjectPath(subject('custom', '/ux/jobs'))).toBe('/ux/jobs?subject_id=%2Fux%2Fjobs');
   });
 
   it('sends a registry kind this file never names to its own packets', () => {
     // `recipe` is a brewery-tenant row, `department` a platform one
     // added after this switch was written; neither has a case here.
     expect(subjectPath(subject('recipe', 'west-coast-ipa'))).toBe(
-      '/jobs?subject_id=west-coast-ipa',
+      '/ux/jobs?subject_id=west-coast-ipa',
     );
-    expect(subjectPath(subject('department', 'it'))).toBe('/jobs?subject_id=it');
+    expect(subjectPath(subject('department', 'it'))).toBe('/ux/jobs?subject_id=it');
   });
 
   it('names no workflow kind on any branch', () => {
     const kinds = ['asset', 'account', 'purchase_order', 'campaign', 'employee', 'vendor', 'custom'];
     for (const k of kinds) {
       expect(subjectPath(subject(k, 'x'))).not.toContain('kind=');
+    }
+  });
+
+  // The branches spelled the router's unprefixed legacy paths — /jobs,
+  // /accounts, /assets — which parse only because the router strips
+  // `/ux` "defensively"; every other link in the app is the canonical
+  // /ux/… (backlog d0b93b80, found by the /ux/jobs page audit's spec).
+  it('spells every branch under /ux, the way entityHref does, to a route the router serves', () => {
+    const cases: ReadonlyArray<[string, string, Route['kind']]> = [
+      ['asset', '/ux/assets/x', 'asset'],
+      ['account', '/ux/accounts/x', 'account'],
+      ['purchase_order', '/ux/purchase-orders/x', 'po'],
+      ['employee', '/ux/people/x', 'employee'],
+      ['vendor', '/ux/vendors/x', 'vendor'],
+      ['custom', '/ux/jobs?subject_id=x', 'jobs'],
+    ];
+    for (const [k, want, route] of cases) {
+      const p = subjectPath(subject(k, 'x'));
+      expect(p).toBe(want);
+      const [path, query = ''] = p.split('?');
+      expect(parseRoute(path!, query ? `?${query}` : '').kind).toBe(route);
     }
   });
 

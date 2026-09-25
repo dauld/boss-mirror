@@ -6,6 +6,7 @@
   // pipeline, Refurb queue) can mount this component with a kind
   // pre-filter. Same pattern as the React app.
 
+  import { onMount } from 'svelte';
   import { navigate, href } from '../router';
   import Link from '@boss/web-kit/ui/Link.svelte';
   import { rowLink } from '@boss/web-kit/ui/RowLink';
@@ -18,7 +19,7 @@
   import { appToday } from '@boss/web-kit/sim-clock';
   import { registeredAdHoc } from './adHoc';
   import { ACCOUNTS_LIST_URL } from '../accounts/api';
-  import { jobsFilterSearch } from './filterQuery';
+  import { jobsFilterSearch, searchWithoutNewJob } from './filterQuery';
 
   let userId = $derived(
     session.value.kind === 'ready' ? session.value.user.id : '',
@@ -234,13 +235,15 @@
   const allowedSubjectKinds = $derived.by(() => {
     const spec = kinds.find((k) => k.kind === formKind);
     if (spec) return spec.subject_kinds;
-    // No kind picked yet — if the user came in via a deep-link
-    // with a subject_kind, surface that as the only option so the
-    // subject_kind select isn't empty. Otherwise show every
-    // subject_kind that any kind in the registry references.
-    if (formSubjectKind) return [formSubjectKind];
+    // No kind picked yet: every subject_kind any kind in the registry
+    // references, plus the one already chosen (a deep link's, before
+    // the registry has answered) so the select is never empty. The
+    // chosen one used to be the ONLY option, and the effect below
+    // chooses the first on opening — so `account` could not be picked
+    // before a Kind, though Ad hoc takes one (backlog d0b93b80).
     const all = new Set<string>();
     for (const k of kinds) for (const sk of k.subject_kinds) all.add(sk);
+    if (formSubjectKind) all.add(formSubjectKind);
     return Array.from(all);
   });
   const selectedKindSpec = $derived(
@@ -302,8 +305,24 @@
     purchase_order: '/api/inventory/purchase-orders?limit=500',
   };
 
+  /// Subject kinds whose list read is out. Not state: nothing renders
+  /// it. The loader's guard was set only by an ANSWER, and opening the
+  /// form asks twice before the first answers — the defaulting effect
+  /// writes formSubjectKind and re-runs — so every open read the list
+  /// twice (backlog d0b93b80).
+  const subjectOptionsInFlight = new Set<string>();
+
   async function loadSubjectOptions(kind: string): Promise<void> {
-    if (subjectOptions[kind]) return;
+    if (subjectOptions[kind] || subjectOptionsInFlight.has(kind)) return;
+    subjectOptionsInFlight.add(kind);
+    try {
+      await readSubjectOptions(kind);
+    } finally {
+      subjectOptionsInFlight.delete(kind);
+    }
+  }
+
+  async function readSubjectOptions(kind: string): Promise<void> {
     const url = SUBJECT_LIST_URLS[kind];
     if (!url) {
       // No autocomplete for this subject_kind (e.g. custom,
@@ -377,8 +396,8 @@
     // submit.
     formOwnerId = userId ?? '';
     // Opening the form is a gesture too, and the form is unusable
-    // without the registry — but it is reached from the deep-link
-    // effect as well, which is why that effect guards on newJobOpen.
+    // without the registry. The deep link reaches it from onMount,
+    // which tracks nothing, so the retry cannot loop.
     void loadKinds({ retry: true });
     void loadOwners();
     // If the deep-link picked a subject_kind, prime its
@@ -391,11 +410,18 @@
 
   // Auto-open the form on mount when the deep-link params are
   // present. The Subject detail pages send users here via
-  // /jobs?new=1&subject_kind=account&subject_id=acc-bigseed-0001;
-  // landing on the page with the form already populated is the
-  // whole point of the deep-link.
-  $effect(() => {
-    if (initialNewJobOpen && !newJobOpen) {
+  // /ux/jobs?new=1&subject_kind=account&subject_id=<id>; landing on
+  // the page with the form already populated is the whole point of
+  // the deep-link.
+  //
+  // ONCE, at mount. This was an effect that opened the form whenever
+  // `initialNewJobOpen && !newJobOpen` — so Cancel, which sets
+  // newJobOpen false while the prop stays true (the route is not
+  // re-parsed on replaceState), reopened it at once, reset, and what
+  // the operator typed was lost (backlog d0b93b80). App remounts this
+  // page on every navigation, so a new deep link is a new mount.
+  onMount(() => {
+    if (initialNewJobOpen) {
       openNewJob({
         subjectKind: initialNewJobSubjectKind,
         subjectId: initialNewJobSubjectId,
@@ -498,7 +524,11 @@
         // count), and "0 open" above the failure line reads as an
         // answer (backlog e98cabd0, sweep c3e4edcc). Unknown, so say so.
         'Job count unknown — the read failed'
-      : `${total.toLocaleString()} ${status || 'any-status'}`}
+      : loading
+        ? // `total` starts at 0 and, on a re-read, belongs to the last
+          // filter: "0 open" sat above "Loading…" (backlog d0b93b80).
+          'Counting…'
+        : `${total.toLocaleString()} ${status || 'in all statuses'}`}
   />
 
   <!-- Filters: narrow the list down without leaving the page. The
@@ -526,7 +556,7 @@
       <span>Subject id</span>
       <input
         type="text"
-        placeholder="e.g. acc-bigseed-0012"
+        placeholder="An exact subject id"
         bind:value={subjectIdFilter}
       />
     </label>
@@ -572,7 +602,11 @@
           </select>
           {#if formSubjectKind && visibleKinds.length < kinds.length}
             <small class="hint">
-              Filtered to kinds that accept a {formSubjectKind} subject
+              <!-- Plural, so no article to get wrong ("a account",
+                   backlog d0b93b80) — and not the words "subject kind":
+                   this hint is inside the Kind label, so it is part of
+                   the Kind select's accessible name. -->
+              Filtered to kinds that accept {formSubjectKind} subjects
               ({visibleKinds.length} of {kinds.length})
             </small>
           {/if}
@@ -685,18 +719,16 @@
           class="btn"
           onclick={() => {
             newJobOpen = false;
-            // If the user landed via a deep-link
-            // (?new=1&subject_kind=…), clear the URL params on
-            // cancel so a refresh doesn't re-open the form. Use
-            // history.replaceState to avoid pushing a back-button
-            // entry for the cancellation.
-            if (
-              typeof window !== 'undefined' &&
-              window.location.search.includes('new=1')
-            ) {
-              const path = window.location.pathname + window.location.hash;
-              window.history.replaceState(null, '', path);
-            }
+            // If the user landed via a deep-link (?new=1&subject_kind=…),
+            // take its new-job half out of the URL on cancel so a refresh
+            // doesn't re-open the form — and ONLY that half: the whole
+            // query went until backlog d0b93b80, the filters' parameters
+            // with it, while the filters stayed set. replaceState, so
+            // the cancellation is no back-button entry.
+            if (!writesFiltersToUrl) return;
+            const { pathname, search, hash } = window.location;
+            const next = searchWithoutNewJob(search, { kind, status, subjectId: subjectIdFilter });
+            if (next !== search) window.history.replaceState(window.history.state, '', pathname + next + hash);
           }}
           disabled={formSubmitting}
         >

@@ -293,17 +293,26 @@
     {:else if route.kind === 'me'}
       <MePage />
     {:else if route.kind === 'jobs'}
-      <JobsListPage
-        initialKind={route.workflow ?? ''}
-        initialKindPrefix={route.workflowPrefix ?? ''}
-        initialStatus={route.jobStatus ?? JOBS_DEFAULT_STATUS}
-        initialOwnerId={route.jobOwnerId ?? ''}
-        initialSubjectId={route.jobSubjectId ?? ''}
-        initialNewJobOpen={route.newJobOpen ?? false}
-        initialNewJobSubjectKind={route.newJobSubjectKind ?? ''}
-        initialNewJobSubjectId={route.newJobSubjectId ?? ''}
-        writesFiltersToUrl
-      />
+      <!-- Keyed on the route, as Finance is: the page takes its filters
+           from these props once, at mount, so a navigation to /ux/jobs?…
+           while it is up (a custom Subject's own packets, a sidebar link)
+           changed the URL and left the page on the filters it had — no
+           read, an empty Subject id box, every row (backlog d0b93b80).
+           The page's own filter writes replaceState and never re-parse
+           the route, so typing does not remount it. -->
+      {#key route}
+        <JobsListPage
+          initialKind={route.workflow ?? ''}
+          initialKindPrefix={route.workflowPrefix ?? ''}
+          initialStatus={route.jobStatus ?? JOBS_DEFAULT_STATUS}
+          initialOwnerId={route.jobOwnerId ?? ''}
+          initialSubjectId={route.jobSubjectId ?? ''}
+          initialNewJobOpen={route.newJobOpen ?? false}
+          initialNewJobSubjectKind={route.newJobSubjectKind ?? ''}
+          initialNewJobSubjectId={route.newJobSubjectId ?? ''}
+          writesFiltersToUrl
+        />
+      {/key}
     {:else if route.kind === 'jobDetail'}
       <JobDetailPage jobId={route.jobId} />
     {:else if route.kind === 'service'}

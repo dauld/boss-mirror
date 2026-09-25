@@ -14,11 +14,9 @@ plugins = ["bun-plugin-svelte"]
 # mocked suite owns everything reactive.
 [test]
 preload = ["./tests/rune-preload.ts"]
-# A per-test timeout exists to catch a HUNG test. Bun's default is
-# 5000 ms, and on 2026-09-08 a synchronous 1 ms unit test took 8167 ms
-# because the gate pod was starved while a second gate compiled on the
-# same node (gates run in parallel since 2026-09-05) - the check
-# reported a scheduling stall as a consist failure and struck a clean
-# protocol car (gate-run 6de49582, backlog 8cbe1b7d). 30 s still catches
-# a hang; a stall under load no longer reds a car.
-timeout = 30000
+# NO per-test timeout here, on purpose. `timeout = 30000` sat in this
+# section from 2026-09-08 (backlog 8cbe1b7d) and bun 1.3.14 ignores the
+# key - it runs the preload above, and a 6.5 s test still timed out at
+# 5000 ms (measured 2026-09-25, backlog 75335234). The budget, and the
+# gate stalls it is sized to, live in scripts/each-test-file-alone.ts
+# (TEST_TIMEOUT_MS), which passes it as `bun test --timeout`.

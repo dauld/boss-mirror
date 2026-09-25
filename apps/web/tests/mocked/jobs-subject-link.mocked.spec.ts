@@ -54,11 +54,11 @@ for (const route of ['/ux/jobs', '/ux/service', '/ux/sales']) {
       await openList(page, route);
       await expect(page.getByRole('link', { name: '/ux/jobs', exact: true })).toHaveAttribute(
         'href',
-        '/jobs?subject_id=%2Fux%2Fjobs',
+        '/ux/jobs?subject_id=%2Fux%2Fjobs',
       );
       await expect(page.getByRole('link', { name: 'estate', exact: true })).toHaveAttribute(
         'href',
-        '/jobs?subject_id=estate',
+        '/ux/jobs?subject_id=estate',
       );
     });
 

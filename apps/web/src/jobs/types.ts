@@ -170,18 +170,22 @@ export function subjectLabel(s: Subject): string {
 /// `/`, so the click landed on Home — for every open packet on the
 /// instance, all of which are `custom`.
 export function subjectPath(s: Subject): string {
+  // The canonical /ux/… spelling, as entityHref writes it. These were
+  // the router's unprefixed legacy paths, which resolve only because
+  // the router strips /ux "defensively" (backlog d0b93b80).
+  const id = encodeURIComponent(s.id ?? '');
   switch (s.subject_kind) {
     case 'asset':
-      return `/assets/${encodeURIComponent(s.id)}`;
+      return `/ux/assets/${id}`;
     case 'account':
-      return `/accounts/${s.id ?? ''}`;
+      return `/ux/accounts/${id}`;
     case 'purchase_order':
-      return `/purchase-orders/${s.id ?? ''}`;
+      return `/ux/purchase-orders/${id}`;
     case 'employee':
-      return `/people/${s.id ?? ''}`;
+      return `/ux/people/${id}`;
     case 'vendor':
-      return `/vendors/${s.id ?? ''}`;
+      return `/ux/vendors/${id}`;
     default:
-      return `/jobs?subject_id=${encodeURIComponent(s.id ?? '')}`;
+      return `/ux/jobs?subject_id=${id}`;
   }
 }

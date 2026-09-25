@@ -37,6 +37,32 @@ export const TEST_FILE_GLOB = '**/*{.test,_test,.spec,_spec}.{ts,tsx,js,jsx,mts,
 
 export const JOBS = Math.max(1, Math.min(4, availableParallelism()));
 
+/// The per-test budget every file runs under, passed to bun on its own
+/// command line (backlog 75335234). A per-test timeout exists to catch
+/// a HUNG test, and a gate pod is not a quiet machine: gates run in
+/// parallel since 2026-09-05, several to a node, and a starved pod
+/// stretches every test's wall clock with the code unchanged.
+///
+/// Measured stalls on the gate, each red against bun's 5 000 ms
+/// default on a test that is milliseconds when quiet:
+///   2026-09-08  a synchronous 1 ms test took 8 167 ms while a second
+///               gate compiled on the node (gate-run 6de49582, 8cbe1b7d)
+///   2026-09-25  dev-tree.test.ts took 5 720 ms with three gates on the
+///               node (gate-run 2c7c7ac1; its re-gate 9c388d9d green)
+/// and on the dev pod, twelve copies of dev-tree.test.ts plus 200
+/// busy loops pinned to one CPU: its slowest test 6.4 s, three of
+/// twelve copies red at 5 000 ms. 30 s is three and a half times the
+/// worst stall a gate has recorded and still reads a hang as a hang.
+///
+/// It lived in bunfig.toml as `[test] timeout = 30000` from 2026-09-08,
+/// and bun 1.3.14 IGNORES that key — it loads the same file's preload,
+/// so the file is read, and a 6.5 s test still timed out at 5 000 ms
+/// (measured 2026-09-25). For seventeen days the budget was a comment.
+/// `--timeout` on the command line is the spelling bun honours, and
+/// each-test-file-alone.test.ts runs a test past the default to prove
+/// this one reaches it.
+export const TEST_TIMEOUT_MS = 30_000;
+
 export type FileRun = Readonly<{ file: string; code: number; ms: number; output: string }>;
 
 /// Every test file under `roots` (directories relative to `cwd`), as a
@@ -56,7 +82,7 @@ export function testFiles(cwd: string, roots: ReadonlyArray<string>): string[] {
 
 async function runOne(cwd: string, file: string): Promise<FileRun> {
   const started = performance.now();
-  const proc = Bun.spawn([process.execPath, 'test', file], {
+  const proc = Bun.spawn([process.execPath, 'test', '--timeout', String(TEST_TIMEOUT_MS), file], {
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',

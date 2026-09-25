@@ -409,7 +409,12 @@ export function parseRoute(pathname: string, search = ''): Route {
     // The truthiness check dropped the empty value (backlog 03e198e5).
     if (js !== null) (r as { jobStatus?: string }).jobStatus = js;
     if (ownerId) (r as { jobOwnerId?: string }).jobOwnerId = ownerId;
-    if (filterSubjectId) (r as { jobSubjectId?: string }).jobSubjectId = filterSubjectId;    if (newJob === '1') (r as { newJobOpen?: boolean }).newJobOpen = true;
+    // Under `new=1` the subject_id is the new job's subject and not a
+    // filter: it narrowed the list behind the form too, and Cancel left
+    // it narrowed under a URL that no longer said so (backlog d0b93b80).
+    // filterQuery's write reads the parameter the same way.
+    if (filterSubjectId && newJob !== '1') (r as { jobSubjectId?: string }).jobSubjectId = filterSubjectId;
+    if (newJob === '1') (r as { newJobOpen?: boolean }).newJobOpen = true;
     if (sk) (r as { newJobSubjectKind?: string }).newJobSubjectKind = sk;
     if (sid) (r as { newJobSubjectId?: string }).newJobSubjectId = sid;
     return r;

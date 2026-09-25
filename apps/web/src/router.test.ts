@@ -407,6 +407,20 @@ describe('jobs list subject filter from the query string', () => {
   test('subject_id still filters the list, the one subject filter the server takes', () => {
     expect(at('?subject_id=account-00001').jobSubjectId).toBe('account-00001');
   });
+
+  // Under `new=1` the subject_id is the NEW job's subject, and it
+  // filtered the list behind the form as well: an Account page's "new
+  // job" link opened a form over a list narrowed to that account, and
+  // Cancel left the list narrowed under a URL that no longer said so
+  // (backlog d0b93b80, found by the /ux/jobs page audit's spec).
+  test('under new=1, subject_id names the new job subject and filters nothing', () => {
+    const r = at('?new=1&subject_kind=account&subject_id=acc-1&status=closed');
+    expect(r.newJobOpen).toBe(true);
+    expect(r.newJobSubjectKind).toBe('account');
+    expect(r.newJobSubjectId).toBe('acc-1');
+    expect('jobSubjectId' in r).toBe(false);
+    expect(r.jobStatus).toBe('closed');
+  });
 });
 
 describe('personal Views route', () => {

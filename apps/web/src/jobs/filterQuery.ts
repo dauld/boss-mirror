@@ -32,8 +32,33 @@ export function jobsFilterSearch(search: string, f: JobsFilters): string {
   };
   put('kind', params.get('kind') ?? '', f.kind, '');
   put('status', params.get('status') ?? JOBS_DEFAULT_STATUS, f.status, JOBS_DEFAULT_STATUS);
-  put('subject_id', params.get('subject_id') ?? '', f.subjectId, '');
+  // Under `new=1` parseRoute reads subject_id as the new job's subject,
+  // not as this filter (backlog d0b93b80), so the write leaves it be: a
+  // mount must not strip the deep link's subject, and a subject filter
+  // typed while that form is open is written by its Cancel.
+  if (!isNewJobDeepLink(params)) put('subject_id', params.get('subject_id') ?? '', f.subjectId, '');
   if (!changed) return search;
   const s = params.toString();
   return s ? `?${s}` : '';
+}
+
+/** The parameters a `new=1` deep link carries for the job it opens. */
+const NEW_JOB_PARAMS = ['new', 'subject_kind', 'subject_id'] as const;
+
+function isNewJobDeepLink(params: URLSearchParams): boolean {
+  return params.get('new') === '1';
+}
+
+/** The search Cancel leaves on a deep-linked new-job form: the deep
+ *  link without its new-job half, then the filters written as usual.
+ *  Cancel stripped the WHOLE query until backlog d0b93b80 — the
+ *  filters' parameters with it, while the filters stayed set — so the
+ *  URL and the page disagreed. A search with no deep link is only the
+ *  filters' write. */
+export function searchWithoutNewJob(search: string, f: JobsFilters): string {
+  const params = new URLSearchParams(search);
+  if (!isNewJobDeepLink(params)) return jobsFilterSearch(search, f);
+  for (const key of NEW_JOB_PARAMS) params.delete(key);
+  const s = params.toString();
+  return jobsFilterSearch(s ? `?${s}` : '', f);
 }

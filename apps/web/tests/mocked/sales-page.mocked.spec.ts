@@ -40,10 +40,13 @@
 //                  column.
 //   GAP 4 dc06c0fc "Start a new Job" offers every registered kind, not
 //                  the department's.
-//   (unfiled)      found writing this spec: on open the form defaults
-//                  the subject kind and then offers only that one, so
-//                  "Receive an inquiry" (an account kind) is not in the
-//                  picker until another kind is chosen first.
+//   (unfiled)      found writing this spec: on open the form defaulted
+//                  the subject kind and then offered only that one, so
+//                  "Receive an inquiry" (an account kind) was not in the
+//                  picker until another kind was chosen first. FIXED by
+//                  backlog d0b93b80, which also moved the Subject links
+//                  to /ux/, the Subject id placeholder off a brewery id,
+//                  and the All count's word; the lines say so.
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage, settledReads } from './_helpers';
@@ -243,7 +246,8 @@ test.describe('/ux/sales — mount', () => {
     await expect(statusFilter(page).locator('option')).toHaveText(['Open', 'Closed', 'All']);
     await expect(statusFilter(page)).toHaveValue('open');
     await expect(subjectFilter(page)).toHaveValue('');
-    await expect(subjectFilter(page)).toHaveAttribute('placeholder', 'e.g. acc-bigseed-0012');
+    // d0b93b80: it named a brewery account id.
+    await expect(subjectFilter(page)).toHaveAttribute('placeholder', 'An exact subject id');
     await expect(clear(page)).toHaveCount(0);
 
     await expect(root(page).locator('.job-actions button')).toHaveText(['Start a new Job', 'Create Ad Hoc Job']);
@@ -321,26 +325,22 @@ test.describe('/ux/sales — links, and back', () => {
     await expect(page.locator('h1.exec-title')).toHaveText('Sales pipeline');
   });
 
-  // subjectPath answers the router's un-prefixed alias (/accounts/…,
-  // /jobs?…) rather than the catalogued /ux/ spelling: both parse to
-  // the catalogued route, and the address bar shows the alias.
+  // subjectPath answers the catalogued /ux/ spelling. d0b93b80: it
+  // answered the router's un-prefixed alias (/accounts/…, /jobs?…),
+  // which parses to the same route but put the alias in the address bar.
   test('the Subject cell links each subject to a route the catalog serves; a custom subject lands on its packets, and Back returns', async ({ page }) => {
     await installSales(page);
     await mountSales(page);
 
     const account = rows(page).nth(0).locator('td').nth(3).locator('a');
     await expect(account).toHaveText('acct-anchor');
-    await expect(account).toHaveAttribute('href', '/accounts/acct-anchor');
-    expect(parseRoute('/accounts/acct-anchor')).toEqual(parseRoute(`${ROUTE_CATALOG.accounts.path}/acct-anchor`));
-    expect(parseRoute('/accounts/acct-anchor')).toMatchObject({ kind: 'account', accountId: 'acct-anchor' });
+    await expect(account).toHaveAttribute('href', `${ROUTE_CATALOG.accounts.path}/acct-anchor`);
+    expect(parseRoute(`${ROUTE_CATALOG.accounts.path}/acct-anchor`)).toMatchObject({ kind: 'account', accountId: 'acct-anchor' });
 
     const custom = rows(page).nth(1).locator('td').nth(3).locator('a');
     await expect(custom).toHaveText('sponsor-zed');
-    await expect(custom).toHaveAttribute('href', '/jobs?subject_id=sponsor-zed');
-    expect(parseRoute('/jobs', '?subject_id=sponsor-zed')).toEqual(
-      parseRoute(ROUTE_CATALOG.jobs.path, '?subject_id=sponsor-zed'),
-    );
-    expect(parseRoute('/jobs', '?subject_id=sponsor-zed')).toMatchObject({ kind: 'jobs', jobSubjectId: 'sponsor-zed' });
+    await expect(custom).toHaveAttribute('href', `${ROUTE_CATALOG.jobs.path}?subject_id=sponsor-zed`);
+    expect(parseRoute(ROUTE_CATALOG.jobs.path, '?subject_id=sponsor-zed')).toMatchObject({ kind: 'jobs', jobSubjectId: 'sponsor-zed' });
 
     await custom.click();
     await expect.poll(() => new URL(page.url()).searchParams.get('subject_id')).toBe('sponsor-zed');
@@ -374,7 +374,8 @@ test.describe('/ux/sales — the filters', () => {
     await statusButtons(page).nth(2).click();
     await expect(rows(page)).toHaveCount(3);
     expect(params(seen.lists.at(-1))).toEqual({ department: DEPARTMENT, limit: '200' });
-    await expect(subtitle(page)).toHaveText('3 any-status');
+    // d0b93b80: it read "3 any-status".
+    await expect(subtitle(page)).toHaveText('3 in all statuses');
     await expect(statusFilter(page)).toHaveValue('');
 
     await statusFilter(page).selectOption('open');
@@ -558,17 +559,16 @@ test.describe('/ux/sales — the new-Job form', () => {
       'Kind', 'Subject kind', 'Subject id', 'Owner', 'Title (optional)',
     ]);
     // With no kind picked the form defaults the subject kind to the
-    // first any kind accepts — and then offers ONLY that subject kind
-    // (allowedSubjectKinds answers [formSubjectKind] while no kind is
-    // chosen), and the Kind picker narrows to the kinds that take it.
-    // So "Receive an inquiry", which takes an account, is not offered
-    // on open, and the Subject kind select cannot reach `account` until
-    // some kind accepting both is chosen first. Found writing this spec
-    // (page audit 1e9283fc, step `test`); not among the four filed gaps.
+    // first any kind accepts, and the Kind picker narrows to the kinds
+    // that take it — but the Subject kind select offers every subject
+    // kind the registry names. d0b93b80: it offered ONLY the defaulted
+    // one, so `account` (and "Receive an inquiry") could not be reached
+    // until some kind accepting both was chosen first. Found writing
+    // this spec (page audit 1e9283fc, step `test`).
     await expect(subjectKind).toHaveValue('custom');
-    await expect(subjectKind.locator('option')).toHaveText(['— select —', 'custom']);
+    await expect(subjectKind.locator('option')).toHaveText(['— select —', 'custom', 'account']);
     await expect(form(page).locator('small.hint').first()).toHaveText(
-      'Filtered to kinds that accept a custom subject (3 of 4)',
+      'Filtered to kinds that accept custom subjects (3 of 4)',
     );
     // GAP 4 (dc06c0fc): the picker is the registry, not the department's
     // two protocols — page-audit (IT's) is offered from "Sales pipeline",
@@ -585,16 +585,14 @@ test.describe('/ux/sales — the new-Job form', () => {
     await expect(submit).toBeDisabled();
     await expect(form(page).getByRole('button', { name: 'Cancel' })).toBeEnabled();
 
-    // The way through: a kind taking both subject kinds unlocks the
-    // Subject kind select; choosing `account` then offers the inquiry.
-    await kind.selectOption('ad-hoc');
-    await expect(subjectKind.locator('option')).toHaveText(['— select —', 'custom', 'account']);
+    // Choosing `account` straight away offers the inquiry.
     await subjectKind.selectOption('account');
     await expect(kind.locator('option')).toHaveText([
       '— select —', 'Receive an inquiry (receive-an-inquiry)', 'Ad hoc (ad-hoc)',
     ]);
+    // d0b93b80: it read "accept a account subject".
     await expect(form(page).locator('small.hint').first()).toHaveText(
-      'Filtered to kinds that accept a account subject (2 of 4)',
+      'Filtered to kinds that accept account subjects (2 of 4)',
     );
     await kind.selectOption('receive-an-inquiry');
     await expect(form(page).locator('p.kind-description')).toHaveText(

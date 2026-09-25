@@ -44,8 +44,14 @@
 //   gap 11 75d1b902  no department filter, column or link
 // Answered on main before this spec, each pinned by its own spec named
 // above: gap 2 4af37dd8, gap 4 e98cabd0, gap 7 03e198e5, gap 8 45ca0f89,
-// gap 9 3c3dc8f3. Lines marked UNFILED pin behaviour this spec found
-// and the audit did not list; the car's report names them.
+// gap 9 3c3dc8f3. This spec also found seven defects the audit did not
+// list, pinned here as UNFILED when it landed; backlog d0b93b80 fixed
+// all seven, and each line that pinned one now pins the fix and names
+// that item: Cancel on a deep-linked form reopening it, a Subject link
+// that did not remount the list, a deep link's subject_id filtering the
+// list behind the form, the account list read twice, Subject kind held
+// to its first value, unprefixed Subject paths, and "0 open" above
+// "Loading…".
 
 import { expect, test, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage, settledReads } from './_helpers';
@@ -247,7 +253,8 @@ test.describe('/ux/jobs — the list', () => {
     await expect(list(page)).not.toContainText(String(LIVE_TOTAL));
 
     await expect(filterBar(page).locator('label.job-filter > span')).toHaveText(['Kind', 'Status', 'Subject id']);
-    await expect(subjectFilter(page)).toHaveAttribute('placeholder', 'e.g. acc-bigseed-0012');
+    // d0b93b80: it named a brewery account id.
+    await expect(subjectFilter(page)).toHaveAttribute('placeholder', 'An exact subject id');
     await expect(page.locator('.catalog-filters .filter-label')).toHaveText('Status');
 
     // Gap 10 (8708447c): seven columns. J1's active step `test` and its
@@ -272,15 +279,15 @@ test.describe('/ux/jobs — the list', () => {
     expect(seen.writes).toHaveLength(0);
   });
 
-  test('a list read still pending paints "Loading…" under the count it does not have yet', async ({ page }) => {
+  test('a list read still pending paints "Loading…" under a header that states no count yet', async ({ page }) => {
     let release: () => void = () => {};
     const held = new Promise<void>((resolve) => { release = resolve; });
     await openList(page, { list: async (r) => { await held; await json(r, { data: ROWS, total: 3 }); } });
 
     await expect(listLine(page)).toHaveText('Loading…');
-    // UNFILED: while the read is out the header already states a count,
-    // the zero `total` starts at — "0 open" above "Loading…".
-    await expectHeader(page, 'All jobs', '0 open');
+    // d0b93b80: while the read was out the header stated the zero
+    // `total` starts at — "0 open" above "Loading…".
+    await expectHeader(page, 'All jobs', 'Counting…');
     release();
     await expect(bodyRows(page)).toHaveCount(3);
     await expectHeader(page, 'All jobs', '3 open');
@@ -349,7 +356,8 @@ test.describe('/ux/jobs — the filters', () => {
     await statusButton(page, 'All').click();
     await expect.poll(() => lastRead(seen)).toEqual({ limit: '200' });
     await expect(statusFilter(page)).toHaveValue('');
-    await expectHeader(page, 'All jobs', `${LIVE_TOTAL} any-status`);
+    // d0b93b80: it read "286 any-status".
+    await expectHeader(page, 'All jobs', `${LIVE_TOTAL} in all statuses`);
 
     await statusButton(page, 'Open').click();
     await expect.poll(() => lastRead(seen)).toEqual({ status: 'open', limit: '200' });
@@ -468,13 +476,13 @@ test.describe('/ux/jobs — the links', () => {
     await openList(page);
     const subject = (name: string) => page.locator('table.data-table').getByRole('link', { name, exact: true });
 
-    // UNFILED: every Subject href is the router's unprefixed legacy
-    // spelling ("defensive"), never the catalog's /ux/… — the custom
-    // one lands on /jobs, not ROUTE_CATALOG.jobs.path.
+    // d0b93b80: every Subject href was the router's unprefixed legacy
+    // spelling ("defensive"); each is now the catalog's /ux/…, and the
+    // custom one lands on ROUTE_CATALOG.jobs.path.
     const expected: ReadonlyArray<[string, string, string]> = [
-      ['/ux/jobs', '/jobs?subject_id=%2Fux%2Fjobs', 'jobs'],
-      ['acc-1', '/accounts/acc-1', 'account'],
-      ['ast-9', '/assets/ast-9', 'asset'],
+      ['/ux/jobs', `${PATH}?subject_id=%2Fux%2Fjobs`, 'jobs'],
+      ['acc-1', '/ux/accounts/acc-1', 'account'],
+      ['ast-9', '/ux/assets/ast-9', 'asset'],
     ];
     for (const [name, href, kind] of expected) {
       await expect(subject(name)).toHaveAttribute('href', href);
@@ -483,27 +491,32 @@ test.describe('/ux/jobs — the links', () => {
     }
   });
 
-  test('a custom Subject\'s link changes the URL to its own packets, but the list does not narrow', async ({ page }) => {
-    const seen = await openList(page);
+  test('a custom Subject\'s link opens the list of its own packets, and back returns to them all', async ({ page }) => {
+    // A backend that honours subject_id, so a narrowed read shows.
+    const seen = await openList(page, {
+      list: (r) => {
+        const sid = new URL(r.request().url()).searchParams.get('subject_id');
+        const data = sid ? ROWS.filter((j) => j.subject.id === sid) : ROWS;
+        return json(r, { data, total: data.length });
+      },
+    });
     await expect(bodyRows(page)).toHaveCount(3);
-    const before = seen.list.length;
 
     await page.locator('table.data-table').getByRole('link', { name: '/ux/jobs', exact: true }).click();
-    await expect.poll(() => new URL(page.url()).pathname).toBe('/jobs');
+    await expect.poll(() => new URL(page.url()).pathname).toBe(PATH);
     expect(new URL(page.url()).searchParams.get('subject_id')).toBe('/ux/jobs');
 
-    // UNFILED: /jobs is the same App branch as /ux/jobs, which is not
-    // keyed on the route, so the mounted page keeps the filter state it
-    // took at mount — no new read, an empty Subject id box, and all
-    // three rows under a URL that names one subject. A reload honours
-    // the URL; the click does not.
-    await expect(subjectFilter(page)).toHaveValue('');
-    await expect(bodyRows(page)).toHaveCount(3);
-    expect(await settledReads(page, () => seen.list.length, before)).toBe(before);
-
-    await page.reload();
+    // d0b93b80: the /jobs mount was not keyed on the route, so the page
+    // kept the filters it took at mount — no read, an empty Subject id
+    // box, all three rows under a URL naming one subject. App now keys
+    // it, as it keys Finance, and the click mounts what the URL names.
     await expect(subjectFilter(page)).toHaveValue('/ux/jobs');
     await expect.poll(() => lastRead(seen)).toEqual({ status: 'open', subject_id: '/ux/jobs', limit: '200' });
+    await expect(bodyRows(page)).toHaveCount(1);
+
+    await page.goBack();
+    await expect(subjectFilter(page)).toHaveValue('');
+    await expect(bodyRows(page)).toHaveCount(3);
   });
 });
 
@@ -530,12 +543,11 @@ test.describe('/ux/jobs — the new-job form', () => {
       '— select —', 'Page audit (page-audit)', 'Ad hoc (ad-hoc)', 'backlog-item',
     ]);
     await expect(field(page, 'Kind').locator('select')).toHaveValue('');
-    // With no kind picked, Subject kind would offer every kind the
-    // registry names (custom, account) — but the form takes the first
-    // on opening, and a taken subject kind is then the ONLY option
-    // until a Kind is picked (UNFILED: `account` cannot be chosen
-    // first, though Ad hoc accepts it).
-    await expect(field(page, 'Subject kind').locator('option')).toHaveText(['— select —', 'custom']);
+    // With no kind picked, Subject kind offers every kind the registry
+    // names, and the form takes the first on opening. d0b93b80: a taken
+    // subject kind used to be the ONLY option until a Kind was picked,
+    // so `account` could not be chosen first, though Ad hoc accepts it.
+    await expect(field(page, 'Subject kind').locator('option')).toHaveText(['— select —', 'custom', 'account']);
     await expect(field(page, 'Subject kind').locator('select')).toHaveValue('custom');
     await expect(field(page, 'Subject id').locator('input')).toHaveAttribute(
       'placeholder', 'Type the id by hand (no autocomplete for this kind)',
@@ -546,6 +558,11 @@ test.describe('/ux/jobs — the new-job form', () => {
     await expect(button(page, 'Create Job')).toBeDisabled();
     await expect(button(page, 'Cancel')).toBeEnabled();
     await expect(formError(page)).toHaveCount(0);
+
+    // Choosing account narrows Kind to what takes one, and stays chosen.
+    await field(page, 'Subject kind').locator('select').selectOption('account');
+    await expect(field(page, 'Kind').locator('option')).toHaveText(['— select —', 'Ad hoc (ad-hoc)']);
+    await expect(field(page, 'Subject kind').locator('select')).toHaveValue('account');
 
     await button(page, 'Cancel').click();
     await expect(form(page)).toHaveCount(0);
@@ -630,11 +647,12 @@ test.describe('/ux/jobs — the new-job form', () => {
     await expect(field(page, 'Subject kind').locator('option')).toHaveText(['— select —', 'account', 'custom']);
     await expect(field(page, 'Subject kind').locator('select')).toHaveValue('account');
 
-    // UNFILED: the account list is read TWICE. The effect that defaults
-    // the subject kind writes it and then loads its options; the write
-    // re-runs the effect before the first read has answered, and the
-    // loader's guard is set only by an answer.
-    expect(await settledReads(page, () => seen.accounts, 2)).toBe(2);
+    // Read ONCE. d0b93b80: it was read twice — the effect that defaults
+    // the subject kind writes it and then loads its options, the write
+    // re-ran the effect before the first read had answered, and the
+    // loader's guard was set only by an answer. It now holds the read
+    // that is out.
+    expect(await settledReads(page, () => seen.accounts, 1)).toBe(1);
     await expect(form(page).locator('datalist#new-job-subject-options option')).toHaveCount(2);
     await expect(field(page, 'Subject id').locator('input')).toHaveAttribute('placeholder', 'Pick from the list or type an id');
     await expect(field(page, 'Subject id').locator('small.hint')).toHaveText(
@@ -694,39 +712,64 @@ test.describe('/ux/jobs — the new-job form', () => {
     await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
   });
 
-  test('a new-job deep link opens the form narrowed to kinds that take its subject; Cancel strips the query and the form reopens', async ({ page }) => {
-    const seen = await openList(page, {}, `${PATH}?new=1&subject_kind=account&subject_id=acc-1&status=closed`);
+  test('a new-job deep link opens the form narrowed to kinds that take its subject; Cancel closes it and keeps the filters in the URL', async ({ page }) => {
+    const DEEP = `${PATH}?new=1&subject_kind=account&subject_id=acc-1&status=closed`;
+    const seen = await openList(page, {}, DEEP);
     await expect(form(page)).toBeVisible();
 
     await expect(field(page, 'Kind').locator('option')).toHaveText(['— select —', 'Ad hoc (ad-hoc)']);
+    // d0b93b80: it read "accept a account subject".
     await expect(field(page, 'Kind').locator('small.hint')).toHaveText(
-      'Filtered to kinds that accept a account subject (1 of 3)',
+      'Filtered to kinds that accept account subjects (1 of 3)',
     );
     await expect(field(page, 'Subject kind').locator('select')).toHaveValue('account');
     await expect(field(page, 'Subject id').locator('input')).toHaveValue('acc-1');
     await expect(button(page, 'Create Job')).toBeDisabled();
 
-    // UNFILED: `subject_id` is both the new job's subject and the list's
-    // filter, so the deep link also narrows the list behind the form.
-    await expect(subjectFilter(page)).toHaveValue('acc-1');
-    expect(lastRead(seen)).toEqual({ status: 'closed', subject_id: 'acc-1', limit: '200' });
+    // d0b93b80: `subject_id` was both the new job's subject and the
+    // list's filter, so the deep link narrowed the list behind the form.
+    // Under `new=1` it is the new job's only; the list keeps the status
+    // the link asked for, and the mount rewrites none of the deep link.
+    await expect(subjectFilter(page)).toHaveValue('');
+    await expect.poll(() => lastRead(seen)).toEqual({ status: 'closed', limit: '200' });
+    expect(seen.list.every((p) => !p.has('subject_id'))).toBe(true);
+    expect(new URL(page.url()).search).toBe('?new=1&subject_kind=account&subject_id=acc-1&status=closed');
 
-    // UNFILED: Cancel does not close a deep-linked form. It closes it and
-    // strips the query, but the effect that opened it from the deep link
-    // reads `newJobOpen`, sees it false while `initialNewJobOpen` is
-    // still true (the route is not re-parsed on replaceState), and opens
-    // it again at once — reset to the deep link's subject. The strip
-    // takes every parameter, the filters' included, while the filters
-    // themselves stay set, so the URL and the page now disagree.
+    // d0b93b80: Cancel did not close a deep-linked form. It closed it and
+    // stripped the query, then the effect that had opened it from the
+    // deep link saw `newJobOpen` false while `initialNewJobOpen` was
+    // still true and opened it again at once, reset — what was typed
+    // was lost. The deep link now opens the form once, at mount; and
+    // Cancel takes out only the deep link's new-job half, so the URL
+    // keeps the filters the page still shows.
     await field(page, 'Title (optional)').locator('input').fill('typed, then cancelled');
     await button(page, 'Cancel').click();
-    await expect.poll(() => new URL(page.url()).search).toBe('');
-    await expect(form(page)).toBeVisible();
-    await expect(field(page, 'Title (optional)').locator('input')).toHaveValue('');
-    await expect(field(page, 'Subject id').locator('input')).toHaveValue('acc-1');
-    await expect(subjectFilter(page)).toHaveValue('acc-1');
+    await expect(form(page)).toHaveCount(0);
+    await expect.poll(() => new URL(page.url()).search).toBe('?status=closed');
+    await expect(subjectFilter(page)).toHaveValue('');
     await expect(statusFilter(page)).toHaveValue('closed');
+    // short on purpose: a form that does not come back has no event to wait on — the window elapsing IS the answer
+    await page.waitForTimeout(300);
+    await expect(form(page)).toHaveCount(0);
     expect(seen.writes).toHaveLength(0);
+
+    // A reload of what the URL now says is the page the operator sees.
+    await page.reload();
+    await expect(bodyRows(page)).toHaveCount(3);
+    await expect(form(page)).toHaveCount(0);
+    await expect(statusFilter(page)).toHaveValue('closed');
+  });
+
+  test('a subject filter typed while a deep-linked form is open waits for Cancel to reach the URL', async ({ page }) => {
+    await openList(page, {}, `${PATH}?new=1&subject_kind=account&subject_id=acc-1`);
+    await expect(form(page)).toBeVisible();
+    await subjectFilter(page).fill('ast-9');
+    // The deep link's subject is not overwritten while its form is up.
+    await expect.poll(() => new URL(page.url()).searchParams.get('subject_id')).toBe('acc-1');
+
+    await button(page, 'Cancel').click();
+    await expect(form(page)).toHaveCount(0);
+    await expect.poll(() => new URL(page.url()).search).toBe('?subject_id=ast-9');
   });
 });
 
