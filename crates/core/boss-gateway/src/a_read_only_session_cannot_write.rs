@@ -6,8 +6,11 @@
 //! dispatcher rule publish/retire, `POST /api/jobs`, the scheduling
 //! calendar token, ~27 ledger writes, messages without ownership — and
 //! every one of them was one proxied request away from ANY valid
-//! session, including the anonymous one `POST /api/auth/guest` mints
-//! with role `audit-readonly`. The edge is the one place every one of
+//! session, including the anonymous one `POST /api/auth/guest` mints.
+//! Since design 2830b6b7 that guest carries one of TWO roles — the
+//! basic `visitor` (the OSS default) or `audit-readonly` (an instance's
+//! opt-in to the system-audit read) — so every guest test here runs
+//! once per minting mode. The edge is the one place every one of
 //! them passes, so the class closes there: a read-only session may send
 //! GET, HEAD and OPTIONS, and every other method is refused with a named
 //! 403 before any upstream is contacted. Per-service authorization
@@ -78,7 +81,12 @@ async fn recording_upstream() -> (String, Hits) {
     (format!("http://{addr}"), hits)
 }
 
-fn local_auth() -> Arc<LocalAuthState> {
+/// The two ways this gateway can mint a guest, each a read-only role
+/// (design 2830b6b7): `Basic` hands out `visitor`, `Audit` hands out
+/// `audit-readonly`. `Off` mints none, so it has no place here.
+const GUEST_MODES: [GuestAccess; 2] = [GuestAccess::Basic, GuestAccess::Audit];
+
+fn local_auth(guest_access: GuestAccess) -> Arc<LocalAuthState> {
     // `load` on a path that does not exist yields an empty store.
     let store = CredentialStore::load("/nonexistent/boss-test-credentials.toml")
         .expect("empty credential store");
@@ -87,7 +95,7 @@ fn local_auth() -> Arc<LocalAuthState> {
         session_key: KEY.to_vec(),
         http: reqwest::Client::new(),
         audit: boss_gateway::audit::AuthAudit::disabled(),
-        guest_access: true,
+        guest_access,
         oidc: None,
         mail: boss_gateway::mail::from_env(),
         public_url: "https://boss.test".into(),
@@ -95,9 +103,9 @@ fn local_auth() -> Arc<LocalAuthState> {
     })
 }
 
-/// The gateway's own route table, local auth mounted (so the guest
-/// door exists), every forward diverted to `upstream`.
-fn gateway(upstream: &str) -> axum::Router {
+/// The gateway's own route table, local auth mounted with the guest
+/// door minting `guests`, every forward diverted to `upstream`.
+fn gateway(upstream: &str, guests: GuestAccess) -> axum::Router {
     let proxy_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .proxy(reqwest::Proxy::all(upstream).expect("stub proxy url"))
@@ -108,7 +116,7 @@ fn gateway(upstream: &str) -> axum::Router {
         proxy_client,
         perf: Arc::new(PerfCollector::new()),
     });
-    build_router(Some(local_auth()), &public_reads::PublicReads::none()).with_state(state)
+    build_router(Some(local_auth(guests)), &public_reads::PublicReads::none()).with_state(state)
 }
 
 /// A proxied route as the table registers it: the probe path to send,
@@ -177,10 +185,13 @@ async fn send(
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-/// The cookie `POST /api/auth/guest` hands an anonymous visitor —
-/// minted by the gateway's own `guest()` through its own route, so the
-/// role it carries is exactly the one a stranger presents.
-async fn guest_cookie(app: axum::Router) -> String {
+/// The cookie `POST /api/auth/guest` hands an anonymous visitor on a
+/// gateway minting `mode` — minted by the gateway's own `guest()`
+/// through its own route, so the role it carries is exactly the one a
+/// stranger presents. The role is read back out of the signed cookie
+/// and held to the mode's, so a Basic run is provably a `visitor` and an
+/// Audit run an `audit-readonly`, not two runs of one role.
+async fn guest_cookie(app: axum::Router, mode: GuestAccess) -> String {
     let resp = app
         .oneshot(
             Request::builder()
@@ -198,7 +209,11 @@ async fn guest_cookie(app: axum::Router) -> String {
         .and_then(|v| v.to_str().ok())
         .expect("guest() sets a cookie");
     let pair = set.split(';').next().expect("name=value").to_string();
-    assert!(pair.starts_with(&format!("{}=", session::COOKIE_NAME)));
+    let raw = pair
+        .strip_prefix(&format!("{}=", session::COOKIE_NAME))
+        .expect("the session cookie");
+    let minted = Session::decode(raw, &KEY).expect("the gateway signed it");
+    assert_eq!(minted.role.as_deref(), mode.role(), "{mode:?} guest's role");
     pair
 }
 
@@ -214,14 +229,13 @@ fn hits_of(hits: &Hits) -> Vec<String> {
     hits.lock().expect("hits lock").clone()
 }
 
-/// THE DEFECT. A guest-minted session sends POST, PUT, PATCH and DELETE
-/// to every proxied route: each `any` route answers the named 403, each
-/// GET-only route its 405, and the upstream records NOTHING.
+/// THE DEFECT. A guest-minted session — the basic `visitor` AND the
+/// system-audit `audit-readonly`, each minted by the guest door in its
+/// own mode — sends POST, PUT, PATCH and DELETE to every proxied route:
+/// each `any` route answers the named 403, each GET-only route its 405,
+/// and the upstream records NOTHING.
 #[tokio::test]
 async fn a_guest_session_cannot_write_to_any_upstream() {
-    let (upstream, hits) = recording_upstream().await;
-    let app = gateway(&upstream);
-    let guest = guest_cookie(app.clone()).await;
     let routes = proxied_routes();
     assert!(
         routes.iter().filter(|r| r.every_method).count() >= 55,
@@ -231,18 +245,32 @@ async fn a_guest_session_cannot_write_to_any_upstream() {
     );
 
     let mut leaked = Vec::new();
-    for route in &routes {
-        for method in WRITES {
-            let (status, body) = send(app.clone(), method.clone(), &route.path, Some(&guest)).await;
-            let refused = if route.every_method {
-                status == StatusCode::FORBIDDEN && body.contains(proxy::READ_ONLY_REFUSAL)
-            } else {
-                status == StatusCode::METHOD_NOT_ALLOWED
-            };
-            if !refused {
-                leaked.push(format!("{method} {} -> {status} {body}", route.path));
+    for mode in GUEST_MODES {
+        let (upstream, hits) = recording_upstream().await;
+        let app = gateway(&upstream, mode);
+        let guest = guest_cookie(app.clone(), mode).await;
+        for route in &routes {
+            for method in WRITES {
+                let (status, body) =
+                    send(app.clone(), method.clone(), &route.path, Some(&guest)).await;
+                let refused = if route.every_method {
+                    status == StatusCode::FORBIDDEN && body.contains(proxy::READ_ONLY_REFUSAL)
+                } else {
+                    status == StatusCode::METHOD_NOT_ALLOWED
+                };
+                if !refused {
+                    leaked.push(format!(
+                        "{mode:?}: {method} {} -> {status} {body}",
+                        route.path
+                    ));
+                }
             }
         }
+        assert_eq!(
+            hits_of(&hits),
+            Vec::<String>::new(),
+            "a refused {mode:?} guest write must never reach an upstream"
+        );
     }
     assert!(
         leaked.is_empty(),
@@ -250,53 +278,60 @@ async fn a_guest_session_cannot_write_to_any_upstream() {
         leaked.len(),
         leaked.join("\n  ")
     );
-    assert_eq!(
-        hits_of(&hits),
-        Vec::<String>::new(),
-        "a refused write must never reach an upstream"
-    );
 }
 
-/// The read half is untouched: the same guest's GET on every route is
-/// forwarded, and the upstream sees one request per route.
+/// The read half is untouched: each guest's GET on every route is
+/// forwarded, and the upstream sees one request per route. What a
+/// `visitor` may then READ is the upstream's policy answer, not the
+/// edge's.
 #[tokio::test]
 async fn a_guest_session_still_reads_every_upstream() {
-    let (upstream, hits) = recording_upstream().await;
-    let app = gateway(&upstream);
-    let guest = guest_cookie(app.clone()).await;
     let routes = proxied_routes();
-    for route in &routes {
-        for method in [Method::GET, Method::HEAD] {
-            let (status, _) = send(app.clone(), method.clone(), &route.path, Some(&guest)).await;
-            assert_eq!(status, StatusCode::OK, "guest {method} {}", route.path);
+    for mode in GUEST_MODES {
+        let (upstream, hits) = recording_upstream().await;
+        let app = gateway(&upstream, mode);
+        let guest = guest_cookie(app.clone(), mode).await;
+        for route in &routes {
+            for method in [Method::GET, Method::HEAD] {
+                let (status, _) =
+                    send(app.clone(), method.clone(), &route.path, Some(&guest)).await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{mode:?} guest {method} {}",
+                    route.path
+                );
+            }
         }
+        let seen = hits_of(&hits);
+        assert_eq!(
+            seen.len(),
+            routes.len() * 2,
+            "one forward per {mode:?} read: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .all(|h| h.starts_with("GET ") || h.starts_with("HEAD ")),
+            "{seen:?}"
+        );
     }
-    let seen = hits_of(&hits);
-    assert_eq!(
-        seen.len(),
-        routes.len() * 2,
-        "one forward per read: {seen:?}"
-    );
-    assert!(
-        seen.iter()
-            .all(|h| h.starts_with("GET ") || h.starts_with("HEAD ")),
-        "{seen:?}"
-    );
 }
 
-/// The seeded external auditor logs in with a password and carries the
-/// same role; a session whose role is absent is read as
-/// `audit-readonly` downstream (role_headers), so the edge reads it the
-/// same way. Both are refused.
+/// A read-only role signed by login rather than the guest door is
+/// refused the same: the seeded external auditor (`audit-readonly`), a
+/// `visitor`, and a session whose role is absent — which acts as a
+/// `visitor` (`boss_core::roles::effective_role`), downstream through
+/// role_headers and here at the edge alike.
 #[tokio::test]
-async fn an_auditor_and_a_roleless_session_are_read_only_too() {
+async fn an_auditor_a_visitor_and_a_roleless_session_are_read_only_too() {
     let (upstream, hits) = recording_upstream().await;
-    let app = gateway(&upstream);
+    let app = gateway(&upstream, GuestAccess::Off);
     for cookie in [
         signed_cookie(
             Some(boss_core::roles::AUDIT_READONLY_ROLE),
             Some("emp-audit"),
         ),
+        signed_cookie(Some(boss_core::roles::VISITOR_ROLE), None),
         signed_cookie(None, None),
     ] {
         let (status, body) = send(app.clone(), Method::POST, "/api/jobs", Some(&cookie)).await;
@@ -313,7 +348,7 @@ async fn an_auditor_and_a_roleless_session_are_read_only_too() {
 #[tokio::test]
 async fn a_platform_admin_session_still_writes_through() {
     let (upstream, hits) = recording_upstream().await;
-    let app = gateway(&upstream);
+    let app = gateway(&upstream, GuestAccess::Off);
     let admin = signed_cookie(
         Some(boss_core::roles::PLATFORM_ADMIN_ROLE),
         Some("emp-admin"),
@@ -345,29 +380,31 @@ async fn a_platform_admin_session_still_writes_through() {
 
 /// The gateway's OWN write that is not an auth ceremony: resetting the
 /// latency histograms answered anyone, with or without a session. A
-/// stranger is now asked for a session and a read-only one is refused
-/// by name; a writer still resets.
+/// stranger is now asked for a session and a read-only one — either
+/// guest — is refused by name; a writer still resets.
 #[tokio::test]
 async fn resetting_gateway_perf_needs_a_session_that_may_write() {
-    let (upstream, hits) = recording_upstream().await;
-    let app = gateway(&upstream);
     let path = "/api/gateway/perf/reset";
+    for mode in GUEST_MODES {
+        let (upstream, hits) = recording_upstream().await;
+        let app = gateway(&upstream, mode);
 
-    let (status, _) = send(app.clone(), Method::POST, path, None).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "a stranger");
+        let (status, _) = send(app.clone(), Method::POST, path, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "a stranger");
 
-    let guest = guest_cookie(app.clone()).await;
-    let (status, body) = send(app.clone(), Method::POST, path, Some(&guest)).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "a guest: {body}");
-    assert!(body.contains(proxy::READ_ONLY_REFUSAL), "{body}");
+        let guest = guest_cookie(app.clone(), mode).await;
+        let (status, body) = send(app.clone(), Method::POST, path, Some(&guest)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "a {mode:?} guest: {body}");
+        assert!(body.contains(proxy::READ_ONLY_REFUSAL), "{body}");
 
-    let admin = signed_cookie(
-        Some(boss_core::roles::PLATFORM_ADMIN_ROLE),
-        Some("emp-admin"),
-    );
-    let (status, body) = send(app, Method::POST, path, Some(&admin)).await;
-    assert_eq!((status, body.as_str()), (StatusCode::OK, "ok"));
-    assert!(hits_of(&hits).is_empty(), "perf reset is the gateway's own");
+        let admin = signed_cookie(
+            Some(boss_core::roles::PLATFORM_ADMIN_ROLE),
+            Some("emp-admin"),
+        );
+        let (status, body) = send(app, Method::POST, path, Some(&admin)).await;
+        assert_eq!((status, body.as_str()), (StatusCode::OK, "ok"));
+        assert!(hits_of(&hits).is_empty(), "perf reset is the gateway's own");
+    }
 }
 
 /// The doors a read-only session legitimately needs are the gateway's
@@ -377,12 +414,14 @@ async fn resetting_gateway_perf_needs_a_session_that_may_write() {
 /// session or the bootstrap token — and are not this edge's to close.)
 #[tokio::test]
 async fn a_guest_can_still_sign_out() {
-    let (upstream, hits) = recording_upstream().await;
-    let app = gateway(&upstream);
-    let guest = guest_cookie(app.clone()).await;
-    let (status, _) = send(app.clone(), Method::POST, "/api/auth/logout", Some(&guest)).await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    let (status, _) = send(app, Method::GET, "/api/auth/me", Some(&guest)).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(hits_of(&hits).is_empty());
+    for mode in GUEST_MODES {
+        let (upstream, hits) = recording_upstream().await;
+        let app = gateway(&upstream, mode);
+        let guest = guest_cookie(app.clone(), mode).await;
+        let (status, _) = send(app.clone(), Method::POST, "/api/auth/logout", Some(&guest)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{mode:?}");
+        let (status, _) = send(app, Method::GET, "/api/auth/me", Some(&guest)).await;
+        assert_eq!(status, StatusCode::OK, "{mode:?}");
+        assert!(hits_of(&hits).is_empty());
+    }
 }

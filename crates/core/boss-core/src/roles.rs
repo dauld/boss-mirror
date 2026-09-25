@@ -51,21 +51,6 @@ pub const PLATFORM_ADMIN_ROLE: &str = "platform-admin";
 /// gateway perf, etc.) don't reject anonymous OSS visitors.
 pub const AUDIT_READONLY_ROLE: &str = "audit-readonly";
 
-/// True for a role that may read and must never write — the ONE
-/// predicate for "read-only role" (backlog 07e797b4, 2026-09-25). The
-/// gateway refuses every method but GET/HEAD/OPTIONS from a session
-/// whose role answers true here, before any upstream sees the request,
-/// because about 110 upstream write routes authorized no caller and the
-/// guest session carries this role.
-///
-/// `audit-readonly` alone today. Design 2830b6b7 adds a `visitor` role
-/// and reuses THIS function for it rather than growing a second list:
-/// a role joins the read-only set here, and every edge that asks
-/// inherits it.
-pub fn is_read_only_role(role: &str) -> bool {
-    role == AUDIT_READONLY_ROLE
-}
-
 /// Break-glass role — the emergency session minted by the gateway's
 /// hardware-key WebAuthn ceremony (docs/design/break-glass-is-a-key-
 /// you-hold.md). Deliberately NARROW (Q4): it carries exactly the
@@ -137,7 +122,16 @@ pub const VISITOR_ROLE: &str = "visitor";
 /// their own check beside this one.
 pub const READ_ONLY_FLOOR_ROLES: [&str; 2] = [AUDIT_READONLY_ROLE, VISITOR_ROLE];
 
-/// True for exactly the roles in [`READ_ONLY_FLOOR_ROLES`].
+/// True for exactly the roles in [`READ_ONLY_FLOOR_ROLES`] — the ONE
+/// predicate for "read-only role". The gateway refuses every method but
+/// GET/HEAD/OPTIONS from a session whose effective role answers true
+/// here, before any upstream sees the request, because about 110
+/// upstream write routes authorized no caller and a guest session
+/// carries one of these roles (backlog 07e797b4, 2026-09-25). That edge
+/// landed asking an `audit-readonly`-only predicate of its own the same
+/// day this list gained `visitor`; the two were merged into this one so
+/// a Basic guest is refused at the edge like an Audit guest, and a role
+/// joining the floor here is refused there with no edit.
 pub fn is_read_only_floor(role: &str) -> bool {
     READ_ONLY_FLOOR_ROLES.contains(&role)
 }
@@ -243,27 +237,6 @@ mod tests {
         assert!(!has_global_read("admin")); // legacy "admin" is not platform-admin
     }
 
-    /// The read-only set is audit-readonly and nothing else today: not
-    /// the roles that merely READ everything (platform-admin, a seeded
-    /// executive), not break-glass, not an empty or unknown code — the
-    /// gateway refuses every write from a role in this set, so a false
-    /// positive would lock a writer out at the edge.
-    #[test]
-    fn only_audit_readonly_is_a_read_only_role() {
-        seed_executive_set();
-        assert!(is_read_only_role(AUDIT_READONLY_ROLE));
-        for role in [
-            PLATFORM_ADMIN_ROLE,
-            BREAK_GLASS_ROLE,
-            "ceo",
-            "service-tech",
-            "",
-            "Audit-Readonly",
-        ] {
-            assert!(!is_read_only_role(role), "{role:?} is not read-only");
-        }
-    }
-
     /// Q4 (break-glass-is-a-key-you-hold): the emergency role is
     /// NARROW. If it ever gains global read, every "admin-ish" gate
     /// keyed on `has_global_read` silently widens the emergency key
@@ -334,7 +307,9 @@ mod tests {
     /// merely READS everything (platform-admin, a seeded executive) is
     /// not on it, nor is break-glass, nor `guest` — that string is the
     /// no-header trusted-internal sentinel, and every door that asks
-    /// this predicate keeps its own `guest` check beside it.
+    /// this predicate keeps its own `guest` check beside it. The
+    /// gateway refuses every write from a role on the floor (07e797b4),
+    /// so a false positive here locks a writer out at the edge.
     #[test]
     fn the_read_only_floor_is_audit_readonly_and_visitor() {
         seed_executive_set();
@@ -349,6 +324,7 @@ mod tests {
             "service-tech",
             "",
             "Visitor",
+            "Audit-Readonly",
         ] {
             assert!(!is_read_only_floor(role), "{role:?} is not the floor");
         }

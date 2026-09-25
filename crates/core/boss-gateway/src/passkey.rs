@@ -739,8 +739,9 @@ pub async fn assert_begin(
         let user_json = json!({
             "id": employee_id,
             // A roleless session reads as the least access, not the
-            // widest (design 2830b6b7).
-            "role": boss_core::roles::effective_role(sess.role.as_deref()),
+            // widest (design 2830b6b7) — the Session's one fallback,
+            // shared with role_headers and the proxy's refusal.
+            "role": sess.effective_role(),
             "access_tier": sess.access_tier,
             "territory_account_ids": sess.territory_account_ids,
             "direct_report_ids": sess.direct_report_ids,
