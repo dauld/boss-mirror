@@ -12,8 +12,9 @@
   import { untrack } from 'svelte';
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
   import type { Employee } from '../people/types';
-  import { saveStep } from './stepWrite';
-  import { HOLDER_LOCKED_NOTE, assigneeToSend, holderLocked } from './holder';
+  import { releaseStep, saveStep } from './stepWrite';
+  import { HOLDER_LOCKED_NOTE, askReleaseReason, gestureFields, holderLocked } from './holder';
+  import { session } from '@boss/web-kit/session/session.svelte';
 
   type StepData = {
     id: string;
@@ -109,10 +110,12 @@
       // The keys this surface owns, through the merge door; an emptied
       // field is sent as null and deleted, where it used to be cleared
       // by omission from a wholesale PUT (backlog e39a9d2a).
+      // `status` only when the gesture moves the step, and the holder
+      // only when the picker changed it — never the snapshot's own
+      // (backlog 6ef4a36b; GenericSurface says why).
       const body = {
         notes: notes || undefined,
-        status: status ?? step.status,
-        assignee_id: assigneeToSend(step, assigneeId),
+        ...gestureFields(step, assigneeId, status),
         metadata: {
           location: location || undefined,
           scheduled_at: scheduledAt || undefined,
@@ -122,6 +125,27 @@
       };
       const res = await saveStep(jobId, step.id, body);
       if (res.kind === 'failed') {
+        writeError = res.error;
+        return;
+      }
+      onUpdate();
+    } finally {
+      saving = false;
+    }
+  }
+
+  /// The release the note beside the picker names (backlog 6ef4a36b),
+  /// with its reason asked first and a partial release left on screen
+  /// (the review of car 675f1858, #2).
+  async function release(): Promise<void> {
+    const why = askReleaseReason();
+    if (why === null) return;
+    saving = true;
+    writeError = null;
+    try {
+      const by = session.value.kind === 'ready' ? session.value.user.id : null;
+      const res = await releaseStep(jobId, step, why, by);
+      if (res.kind !== 'ok') {
         writeError = res.error;
         return;
       }
@@ -222,6 +246,16 @@
       {#if scheduleMissing.length > 0}
         <span class="step-schedule-missing">Missing: {scheduleMissing.join(', ')}</span>
       {/if}
+    {/if}
+    {#if locked}
+      <button
+        class="btn"
+        onclick={release}
+        disabled={saving}
+        title="Hand this step back — it returns to ready, and the next holder claims it"
+      >
+        Release
+      </button>
     {/if}
     {#if !terminal && step.status === 'active'}
       <button

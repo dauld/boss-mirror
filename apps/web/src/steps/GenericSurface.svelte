@@ -13,9 +13,10 @@
   } from '../jobs/types';
   import type { SpecStep } from '../jobs/fork';
   import type { Employee } from '../people/types';
-  import { saveStep } from './stepWrite';
+  import { releaseStep, saveStep } from './stepWrite';
   import { PROCEDURE_KEY } from './procedure';
-  import { HOLDER_LOCKED_NOTE, assigneeToSend, holderLocked } from './holder';
+  import { HOLDER_LOCKED_NOTE, askReleaseReason, gestureFields, holderLocked } from './holder';
+  import { session } from '@boss/web-kit/session/session.svelte';
   import {
     askRoutes,
     completeLabel,
@@ -207,11 +208,11 @@
     [...employees].sort((a, b) => (a.name ?? "").localeCompare(b.name ?? "")),
   );
 
-  async function persist(overrides: {
-    status?: string;
-    assignee_id?: string | null;
-    notes?: string;
-  }): Promise<void> {
+  /// `status` is the one the gesture moves the step to — Start,
+  /// Complete — and absent for a Save: the page's own copy of the
+  /// status is a snapshot, and sending it back released an agent's
+  /// claim made after the page was drawn (backlog 6ef4a36b).
+  async function persist(status?: string): Promise<void> {
     saving = true;
     writeError = null;
     try {
@@ -220,12 +221,8 @@
       // date is an explicit null, which the door deletes; it used to be
       // cleared by OMISSION from a wholesale PUT.
       const body = {
-        notes: overrides.notes ?? notes ?? undefined,
-        status: overrides.status ?? step.status,
-        assignee_id:
-          overrides.assignee_id !== undefined
-            ? overrides.assignee_id
-            : assigneeToSend(step, assigneeId),
+        notes: notes ?? undefined,
+        ...gestureFields(step, assigneeId, status),
         metadata: {
           ...(dueOnDirty ? { due_on: dueOn || null } : {}),
           // Only send fields the operator actually filled — an
@@ -238,6 +235,30 @@
       };
       const res = await saveStep(jobId, step.id, body);
       if (res.kind === 'failed') {
+        writeError = res.error;
+        return;
+      }
+      onUpdate();
+    } finally {
+      saving = false;
+    }
+  }
+
+  /// Hand an active step back: `ready`, nobody's, for the next holder
+  /// to claim (backlog 6ef4a36b — the note beside the picker said a
+  /// held step changes hands "by release", and the page had none). It
+  /// asks why first and records the answer, as `boss step release`
+  /// does; a partial release stays on screen rather than refreshing it
+  /// away (the review of car 675f1858, #2).
+  async function release(): Promise<void> {
+    const why = askReleaseReason();
+    if (why === null) return;
+    saving = true;
+    writeError = null;
+    try {
+      const by = session.value.kind === 'ready' ? session.value.user.id : null;
+      const res = await releaseStep(jobId, step, why, by);
+      if (res.kind !== 'ok') {
         writeError = res.error;
         return;
       }
@@ -358,7 +379,7 @@
              waiting on, in the row rather than a hover title. -->
         <button
           class="btn btn-primary"
-          onclick={() => persist({ status: 'completed' })}
+          onclick={() => persist('completed')}
           disabled={saving || missingRequired.length > 0}
         >
           {completeText}
@@ -448,7 +469,7 @@
     {#if dirty && !terminal}
       <button
         class="btn"
-        onclick={() => persist({})}
+        onclick={() => persist()}
         disabled={saving}
       >
         {saving ? 'Saving…' : 'Save assignment'}
@@ -457,10 +478,24 @@
     {#if !terminal && isPending(step.status)}
       <button
         class="btn btn-primary"
-        onclick={() => persist({ status: 'active' })}
+        onclick={() => persist('active')}
         disabled={saving}
       >
         Start
+      </button>
+    {/if}
+    {#if locked}
+      <!-- The release the note beside the picker names: the step goes
+           back to ready, nobody's, and the next holder claims it. The
+           server's policy decides who may; the page is behind the
+           write gate like every step surface. -->
+      <button
+        class="btn"
+        onclick={release}
+        disabled={saving}
+        title="Hand this step back — it returns to ready, and the next holder claims it"
+      >
+        Release
       </button>
     {/if}
     {#if !terminal && step.status === 'active' && !hasAsk}
@@ -468,7 +503,7 @@
            completes from the ask above, where the answer is. -->
       <button
         class="btn btn-primary"
-        onclick={() => persist({ status: 'completed' })}
+        onclick={() => persist('completed')}
         disabled={saving}
       >
         Complete

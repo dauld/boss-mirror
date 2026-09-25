@@ -386,14 +386,59 @@ async fn the_status_in_the_same_body_decides_whether_a_clear_is_a_release() {
     );
     let after = stored(&jobs).await;
     assert_eq!(after.status, StepStatus::Ready);
-    assert!(
-        after
-            .assignee_id
-            .as_deref()
-            .is_none_or(|a| a.trim().is_empty()),
-        "released: {:?}",
-        after.assignee_id
-    );
+    // NULL, not `Some("")` (backlog 6ef4a36b, the review of car
+    // 781b9209): this assertion accepted a blank, and a stored blank
+    // is a holder to both claim CASes, which admit only NULL or the
+    // claimant — the release answered 204 and stranded the step.
+    assert_eq!(after.assignee_id, None, "a blank release stores nobody");
+}
+
+/// THE STRANDED STEP (backlog 6ef4a36b, the review of car 781b9209). A
+/// release spelled with `""` — or a blank — answered 204 and stored
+/// `Some("")`, and every claim after it answered 409 `holder: ""`:
+/// both claim CASes admit a step whose holder is NULL or the claimant,
+/// and a blank is neither. So nobody could ever take the step. A blank
+/// holder is stored as NULL on every write, and the step is claimable.
+#[tokio::test]
+async fn a_blank_release_leaves_a_step_the_next_holder_can_claim() {
+    for blank in [r#""""#, r#""   ""#] {
+        let (app, jobs) = seed(StepStatus::Ready, None).await;
+        claim(&app, CLAIMANT).await;
+
+        let (status, body) = put_step(
+            &app,
+            "emp-op",
+            &format!(r#"{{"status":"ready","assignee_id":{blank}}}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{blank}: {body}");
+        assert_eq!(
+            stored(&jobs).await.assignee_id,
+            None,
+            "{blank} is stored as nobody"
+        );
+
+        claim(&app, "emp-next").await;
+        let after = stored(&jobs).await;
+        assert_eq!(after.assignee_id.as_deref(), Some("emp-next"), "{blank}");
+        assert_eq!(after.status, StepStatus::Active, "{blank}");
+    }
+}
+
+/// And a blank NOMINATION of a ready step is nobody too — the same
+/// normalisation, off the release path: `{"assignee_id":""}` on a ready
+/// step used to store `Some("")`, which left it unclaimable exactly as
+/// the blank release did.
+#[tokio::test]
+async fn a_blank_nomination_is_stored_as_nobody() {
+    let (app, jobs) = seed(StepStatus::Ready, Some("emp-first-pick")).await;
+
+    let (status, body) = put_step(&app, "emp-op", r#"{"assignee_id":" "}"#).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert_eq!(stored(&jobs).await.assignee_id, None);
+
+    claim(&app, "emp-next").await;
+    assert_eq!(stored(&jobs).await.assignee_id.as_deref(), Some("emp-next"));
 }
 
 /// An active step that already has no holder (a row from before the

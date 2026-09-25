@@ -4,7 +4,14 @@
 // must carry whatever the server said about why.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { WRITE_RETRY, describeWriteFailure, putStep, saveStep, writeStep } from './stepWrite';
+import {
+  WRITE_RETRY,
+  describeWriteFailure,
+  putStep,
+  releaseStep,
+  saveStep,
+  writeStep,
+} from './stepWrite';
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -263,6 +270,121 @@ describe('saveStep — the two doors (backlog e39a9d2a)', () => {
     const res = await saveStep('job-1', 'step-9', { metadata: { a: 1 } }, noWait);
     expect(res.kind).toBe('ok');
     expect(calls).toBe(2);
+  });
+});
+
+describe('releaseStep — the page hands a held step back (backlog 6ef4a36b)', () => {
+  type Seen = { method: string; url: string; body: unknown };
+  const WHY = 'handing over to the day shift';
+  /// The step as the server holds it after a clean release.
+  const releasedRow = {
+    id: 'step-9',
+    status: 'ready',
+    assignee_id: null,
+    metadata: { brief: 'kept', released: { why: WHY } },
+  };
+  /// Records every call; `answer` decides each response, and the
+  /// read-back (`GET …/steps`) answers `readBack` unless told otherwise.
+  function recordAll(
+    answer: (s: Seen) => Response | null = () => null,
+    readBack: unknown = [releasedRow],
+  ): Seen[] {
+    const seen: Seen[] = [];
+    stubFetch(async (url, init) => {
+      const s = {
+        method: String(init?.method ?? 'GET'),
+        url,
+        body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      };
+      seen.push(s);
+      const custom = answer(s);
+      if (custom) return custom;
+      if (s.method === 'GET') return new Response(JSON.stringify(readBack), { status: 200 });
+      return new Response(null, { status: 204 });
+    });
+    return seen;
+  }
+  const writes = (seen: Seen[]) => seen.filter((s) => s.method !== 'GET');
+
+  test('always clears the run edge and records the stamp, then releases, then reads back', async () => {
+    // The page was drawn BEFORE the dispatcher wrote `agent_run`, so its
+    // snapshot has none — the release clears it anyway (review of car
+    // 675f1858, #1), and records why in the same merge (#2).
+    const seen = recordAll();
+    const res = await releaseStep(
+      'job-1',
+      { id: 'step-9', metadata: { brief: 'kept' } },
+      WHY,
+      'emp-001',
+      noWait,
+    );
+    expect(res.kind).toBe('ok');
+    expect(seen).toEqual([
+      {
+        method: 'PATCH',
+        url: '/api/jobs/job-1/steps/step-9/metadata',
+        body: {
+          agent_run: null,
+          released: { why: WHY, by: 'emp-001', at: expect.any(String), from_run: null },
+        },
+      },
+      {
+        method: 'PUT',
+        url: '/api/jobs/job-1/steps/step-9',
+        body: { status: 'ready', assignee_id: null },
+      },
+      { method: 'GET', url: '/api/jobs/job-1/steps', body: undefined },
+    ]);
+  });
+
+  test('a blank reason writes nothing', async () => {
+    const seen = recordAll();
+    const res = await releaseStep('job-1', { id: 'step-9', metadata: {} }, '   ', 'emp-001', noWait);
+    expect(res.kind).toBe('failed');
+    expect(seen).toEqual([]);
+  });
+
+  test('a refused merge stops before the status write', async () => {
+    const seen = recordAll((s) =>
+      s.method === 'PATCH' ? new Response('{"error":"nope"}', { status: 403 }) : null,
+    );
+    const res = await releaseStep('job-1', { id: 'step-9', metadata: {} }, WHY, 'emp-001', noWait);
+    expect(res).toEqual({ kind: 'failed', error: 'HTTP 403 — nope' });
+    expect(writes(seen).map((s) => s.method)).toEqual(['PATCH']);
+  });
+
+  test('a status write refused AFTER the merge is a partial release, read back and said so', async () => {
+    // The merge landed — the reason is recorded, the run edge cleared —
+    // and the step is still held. That is neither success nor a clean
+    // failure, and the page must not render it as either.
+    const seen = recordAll(
+      (s) =>
+        s.method === 'PUT'
+          ? new Response('{"error":"not the holder"}', { status: 409 })
+          : null,
+      [{ ...releasedRow, status: 'active', assignee_id: 'agent-claude' }],
+    );
+    const res = await releaseStep('job-1', { id: 'step-9', metadata: {} }, WHY, 'emp-001', noWait);
+    expect(res.kind).toBe('partial');
+    if (res.kind !== 'partial') return;
+    expect(res.error).toMatch(/^PARTIAL RELEASE/);
+    expect(res.error).toContain('HTTP 409 — not the holder');
+    expect(res.error).toContain('reads back active');
+    expect(seen.map((s) => s.method)).toEqual(['PATCH', 'PUT', 'GET']);
+  });
+
+  test('a 2xx the read-back does not bear out is partial too', async () => {
+    recordAll(() => null, [{ ...releasedRow, assignee_id: 'agent-claude' }]);
+    const res = await releaseStep('job-1', { id: 'step-9', metadata: {} }, WHY, 'emp-001', noWait);
+    expect(res.kind).toBe('partial');
+    if (res.kind !== 'partial') return;
+    expect(res.error).toContain('still assigned to agent-claude');
+  });
+
+  test('a read-back that cannot be read is partial, not ok', async () => {
+    recordAll((s) => (s.method === 'GET' ? new Response('down', { status: 500 }) : null));
+    const res = await releaseStep('job-1', { id: 'step-9', metadata: {} }, WHY, 'emp-001', noWait);
+    expect(res.kind).toBe('partial');
   });
 });
 

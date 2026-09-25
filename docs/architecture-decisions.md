@@ -1829,6 +1829,63 @@ open: the approve step's runner-written keys
 anyone who can write the step — the runner's re-render and the ceremony
 binding refuse a swap, but do not prevent one.
 
+**A key a human signs has one declared writer, and the server knows
+who that writer is** (design `f623e425`, David 2026-09-25, Q1 answered
+as option A; answers backlog `6c9183de`). The paragraph above leaves
+the approval tamper-evident AFTER the ceremony and open BEFORE it, in
+four measured ways: the merge door lets anyone with Update on the step
+write `plan`, `verb`, `host`, `args`, `rendered_plan_sha256` and
+`decision`; the `claimable` execute step can be claimed, returned to
+ready or completed with invented `output` by any machine-door caller;
+the sign-off surface rendered only `comment` and `decision` while the
+passkey stamped the whole shape, so a planted plan or a planted
+`decision = approved` was signed in one tap; and the runner's identity
+is self-asserted, an `x-boss-user` id sent beside the one
+`x-boss-machine-token` that every agent's `boss-api`, the conductor,
+the dispatcher and the runner all hold, so a rule keyed on actor id is
+satisfied by typing the id. Decided: (1) **the writer is declared on
+the Workflow row, per field** — `writer = "runner:ops"` on the runner's
+keys, `writer = "signer"` (a holder of one of the step's
+`sign_offs_required` roles through the gateway session) on `decision`
+and `comment`, and `executor = "runner:ops"` on execute for its status
+and assignee transitions — so a new approval-carrying protocol gets the
+rule by writing a row, not an ops-request branch in `steps.rs`;
+(2) **one check at every door that can change the key** — the merge
+door, the step PUT, the claim door and the transitions of a step that
+declares `executor` — refusing 409 naming the key, its declared writer
+and who asked, the shape `human_only` refusals already take; (3) **the
+surface shows every key the passkey signs, or does not sign**: every
+metadata key in `step_shape_hash`, the title, and the plan verbatim,
+an unrendered key shown as raw JSON, with a test that the rendered keys
+equal the hashed keys — this ships FIRST, alone, because it is needed
+whatever Q1 answers and a human who can see a planted plan will not
+approve it; (4) **the runner's refusals stay** as the second line — the
+guard prevents, the runner detects, and the guard is only as strong as
+the identity it reads; (5) ops-request's approve and execute steps
+first, other presence-assured steps adopting it as rows when a need is
+measured. Q1 — how the server tells the runner from anything claiming
+to be it — is **a per-runner credential minted by the credential
+broker** (a `rotate-a-credential` packet; its issuer is the jobs API's
+own actor-credential table, so it is derivable and no human places
+it): the jobs API resolves the presented credential to an actor and a
+host and IGNORES the self-asserted id, `runner:ops` means "presented a
+runner credential", and a runner for host h writes only requests whose
+`host` is h. Rejected: runner-signed writes (B), because the planted
+write still reaches the record and the page — detect, not prevent;
+server-rendered plans (C), because the plan is observed on the host,
+though the server computing `rendered_plan_sha256` from `plan` rides
+with A as a detail; and writer rules enforced against the forgeable
+header alone (D), because a guard that LOOKS like protection against
+the adversary the review named, and is not, is a mostly-sure guard.
+So (1)-(2) ship only together with the credential, never before it,
+and until then the display and the runner's refusals are the controls.
+Stamp voiding after a reverted edit is `87329a13`'s decision, not this
+one; under (1) only a signer may write `decision`, which narrows that
+attacker without closing it. The surface display rides its own
+trust-boundary car (`fix/the-approval-surface-shows-every-key-the-passkey-signs`).
+Not yet built: the credential kind, its broker handler, the resolve
+step in the machine door, and the writer rules.
+
 **Presence authorises a break-glass enrolment, and the bootstrap token
 retires** (design `03451237`, David 2026-09-22, all four questions
 accepted as proposed). Independence is a property of the ASSERT path —

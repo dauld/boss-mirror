@@ -7,6 +7,8 @@
 // result the surface must branch on: `ok` continues, `failed` renders
 // inline and leaves state untouched.
 
+import { RELEASE, releaseMetadata, releaseUnconfirmed } from './holder';
+
 /// `presenceRequired` is set only on a 422 whose body says
 /// `required: "presence"` — the one refusal a surface answers with a
 /// passkey tap rather than showing (backlog 3ce3c15f). A 422 is also a
@@ -223,6 +225,117 @@ export async function saveStep(
     );
   }
   return result;
+}
+
+/// A release's outcome. `partial` is the third answer a two-write act
+/// owes: the merge landed — the reason recorded, the run edge cleared —
+/// and then the status write was refused, or the read-back does not
+/// bear the release out. It is neither success nor a clean failure,
+/// and a surface that rendered it as either would lie about the step.
+export type ReleaseResult =
+  | { kind: 'ok' }
+  | { kind: 'failed'; error: string }
+  | { kind: 'partial'; error: string };
+
+/// Release an active step — the three acts `boss step release` makes,
+/// so the page is a third way to hand a step back rather than a
+/// different one (backlog 6ef4a36b: the surfaces said a held step
+/// changes hands "by release", and offered no release):
+///
+/// 1. the merge door: the run edge cleared and the `released` stamp
+///    `{why, by, at, from_run}` recorded, in one write
+///    ([`releaseMetadata`]);
+/// 2. the PUT: [`RELEASE`] — `ready`, nobody's;
+/// 3. the read-back, because a 2xx is a claim and the step as it now
+///    reads is the fact ([`releaseUnconfirmed`]).
+///
+/// A blank reason writes nothing, as the CLI refuses a blank `--why`: the
+/// reason is the whole artifact a release leaves (the review of car
+/// 675f1858, #2). The next holder takes the step through the claim.
+export async function releaseStep(
+  jobId: string,
+  step: Readonly<{ id: string; metadata: Readonly<Record<string, unknown>> }>,
+  why: string,
+  by: string | null,
+  opts?: WriteOpts,
+): Promise<ReleaseResult> {
+  if (!why.trim()) {
+    return {
+      kind: 'failed',
+      error: 'a release needs a reason — it is the whole record a release leaves',
+    };
+  }
+  const stepUrl = `/api/jobs/${jobId}/steps/${step.id}`;
+  const merged = await writeStep(
+    `${stepUrl}/metadata`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(releaseMetadata(step.metadata, why, by, new Date().toISOString())),
+    },
+    { ...opts, idempotent: true },
+  );
+  if (merged.kind === 'failed') return merged;
+
+  const put = await writeStep(
+    stepUrl,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(RELEASE),
+    },
+    opts,
+  );
+  const readBack = await readStepBack(jobId, step.id, opts);
+  const standing =
+    typeof readBack === 'string' ? readBack : releaseUnconfirmed(readBack, why);
+  if (put.kind === 'failed') {
+    return {
+      kind: 'partial',
+      error:
+        `PARTIAL RELEASE — the reason is recorded and the run edge cleared, but the ` +
+        `status write was refused (${put.error}); ${standing ?? 'the step nonetheless reads back released'}. ` +
+        'Reload before acting on this step.',
+    };
+  }
+  if (standing !== null) {
+    return {
+      kind: 'partial',
+      error: `PARTIAL RELEASE — both writes were accepted, but ${standing}. Reload before acting on this step.`,
+    };
+  }
+  return { kind: 'ok' };
+}
+
+/// The step as the server now holds it, or a line saying why it could
+/// not be read.
+async function readStepBack(
+  jobId: string,
+  stepId: string,
+  opts?: WriteOpts,
+): Promise<
+  | Readonly<{ status: string; assignee_id: string | null; metadata: Record<string, unknown> }>
+  | string
+> {
+  const res = await writeStep(`/api/jobs/${jobId}/steps`, { method: 'GET' }, opts);
+  if (res.kind === 'failed') return `the step could not be read back (${res.error})`;
+  try {
+    const rows = (await res.response.json()) as ReadonlyArray<{
+      id: string;
+      status: string;
+      assignee_id: string | null;
+      metadata?: Record<string, unknown> | null;
+    }>;
+    const row = rows.find((r) => r.id === stepId);
+    if (!row) return 'the step is missing from the read-back';
+    return {
+      status: row.status,
+      assignee_id: row.assignee_id ?? null,
+      metadata: row.metadata ?? {},
+    };
+  } catch {
+    return 'the read-back was not the step list';
+  }
 }
 
 /// The standard step PUT (PATCH semantics server-side). A body that

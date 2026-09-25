@@ -94,6 +94,32 @@ fn stub_curl(root: &Path) -> PathBuf {
             // that ANSWERS an error (curl's 22 under -f) with
             // STUB_GATE_RC.
             "case \"$url\" in\n",
+            // The worktree pass's RECORD reads (backlog 9a044141): the
+            // gate-runs launched from a worktree, the cars on a branch
+            // (both narrowed by `metadata=`), and an agent-run by id.
+            // Answered from the JSON document at STUB_RECORD —
+            // `{gate_runs: [...], cars: [...], runs: {id: status}}`,
+            // empty when unset — filtered by the same containment the
+            // real list applies; STUB_RECORD_RC fails every one of
+            // them (7: nothing answered; 22: an error answered).
+            "    *kind=gate-run*metadata=* | *kind=ship-a-change*metadata=* | */api/jobs/run*)\n",
+            "        if [ -n \"${STUB_RECORD_RC:-}\" ]; then exit \"$STUB_RECORD_RC\"; fi\n",
+            "        rec=$(cat \"${STUB_RECORD:-/dev/null}\" 2>/dev/null); [ -n \"$rec\" ] || rec='{}'\n",
+            "        case \"$url\" in\n",
+            "            */api/jobs/run*)\n",
+            "                id=${url##*/api/jobs/}\n",
+            "                jq -c --arg id \"$id\" '(.runs[$id] // \"open\") as $s\n",
+            "                    | {id: $id, kind: \"agent-run\", status: $s,\n",
+            "                       metadata: {outcome: (if $s == \"closed\" then \"landed\" else null end)}}' <<<\"$rec\" ;;\n",
+            "            *)\n",
+            "                m=${url##*metadata=}; m=${m%%&*}; m=$(printf '%b' \"${m//%/\\\\x}\")\n",
+            "                case \"$url\" in *kind=gate-run*) c=gate_runs ;; *) c=cars ;; esac\n",
+            "                jq -c --argjson m \"$m\" --arg c \"$c\" '\n",
+            "                    [(.[$c] // [])[] | select(. as $r | $m | to_entries | all(.value == $r[.key]))]\n",
+            "                    | {total: length, data: [.[] | {id: (.id // \"packet\"), status: (.status // \"open\"),\n",
+            "                                                    metadata: del(.id, .status)}]}' <<<\"$rec\" ;;\n",
+            "        esac\n",
+            "        exit 0 ;;\n",
             "    *kind=gate-run*)\n",
             "        if [ -n \"${STUB_GATE_RC:-}\" ]; then exit \"$STUB_GATE_RC\"; fi\n",
             "        if [ -n \"${STUB_OPEN_GATE:-}\" ]; then\n",
@@ -196,6 +222,9 @@ fn run_with(scratch: &Path, args: &[&str], extra: &[(&str, &str)]) -> Output {
         .env("BOSS_API_RETRY_DEADLINE", "0")
         .env("STUB_LOG", scratch.join("curl-log.txt"))
         .env("STUB_LS_REMOTE", scratch.join("git-ls-remote.txt"))
+        // What the system of record holds about worktrees, cars and
+        // runs: absent, it holds nothing (see `write_record`).
+        .env("STUB_RECORD", scratch.join("record.json"))
         .env(
             "PATH",
             format!(
@@ -2197,6 +2226,304 @@ fn a_worktree_whose_work_landed_by_a_rebase_and_a_squash_is_landed_and_unlanded_
                 trained.exists() && squashed.exists(),
                 "above the floor a tree landed by content keeps the 12h grace, as one \
                  landed by sha does\n{text}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// LANDED ON RECORD (backlog 9a044141). Measured 2026-09-25 16:15-16:40Z:
+// /work at 14 GB free against its 18 GB floor, 297 worktrees under
+// .claude/worktrees, 253 of them a named branch with no origin/ ref and
+// a head on no origin ref — and `landed_by_content` called 0 of the 218
+// idle ones landed, because a train squashes N cars into one commit,
+// `boss gate --rebase` replays the car, and a later car edits the same
+// files. So every finished builder's tree waited the 48h unpushed
+// window, even under the floor, where a landed one waits 30 minutes.
+// The system of record holds the answer git cannot see: the gate-runs
+// launched from a worktree (flat `worktree`, `branch`, `agent_run`), the
+// agent-run each names and whether it finished, and the car on a branch
+// with the conductor's `merged` stamp. These tests write the refusals
+// first — a dirty tree, a tree with no landing on record, and a record
+// that cannot be read — because this car changes what gets deleted.
+// ---------------------------------------------------------------------
+
+/// What the stub system of record holds (see `stub_curl`).
+fn write_record(root: &Path, doc: serde_json::Value) {
+    boss_testing::write_file(&root.join("record.json"), &doc.to_string());
+}
+
+fn path_str(p: &Path) -> String {
+    p.to_str().expect("utf8").to_string()
+}
+
+/// One GB under the /work floor: a landed tree waits only the live
+/// window, so a tree idle 2h is due the moment anything calls it landed.
+fn under_the_work_floor() -> String {
+    (work_floor() - 1).to_string()
+}
+
+/// A tree past WORKTREE_MAX_AGE_H with nothing on record: the pass takes
+/// it without asking anyone, so every test here files its packet and the
+/// counts can be read off the run step.
+fn abandoned_tree(yard: &Yard) -> PathBuf {
+    yard.worktree("agent-abandoned", Some("feat/abandoned"), 60)
+}
+
+/// The run step's completion, as the stub saw it.
+fn run_step_put(root: &Path, text: &str) -> String {
+    let log = curl_log(root);
+    log.lines()
+        .find(|l| l.starts_with("PUT "))
+        .unwrap_or_else(|| panic!("the run step is completed\n{log}\n{text}"))
+        .to_string()
+}
+
+/// Make a tree dirty — an edit and an untracked file — dated like the
+/// tree itself, so it is the dirt and not recency that keeps it.
+fn dirty(tree: &Path, hours_ago: u64) {
+    boss_testing::write_file(&tree.join("work.txt"), "edited, not committed");
+    boss_testing::write_file(&tree.join("notes.txt"), "untracked");
+    for p in [
+        tree.join("work.txt"),
+        tree.join("notes.txt"),
+        tree.to_path_buf(),
+    ] {
+        touch_at(&p, hours_ago);
+    }
+}
+
+/// REFUSAL 1. A landing on record makes a tree DUE; it never makes a
+/// dirty one removable. The record only shortens the wait — every guard
+/// after it still runs, and `git worktree remove` still has no --force.
+#[test]
+fn a_dirty_worktree_whose_run_finished_on_record_is_kept_and_named() {
+    let root = boss_testing::scratch_dir("boss-dsr-record-dirty");
+    let _guard = Scratch(root.clone());
+    let yard = Yard::new(&root);
+    let tree = yard.worktree("agent-dirty", Some("fix/dirty"), 2);
+    dirty(&tree, 2);
+    abandoned_tree(&yard);
+    write_record(
+        &root,
+        serde_json::json!({
+            "gate_runs": [{"worktree": path_str(&tree), "branch": "fix/dirty", "agent_run": "run0dirt"}],
+            "runs": {"run0dirt": "closed"},
+        }),
+    );
+
+    let out = run(&root, &[("STUB_DF_WORK_GB", &under_the_work_floor())]);
+    let text = say(&out);
+    assert!(
+        tree.exists(),
+        "a dirty tree is never removed, whatever the record says\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("agent-dirty (2 dirty"),
+        "the record made it due, so the dirty guard judged it and NAMED it\n{text}"
+    );
+    let put = run_step_put(&root, &text);
+    assert!(
+        put.contains("\"worktrees_kept_dirty\":\"1\"") && put.contains("agent-dirty:2"),
+        "the kept dirty tree is on the packet with its count\n{put}\n{text}"
+    );
+}
+
+/// REFUSAL 2. No landing on record is not a landing. A run still open,
+/// a car still parked, and a tree the record has never heard of all keep
+/// the 48h unpushed window — and the packet says WHY each stays, rather
+/// than folding them into "git activity inside the window".
+#[test]
+fn an_unpushed_worktree_with_no_landing_on_record_is_kept_and_counted() {
+    let root = boss_testing::scratch_dir("boss-dsr-record-none");
+    let _guard = Scratch(root.clone());
+    let yard = Yard::new(&root);
+    let open_run = yard.worktree("agent-open-run", Some("fix/open-run"), 2);
+    let unknown = yard.worktree("agent-unknown", Some("worktree-agent-unknown"), 2);
+    let gone = abandoned_tree(&yard);
+    write_record(
+        &root,
+        serde_json::json!({
+            "gate_runs": [{"worktree": path_str(&open_run), "branch": "fix/open-run", "agent_run": "run0open"}],
+            "cars": [{"id": "c0parked", "branch": "fix/open-run", "status": "open"}],
+            "runs": {"run0open": "open"},
+        }),
+    );
+
+    let out = run(&root, &[("STUB_DF_WORK_GB", &under_the_work_floor())]);
+    let text = say(&out);
+    assert!(
+        open_run.exists(),
+        "a run still open and a car not merged are no landing\n{text}"
+    );
+    assert!(
+        unknown.exists(),
+        "a tree the record has never heard of is no landing either\n{text}"
+    );
+    assert!(
+        !gone.exists(),
+        "past the unpushed window the pass still takes an abandoned tree\n{text}"
+    );
+    let log = curl_log(&root);
+    assert!(
+        log.contains("kind=gate-run")
+            && log.contains("metadata=")
+            && log.contains("kind=ship-a-change")
+            && log.contains("/api/jobs/run0open"),
+        "the record was asked — the gate-runs from the tree, the car on its branch, the run\n{log}\n{text}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("no landing on record"),
+        "each kept tree says why it stays\n{text}"
+    );
+    let put = run_step_put(&root, &text);
+    assert!(
+        put.contains("\"worktrees_kept_unpushed_no_landing\":\"2\""),
+        "the packet counts the trees kept for want of a landing on record\n{put}\n{text}"
+    );
+}
+
+/// REFUSAL 3. A record that cannot be read FAILS CLOSED: every unpushed
+/// tree keeps its 48h window, exactly as before the record was asked.
+/// Two ways it goes dark — nothing answers (curl 7) and an error answers
+/// (curl 22) — and both trees here DO have a landing on record, so the
+/// dark read is the only thing that keeps them. It is asked once a pass:
+/// a hundred trees must not each wait out a dead API.
+#[test]
+fn a_system_of_record_that_cannot_be_read_keeps_every_unpushed_worktree() {
+    for rc in ["7", "22"] {
+        let root = boss_testing::scratch_dir("boss-dsr-record-dark");
+        let _guard = Scratch(root.clone());
+        let yard = Yard::new(&root);
+        let first = yard.worktree("agent-first", Some("fix/first"), 2);
+        let second = yard.worktree("agent-second", Some("fix/second"), 2);
+        let gone = abandoned_tree(&yard);
+        write_record(
+            &root,
+            serde_json::json!({
+                "cars": [
+                    {"id": "c0first0", "branch": "fix/first", "merged": "true"},
+                    {"id": "c0second", "branch": "fix/second", "merged": "true"},
+                ],
+            }),
+        );
+
+        let out = run(
+            &root,
+            &[
+                ("STUB_DF_WORK_GB", &under_the_work_floor()),
+                ("STUB_RECORD_RC", rc),
+            ],
+        );
+        let text = say(&out);
+        assert!(
+            first.exists() && second.exists(),
+            "curl {rc}: a record that could not be read is no landing — kept\n{text}"
+        );
+        assert!(
+            !gone.exists(),
+            "curl {rc}: and the rest of the pass still runs\n{text}"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("could not be read"),
+            "curl {rc}: the dark read is said out loud\n{text}"
+        );
+        let log = curl_log(&root);
+        let asked = log
+            .lines()
+            .filter(|l| l.contains("metadata=") || l.contains("/api/jobs/run"))
+            .count();
+        assert_eq!(
+            asked, 1,
+            "curl {rc}: a dark record is asked once a pass, not once a tree\n{log}\n{text}"
+        );
+        let put = run_step_put(&root, &text);
+        assert!(
+            put.contains("\"worktrees_kept_unpushed_sor_unread\":\"2\"")
+                && put.contains(&format!("curl exit {rc}")),
+            "curl {rc}: the packet counts what the dark read kept, and why\n{put}\n{text}"
+        );
+    }
+}
+
+/// THE CHANGE. A tree whose builder's run FINISHED, whose branch's car
+/// MERGED, or which launched a gate for a car that merged under another
+/// branch name, is landed on record, and under the /work floor waits only
+/// the live window. A landed tree inside the live window is still kept,
+/// and is not even asked about; above the floor the 12h grace holds.
+#[test]
+fn a_worktree_whose_run_finished_or_whose_car_merged_on_record_is_landed() {
+    for under in [true, false] {
+        let root = boss_testing::scratch_dir("boss-dsr-record-landed");
+        let _guard = Scratch(root.clone());
+        let yard = Yard::new(&root);
+        let run_done = yard.worktree("agent-run-done", Some("worktree-agent-run-done"), 2);
+        let car_merged = yard.worktree("agent-car-merged", Some("fix/car-merged"), 2);
+        let via_gate = yard.worktree("agent-via-gate", Some("worktree-agent-via-gate"), 2);
+        let fresh = yard.worktree("agent-fresh", Some("fix/fresh"), 0);
+        write_record(
+            &root,
+            serde_json::json!({
+                "gate_runs": [
+                    {"worktree": path_str(&run_done), "branch": "fix/run-done", "agent_run": "run0done"},
+                    {"worktree": path_str(&via_gate), "branch": "fix/via-gate", "agent_run": "run0via1"},
+                ],
+                "cars": [
+                    {"id": "c0merged", "branch": "fix/car-merged", "merged": "true"},
+                    {"id": "c0viagat", "branch": "fix/via-gate", "status": "closed", "outcome": "merged"},
+                    {"id": "c0fresh0", "branch": "fix/fresh", "merged": "true"},
+                ],
+                "runs": {"run0done": "closed", "run0via1": "open"},
+            }),
+        );
+
+        let free = if under {
+            under_the_work_floor()
+        } else {
+            (work_floor() + 10).to_string()
+        };
+        let out = run(&root, &[("STUB_DF_WORK_GB", &free)]);
+        let text = say(&out);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            fresh.exists(),
+            "a tree inside the live window is kept, landed or not\n{text}"
+        );
+        if under {
+            assert!(
+                !run_done.exists(),
+                "its run finished: landed on record, removed after the live window\n{text}"
+            );
+            assert!(
+                !car_merged.exists(),
+                "its branch's car merged: landed on record\n{text}"
+            );
+            assert!(
+                !via_gate.exists(),
+                "it launched a gate for a branch whose car merged: landed on record\n{text}"
+            );
+            assert!(
+                stdout.contains("agent-run run0done") && stdout.contains("is finished"),
+                "the removal names the run the record answered with\n{text}"
+            );
+            assert!(
+                stdout.contains("car c0merged") && stdout.contains("car c0viagat"),
+                "and the car\n{text}"
+            );
+            let put = run_step_put(&root, &text);
+            assert!(
+                put.contains("\"worktrees_removed_by_record\":\"3\""),
+                "the packet counts the trees only the record could call landed\n{put}\n{text}"
+            );
+        } else {
+            assert!(
+                run_done.exists() && car_merged.exists() && via_gate.exists(),
+                "above the floor a tree landed on record keeps the 12h grace\n{text}"
+            );
+            assert!(
+                !curl_log(&root).contains("metadata="),
+                "inside the landed window nothing is asked of the record\n{}\n{text}",
+                curl_log(&root)
             );
         }
     }

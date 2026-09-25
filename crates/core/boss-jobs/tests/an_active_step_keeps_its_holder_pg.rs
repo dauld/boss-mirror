@@ -157,3 +157,28 @@ async fn a_release_in_one_body_still_frees_the_step_over_postgres() {
     claim(&app, "emp-next").await;
     assert_eq!(stored(&jobs).await.assignee_id.as_deref(), Some("emp-next"));
 }
+
+/// A release spelled `""` stored `Some("")`, and the Pg claim CAS —
+/// `assignee_id IS NULL OR` the claimant — then refused every claimant
+/// 409 `holder: ""` (backlog 6ef4a36b, probed on in-memory; the Pg
+/// predicate at postgres.rs has the same shape). Stored as NULL, the
+/// next claim wins.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_blank_release_is_stored_as_null_and_claimable_over_postgres() {
+    let db = TestDb::new().await;
+    let (app, jobs) = app(&db).await;
+    claim(&app, CLAIMANT).await;
+
+    put(
+        &app,
+        serde_json::json!({ "status": "ready", "assignee_id": "  " }),
+    )
+    .await
+    .assert_status(StatusCode::NO_CONTENT);
+    let after = stored(&jobs).await;
+    assert_eq!(after.status, StepStatus::Ready);
+    assert_eq!(after.assignee_id, None, "a blank release stores NULL");
+
+    claim(&app, "emp-next").await;
+    assert_eq!(stored(&jobs).await.assignee_id.as_deref(), Some("emp-next"));
+}

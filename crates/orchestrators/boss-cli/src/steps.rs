@@ -1641,7 +1641,7 @@ pub(crate) fn confirm_released(step: &Value, why: &str) -> Result<(), String> {
     }
     if let Some(who) = step.get("assignee_id").and_then(Value::as_str) {
         return Err(format!(
-            "the step reads back `{WAITING_STATUS}` but is still assigned to {who} — the \
+            "the step reads back `{WAITING_STATUS}` but is still assigned to {who:?} — the \
              station cannot hand out work somebody still holds"
         ));
     }
@@ -3438,6 +3438,20 @@ mod tests {
                 .unwrap_err()
                 .contains("agent-claude"),
             "a ready step still assigned is not handed back to the station"
+        );
+
+        // A blank holder is still a holder to the claim CAS, which
+        // admits only NULL or the claimant — so it is refused here, and
+        // named quoted so the blank is visible (backlog 6ef4a36b: the
+        // jobs API now stores a blank release as NULL, so a blank read
+        // back is a server that did not).
+        let mut blank = freed.clone();
+        blank["assignee_id"] = json!("");
+        assert!(
+            confirm_released(&blank, "the run died")
+                .unwrap_err()
+                .contains(r#""""#),
+            "a blank holder reads back as a step nobody can claim"
         );
 
         let mut pinned = freed.clone();

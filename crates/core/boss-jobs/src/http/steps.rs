@@ -734,6 +734,16 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // Path params are authoritative — reject body-driven ID swaps.
     step.job_id = job_id;
     step.id = step_id;
+    // A BLANK HOLDER IS STORED AS NOBODY (backlog 6ef4a36b, the review
+    // of car 781b9209). `{"status":"ready","assignee_id":""}` is a
+    // release, and it stored `Some("")` — which the claim CAS reads as
+    // a holder, so the freed step could never be claimed. Before every
+    // judgement below, so each one reads the value that will be
+    // written. Not on a terminal row: its holder is frozen, and a
+    // re-send of a legacy blank must stay the no-op the freeze allows.
+    if !is_terminal {
+        step.assignee_id = crate::active_holder::stored(step.assignee_id);
+    }
 
     // A STEP'S PLACE IN ITS PROTOCOL DOES NOT MOVE (backlog b433bdf3).
     // The overlay above took every field from the body, so a writer

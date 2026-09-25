@@ -20,10 +20,20 @@
 //! A release names nobody; naming someone in it is the one-write
 //! reassignment again.
 //!
+//! WHAT THIS DOES NOT ENFORCE (backlog 6ef4a36b, the review of car
+//! 781b9209): that the next holder arrives through the claim. Once a
+//! step is released it is Ready, and a PUT can still take a Ready step
+//! to Active naming anyone — the PUT-as-claim path the ten platform
+//! step surfaces' Start and the sim's workforce use to start work
+//! (the Scheduling surface's calendar reservation is made only on that
+//! path; the claim door does not run the hook). This module keeps
+//! an ACTIVE step's holder; it does not yet decide who may START one.
+//!
 //! `""` and a blank are the same clear as `null`: every reader of the
 //! holder here (and the dispatcher's assignee check) reads them as
 //! nobody, so a rule that only knew `null` would leave `""` as the way
-//! round it.
+//! round it. And a blank is STORED as nobody ([`stored`]), because the
+//! claim CAS is the one reader that did not read it that way.
 //!
 //! The refusal's body is built HERE, once, and the dispatcher's test
 //! reads this builder's output rather than a hand copy of its shape
@@ -44,6 +54,16 @@ pub const ERROR: &str = "step is active and held — a PUT does not replace or c
 
 /// A holder value that names someone: `None`, `""` and a blank do not.
 fn named(holder: Option<&str>) -> Option<&str> {
+    holder.filter(|h| !h.trim().is_empty())
+}
+
+/// The holder a step PUT stores: a blank is stored as `None` (backlog
+/// 6ef4a36b, the review of car 781b9209). Every reader here reads a
+/// blank as nobody, but both claim CASes admit only a NULL holder or
+/// the claimant, so a stored `Some("")` was a holder to the one door
+/// that hands a step out — a `""` release answered 204 and left a
+/// ready step no one could ever claim (409 `holder: ""`).
+pub fn stored(holder: Option<String>) -> Option<String> {
     holder.filter(|h| !h.trim().is_empty())
 }
 
@@ -88,7 +108,15 @@ pub fn refusal_body(step_id: &str, holder: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::refuses;
+    use super::{refuses, stored};
+
+    #[test]
+    fn a_blank_holder_is_stored_as_nobody() {
+        assert_eq!(stored(None), None);
+        assert_eq!(stored(Some(String::new())), None);
+        assert_eq!(stored(Some(" \t".into())), None);
+        assert_eq!(stored(Some("emp-a".into())), Some("emp-a".into()));
+    }
     use boss_core::job::StepStatus::{Active, Completed, Pending, Ready};
 
     const H: Option<&str> = Some("emp-holder");

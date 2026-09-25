@@ -280,7 +280,8 @@ problems=0
 # Totals every pass leaves for the record at the end.
 WT_PASS=skipped; WT_PASS_REASON=""
 WT_MAIN_SHA=""; WT_MAIN_TS=""
-WT_REMOVED=0; WT_REMOVED_MIB=0; WT_REMOVED_BY_CONTENT=0
+WT_REMOVED=0; WT_REMOVED_MIB=0; WT_REMOVED_BY_CONTENT=0; WT_REMOVED_BY_RECORD=0
+WT_KEPT_NO_LANDING=0; WT_KEPT_SOR_UNREAD=0; WT_SOR_UNREAD_REASON=""
 WT_KEPT_DIRTY=0; WT_KEPT_DIRTY_NAMES=""
 WT_KEPT_UNREFERENCED=0; WT_KEPT_UNREFERENCED_NAMES=""
 WT_KEPT_LIVE=0; WT_KEPT_RECENT=0; WT_KEPT_LOCKED=0; WT_KEPT_REFUSED=0
@@ -615,6 +616,10 @@ fast_forward_checkout() {
 #      every commit of its own there by patch-id (`landed_by_content`)
 #      — because a rebase and a train's squash leave the checkout's own
 #      sha on no origin ref at all, and 56 of 58 measured heads were;
+#      and where git cannot see a landing at all, the SYSTEM OF RECORD
+#      may (backlog 9a044141, `landed_on_record`): the tree's car merged,
+#      or the builder run that gated from it finished. A record that
+#      cannot be read is no landing, and keeps;
 #   2. git has been QUIET in it for the window (1) chose — no commit,
 #      no HEAD or index write, no new reflog ENTRY (an entry's own
 #      time, never the file's mtime, which a gc rewrites in every
@@ -794,6 +799,153 @@ landed_by_content() {
     echo patch-id
 }
 
+# LANDED ON RECORD (backlog 9a044141). A head whose work neither git
+# test above can see on origin/main may still have landed — or its
+# builder may be done with it — and the system of record says which.
+# Measured 2026-09-25 16:15-16:40Z: /work at 14 GB free against its
+# 18 GB floor, 297 worktrees under .claude/worktrees, 253 a named branch
+# with no origin/ ref and a head on no origin ref, and
+# `landed_by_content` called 0 of the 218 idle ones landed: a train
+# squashes N cars into one commit, `boss gate --rebase` replays each,
+# and a later car edits the same files, so neither the content rule nor
+# the patch-id rule survives. Every finished builder's tree waited the
+# 48h unpushed window, even under the floor, where a landed one waits
+# 30 minutes — ~6 builder trees an hour times 48h is the ~290 measured.
+#
+# THREE READS, each a fact the record already holds, cheapest first:
+#   1. the CAR on the tree's own branch (`kind=ship-a-change`,
+#      `metadata={"branch":...}`) — landed when closed with
+#      outcome=merged or stamped `merged` by the conductor as its train
+#      merges; the one definition is `boss_jobs::car::is_landed`
+#      (crates/core/boss-jobs/src/car.rs), read here the same way. The
+#      stamp comes with the train's id, so the car IS the train's word.
+#   2. the GATE-RUNS launched from this worktree (`kind=gate-run`,
+#      `metadata={"worktree":...}` — `boss gate` stamps the path it
+#      launched from, flat, beside `branch` and `agent_run`; the run's
+#      `building` step copies them as `gate_run.worktree`), and for each
+#      the AGENT-RUN it names: a CLOSED run is a finished builder —
+#      landed on its green, reported, refused or died — whose checkout
+#      holds nothing its branch ref does not (the dirty guard below
+#      still keeps an uncommitted edit).
+#   3. the CAR on each branch those gate-runs carried, for a builder
+#      that committed on the harness's `worktree-agent-*` branch and
+#      pushed under the car's name.
+# The answer only moves the WAIT from the unpushed window to the landed
+# one. Every guard after it still runs — quiet, clean, a detached head
+# some ref holds, a stale lock judged, `git worktree remove` without
+# --force — and the local branch outlives its checkout, so removing a
+# clean tree the record calls done costs at most a `git worktree add`.
+#
+# FAILS CLOSED. A read that errors, answers a shape with no `.data`, or
+# returns fewer rows than its `.total` (a limit is not a filter) is NO
+# landing, and the tree keeps its unpushed window, as it did before the
+# record was asked. The first such read ends the asking for the pass
+# (WT_SOR_UNREAD_REASON latches): a dark API asked once per tree would
+# spend a retry window on each of hundreds. The reader is the one this
+# pass already uses for the gate check — BOSS_JOBS_URL, else
+# infra/dev/sor-url beside this checkout, through boss-api-curl.sh as
+# the sidecar's platform-admin identity — never an address of its own.
+
+# GET one jobs-API path; prints the body. Fails with curl's exit, or 3
+# when no system of record is named.
+sor_read() {
+    local here url api
+    here="$(dirname "$(readlink -f "$0")")"
+    url="${BOSS_JOBS_URL:-$(head -n1 "$here/../dev/sor-url" 2>/dev/null || true)}"
+    [ -n "$url" ] || return 3
+    api="$here/../boss-api-curl.sh"
+    [ -x "$api" ] || api=boss-api-curl.sh
+    "$api" -fsS -H "x-boss-user: $FF_USER" "$url$1"
+}
+
+# `metadata=` for a list read: a one-key containment document, url-encoded.
+meta_query() {
+    jq -rn --arg k "$1" --arg v "$2" '{($k): $v} | tojson | @uri'
+}
+
+# Does a list reply hold its whole answer? A `.data` array, and every row
+# its `.total` counts.
+page_is_whole() {
+    local count total
+    count=$(printf '%s' "$1" | jq '.data | if type == "array" then length else error("no .data") end' 2>/dev/null) || return 1
+    case ${count:-empty} in empty | *[!0-9]*) return 1 ;; esac
+    total=$(printf '%s' "$1" | jq '.total // empty' 2>/dev/null) || total=
+    case ${total:-empty} in empty | *[!0-9]*) total=$count ;; esac
+    [ "$total" -le "$count" ]
+}
+
+# Latch the record as unreadable for the rest of the pass, and say so.
+sor_unread() {
+    case "$2" in
+        0) WT_SOR_UNREAD_REASON="$1 answered a shape this pass cannot read (no .data array, fewer rows than its .total, or no status)" ;;
+        3) WT_SOR_UNREAD_REASON="no system of record named (BOSS_JOBS_URL unset, infra/dev/sor-url absent)" ;;
+        *) WT_SOR_UNREAD_REASON="$1 failed (curl exit $2)" ;;
+    esac
+    log "worktree pass: the system of record could not be read — $WT_SOR_UNREAD_REASON; every unpushed worktree keeps its ${WORKTREE_MAX_AGE_H}h window this pass" >&2
+}
+
+# Read 1 and 3: has the car on branch $1 landed? 0 yes (REC_HOW says
+# which car), 1 no, 2 unread.
+record_car_landed() {
+    local b="$1" reply rc=0 car
+    reply=$(sor_read "/api/jobs?kind=ship-a-change&limit=50&metadata=$(meta_query branch "$b")") || rc=$?
+    if [ "$rc" -ne 0 ] || ! page_is_whole "$reply"; then
+        sor_unread "the car read for branch $b" "$rc"
+        return 2
+    fi
+    car=$(printf '%s' "$reply" | jq -r '[.data[]
+        | select((.status == "closed" and .metadata.outcome == "merged")
+                 or .metadata.merged == "true" or .metadata.merged == true)][0].id // empty' 2>/dev/null) || car=
+    [ -n "$car" ] || return 1
+    REC_HOW="car ${car:0:8} for branch $b is merged"
+}
+
+# Is the worktree at $1, on branch $2, landed on record? 0 yes (REC_HOW
+# says how), 1 the record holds no landing, 2 the record could not be
+# read. Called directly, never in $(...), so the latch outlives it.
+REC_HOW=""
+landed_on_record() {
+    local path="$1" branch="$2" reply rc run status outcome b
+    local -a runs=() branches=()
+    REC_HOW=""
+    [ -z "$WT_SOR_UNREAD_REASON" ] || return 2
+    rc=0
+    record_car_landed "$branch" || rc=$?
+    [ "$rc" = 1 ] || return "$rc"
+
+    rc=0
+    reply=$(sor_read "/api/jobs?kind=gate-run&limit=50&metadata=$(meta_query worktree "$path")") || rc=$?
+    if [ "$rc" -ne 0 ] || ! page_is_whole "$reply"; then
+        sor_unread "the gate-run read for $path" "$rc"
+        return 2
+    fi
+    mapfile -t runs < <(printf '%s' "$reply" | jq -r '[.data[].metadata.agent_run // empty] | unique[]' 2>/dev/null)
+    mapfile -t branches < <(printf '%s' "$reply" | jq -r --arg b "$branch" '[.data[].metadata.branch // empty | select(. != $b)] | unique[]' 2>/dev/null)
+    for run in "${runs[@]}"; do
+        # An id goes into a path: anything but a uuid's alphabet is not one.
+        case ${run:-empty} in empty | *[!0-9A-Za-z-]*) continue ;; esac
+        rc=0
+        reply=$(sor_read "/api/jobs/$run") || rc=$?
+        status=$(printf '%s' "$reply" | jq -r '.status // empty' 2>/dev/null) || status=
+        if [ "$rc" -ne 0 ] || [ -z "$status" ]; then
+            sor_unread "the read of agent-run $run" "$rc"
+            return 2
+        fi
+        if [ "$status" = closed ]; then
+            outcome=$(printf '%s' "$reply" | jq -r '.metadata.outcome // "no outcome"' 2>/dev/null) || outcome="no outcome"
+            REC_HOW="agent-run ${run:0:8}, which gated from this worktree, is finished ($outcome)"
+            return 0
+        fi
+    done
+    for b in "${branches[@]}"; do
+        [ -n "$b" ] || continue
+        rc=0
+        record_car_landed "$b" || rc=$?
+        [ "$rc" = 1 ] || return "$rc"
+    done
+    return 1
+}
+
 worktree_target() { echo "$SCRATCH_MOUNT/target-$(basename "$1")"; }
 
 remove_worktree_target() {
@@ -879,7 +1031,7 @@ reclaim_gone_worktrees() {
     # standing in for a HEAD with no branch; the first block is the main
     # worktree.
     local first=1 path branch locked reason stale window_s why last idle_s idle_h dirty kb head held
-    local landed_window_s floor_note unpushed how by_content
+    local landed_window_s floor_note unpushed how by_content by_record rc
     landed_window_s=$((WORKTREE_GRACE_H * 3600)); floor_note=""
     if [ "$under_floor" = 1 ]; then
         landed_window_s=$((LIVE_TARGET_MIN * 60)); floor_note=", under the /work floor"
@@ -933,6 +1085,33 @@ reclaim_gone_worktrees() {
             by_content=1
             window_s=$landed_window_s
             why="branch $branch has no origin/ ref and its work is on origin/main by $how (landed — rebased or squashed under other shas)$floor_note"
+        fi
+        # ...and where git cannot see it at all, the system of record
+        # may (backlog 9a044141, `landed_on_record`): asked in the same
+        # window, only once git has had its say. No landing on record,
+        # or no reading of it, keeps the tree — counted by which, so
+        # the packet says why each unpushed tree stays.
+        by_record=0
+        if [ "$unpushed" = 1 ] && [ "$by_content" = 0 ] &&
+            [ "$idle_s" -ge "$landed_window_s" ] && [ "$idle_s" -lt "$window_s" ]; then
+            rc=0
+            landed_on_record "$path" "$branch" || rc=$?
+            case "$rc" in
+                0)
+                    by_record=1
+                    window_s=$landed_window_s
+                    why="branch $branch has no origin/ ref and is not on origin/main, and the system of record says $REC_HOW (landed on record)$floor_note"
+                    ;;
+                1)
+                    log "  kept $path (unpushed, no landing on record: no merged car for $branch and no finished run that gated from it; idle ${idle_h}h of ${WORKTREE_MAX_AGE_H}h)"
+                    WT_KEPT_NO_LANDING=$((WT_KEPT_NO_LANDING + 1))
+                    continue
+                    ;;
+                *)
+                    WT_KEPT_SOR_UNREAD=$((WT_KEPT_SOR_UNREAD + 1))
+                    continue
+                    ;;
+            esac
         fi
         if [ "$idle_s" -lt "$window_s" ]; then
             WT_KEPT_RECENT=$((WT_KEPT_RECENT + 1))
@@ -989,6 +1168,7 @@ reclaim_gone_worktrees() {
         WT_REMOVED=$((WT_REMOVED + 1))
         WT_REMOVED_MIB=$((WT_REMOVED_MIB + ${kb:-0} / 1024))
         if [ "$by_content" = 1 ]; then WT_REMOVED_BY_CONTENT=$((WT_REMOVED_BY_CONTENT + 1)); fi
+        if [ "$by_record" = 1 ]; then WT_REMOVED_BY_RECORD=$((WT_REMOVED_BY_RECORD + 1)); fi
         log "  removed worktree $path ($((${kb:-0} / 1024))MiB; $why, idle ${idle_h}h, clean)"
         remove_worktree_target "$path"
     done < <(
@@ -1000,7 +1180,7 @@ reclaim_gone_worktrees() {
         '
     )
 
-    log "worktree pass: removed $WT_REMOVED worktree(s) (${WT_REMOVED_MIB}MiB; $WT_REMOVED_BY_CONTENT of them landed by content, not by sha) and $WT_TARGETS_REMOVED target(s) (${WT_TARGETS_MIB}MiB); kept $WT_KEPT_LIVE with an origin/ ref still in the checkout, $WT_KEPT_RECENT with git activity inside the window, $WT_KEPT_DIRTY dirty, $WT_KEPT_UNREFERENCED with a head no ref holds, $WT_KEPT_LOCKED locked, $WT_KEPT_REFUSED refused by git; pruned $WT_PRUNED entries whose directory was gone; judged $WT_STALE_LOCKS with a stale lock"
+    log "worktree pass: removed $WT_REMOVED worktree(s) (${WT_REMOVED_MIB}MiB; $WT_REMOVED_BY_CONTENT of them landed by content, not by sha, and $WT_REMOVED_BY_RECORD landed on record) and $WT_TARGETS_REMOVED target(s) (${WT_TARGETS_MIB}MiB); kept $WT_KEPT_LIVE with an origin/ ref still in the checkout, $WT_KEPT_RECENT with git activity inside the window, $WT_KEPT_NO_LANDING unpushed with no landing on record, $WT_KEPT_SOR_UNREAD unpushed because the record could not be read, $WT_KEPT_DIRTY dirty, $WT_KEPT_UNREFERENCED with a head no ref holds, $WT_KEPT_LOCKED locked, $WT_KEPT_REFUSED refused by git; pruned $WT_PRUNED entries whose directory was gone; judged $WT_STALE_LOCKS with a stale lock"
 }
 
 # ---------------------------------------------------------------------
@@ -1403,6 +1583,9 @@ record_pass() {
             "origin_main_sha=$WT_MAIN_SHA" "origin_main_ref_ts=$WT_MAIN_TS" \
             "worktrees_removed=$WT_REMOVED" "worktrees_removed_mib=$WT_REMOVED_MIB" \
             "worktrees_removed_by_content=$WT_REMOVED_BY_CONTENT" \
+            "worktrees_removed_by_record=$WT_REMOVED_BY_RECORD" \
+            "worktrees_kept_unpushed_no_landing=$WT_KEPT_NO_LANDING" \
+            "worktrees_kept_unpushed_sor_unread=$WT_KEPT_SOR_UNREAD" "worktrees_sor_unread_reason=$WT_SOR_UNREAD_REASON" \
             "worktrees_kept_dirty=$WT_KEPT_DIRTY" "worktrees_kept_dirty_names=$WT_KEPT_DIRTY_NAMES" \
             "worktrees_kept_unreferenced=$WT_KEPT_UNREFERENCED" "worktrees_kept_unreferenced_names=$WT_KEPT_UNREFERENCED_NAMES" \
             "worktrees_kept_live=$WT_KEPT_LIVE" "worktrees_kept_recent=$WT_KEPT_RECENT" \

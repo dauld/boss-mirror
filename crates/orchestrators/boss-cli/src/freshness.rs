@@ -413,7 +413,8 @@ impl Dropped {
 /// branch is moved on the forge with `--force-with-lease` on the head
 /// this function read, so a push that raced it is refused, not
 /// overwritten. A replay that CONFLICTS is refused naming the files and
-/// nothing is pushed: this verb never guesses a merge.
+/// nothing is pushed: this verb never guesses a merge, it names the one
+/// the builder makes ([`MERGE_MAIN_PATH`]).
 ///
 /// Measured 2026-09-12 (protocol retro 8043c1f5): seven cars in one
 /// session were built on a main that had moved by gate time — trains
@@ -433,6 +434,20 @@ pub(crate) fn rebase_onto_main(repo: &Path, branch: &str) -> anyhow::Result<Reba
         raced.join("\n  ")
     );
 }
+
+/// The way past a replay this verb cannot make: merge main into the car.
+///
+/// ONE TEXT, the one builder-rules.md rule 1 gives (e173be13,
+/// 2026-09-25). The conflict refusal used to say `git rebase
+/// origin/main`, which rule 1 forbids — and whose push then needs the
+/// force-push rule 1 also forbids — so a builder at a conflict had no
+/// allowed path. A merge commit is harmless: trains squash, the base
+/// check's three-dot diff reads from the merge-base, which is then
+/// main's head, and the push is a fast-forward.
+pub(crate) const MERGE_MAIN_PATH: &str = "Merge main into the car instead, in your own \
+     worktree: git fetch origin, then git merge origin/main (a normal merge commit; trains \
+     squash), resolve, commit, run the whole suites, push as a fast-forward, then gate again \
+     with the --park-* flags, or run boss rerail <car> --finish if the car is already docked.";
 
 /// How many times a racing branch is replayed before the verb refuses.
 ///
@@ -510,6 +525,29 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
             // Nothing was pushed, so the head read above IS the forge's.
             confirmed: true,
         }));
+    }
+    // A CAR THAT HAS MERGED MAIN IS NOT REPLAYED (e173be13, 2026-09-25).
+    // Its commit list carries the merge, and `git cherry-pick <merge>`
+    // without `-m` fails mid-replay with nothing a builder can act on.
+    // Refuse before any worktree exists, naming the path it took before.
+    let merges = ok(
+        &git(&[
+            "rev-list",
+            "--merges",
+            &format!("origin/main..origin/{branch}"),
+        ])?,
+        "listing the car's merge commits",
+    )?;
+    if let Some(m) = merges.lines().find(|l| !l.is_empty()) {
+        bail!(
+            "boss gate --rebase: REFUSED — {branch} carries a merge commit ({}) above \
+             origin/main@{}, and a replay cannot carry one. Nothing was pushed; {branch} still \
+             points at {}. A car that has merged main takes main by merging again. \
+             {MERGE_MAIN_PATH}",
+            &m[..8.min(m.len())],
+            &main_head[..8.min(main_head.len())],
+            &old_head[..8.min(old_head.len())]
+        );
     }
     // ONE ATTEMPT, ONE DIRECTORY. pid + head alone named the same path
     // for every replay of the same head, and `cleanup` below removes it
@@ -619,8 +657,7 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
             }
             bail!(
                 "boss gate --rebase: REFUSED — replaying {} onto origin/main@{} hit a conflict in: \
-                 {files}. Nothing was pushed; {branch} still points at {}. Resolve it in your own \
-                 worktree (git rebase origin/main) and gate again.",
+                 {files}. Nothing was pushed; {branch} still points at {}. {MERGE_MAIN_PATH}",
                 &c[..8.min(c.len())],
                 &main_head[..8],
                 &old_head[..8]
@@ -1268,6 +1305,15 @@ mod tests {
             err.contains("landed.rs") && err.contains("conflict"),
             "{err}"
         );
+        // The way past names the path the builder rules allow (e173be13,
+        // 2026-09-25): until then it said `git rebase origin/main`, the
+        // command rule 1 forbids, whose push then needs the force-push
+        // rule 1 also forbids.
+        assert!(
+            err.contains(MERGE_MAIN_PATH) && err.contains("git merge origin/main"),
+            "{err}"
+        );
+        assert!(!err.contains("git rebase"), "{err}");
         Forge::git(&f.clone, &["fetch", "-q", "origin"]);
         let forge_head = String::from_utf8_lossy(
             &Forge::git(&f.clone, &["rev-parse", "origin/car/overlaps"]).stdout,
@@ -1282,6 +1328,97 @@ mod tests {
             1,
             "no temporary worktree left behind: {wts}"
         );
+    }
+
+    /// A car that has MERGED main and fallen behind again is refused up
+    /// front, naming the merge again — never replayed until `git
+    /// cherry-pick <merge>` fails with no `-m` and the refusal can only
+    /// say it "failed before any conflict could be read" (e173be13,
+    /// read from the code 2026-09-25: the commit list carries the merge).
+    #[test]
+    fn a_car_that_merged_main_is_refused_up_front_naming_the_merge_again() {
+        let f = Forge::build("boss-cli-freshness-rebase-merged");
+        let origin = f.origin();
+        let w = |rel: &str, body: &str| {
+            boss_testing::scratch::write_file(&origin.join(rel), body);
+        };
+        // Cut from B, one commit of its own, then main merged in — the
+        // path the rules name when a replay conflicts.
+        Forge::git(&origin, &["checkout", "-q", "-b", "car/merged", "main~2"]);
+        w("mine.rs", "fn mine() {}\nfn merged_car() {}\n");
+        Forge::git(&origin, &["commit", "-qam", "car edits mine.rs"]);
+        Forge::git(&origin, &["merge", "-q", "--no-edit", "main"]);
+        // ...and main moves on again.
+        Forge::git(&origin, &["checkout", "-q", "main"]);
+        w("later.rs", "fn later() {}\n");
+        Forge::git(&origin, &["add", "."]);
+        Forge::git(&origin, &["commit", "-qm", "train: lands after the merge"]);
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        let old_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/merged"]).stdout,
+        )
+        .trim()
+        .to_string();
+
+        let err = rebase_onto_main(&f.clone, "car/merged")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("REFUSED") && err.contains("merge commit"),
+            "{err}"
+        );
+        assert!(
+            err.contains(MERGE_MAIN_PATH) && err.contains("git merge origin/main"),
+            "{err}"
+        );
+        assert!(!err.contains("failed before any conflict"), "{err}");
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        let forge_head = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["rev-parse", "origin/car/merged"]).stdout,
+        )
+        .trim()
+        .to_string();
+        assert_eq!(forge_head, old_head, "the forge's branch did not move");
+        let wts = String::from_utf8_lossy(&Forge::git(&f.clone, &["worktree", "list"]).stdout)
+            .to_string();
+        assert_eq!(
+            wts.lines().count(),
+            1,
+            "no temporary worktree left behind: {wts}"
+        );
+    }
+
+    /// THE REFUSAL AND THE RULES SAY ONE PATH. The builder reads rule 1
+    /// of builder-rules.md and then this verb's refusal; until e173be13
+    /// (2026-09-25) the verb said `git rebase` and the rule forbade it.
+    /// Every command the refusal names must stand in rule 1.
+    #[test]
+    fn the_merge_path_the_refusal_names_is_the_one_builder_rule_one_gives() {
+        let rules = std::fs::read_to_string(
+            boss_testing::repo_root().join("infra/platform/documents/builder-rules.md"),
+        )
+        .expect("the builder rules are readable");
+        let start = rules.find("\n1. ").expect("rule 1") + 1;
+        let end = rules[start..].find("\n2. ").expect("rule 2") + start;
+        let rule_one = &rules[start..end];
+        for said in [
+            "git fetch origin",
+            "git merge origin/main",
+            "fast-forward",
+            "--park-*",
+            "boss rerail <car> --finish",
+        ] {
+            assert!(MERGE_MAIN_PATH.contains(said), "the refusal names `{said}`");
+            assert!(
+                rule_one.contains(said),
+                "builder-rules.md rule 1 must name `{said}`, as the --rebase refusal does"
+            );
+        }
+        // A car that merged main is refused by --rebase up front; the rule
+        // must send it back to the merge, and must not call a merge
+        // forbidden.
+        assert!(rule_one.contains("merge again"), "{rule_one}");
+        assert!(!rule_one.contains("merge-or-reset"), "{rule_one}");
     }
 
     /// A car already on main has nothing to replay; saying so is not an

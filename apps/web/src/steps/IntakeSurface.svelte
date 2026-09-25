@@ -13,8 +13,9 @@
   import { untrack } from 'svelte';
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
   import type { Employee } from '../people/types';
-  import { putStep } from './stepWrite';
-  import { HOLDER_LOCKED_NOTE, assigneeToSend, holderLocked } from './holder';
+  import { putStep, releaseStep } from './stepWrite';
+  import { HOLDER_LOCKED_NOTE, askReleaseReason, gestureFields, holderLocked } from './holder';
+  import { session } from '@boss/web-kit/session/session.svelte';
   import { formatMoney } from '@boss/web-kit/ui/money';
 
   type LineItem = {
@@ -99,16 +100,19 @@
     lineItems.reduce((sum, li) => sum + (li.amount_cents ?? 0), 0),
   );
 
+  /// `status` only when the gesture moves the step, and the holder only
+  /// when the picker changed it — neither from the snapshot this body
+  /// is otherwise built on (backlog 6ef4a36b; GenericSurface says why).
   async function persist(status?: string): Promise<void> {
     saving = true;
     writeError = null;
     try {
+      const { status: _drawnStatus, assignee_id: _drawnHolder, ...drawn } = step;
       const body = {
-        ...step,
+        ...drawn,
         job_id: jobId,
         notes: notes || undefined,
-        status: status ?? step.status,
-        assignee_id: assigneeToSend(step, assigneeId),
+        ...gestureFields(step, assigneeId, status),
         metadata: {
           ...step.metadata,
           delivery_window: deliveryWindow,
@@ -116,6 +120,27 @@
       };
       const res = await putStep(jobId, step.id, body);
       if (res.kind === 'failed') {
+        writeError = res.error;
+        return;
+      }
+      onUpdate();
+    } finally {
+      saving = false;
+    }
+  }
+
+  /// The release the note beside the picker names (backlog 6ef4a36b),
+  /// with its reason asked first and a partial release left on screen
+  /// (the review of car 675f1858, #2).
+  async function release(): Promise<void> {
+    const why = askReleaseReason();
+    if (why === null) return;
+    saving = true;
+    writeError = null;
+    try {
+      const by = session.value.kind === 'ready' ? session.value.user.id : null;
+      const res = await releaseStep(jobId, step, why, by);
+      if (res.kind !== 'ok') {
         writeError = res.error;
         return;
       }
@@ -219,6 +244,16 @@
         disabled={saving}
       >
         Start
+      </button>
+    {/if}
+    {#if locked}
+      <button
+        class="btn"
+        onclick={release}
+        disabled={saving}
+        title="Hand this step back — it returns to ready, and the next holder claims it"
+      >
+        Release
       </button>
     {/if}
     {#if !terminal && step.status === 'active'}
