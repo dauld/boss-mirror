@@ -638,6 +638,71 @@ pub(crate) fn briefed_writes(prompt_bytes: usize) -> Value {
     json!({ "prompt_bytes": prompt_bytes.to_string() })
 }
 
+/// How many times `briefed`'s field is written before a read-back that
+/// still misses it is refused: the write, and one more (backlog
+/// e381689d). A lost write is a race, so the second lands; a second
+/// miss is no longer a race and is not retried into silence.
+pub(crate) const BRIEFED_ATTEMPTS: usize = 2;
+
+/// The refusal when `briefed`'s field does not read back after
+/// [`BRIEFED_ATTEMPTS`] writes that each answered success. It names the
+/// run, the step, what the step holds instead, and the two writes that
+/// finish THIS run — the prompt already printed names this run's id, so
+/// a fresh dispatch would orphan it. `briefed` is left open: the
+/// completion was not sent.
+pub(crate) fn briefed_unheld_refusal(
+    run_id: &str,
+    briefed_id: &str,
+    writes: &Value,
+    report: &str,
+) -> String {
+    format!(
+        "run {} is filed and its step claimed, but its `briefed` step does not hold \
+         prompt_bytes after {BRIEFED_ATTEMPTS} writes that each answered success — refusing \
+         to complete it over a record it does not hold (backlog e381689d):\n{report}\
+         `briefed` is left open. To finish this run, record the field and then the status:\n  \
+         boss-api PATCH /api/jobs/{run_id}/steps/{briefed_id}/metadata  body {writes}\n  \
+         boss-api PUT /api/jobs/{run_id}/steps/{briefed_id}  body {{\"status\":\"completed\"}}",
+        &run_id[..8.min(run_id.len())],
+    )
+}
+
+/// The test stubs' step merge door, as the jobs API's: `body`'s keys land
+/// on the step `path` names in the filed run. ONE copy for every stub
+/// that serves a dispatch, because dispatch reads `briefed`'s field back
+/// before completing it (backlog e381689d) and a stub that answered 204
+/// and stored nothing would be refused exactly as run 6b6fe011 now is. A
+/// path naming no step of `run_id` changes nothing.
+#[cfg(test)]
+pub(crate) fn stub_merge(
+    run: &std::sync::Mutex<Option<Value>>,
+    run_id: &str,
+    path: &str,
+    body: &Value,
+) {
+    let Ok(mut guard) = run.lock() else {
+        return;
+    };
+    let Some(filed) = guard.as_mut() else {
+        return;
+    };
+    let Some(sid) = path
+        .strip_prefix(&format!("/api/jobs/{run_id}/steps/"))
+        .map(|rest| rest.trim_end_matches("/metadata"))
+    else {
+        return;
+    };
+    for step in filed["steps"].as_array_mut().into_iter().flatten() {
+        if step["id"] == sid
+            && let (Some(md), Some(sent)) = (step["metadata"].as_object_mut(), body.as_object())
+        {
+            for (k, v) in sent {
+                md.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
 /// The second write of a run step's completion: the status alone, so
 /// the PUT carries no metadata to replace or drop.
 pub(crate) fn completed() -> Value {
@@ -1385,19 +1450,68 @@ pub(crate) async fn dispatch_at(
     if matches!(source, BriefSource::Rendered) {
         print!("{prompt}");
     }
-    api_at(
-        Method::PATCH,
-        format!("/api/jobs/{run_id}/steps/{briefed_id}/metadata"),
-        Some(briefed_writes(prompt.len())),
-    )
-    .await
-    .context("recording prompt_bytes on the run's briefed step")?;
-    api_at(
-        Method::PUT,
-        format!("/api/jobs/{run_id}/steps/{briefed_id}"),
-        Some(completed()),
-    )
-    .await
+    // A 2xx IS A CLAIM; THE READ-BACK IS THE FACT (backlog e381689d).
+    // On run 6b6fe011 (2026-09-25) this merge answered 204, a concurrent
+    // whole-row write erased the key 2 ms later, and the completing PUT
+    // below was then refused "prompt_bytes: required field missing" —
+    // leaving the run half-opened with nothing saying why. So the field
+    // is read back before the status is sent; a miss is written once
+    // more, and a second miss is refused by name with `briefed` still
+    // open, never completed over a record it does not hold.
+    let writes = briefed_writes(prompt.len());
+    let mut unheld = None;
+    for _ in 0..BRIEFED_ATTEMPTS {
+        api_at(
+            Method::PATCH,
+            format!("/api/jobs/{run_id}/steps/{briefed_id}/metadata"),
+            Some(writes.clone()),
+        )
+        .await
+        .context("recording prompt_bytes on the run's briefed step")?;
+        let now = api_at(Method::GET, format!("/api/jobs/{run_id}"), None)
+            .await?
+            .with_context(|| {
+                format!("recorded prompt_bytes and could not read run {run_id} back")
+            })?;
+        let held = crate::envelope::steps(&now)
+            .into_iter()
+            .find(|s| s.get("id").and_then(Value::as_str) == Some(briefed_id.as_str()))
+            .and_then(|s| s.get("metadata").cloned())
+            .unwrap_or_else(|| json!({}));
+        let (report, took) = crate::job::confirm_patch(&held, &writes);
+        if took {
+            unheld = None;
+            break;
+        }
+        unheld = Some(report);
+    }
+    if let Some(report) = unheld {
+        bail!(briefed_unheld_refusal(
+            &run_id,
+            &briefed_id,
+            &writes,
+            &report
+        ));
+    }
+    // The completion races the same dispatcher writes the merge did
+    // (run 9aa88562, 11:26:01Z: two within ~25 ms of `briefed` going
+    // ready), and the jobs API now refuses the loser of such a race by
+    // name instead of letting it erase the other write. A status-only
+    // body carries nothing that can be stale, so exactly that refusal
+    // is sent once more; any other error, or a second loss, stands.
+    let complete = || {
+        api_at(
+            Method::PUT,
+            format!("/api/jobs/{run_id}/steps/{briefed_id}"),
+            Some(completed()),
+        )
+    };
+    match complete().await {
+        Err(e) if format!("{e:#}").contains(boss_jobs::step_metadata_write::STEP_CHANGED_ERROR) => {
+            complete().await
+        }
+        answer => answer,
+    }
     .context("completing the run's briefed step")?;
     eprintln!(
         "boss dispatch: run {} open for `{slug}` on {} — {} bytes of prompt printed, \
@@ -3935,7 +4049,28 @@ mod wire_tests {
         claim_conflict: bool,
         level: Option<Option<&'static str>>,
     ) -> (String, Log) {
+        stub_losing(packet, row, claim_conflict, level, 0, 0).await
+    }
+
+    /// `lost`: how many merges onto the run's steps answer 204 and store
+    /// nothing — the shape run 6b6fe011 met on 2026-09-25, when a
+    /// concurrent whole-row write erased `prompt_bytes` after the merge
+    /// door had answered (backlog e381689d). Every other merge is
+    /// stored, so a read-back sees exactly what the door kept.
+    /// `raced`: how many step PUTs on the run answer the 409 the jobs
+    /// API now gives a write whose read another writer moved
+    /// ([`boss_jobs::step_metadata_write::STEP_CHANGED_ERROR`]).
+    async fn stub_losing(
+        packet: Value,
+        row: Value,
+        claim_conflict: bool,
+        level: Option<Option<&'static str>>,
+        lost: usize,
+        raced: usize,
+    ) -> (String, Log) {
         let run: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+        let lost = Arc::new(Mutex::new(lost));
+        let raced = Arc::new(Mutex::new(raced));
         serve(move |method, path, target, body| {
             let (status, resp): (&str, String) = match (method, path) {
                     ("GET", p) if p == format!("/api/jobs/{PACKET}") => {
@@ -3983,10 +4118,31 @@ mod wire_tests {
                         }
                     }
                     ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
-                        run_step_put(body)
+                        let mut left = raced.lock().unwrap();
+                        if *left > 0 {
+                            *left -= 1;
+                            (
+                                "409 Conflict",
+                                json!({
+                                    "error": boss_jobs::step_metadata_write::STEP_CHANGED_ERROR,
+                                    "step_id": "run-briefed",
+                                })
+                                .to_string(),
+                            )
+                        } else {
+                            run_step_put(body)
+                        }
                     }
-                    // The run's step merge door: `briefed`'s fields.
+                    // The run's step merge door: `briefed`'s fields,
+                    // stored on the step unless this merge is one the
+                    // stub was told to lose.
                     ("PATCH", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
+                        let mut left = lost.lock().unwrap();
+                        if *left > 0 {
+                            *left -= 1;
+                        } else {
+                            stub_merge(&run, RUN, p, body);
+                        }
                         ("204 No Content", String::new())
                     }
                     // The edge onto the CLAIMED step (dd6d44b7) — on
@@ -4107,6 +4263,10 @@ mod wire_tests {
                     "PATCH".to_string(),
                     format!("/api/jobs/{RUN}/steps/run-briefed/metadata")
                 ),
+                // …read back before the status is sent (e381689d): a
+                // 204 from the merge door is a claim, the step is the
+                // fact.
+                ("GET".to_string(), format!("/api/jobs/{RUN}")),
                 (
                     "PUT".to_string(),
                     format!("/api/jobs/{RUN}/steps/run-briefed")
@@ -4189,6 +4349,148 @@ mod wire_tests {
             .expect("the briefed step is completed")
             .2;
         assert_eq!(*briefed, json!({ "status": "completed" }));
+    }
+
+    fn briefed_calls(log: &Log) -> Vec<String> {
+        log.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, p, _)| p.contains("/steps/run-briefed"))
+            .map(|(m, _, _)| m.clone())
+            .collect()
+    }
+
+    async fn dispatch_to(base: &str) -> Result<Dispatched> {
+        dispatch_at(
+            &reqwest::Client::new(),
+            base,
+            &repo(),
+            PACKET,
+            None,
+            None,
+            &Overrides::default(),
+            false,
+            "claude@algedonic.dev",
+            "emp-david",
+            "boss-dev-0",
+            BriefSource::Rendered,
+        )
+        .await
+    }
+
+    /// Run 6b6fe011, 2026-09-25 (backlog e381689d): the merge answered
+    /// 204 and the key was not on the step. A merge lost once is a race,
+    /// so it is written again, read back, and only then is the status
+    /// sent.
+    #[tokio::test]
+    async fn a_briefed_field_lost_once_is_written_again_before_the_completion() {
+        let (base, log) = stub_losing(
+            packet_without_projection(),
+            row_with_block(),
+            false,
+            Some(None),
+            1,
+            0,
+        )
+        .await;
+        dispatch_to(&base)
+            .await
+            .expect("dispatches on the second write");
+        assert_eq!(
+            briefed_calls(&log),
+            vec!["PATCH", "PATCH", "PUT"],
+            "the field twice, then the status — never the status over a missing field"
+        );
+    }
+
+    /// Reproduced live on run 9aa88562 at 11:26:01Z the same day: the
+    /// dispatcher writes the new run's `briefed` step twice within ~25 ms
+    /// of it going ready, and the completing PUT lands in that window.
+    /// The jobs API now refuses the loser of that race with a named 409
+    /// rather than letting it erase the other write; the status-only
+    /// completion carries nothing that can be stale, so it is sent once
+    /// more on exactly that refusal and on no other.
+    #[tokio::test]
+    async fn a_completion_that_loses_the_race_is_sent_once_more() {
+        let (base, log) = stub_losing(
+            packet_without_projection(),
+            row_with_block(),
+            false,
+            Some(None),
+            0,
+            1,
+        )
+        .await;
+        dispatch_to(&base)
+            .await
+            .expect("dispatches on the second completion");
+        assert_eq!(briefed_calls(&log), vec!["PATCH", "PUT", "PUT"]);
+    }
+
+    /// Losing twice is not a race any longer, and it is not retried
+    /// into silence: the refusal is the API's own, named.
+    #[tokio::test]
+    async fn a_completion_that_keeps_losing_is_refused_with_the_apis_reason() {
+        let (base, log) = stub_losing(
+            packet_without_projection(),
+            row_with_block(),
+            false,
+            Some(None),
+            0,
+            2,
+        )
+        .await;
+        let err = match dispatch_to(&base).await {
+            Ok(_) => panic!("a completion refused twice must not dispatch"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert_eq!(briefed_calls(&log), vec!["PATCH", "PUT", "PUT"]);
+        assert!(
+            err.contains("completing the run's briefed step")
+                && err.contains(boss_jobs::step_metadata_write::STEP_CHANGED_ERROR),
+            "{err}"
+        );
+    }
+
+    /// A merge that never holds is not retried into silence: the run is
+    /// refused by name, `briefed` is left OPEN (no completing PUT is
+    /// sent), and the refusal names the two writes that finish this run.
+    #[tokio::test]
+    async fn a_briefed_field_that_never_holds_is_refused_by_name_and_left_open() {
+        let (base, log) = stub_losing(
+            packet_without_projection(),
+            row_with_block(),
+            false,
+            Some(None),
+            BRIEFED_ATTEMPTS,
+            0,
+        )
+        .await;
+        let err = match dispatch_to(&base).await {
+            Ok(_) => panic!("a field the step does not hold must not dispatch"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert_eq!(
+            briefed_calls(&log),
+            vec!["PATCH"; BRIEFED_ATTEMPTS],
+            "no completion over a record the step does not hold"
+        );
+        assert!(err.contains(&RUN[..8]), "names the run: {err}");
+        assert!(
+            err.contains("does not hold prompt_bytes"),
+            "names the field: {err}"
+        );
+        assert!(
+            err.contains("prompt_bytes: wrote a value but the packet has no such key"),
+            "carries what the step holds instead: {err}"
+        );
+        assert!(
+            err.contains(&format!(
+                "boss-api PATCH /api/jobs/{RUN}/steps/run-briefed/metadata"
+            )) && err.contains(&format!("boss-api PUT /api/jobs/{RUN}/steps/run-briefed")),
+            "names the writes that finish this run: {err}"
+        );
     }
 
     /// A step nobody declared a block for is refused BEFORE the claim —
@@ -4972,6 +5274,7 @@ mod wire_tests {
                     run_step_put(body)
                 }
                 ("PATCH", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
+                    stub_merge(&run, RUN, p, body);
                     ("204 No Content", String::new())
                 }
                 // The run edge (dd6d44b7): dispatch writes `agent_run`
@@ -5075,7 +5378,10 @@ mod wire_tests {
                 ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
                     run_step_put(body)
                 }
-                ("PATCH", p) if p.contains("/steps/") => ("204 No Content", String::new()),
+                ("PATCH", p) if p.contains("/steps/") => {
+                    stub_merge(&run, RUN, p, body);
+                    ("204 No Content", String::new())
+                }
                 _ => ("404 Not Found", format!("unstubbed {method} {target}")),
             })
             .await
@@ -5613,6 +5919,7 @@ mod wire_tests {
                         run_step_put(body)
                     }
                     ("PATCH", p) if p.starts_with(&format!("/api/jobs/{INBOX_RUN}/steps/")) => {
+                        crate::dispatch::stub_merge(&run, INBOX_RUN, p, body);
                         ("204 No Content", String::new())
                     }
                     // The edge onto the claimed step (dd6d44b7): a

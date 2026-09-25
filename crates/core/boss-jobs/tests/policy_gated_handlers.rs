@@ -897,7 +897,7 @@ async fn a_step_requiring_presence_refuses_without_a_ceremony_ticket() {
 /// itself before believing a word of it — the machine door is reachable
 /// without the gateway, so a header it merely carries proves nothing
 /// (backlog 72fe3640; the forgeries are pinned in
-/// a_forged_presence_header_is_refused_at_the_machine_door.rs).
+/// tests/presence/mod.rs and the files beside it that use it).
 async fn post_sign_off_with_presence(
     app: Router,
     user: &User,

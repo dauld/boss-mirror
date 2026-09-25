@@ -404,6 +404,36 @@ abort_request() {
     return 1
 }
 
+# The `error` the step PUT answers with 409 when the step's metadata
+# moved between the handler's read and its write (car 88123ae0) — the
+# one refused completion that is sent again (see the completion PUT).
+# Its definition is boss_jobs::step_metadata_write::STEP_CHANGED_ERROR;
+# this copy is held to the text boss-testing's ops_runner_sh stubs the
+# server with, which spells that constant.
+STEP_CHANGED_ERROR='step changed while this write was computed — its metadata is no longer what the write read, so writing it would erase the other write'
+
+# put_completion <payload file> <response body file> <url> — one step
+# completion PUT. Prints the HTTP status (nothing when curl could not
+# ask); the server's words land in the body file, curl's in
+# $workdir/put-err.
+put_completion() {
+    : > "$2"
+    curl -sS -o "$2" -w '%{http_code}' -X PUT \
+        -H "content-type: application/json" \
+        -H "x-boss-user: $BOSS_USER" \
+        ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
+        --data-binary @"$1" \
+        "$3" 2>"$workdir/put-err"
+}
+
+# lost_the_step_race <status> <response body file> — is this the 409
+# whose `error` is exactly STEP_CHANGED_ERROR? jq reads the body as
+# JSON, so an escaped or unescaped em dash compares the same.
+lost_the_step_race() {
+    [ "$1" = 409 ] || return 1
+    [ "$(jq -r '.error? // empty' "$2" 2>/dev/null)" = "$STEP_CHANGED_ERROR" ]
+}
+
 # run_plan_verb <request id> <plan verb> <args json> — run the plan verb
 # on this host. On success `rv_why` is empty, the plan's bytes are in
 # $workdir/plan and `rv_sha` is their sha256; otherwise `rv_why` names
@@ -1230,14 +1260,29 @@ ARGV
     # night: the packet then says why it is stuck. A transport failure
     # (no answer at all) has no words to keep and no door to write
     # through, so it stays a journal line and a red unit, as before.
+    #
+    # A COMPLETION THAT LOST THE STEP RACE IS SENT ONCE MORE (backlog
+    # 2a6d0b86). The step PUT refuses, 409 STEP_CHANGED_ERROR, a write
+    # whose read another write moved before it landed (car 88123ae0),
+    # where it used to answer success and erase that write. That refusal
+    # means NOTHING was written, and the handler reads the row afresh on
+    # a resend, so the same body goes once more: it is exactly the write
+    # that would have been accepted had it arrived a moment later — and
+    # the omitted-keys refusal still stands between it and a key the
+    # other write added. Before this the one 409 recorded
+    # `completion_refused` and, the verb having run, HELD the request for
+    # a human. A second loss, or any other refusal, takes the refusal
+    # path below with the server's words — never a loop.
     putbodyf="$workdir/put-body"
-    : > "$putbodyf"
-    put_code=$(curl -sS -o "$putbodyf" -w '%{http_code}' -X PUT \
-            -H "content-type: application/json" \
-            -H "x-boss-user: $BOSS_USER" \
-            ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
-            --data-binary @"$payloadf" \
-            "$BASE/api/jobs/$job_id/steps/$step_id" 2>"$workdir/put-err") || put_code=""
+    puturl="$BASE/api/jobs/$job_id/steps/$step_id"
+    put_code=$(put_completion "$payloadf" "$putbodyf" "$puturl") || put_code=""
+    if lost_the_step_race "$put_code" "$putbodyf"; then
+        echo "ops-runner: PUT on $short lost the step race to another write — nothing was written; sending the same completion once more" >&2
+        put_code=$(put_completion "$payloadf" "$putbodyf" "$puturl") || put_code=""
+        if lost_the_step_race "$put_code" "$putbodyf"; then
+            echo "ops-runner: PUT on $short lost the step race twice — not resent again" >&2
+        fi
+    fi
     case "${put_code:-000}" in
         2??) ;;
         000)

@@ -32,6 +32,16 @@ const PACKET: &str = "11111111-2222-4333-8444-555555555555";
 const BEGIN: &str = "# --- report-back (begin) ---";
 const END: &str = "# --- report-back (end) ---";
 
+/// The `error` the step PUT answers, with 409, when another write moved
+/// the step's metadata between the handler's read and its write —
+/// `boss_jobs::step_metadata_write::STEP_CHANGED_ERROR`, introduced by
+/// car 88123ae0 (branch fix/dispatch-reads-back-the-briefed-step-merge).
+/// Spelled here because that constant is not on main as this is written
+/// and boss-testing does not depend on boss-jobs; the runner carries the
+/// same text, and these tests hold it to this copy (backlog 2a6d0b86).
+const STEP_CHANGED: &str = "step changed while this write was computed — its metadata \
+     is no longer what the write read, so writing it would erase the other write";
+
 /// The report-back block, lifted out of `run.sh` verbatim. It lives
 /// inline in the runner because the pod receives exactly one file (the
 /// `gate-runner-script` ConfigMap is built from `run.sh` alone).
@@ -67,7 +77,14 @@ fn missing(tool: &str) -> bool {
 ///   `done:V` — the record-verdict step is ALREADY completed carrying
 ///              verdict V: the merge door refuses it with 409, as the
 ///              real one refuses any terminal step, and a status PUT
-///              passes as the idempotent re-send it is.
+///              passes as the idempotent re-send it is;
+///   `race:N` — the merge door lands, and the first N step PUTs lose the
+///              step write's compare-and-set: 409 carrying exactly
+///              [`STEP_CHANGED`] (car 88123ae0), which the stub reads
+///              from its environment and writes unescaped, as serde_json
+///              does;
+///   `put409` — the merge door lands and every step PUT is refused 409
+///              for another reason (unresolved blockers).
 /// Writes are logged per route — `puts.log` for the step PUT,
 /// `patches.log` for the step merge door — because which door carried
 /// which keys is the property under test (backlog e39a9d2a).
@@ -82,7 +99,7 @@ fn missing(tool: &str) -> bool {
 /// that saw it between `open` and `write` parsed an empty string
 /// (backlog 0d1e557e).
 const STUB: &str = r#"
-import http.server, json, socket, sys, time
+import http.server, json, os, socket, sys, time
 log, mode, delay = sys.argv[1], sys.argv[2], float(sys.argv[3])
 JOB, started_at, bound_at = sys.argv[4], sys.argv[5], sys.argv[6]
 
@@ -146,6 +163,16 @@ class H(http.server.BaseHTTPRequestHandler):
         with open(path, "a") as f:
             f.write(self.path + " " + body + "\n")
         frozen = mode.startswith("done:") and path.endswith("patches.log")
+        if mode.startswith("race:") and path.endswith("puts.log"):
+            seen["puts"] = seen.get("puts", 0) + 1
+            if seen["puts"] <= int(mode.split(":")[1]):
+                body = {"error": os.environ["STEP_CHANGED"], "step_id": "step-verdict",
+                        "hint": "nothing was written; send the same request again"}
+                self._reply(409, json.dumps(body, ensure_ascii=False).encode("utf-8"))
+                return
+        if mode == "put409" and path.endswith("puts.log"):
+            self._reply(409, b'{"error":"step has unresolved blockers"}')
+            return
         if mode == "409" or frozen:
             self._reply(409, b'{"error":"step is terminal"}')
         else:
@@ -239,6 +266,7 @@ fn start_stub(tag: &str, mode: &str, delay_secs: f32) -> Stub {
         .arg(PACKET)
         .arg(&started)
         .arg(&bound)
+        .env("STEP_CHANGED", STEP_CHANGED)
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -556,6 +584,104 @@ fn a_definitive_refusal_is_not_retried() {
     assert!(
         stub.puts().is_empty(),
         "a refused merge is not followed by a completion:\n{joined}"
+    );
+}
+
+/// A COMPLETION THAT LOST THE STEP RACE IS SENT ONCE MORE (backlog
+/// 2a6d0b86, review of car 88123ae0). That car makes the step PUT
+/// refuse, with a 409 carrying [`STEP_CHANGED`], a write computed from
+/// a read another write has since moved — where it used to answer
+/// success and erase the other write. This runner's completion is
+/// exactly the shape that can lose that race, and it read ANY 4xx as
+/// final: the report refused outright, and the conductor later closed
+/// the gate-run `lost` over a real green or red. The refusal says
+/// nothing was written, and the body is status-only, so the same body
+/// is sent once more — and lands.
+#[test]
+fn a_completion_that_lost_the_step_race_is_sent_once_more_and_lands() {
+    if skip() {
+        return;
+    }
+    let stub = start_stub("race-once", "race:1", 0.0);
+    let (lines, ok) = run_report(&stub, "0 0 0", "green");
+    let joined = lines.join("\n");
+    assert!(
+        ok,
+        "one lost race is not a refused report — the resend lands:\n{joined}"
+    );
+    assert_eq!(stub.patches().len(), 1, "one merge:\n{joined}");
+    let puts = stub.puts();
+    assert_eq!(
+        puts.len(),
+        2,
+        "the lost completion and exactly one resend:\n{joined}"
+    );
+    for put in &puts {
+        let (path, body) = put.split_once(' ').expect("path and body");
+        assert_eq!(path, format!("/api/jobs/{PACKET}/steps/step-verdict"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(body).expect("PUT body is JSON"),
+            serde_json::json!({"status": "completed"}),
+            "the resend is the same status-only body"
+        );
+    }
+    assert!(
+        joined.contains("sending the same status-only body once more"),
+        "the log says why a second PUT went out:\n{joined}"
+    );
+    assert!(
+        joined.contains("recorded on packet") && joined.contains("attempt 1"),
+        "the resend is inside the attempt, not a retry of the report:\n{joined}"
+    );
+}
+
+/// ...and a completion that loses it AGAIN is refused by name, never
+/// looped: two lost races in a row is not the ordinary timing a single
+/// resend answers, and the report must stop and say which refusal it
+/// met rather than spend its retry schedule re-sending.
+#[test]
+fn a_completion_that_loses_the_step_race_twice_is_refused_by_name() {
+    if skip() {
+        return;
+    }
+    let stub = start_stub("race-always", "race:99", 0.0);
+    let (lines, ok) = run_report(&stub, "0 0 0", "green");
+    let joined = lines.join("\n");
+    assert!(!ok, "a second lost race is a refused report:\n{joined}");
+    assert_eq!(
+        stub.puts().len(),
+        2,
+        "one resend, never a loop — and the report does not retry it:\n{joined}"
+    );
+    assert!(
+        joined.contains("lost the step race twice") && joined.contains(STEP_CHANGED),
+        "the refusal is named by the server's own words:\n{joined}"
+    );
+    assert!(
+        joined.contains("not retrying"),
+        "a refusal about the write is not a roll:\n{joined}"
+    );
+}
+
+/// Any OTHER 409 on the completion is still final: only the refusal
+/// that says nothing was written earns a resend.
+#[test]
+fn a_completion_refused_for_another_reason_is_not_resent() {
+    if skip() {
+        return;
+    }
+    let stub = start_stub("put-409", "put409", 0.0);
+    let (lines, ok) = run_report(&stub, "0 0", "green");
+    let joined = lines.join("\n");
+    assert!(!ok, "{joined}");
+    assert_eq!(
+        stub.puts().len(),
+        1,
+        "a refusal that is not the step race is never resent:\n{joined}"
+    );
+    assert!(
+        joined.contains("step has unresolved blockers"),
+        "the refusal carries the server's words, not only its status:\n{joined}"
     );
 }
 

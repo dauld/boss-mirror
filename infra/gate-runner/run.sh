@@ -188,29 +188,83 @@ PY
         "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID/steps/$step_id/metadata" "merge verdict" \
         || { rc=$?; rm -f "$payload"; return "$rc"; }
     printf '%s' '{"status":"completed"}' > "$payload"
-    report_write PUT "$payload" \
-        "$JOBS_API/api/jobs/$GATE_RUN_JOB_ID/steps/$step_id" "PUT completion" \
-        || { rc=$?; rm -f "$payload"; return "$rc"; }
+    # A COMPLETION THAT LOST THE STEP RACE IS SENT ONCE MORE (backlog
+    # 2a6d0b86). The step PUT refuses, 409 STEP_CHANGED_ERROR, a write
+    # whose read another write moved before it landed (car 88123ae0) -
+    # where it used to answer success and erase that write. The refusal
+    # means nothing was written, and this body is status-only, so it
+    # carries nothing that can be stale: the same body goes once more,
+    # as boss dispatch's briefed completion does. A second loss, or any
+    # other refusal, stands - refused by name, never looped. Before
+    # this, the one 409 refused the report outright and the conductor
+    # closed the gate-run `lost` over a real green or red.
+    local url="$JOBS_API/api/jobs/$GATE_RUN_JOB_ID/steps/$step_id"
+    rc=0
+    report_write PUT "$payload" "$url" "PUT completion" || rc=$?
+    if [ "$rc" -eq 76 ]; then
+        echo "gate-runner: report: PUT completion lost the step race to another write - nothing was written; sending the same status-only body once more"
+        rc=0
+        report_write PUT "$payload" "$url" "PUT completion (resent)" || rc=$?
+        if [ "$rc" -eq 76 ]; then
+            echo "gate-runner: report: PUT completion lost the step race twice - refused: $STEP_CHANGED_ERROR"
+            rc=1
+        fi
+    fi
     rm -f "$payload"
+    return "$rc"
+}
+
+# The `error` the step PUT answers with 409 when the step's metadata
+# moved between the handler's read and its write - the one refusal a
+# resend answers (above). Its definition is
+# boss_jobs::step_metadata_write::STEP_CHANGED_ERROR, from car 88123ae0;
+# this copy is held to the text boss-testing's gate_runner_report_retry
+# stubs the server with, which spells that constant.
+STEP_CHANGED_ERROR='step changed while this write was computed — its metadata is no longer what the write read, so writing it would erase the other write'
+
+# Is this response body the step-race refusal? Its `error` is compared
+# as BYTES: os.fsencode undoes whatever the locale did to argv, so the
+# em dash in the text cannot make an exact match miss.
+report_step_changed() { # response body file
+    python3 - "$1" "$STEP_CHANGED_ERROR" <<'PY'
+import json, os, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        said = json.load(f)
+except Exception:
+    sys.exit(1)
+err = said.get("error") if isinstance(said, dict) else None
+sys.exit(0 if isinstance(err, str) and err.encode("utf-8") == os.fsencode(sys.argv[2]) else 1)
+PY
 }
 
 # One report write, classified the way every report write is: 0 landed,
-# 75 nobody answered (a roll - retry), 1 refused (about the write itself).
+# 75 nobody answered (a roll - retry), 76 the step PUT lost the race to
+# another write and wrote nothing (resend once), 1 refused (about the
+# write itself). A refusal prints the server's words beside its status:
+# a bare "HTTP 409" sent the reader of the Job log to the API to find
+# out which refusal it was.
 report_write() { # method, body file, url, label
-    local rc=0 out
-    out=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -X "$1" \
+    local rc=0 out said
+    said=$(mktemp) || return 1
+    out=$(curl -s --max-time 20 -o "$said" -w '%{http_code}' -X "$1" \
         -H "x-boss-user: $ACTOR" -H "Content-Type: application/json" \
         -d @"$2" "$3") || rc=$?
     if [ "$rc" -ne 0 ]; then
+        rm -f "$said"
         echo "gate-runner: report: $4 failed (curl exit $rc)"
         report_transient_curl "$rc" && return 75
         return 1
     fi
     case "$out" in
-        2??) return 0 ;;
-        5??|000) echo "gate-runner: report: $4 answered HTTP $out"; return 75 ;;
-        *) echo "gate-runner: report: $4 answered HTTP $out"; return 1 ;;
+        2??) rm -f "$said"; return 0 ;;
+        5??|000) rm -f "$said"; echo "gate-runner: report: $4 answered HTTP $out"; return 75 ;;
     esac
+    echo "gate-runner: report: $4 answered HTTP $out: $(head -c 2000 "$said" | tr '\n' ' ')"
+    rc=1
+    if [ "$out" = 409 ] && report_step_changed "$said"; then rc=76; fi
+    rm -f "$said"
+    return "$rc"
 }
 
 report() { # verdict, note

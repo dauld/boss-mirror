@@ -201,6 +201,10 @@ name = "step_metadata_patch_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "a_stale_step_write_erases_nothing_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "step_claim_admits_an_aliased_holder_pg"
 required-features = ["postgres"]
 

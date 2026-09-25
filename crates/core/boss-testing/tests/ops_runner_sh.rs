@@ -53,7 +53,10 @@ fn write_exec(path: &Path, body: &str) {
 /// set, because one pass may write two (the queue reading, then a
 /// refused completion). A PUT answers `STUB_PUT_CODE` (default 200) on
 /// `-w` and writes `STUB_PUT_BODY` to its `-o` file — the server's
-/// refusal, which is what a refused completion must carry.
+/// refusal, which is what a refused completion must carry. The FIRST
+/// PUT answers `STUB_PUT_FIRST_CODE` / `STUB_PUT_FIRST_BODY` instead
+/// when set (a race lost once), and every PUT body is appended to
+/// `STUB_PUT_LOG` when set, so a case can count the sends.
 fn stub_sor(root: &Path) -> PathBuf {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -66,8 +69,12 @@ fn stub_sor(root: &Path) -> PathBuf {
              if [ \"$m\" = PATCH ]; then cp \"${a#@}\" \"$STUB_PATCH\"\n\
                  if [ -n \"${STUB_PATCH_LOG:-}\" ]; then cat \"${a#@}\" >> \"$STUB_PATCH_LOG\"; echo >> \"$STUB_PATCH_LOG\"; fi\n\
              else cp \"${a#@}\" \"$STUB_PUT\"\n\
-                 if [ -n \"$o\" ]; then printf '%s' \"${STUB_PUT_BODY:-}\" > \"$o\"; fi\n\
-                 if [ -n \"$w\" ]; then printf '%s' \"${STUB_PUT_CODE:-200}\"; fi\n\
+                 if [ -n \"${STUB_PUT_LOG:-}\" ]; then cat \"${a#@}\" >> \"$STUB_PUT_LOG\"; echo >> \"$STUB_PUT_LOG\"; fi\n\
+                 code=\"${STUB_PUT_CODE:-200}\"; said=\"${STUB_PUT_BODY:-}\"\n\
+                 if [ -n \"${STUB_PUT_FIRST_CODE:-}\" ] && [ ! -e \"$STUB_PUT.first\" ]; then\n\
+                     : > \"$STUB_PUT.first\"; code=\"$STUB_PUT_FIRST_CODE\"; said=\"${STUB_PUT_FIRST_BODY:-}\"; fi\n\
+                 if [ -n \"$o\" ]; then printf '%s' \"$said\" > \"$o\"; fi\n\
+                 if [ -n \"$w\" ]; then printf '%s' \"$code\"; fi\n\
              fi\n\
              exit 0;; esac; done\n\
          for a in \"$@\"; do case \"$a\" in http*) printf '%s\\n' \"$a\" > \"$STUB_GET\";; esac; done\n\
@@ -1155,6 +1162,163 @@ fn a_refused_completion_is_written_onto_its_request_with_the_servers_reason() {
             .contains("completion_refused"),
         "an accepted completion is not a refusal: {out}"
     );
+}
+
+/// The `error` the step PUT answers, with 409, when another write moved
+/// the step's metadata between the handler's read and its write —
+/// `boss_jobs::step_metadata_write::STEP_CHANGED_ERROR`, introduced by
+/// car 88123ae0 (branch fix/dispatch-reads-back-the-briefed-step-merge).
+/// Spelled here because that constant is not on main as this is written
+/// and boss-testing does not depend on boss-jobs; the runner carries the
+/// same text, and these cases hold it to this copy (backlog 2a6d0b86).
+const STEP_CHANGED: &str = "step changed while this write was computed — its metadata \
+     is no longer what the write read, so writing it would erase the other write";
+
+fn step_changed_body() -> String {
+    serde_json::json!({
+        "error": STEP_CHANGED,
+        "step_id": "s-execute",
+        "hint": "nothing was written; send the same request again — the handler reads the row afresh",
+    })
+    .to_string()
+}
+
+/// One answering verb, a stub SoR, and a PUT log: the fixture the
+/// step-race cases share.
+fn race_fixture(case: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let root = scratch(case);
+    stub_sor(&root);
+    let ok = root.join("ok.sh");
+    write_exec(&ok, "#!/bin/sh\necho ok\n");
+    let verbs = verbs_dir(
+        &root,
+        &[(
+            "ok",
+            &format!(
+                r#"{{"about":"a verb that answers","hosts":["forge"],"argv":["{}"],"params":[]}}"#,
+                ok.display()
+            ),
+        )],
+    );
+    packet(&root, "ok", "[]");
+    let puts = root.join("puts.jsonl");
+    let patches = root.join("patches.jsonl");
+    (root, verbs, puts, patches)
+}
+
+fn logged(path: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("a logged body is JSON"))
+        .collect()
+}
+
+/// A COMPLETION THAT LOST THE STEP RACE IS SENT ONCE MORE (backlog
+/// 2a6d0b86, review of car 88123ae0). That car makes the step PUT
+/// refuse, 409 with [`STEP_CHANGED`], a write computed from a read that
+/// another write has since moved, where it used to answer success and
+/// erase the other write. This runner read every non-2xx completion as
+/// final: it recorded `completion_refused`, and because the verb had
+/// run, the request was HELD for a human — over a refusal whose own
+/// words say nothing was written and the same request may be sent
+/// again. So exactly that refusal earns one resend of the same body.
+#[test]
+fn a_completion_that_lost_the_step_race_is_sent_once_more_and_lands() {
+    needs_jq!();
+    let (root, verbs, puts, patches) = race_fixture("step-race-once");
+    let (out, payload) = run(
+        &root,
+        &verbs,
+        &[
+            ("STUB_PUT_FIRST_CODE", "409".to_string()),
+            ("STUB_PUT_FIRST_BODY", step_changed_body()),
+            ("STUB_PUT_LOG", puts.display().to_string()),
+            ("STUB_PATCH_LOG", patches.display().to_string()),
+        ],
+    );
+    let sent = logged(&puts);
+    assert_eq!(
+        sent.len(),
+        2,
+        "the lost completion and exactly one resend: {out}"
+    );
+    assert_eq!(sent[0], sent[1], "the resend is the same body: {out}");
+    assert_eq!(sent[1]["status"], "completed", "{out}");
+    assert!(payload.is_some(), "{out}");
+    assert!(
+        !logged(&patches)
+            .iter()
+            .any(|p| p.get("completion_refused").is_some()),
+        "a race the resend won is not a refused completion — nothing to hold: {out}"
+    );
+    assert!(
+        out.contains("sending the same completion once more"),
+        "the journal says why a second PUT went out: {out}"
+    );
+    assert!(
+        out.contains("answered ok") && out.contains("failed=0"),
+        "the request is answered and the pass is clean: {out}"
+    );
+}
+
+/// ...and a completion that loses it AGAIN is refused by name, never
+/// looped: the refusal is recorded on the request with the server's own
+/// words, exactly as any other refused completion is.
+#[test]
+fn a_completion_that_loses_the_step_race_twice_is_refused_by_name() {
+    needs_jq!();
+    let (root, verbs, puts, patches) = race_fixture("step-race-always");
+    let (out, _) = run(
+        &root,
+        &verbs,
+        &[
+            ("STUB_PUT_CODE", "409".to_string()),
+            ("STUB_PUT_BODY", step_changed_body()),
+            ("STUB_PUT_LOG", puts.display().to_string()),
+            ("STUB_PATCH_LOG", patches.display().to_string()),
+        ],
+    );
+    assert_eq!(logged(&puts).len(), 2, "one resend, never a loop: {out}");
+    assert!(
+        out.contains("lost the step race twice"),
+        "the journal names the second loss: {out}"
+    );
+    let refused = logged(&patches)
+        .into_iter()
+        .find(|p| p.get("completion_refused").is_some())
+        .unwrap_or_else(|| panic!("the second loss is a refused completion: {out}"));
+    assert!(
+        refused["completion_refused"]["reason"]
+            .as_str()
+            .is_some_and(|s| s.contains(STEP_CHANGED)),
+        "the refusal rides the request in the server's words: {refused}"
+    );
+    assert!(out.contains("failed=1"), "{out}");
+}
+
+/// Any OTHER refused completion is still sent exactly once: only the
+/// refusal that says nothing was written earns a resend.
+#[test]
+fn a_completion_refused_for_another_reason_is_not_resent() {
+    needs_jq!();
+    let (root, verbs, puts, patches) = race_fixture("put-409-other");
+    let (out, _) = run(
+        &root,
+        &verbs,
+        &[
+            ("STUB_PUT_CODE", "409".to_string()),
+            (
+                "STUB_PUT_BODY",
+                r#"{"error":"step has unresolved blockers"}"#.to_string(),
+            ),
+            ("STUB_PUT_LOG", puts.display().to_string()),
+            ("STUB_PATCH_LOG", patches.display().to_string()),
+        ],
+    );
+    assert_eq!(logged(&puts).len(), 1, "never resent: {out}");
+    assert!(!out.contains("once more"), "{out}");
 }
 
 /// A QUEUE WHOSE DEPTH NOBODY READS (backlog 1ffb3305). This runner
