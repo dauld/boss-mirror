@@ -38,7 +38,7 @@
 //! the real verb's confirmation line, because that line is what the
 //! session-start hook parses the packet id from.
 
-use boss_testing::{repo_root, scratch_dir, write_exec};
+use boss_testing::{feed_stdin, repo_root, scratch_dir, write_exec};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -208,11 +208,9 @@ impl Fixture {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap_or_else(|e| panic!("run {hook}: {e}"));
-        {
-            use std::io::Write;
-            let mut stdin = child.stdin.take().expect("stdin");
-            stdin.write_all(payload.as_bytes()).expect("write payload");
-        }
+        // A hook that declines may exit before it reads the payload; the
+        // closed pipe is its verdict, read from the status (backlog fec29a02).
+        feed_stdin(&mut child, payload.as_bytes());
         let out = child.wait_with_output().expect("wait");
         (
             out.status.code().unwrap_or(-1),

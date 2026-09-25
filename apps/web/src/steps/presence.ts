@@ -187,8 +187,9 @@ export async function performPresenceCeremony(
  * surface, spent on the first attempt and never re-sent. Nothing here
  * mints or widens one: the gateway issues it for this step and person,
  * and the server re-checks step, person, shape and expiry on the retry.
- * Never a second ceremony — a retry the server refuses again is returned
- * failed, saying so.
+ * Never a second ceremony — a retry the server refuses again for presence
+ * is returned failed, saying so; refused for anything else, it is
+ * returned as the server said it.
  */
 export async function completeWithPresence(
   jobId: string,
@@ -207,7 +208,10 @@ export async function completeWithPresence(
     return { kind: 'failed', error: `Completing needs your passkey, and the ceremony failed: ${why}` };
   }
   const retry = await putStep(jobId, stepId, body, ticket);
-  if (retry.kind === 'ok') return retry;
+  // Only a retry refused for PRESENCE again is "refused again after a
+  // fresh passkey tap"; any other refusal — a 409 for stale stamps — is
+  // returned in its own words (backlog d82b5f60).
+  if (retry.kind === 'ok' || !retry.presenceRequired) return retry;
   return {
     kind: 'failed',
     error: `The completion was refused again after a fresh passkey tap — ${retry.error}`,

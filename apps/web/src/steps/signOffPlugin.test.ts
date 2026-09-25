@@ -897,6 +897,131 @@ describe('sign-off — a completion refused for presence gets one tap and one re
     expect(server.ceremonies()).toBe(2);
     expect(server.srv.puts).toEqual([200]);
   });
+
+  // Backlog d82b5f60 (review of car 66de0e4b, 2026-09-25). The recovery
+  // ceremony's begin is refused 412 when the step no longer matches what
+  // this surface showed — another writer moved it. The surface returned
+  // there without asking the host to refresh, and kept "Decision saved:
+  // rejected" on screen as if that were what the step now holds.
+  test('a recovery ceremony refused 412 asks the host to refresh and leaves no stale "Decision saved"', async () => {
+    const step = bypassStep();
+    step.sign_offs_required = [];
+    const server = presenceServer(step);
+    const { mount } = loadBundle((url, init) =>
+      url === BEGIN
+        ? { __status: 412, __text: 'the step changed since it was shown' }
+        : server.routes(url, init),
+    );
+    withPasskey();
+    let updates = 0;
+    const c = new FakeNode();
+    mount(c, {
+      step,
+      jobId: 'job-1',
+      onUpdate() {
+        updates += 1;
+      },
+    });
+
+    buttonNamed(c, 'Reject')!.fire('click');
+    await settled();
+
+    expect(server.completionTickets).toEqual([undefined]);
+    expect(updates).toBe(1);
+    expect(allText(c)).toContain('412');
+    expect(allText(c)).toContain('reopen it to read it as it stands');
+    expect(allText(c)).not.toContain('Decision saved');
+  });
+
+  test('a stamp ceremony refused 412 after the decision landed does the same', async () => {
+    const step = bypassStep();
+    delete (step.metadata as Record<string, unknown>).decision;
+    const server = presenceServer(step);
+    const { mount } = loadBundle((url, init) =>
+      url === BEGIN
+        ? { __status: 412, __text: 'the step changed since it was shown' }
+        : server.routes(url, init),
+    );
+    withPasskey();
+    let updates = 0;
+    const c = new FakeNode();
+    mount(c, {
+      step,
+      jobId: 'job-1',
+      onUpdate() {
+        updates += 1;
+      },
+    });
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    expect(server.completionTickets).toEqual([]);
+    expect(updates).toBe(1);
+    expect(allText(c)).toContain('reopen it to read it as it stands');
+    expect(allText(c)).not.toContain('Decision saved');
+  });
+
+  // The held ticket was cleared only after the completion RESOLVED, so a
+  // completion whose fetch threw kept it, and the next attempt re-sent it.
+  test('a completion whose request threw still spends the held ticket', async () => {
+    const step = bypassStep();
+    const server = presenceServer(step);
+    let throwNext = false;
+    const { mount } = loadBundle((url, init) => {
+      if (throwNext && url === STEP && init?.method === 'PUT') {
+        throwNext = false;
+        server.completionTickets.push(ticketOn(init));
+        return undefined; // the stub rejects an unrouted request: a network failure
+      }
+      return server.routes(url, init);
+    });
+    withPasskey();
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
+    await settled();
+    throwNext = true;
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+    expect(allText(c)).toContain('Could not record the decision');
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    expect(server.completionTickets).toEqual(['ticket-1', undefined, 'ticket-2']);
+    expect(server.ceremonies()).toBe(2);
+    expect(server.srv.puts).toEqual([200]);
+  });
+
+  // "Refused again after a fresh passkey tap" named ANY refusal of the
+  // retry, so a 409 for stale stamps read as a presence failure.
+  test('a retry refused 409 after the tap is labelled by its own reason', async () => {
+    const step = bypassStep();
+    const server = presenceServer(step);
+    server.srv.stampAs('platform-admin');
+    (step as { sign_offs: Stamp[] }).sign_offs = server.srv.stamps.slice();
+    const body = '{"error":"sign-offs incomplete","missing_or_stale_roles":["platform-admin"]}';
+    let n = 0;
+    server.answerCompletion(() => {
+      n += 1;
+      return n === 1 ? refusal : { __status: 409, __text: body };
+    });
+    const { mount } = loadBundle(server.routes);
+    withPasskey();
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+
+    expect(server.ceremonies()).toBe(1);
+    expect(server.completionTickets).toEqual([undefined, 'ticket-1']);
+    expect(allText(c)).toContain(`409: ${body}`);
+    expect(allText(c)).not.toContain('refused again');
+    expect(buttonNamed(c, 'Sign off as platform-admin')).toBeDefined();
+  });
 });
 
 // ---------------------------------------------------------------------

@@ -37,7 +37,7 @@
 //! one packet on GET and logs every write, in order), so each verdict is
 //! one the runner actually made.
 
-use boss_testing::repo_root;
+use boss_testing::{feed_stdin, repo_root};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::process::Command;
@@ -85,14 +85,15 @@ const PROCEDURE: &str = "READ THE PLAN ON THIS STEP AND NOTHING ELSE.\n\nYOUR PA
 /// on parallel threads of one process, and a shared scratch file would
 /// be cleared under one case by another.
 fn sha256_hex(bytes: &[u8]) -> String {
-    use std::io::Write;
     let mut child = Command::new("sha256sum")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
         .expect("sha256sum runs");
-    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    // Its exit status is the verdict, not the write (backlog fec29a02).
+    feed_stdin(&mut child, bytes);
     let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "sha256sum: {:?}", out.status);
     String::from_utf8_lossy(&out.stdout)[..64].to_string()
 }
 

@@ -42,7 +42,7 @@
 //! Nothing here touches the network, the forge, or a token: the token
 //! fixture holds a fixed non-secret string and is never printed.
 
-use boss_testing::repo_root;
+use boss_testing::{feed_stdin, repo_root};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -716,7 +716,6 @@ fn git_version() -> String {
 /// One git command in `dir` with `input` on stdin — `hash-object` and
 /// `mktree` are the two fixtures below need, and both read stdin.
 fn git_stdin(dir: &Path, args: &[&str], input: &str) -> String {
-    use std::io::Write;
     let mut child = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -730,12 +729,8 @@ fn git_stdin(dir: &Path, args: &[&str], input: &str) -> String {
         .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
         .spawn()
         .expect("git runs");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin is piped")
-        .write_all(input.as_bytes())
-        .expect("git reads stdin");
+    // git's exit status, asserted below, is the verdict (backlog fec29a02).
+    feed_stdin(&mut child, input.as_bytes());
     let out = child.wait_with_output().expect("git finishes");
     assert!(
         out.status.success(),
