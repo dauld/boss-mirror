@@ -9,6 +9,7 @@ mod bundle_lineage;
 mod cadence;
 mod car;
 mod car_retire;
+mod car_unland;
 mod census;
 mod channels;
 mod core_changes;
@@ -1117,6 +1118,30 @@ enum CarAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Close a car whose landing forge main LOST, and open the successor
+    /// that rides again.
+    ///
+    /// Reads, itself, that the merge is NOT an ancestor of the forge's
+    /// main (`git ls-remote origin refs/heads/main` + `git merge-base
+    /// --is-ancestor`, in the clone it runs in); main carrying it, or any
+    /// git failure, is a refusal. Then opens a successor car for the same
+    /// branch (`supersedes` naming this one, first open work `gate`),
+    /// corrects the landing note beside the review step, and closes the
+    /// car through ship-a-change's `unlanded` terminal with the reading
+    /// and the successor recorded. Never a reopen: both facts stay.
+    /// WHY (backlog f9256445): train 2026-09-25 20:04 merged as c85941b4
+    /// and main was back at 777a5888 within 32 seconds.
+    Unland {
+        /// The car: its branch, or 8+ characters of its id.
+        car: String,
+        /// The merge main lost — the car's `merge_ref`, or its full sha
+        /// (a full sha is fetched by sha when this clone never saw it).
+        #[arg(long)]
+        merge_ref: String,
+        /// Read and print, write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1743,6 +1768,11 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
+            CarAction::Unland {
+                car: given,
+                merge_ref,
+                dry_run,
+            } => car_unland::unland(&given, &merge_ref, dry_run).await,
         },
         Commands::Workflow { action } => match action {
             WorkflowAction::Publish {
