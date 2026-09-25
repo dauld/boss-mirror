@@ -2742,6 +2742,16 @@ button.manual-tree-node {
   font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
   background: var(--bg); border-radius: var(--radius);
 }
+/* The title and each value are drawn as their bytes (backlog 6093cf13):
+   the title keeps every space it signs, and a value that scrolls in its
+   box says so under it — rendered is not read. */
+.step-signed-title { font-family: var(--mono, monospace); white-space: pre-wrap; overflow-wrap: anywhere; }
+.step-signed-overflow { margin: 2px 0 0; font-size: 11px; font-weight: 600; color: var(--warn); }
+.step-signed-overflow:empty { display: none; }
+.step-signoff-context-unsigned {
+  margin-left: 8px; padding: 0 6px; font-size: 11px; font-weight: 600;
+  color: var(--warn); border: 1px solid var(--warn); border-radius: var(--radius);
+}
 
 /* Checklist */
 .step-checklist-items { display: flex; flex-direction: column; gap: 4px; }

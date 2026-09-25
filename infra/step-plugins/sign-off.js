@@ -37,7 +37,10 @@
 //      per-role button unseen. A ceremony on a step whose block is not
 //      drawn — a kind whose floor demands presence the step never
 //      declared — signs nothing: it draws the block and asks for the
-//      tap again.
+//      tap again. Title, key names and values are drawn AS THEIR BYTES —
+//      quoted and escaped wherever a reader could otherwise misread them
+//      (backlog 6093cf13) — a box that scrolls says so, and an unmounted
+//      surface signs nothing.
 //
 // Order on Approve/Reject (v3, feedback 221b4b5c): metadata lands
 // first (a stamp attests the step's current shape, so the decision
@@ -98,14 +101,56 @@
     return typeof v === 'string' && v.trim().length > 0 ? v : null;
   }
 
-  // A signed value as text: a string byte for byte, anything else as its
-  // indented JSON. The app's copy is signedText in
-  // apps/web/src/steps/presence.ts; signOffPlugin.test.ts pins the two
-  // equal (a bundle cannot import it).
+  // A signed value AS THE BYTES IT IS (backlog 6093cf13, adversarial
+  // review of car 30674304): a string that reads as exactly itself is
+  // drawn bare; any other — empty, spaced at an edge, multi-line, holding
+  // a character that is not printable ASCII or an em dash, starting with
+  // a quote, or reading as a number, boolean, null or JSON — is drawn in
+  // double quotes with each such character written as \u{XXXX}. Anything
+  // else is its indented JSON with the same escapes. So '42' and 42, a
+  // bidi override, a zero-width space and a Cyrillic look-alike are all
+  // visibly what they are. Key names and the title are drawn through it
+  // too. The app's copy is signedText in apps/web/src/steps/presence.ts
+  // (the reasoning is there); signOffPlugin.test.ts pins the two equal on
+  // generated inputs, because a bundle cannot import it.
+  const AS_ITSELF = /^[\x20-\x7E\u2014]$/u;
+  const NOT_AS_ITSELF = /[^\x20-\x7E\n\u2014]/gu;
+  const escaped = (c) =>
+    `\\u{${(c.codePointAt(0) || 0).toString(16).toUpperCase().padStart(4, '0')}}`;
+  const QUOTED = { '\\': '\\\\', '"': '\\"', '\n': '\\n\n', '\t': '\\t', '\r': '\\r' };
+  const quoted = (s) =>
+    `"${[...s]
+      .map((c) =>
+        Object.prototype.hasOwnProperty.call(QUOTED, c)
+          ? QUOTED[c]
+          : AS_ITSELF.test(c)
+            ? c
+            : escaped(c),
+      )
+      .join('')}"`;
+
+  function readsAsItself(s) {
+    if (s === '' || s.startsWith('"') || s.startsWith(' ') || s.endsWith(' ')) return false;
+    if (![...s].every((c) => AS_ITSELF.test(c))) return false;
+    try {
+      JSON.parse(s);
+      return false;
+    } catch (_) {
+      return true;
+    }
+  }
+
   function signedText(v) {
-    if (typeof v === 'string') return v;
+    if (typeof v === 'string') return readsAsItself(v) ? v : quoted(v);
     const s = JSON.stringify(v, null, 2);
-    return s === undefined ? String(v) : s;
+    return s === undefined ? String(v) : s.replace(NOT_AS_ITSELF, escaped);
+  }
+
+  // What a value whose box scrolls says under it (6093cf13): rendered is
+  // not read. The app's copy is scrollNote in presence.ts, pinned equal.
+  function scrollNote(text) {
+    const lines = text.split('\n').length;
+    return `scrolls in its box: ${lines} ${lines === 1 ? 'line' : 'lines'}, ${[...text].length} characters. Read it to the end; your passkey signs all of it.`;
   }
 
   function canonical(v) {
@@ -172,7 +217,20 @@
     // Set when a ceremony was asked of a step that never declared
     // presence: from then on its signed content is drawn too.
     let revealed = false;
-    const signedVisible = () => !isDone && (step.assurance_required === 'presence' || revealed);
+    // Set by the mount's cleanup (backlog 6093cf13). The host unmounts
+    // this surface when the rail moves to another step, and a gesture
+    // already running kept going: it drew into the detached tree, its
+    // copy of "what is on screen" still matched, and the passkey prompt
+    // came up over the NEXT step to sign this one. Unmounted, nothing of
+    // this step is on screen, so nothing is drawn as signed and any
+    // ceremony still in flight refuses.
+    let disposed = false;
+    const signedVisible = () =>
+      !disposed && !isDone && (step.assurance_required === 'presence' || revealed);
+    // The overflow checks of the rows as last drawn, and the observers
+    // that re-run them when a box changes size.
+    let overflowChecks = [];
+    let overflowObservers = [];
 
     const declared = (Array.isArray(step.fields) ? step.fields : []).filter(
       (f) => f && f.name && !TRIO.includes(f.name),
@@ -230,7 +288,14 @@
     });
     commentTa.value = String((step.metadata || {}).comment || '');
 
-    function renderContext(text, sourceLabel) {
+    // `signed` is false for the packet's own text (its briefing or filed
+    // message): that is job metadata, outside the step's shape hash, so a
+    // passkey on this step does not sign it and it can change under a
+    // signature without voiding it — and its links are drawn as their
+    // text, not their targets. The card says so (6093cf13). The step's
+    // own context_md IS one of the step's keys, drawn as its bytes in the
+    // signed block, and carries no such label.
+    function renderContext(text, sourceLabel, signed) {
       contextDiv.replaceChildren();
       if (!text) return;
       // The case renders as MARKDOWN when the host provides its
@@ -255,6 +320,9 @@
             { className: 'step-signoff-context-head' },
             h('span', { className: 'step-signoff-context-title' }, 'What this decision is about'),
             h('span', { className: 'step-signoff-context-source' }, sourceLabel),
+            signed
+              ? null
+              : h('span', { className: 'step-signoff-context-unsigned' }, 'not signed'),
           ),
           body,
         ),
@@ -276,7 +344,7 @@
               'div',
               { className: 'step-field' },
               h('label', { for: id }, `${f.name} — what your passkey signs`),
-              h('pre', { className: 'step-signoff-signed', id }, fieldValues[f.name]),
+              h('pre', { className: 'step-signoff-signed', id }, signedText(fieldValues[f.name])),
             ),
           );
           return;
@@ -314,12 +382,35 @@
       });
     }
 
+    // A value box that scrolls — its content taller or wider than the box
+    // — carries a note under it saying how much there is (6093cf13). Run
+    // at each draw, again once the root is attached (a detached box has no
+    // size), and whenever a box changes size where the browser can say so.
+    function watchOverflow(pre, note, text) {
+      const check = () => {
+        const scrolls =
+          pre.scrollHeight > pre.clientHeight + 1 || pre.scrollWidth > pre.clientWidth + 1;
+        note.textContent = scrolls ? scrollNote(text) : '';
+      };
+      overflowChecks.push(check);
+      if (typeof ResizeObserver === 'function') {
+        const observer = new ResizeObserver(check);
+        observer.observe(pre);
+        overflowObservers.push(observer);
+      }
+      check();
+    }
+
     // Every key the passkey signs, from the step's own keys — never an
     // allow-list, so a key nobody wrote a renderer for is drawn as its
     // JSON rather than skipped — and the copy presenceTicket() compares
-    // against is taken HERE, from what was just drawn.
+    // against is taken HERE, from what was just drawn. The title, each
+    // key name and each value are drawn as their bytes (signedText).
     function renderSigned() {
       signedDiv.replaceChildren();
+      overflowObservers.forEach((o) => o.disconnect());
+      overflowObservers = [];
+      overflowChecks = [];
       onScreen = null;
       if (!signedVisible()) return;
       const md = step.metadata || {};
@@ -331,21 +422,26 @@
           'p',
           { className: 'step-signed-keys-note' },
           'The step ',
-          h('strong', { className: 'step-signed-title' }, step.title),
-          ' and every key below, exactly as shown. Your decision, its time and your comment join them when you press a button.',
+          h('strong', { className: 'step-signed-title' }, signedText(step.title)),
+          ' and every key below, exactly as shown. Text in double quotes has each character you could not otherwise see or tell apart written as an escape. Your decision, its time and your comment join them when you press a button.',
         ),
       );
       Object.keys(md)
         .sort()
         .forEach((k) => {
+          const text = signedText(md[k]);
+          const pre = h('pre', { className: 'step-signed-value' }, text);
+          const note = h('div', { className: 'step-signed-overflow' });
           signedDiv.appendChild(
             h(
               'div',
               { className: 'step-signed-row' },
-              h('div', { className: 'step-signed-key' }, k),
-              h('pre', { className: 'step-signed-value' }, signedText(md[k])),
+              h('div', { className: 'step-signed-key' }, signedText(k)),
+              pre,
+              note,
             ),
           );
+          watchOverflow(pre, note, text);
         });
       onScreen = { title: step.title, metadata: JSON.parse(JSON.stringify(md)) };
     }
@@ -498,7 +594,14 @@
     // step, it only compares. The lost update step-plugins-own-their-keys
     // refuses cannot happen here — a stale snapshot is refused 412, which
     // is the whole point — so the snapshot is named for what it is.
+    // Unmounted mid-gesture (6093cf13): the step this gesture began on is
+    // no longer on screen, so the passkey is never asked, and an answer it
+    // already gave is never sent to be turned into a ticket.
+    const offScreen = () =>
+      new Error('Nothing was signed: this step is no longer on screen, so your passkey was not used for it.');
+
     async function presenceTicket() {
+      if (disposed) throw offScreen();
       const renderedMetadata = step.metadata || {};
       // THE PASSKEY SIGNS ONLY WHAT WAS DRAWN (design f623e425 D3): a key
       // of what the begin would name that the signed block did not draw
@@ -537,6 +640,7 @@
         throw refused;
       }
       const opts = await begin.json();
+      if (disposed) throw offScreen();
       const cred = await navigator.credentials.get({
         publicKey: {
           challenge: b64uBytes(opts.publicKey.challenge).buffer,
@@ -550,6 +654,7 @@
         },
       });
       if (!cred) throw new Error('Passkey prompt returned no credential.');
+      if (disposed) throw offScreen();
       const a = cred.response;
       const finish = await fetch('/api/auth/passkey/assert/finish', {
         method: 'POST',
@@ -837,30 +942,43 @@
     );
     renderAll();
     container.appendChild(root);
+    overflowChecks.forEach((check) => check());
 
     // The case for action, resolved the DecisionContext way: the
     // step's own context wins without a fetch; otherwise one job read
     // supplies the packet-level briefing or the filed message.
     const own = nonEmptyString((step.metadata || {}).context_md);
     if (own) {
-      renderContext(own, 'written for this step');
+      renderContext(own, 'written for this step', true);
     } else {
       fetch(`/api/jobs/${jobId}`)
         .then((r) => (r.ok ? r.json() : null))
         .then((job) => {
           const jm = (job && job.metadata) || {};
           const ctx = nonEmptyString(jm.context_md);
-          if (ctx) return renderContext(ctx, 'the packet’s briefing');
+          if (ctx) return renderContext(ctx, 'the packet’s briefing', false);
           const msg = nonEmptyString(jm.message);
-          if (msg) return renderContext(msg, 'the packet as filed');
+          if (msg) return renderContext(msg, 'the packet as filed', false);
         })
         .catch(() => {
           // No context is a quiet absence, never a broken surface.
         });
     }
 
-    return () => root.remove();
+    return () => {
+      disposed = true;
+      overflowObservers.forEach((o) => o.disconnect());
+      overflowObservers = [];
+      root.remove();
+    };
   }
+
+  // The copies of presence.ts's functions, where signOffPlugin.test.ts
+  // can hold them equal to the app's on generated inputs (CLAUDE.md §9a;
+  // 6093cf13 — the pin used to reach signedText alone, and canonical and
+  // notShown only through one empty-screen case). Pure functions of their
+  // arguments: exposing them grants nothing.
+  mount.signed = Object.freeze({ signedText, canonical, notShown, scrollNote });
 
   if (typeof window.__boss_register_step_plugin !== 'function') {
     console.error('[sign-off-plugin] __boss_register_step_plugin not on window');

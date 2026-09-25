@@ -5,15 +5,35 @@
 // completion 400 was swallowed. v1's row was retired live for exactly
 // these gaps; this suite is what earns re-publishing it.
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { notShown, signedText } from './presence';
+import {
+  canonical,
+  notShown,
+  scrollNote,
+  signedRows,
+  signedText,
+  type ShownStep,
+} from './presence';
+import { genMetadata, genString, genValue, rng } from './signedInputs.testkit';
 
 const BUNDLE = new URL('../../../../infra/step-plugins/sign-off.js', import.meta.url);
 
 type Handler = (ev: { target: FakeNode }) => void;
 
 class FakeNode {
+  // Layout, which a fake DOM does not have: a test that needs a box to
+  // scroll says which boxes do (FakeNode.scrolls), and every other box
+  // holds exactly its content.
+  static scrolls: (n: FakeNode) => boolean = () => false;
+  get clientHeight() {
+    return 100;
+  }
+  get scrollHeight() {
+    return FakeNode.scrolls(this) ? 400 : 100;
+  }
+  clientWidth = 100;
+  scrollWidth = 100;
   className = '';
   textContent = '';
   value = '';
@@ -118,8 +138,18 @@ function loadBundle(routes: (url: string, init?: RequestInit) => unknown) {
   // eslint-disable-next-line no-new-func
   new Function(readFileSync(BUNDLE, 'utf8'))();
   if (!mountFn) throw new Error('bundle registered no plugin');
-  return { mount: mountFn as (c: unknown, p: unknown) => unknown, calls };
+  const mount = mountFn as ((c: unknown, p: unknown) => unknown) & { signed?: PluginSigned };
+  return { mount, calls, signed: mount.signed };
 }
+
+/** The plugin's own copies of the functions presence.ts defines, as the
+ *  bundle exposes them on its mount function for this pin. */
+type PluginSigned = {
+  signedText: (v: unknown) => string;
+  canonical: (v: unknown) => string;
+  notShown: (shown: ShownStep, screen: ShownStep | null) => string[];
+  scrollNote: (text: string) => string;
+};
 
 async function settled() {
   for (let i = 0; i < 48; i++) await Promise.resolve();
@@ -163,6 +193,31 @@ describe('sign-off v2', () => {
     await settled();
     expect(allText(c)).toContain('the filed case');
     expect(allText(c)).toContain('the packet as filed');
+    // The packet's own text is outside the step's shape hash: a passkey
+    // on this step does not sign it, and the card says so (6093cf13).
+    expect(byClass(c, 'step-signoff-context-unsigned').map((n) => allText(n).trim())).toEqual([
+      'not signed',
+    ]);
+  });
+
+  test('the packet briefing is labelled not signed; the step’s own context is not', async () => {
+    const briefed = loadBundle((url) =>
+      url === '/api/jobs/job-1' ? { metadata: { context_md: 'the briefing' }, steps: [] } : undefined,
+    );
+    const step = publishStep();
+    delete (step.metadata as Record<string, unknown>).context_md;
+    const c = new FakeNode();
+    briefed.mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    await settled();
+    expect(allText(c)).toContain('the briefing');
+    expect(byClass(c, 'step-signoff-context-unsigned').length).toBe(1);
+
+    const own = loadBundle(() => undefined);
+    const c2 = new FakeNode();
+    own.mount(c2, { step: publishStep(), jobId: 'job-1', onUpdate() {} });
+    await settled();
+    expect(allText(c2)).toContain('62 commits');
+    expect(byClass(c2, 'step-signoff-context-unsigned').length).toBe(0);
   });
 
   test('an empty required field blocks Approve/Reject and says which', async () => {
@@ -1238,8 +1293,9 @@ describe('sign-off — a presence step shows the signed document as it is', () =
     // Since design f623e425 D3 the plan is drawn in the block of every
     // signed key, byte for byte — and once: the declared field is not
     // drawn a second time beside it.
-    expect(signedBlock(c).get('plan')).toBe(PLAN);
-    expect(walk(c).filter((n) => n.textContent === PLAN).length).toBe(1);
+    // Drawn as its bytes: quoted, each line break shown as \n (6093cf13).
+    expect(signedBlock(c).get('plan')).toBe(signedText(PLAN));
+    expect(walk(c).filter((n) => n.textContent === signedText(PLAN)).length).toBe(1);
     expect(buttonNamed(c, 'Approve')?.disabled).toBe(false);
   });
 
@@ -1437,5 +1493,257 @@ describe('sign-off — the passkey signs only what this surface drew', () => {
     const c = new FakeNode();
     mount(c, { step, jobId: 'job-1', onUpdate() {} });
     expect(signedBlock(c).size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------
+// Backlog 6093cf13 (adversarial review of car 30674304, 2026-09-25).
+
+const nodeText = (n: FakeNode) =>
+  walk(n)
+    .map((x) => x.textContent)
+    .join('');
+
+const passkeyAnswers = (answer: () => unknown) => {
+  (globalThis as unknown as Record<string, unknown>).navigator = {
+    credentials: { get: async () => answer() },
+  };
+};
+
+/** The signing server, presence-gated on the stamp door. */
+function gatedServer(step: ReturnType<typeof publishStep>) {
+  const BEGIN = '/api/auth/passkey/assert/begin';
+  const FINISH = '/api/auth/passkey/assert/finish';
+  const srv = signingServer(step);
+  const routes = (url: string, init?: RequestInit) => {
+    const ticket = (init?.headers as Record<string, string> | undefined)?.['x-presence-ticket'];
+    if (url === SIGN && init?.method === 'POST' && !ticket) {
+      return { __status: 422, required: 'presence' };
+    }
+    if (url === BEGIN) {
+      return {
+        challenge_id: 'chal-1',
+        publicKey: {
+          challenge: 'AAAA',
+          rpId: 'boss.test',
+          allowCredentials: [{ type: 'public-key', id: 'AAAA' }],
+          userVerification: 'required',
+          timeout: 60000,
+        },
+      };
+    }
+    if (url === FINISH) return { ticket: 'ticket-1' };
+    return srv.routes(url, init);
+  };
+  return { srv, routes, BEGIN, FINISH };
+}
+
+const aCredential = () => {
+  const buf = () => new Uint8Array([1, 2, 3]).buffer;
+  return {
+    id: 'cred',
+    rawId: buf(),
+    type: 'public-key',
+    response: { authenticatorData: buf(), clientDataJSON: buf(), signature: buf(), userHandle: null },
+  };
+};
+
+// A mount's cleanup only removed its root, so a gesture begun on step A
+// kept running after the rail switched to B: it drew into the detached
+// tree, its own copy of "what is on screen" still matched, and the passkey
+// prompt came up over B to sign A. ApprovalSurface refuses this (its
+// shownNow answers from the step on screen); the plugin now does too.
+describe('sign-off — a gesture that outlives its mount signs nothing', () => {
+  const presenceOnly = () => {
+    const step = presenceStep();
+    delete (step.metadata as Record<string, unknown>).decision;
+    delete (step.metadata as Record<string, unknown>).decided_at;
+    return step;
+  };
+
+  test('control: the same gesture, still mounted, does ask the passkey', async () => {
+    const step = presenceOnly();
+    const server = gatedServer(step);
+    const { mount, calls } = loadBundle(server.routes);
+    passkeyAnswers(aCredential);
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+    expect(calls.some((x) => x.url === server.BEGIN)).toBe(true);
+    expect(server.srv.stamps.length).toBe(1);
+  });
+
+  test('Approve, then the rail moves on before the passkey is asked: no begin, no stamp', async () => {
+    const step = presenceOnly();
+    const server = gatedServer(step);
+    const { mount, calls } = loadBundle(server.routes);
+    passkeyAnswers(aCredential);
+    const c = new FakeNode();
+    const dispose = mount(c, { step, jobId: 'job-1', onUpdate() {} }) as () => void;
+    buttonNamed(c, 'Approve')!.fire('click');
+    dispose();
+    await settled();
+    expect(calls.some((x) => x.url === server.BEGIN)).toBe(false);
+    expect(server.srv.stamps.length).toBe(0);
+    expect(server.srv.puts).toEqual([]);
+    expect(allText(c)).toContain('Nothing was signed');
+    // Unmounted, nothing is drawn as signed.
+    expect(signedBlock(c).size).toBe(0);
+  });
+
+  test('the role button, then the rail moves on: the same', async () => {
+    const step = presenceOnly();
+    const server = gatedServer(step);
+    const { mount, calls } = loadBundle(server.routes);
+    passkeyAnswers(aCredential);
+    const c = new FakeNode();
+    const dispose = mount(c, { step, jobId: 'job-1', onUpdate() {} }) as () => void;
+    buttonNamed(c, 'Sign off as platform-admin')!.fire('click');
+    dispose();
+    await settled();
+    expect(calls.some((x) => x.url === server.BEGIN)).toBe(false);
+    expect(server.srv.stamps.length).toBe(0);
+    expect(allText(c)).toContain('Nothing was signed');
+  });
+
+  test('the rail moves on while the passkey prompt is up: its answer is never sent', async () => {
+    const step = presenceOnly();
+    const server = gatedServer(step);
+    const { mount, calls } = loadBundle(server.routes);
+    let dispose = () => {};
+    passkeyAnswers(() => {
+      dispose();
+      return aCredential();
+    });
+    const c = new FakeNode();
+    dispose = mount(c, { step, jobId: 'job-1', onUpdate() {} }) as () => void;
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+    expect(calls.some((x) => x.url === server.BEGIN)).toBe(true);
+    expect(calls.some((x) => x.url === server.FINISH)).toBe(false);
+    expect(server.srv.stamps.length).toBe(0);
+    expect(allText(c)).toContain('Nothing was signed');
+  });
+});
+
+// The rendering the plugin draws and the refusal it runs are copies of
+// presence.ts (a bundle cannot import it), pinned HERE on generated
+// inputs — CLAUDE.md §9a. The equality used to cover signedText and one
+// empty-screen notShown; canonical was re-implemented in this file's stub.
+describe('sign-off — the plugin draws and refuses exactly as the app does', () => {
+  const plugin = (): PluginSigned => {
+    const { signed } = loadBundle(() => undefined);
+    if (!signed) throw new Error('the bundle exposes no signed-rendering functions on mount');
+    return signed;
+  };
+
+  test('signedText and canonical agree on generated values', () => {
+    const p = plugin();
+    const r = rng(0x5160ff);
+    for (let i = 0; i < 3000; i++) {
+      const v = genValue(r);
+      expect([v, p.signedText(v), p.canonical(v)]).toEqual([v, signedText(v), canonical(v)]);
+    }
+  });
+
+  test('notShown agrees on generated steps and screens', () => {
+    const p = plugin();
+    const r = rng(0x6093);
+    const screens = (shown: ShownStep): (ShownStep | null)[] => {
+      const md = shown.metadata;
+      const keys = Object.keys(md);
+      const k = keys[Math.floor(r() * keys.length)];
+      const without = { ...md };
+      if (k !== undefined) delete without[k];
+      const moved = k === undefined ? { ...md } : { ...md, [k]: genValue(r) };
+      return [
+        null,
+        { title: shown.title, metadata: JSON.parse(JSON.stringify(md)) },
+        { title: genString(r), metadata: { ...md } },
+        { title: shown.title, metadata: without },
+        { title: shown.title, metadata: moved },
+        { title: shown.title, metadata: { ...md, [genString(r)]: genValue(r) } },
+        { title: shown.title, metadata: Object.fromEntries(Object.entries(md).reverse()) },
+      ];
+    };
+    for (let i = 0; i < 500; i++) {
+      const shown = { title: genString(r), metadata: genMetadata(r) };
+      for (const screen of screens(shown)) {
+        expect([shown, screen, p.notShown(shown, screen)]).toEqual([
+          shown,
+          screen,
+          notShown(shown, screen),
+        ]);
+      }
+    }
+  });
+
+  test('the overflow note agrees', () => {
+    const p = plugin();
+    const r = rng(3);
+    for (let i = 0; i < 200; i++) {
+      const text = signedText(genValue(r));
+      expect(p.scrollNote(text)).toBe(scrollNote(text));
+    }
+  });
+
+  test('a hostile step is drawn as the app draws it: its title, key names and values', () => {
+    const step = presenceStep();
+    step.title = ' Approve  the plan ';
+    Object.assign(step.metadata, {
+      '4​2': '42',
+      host: 'fоrge‮xcod.exe',
+      count: 42,
+      approved: 'true',
+    });
+    const { mount } = loadBundle(() => undefined);
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    const rows = signedRows({ title: step.title, metadata: step.metadata });
+    expect([...signedBlock(c)]).toEqual(rows.map((row) => [row.label, row.text]));
+    expect(signedBlock(c).get('host')).toBe('"f\\u{043E}rge\\u{202E}xcod.exe"');
+    expect(signedBlock(c).get('"4\\u{200B}2"')).toBe('"42"');
+    expect(signedBlock(c).get('count')).toBe('42');
+    expect(byClass(c, 'step-signed-title').map(nodeText)).toEqual([signedText(step.title)]);
+  });
+
+  test('the drawn title keeps its whitespace, and a value box scrolls rather than clips', () => {
+    const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+    const rule = (sel: string) =>
+      css.match(new RegExp(`${sel.replace('.', '\\.')}\\s*\\{[^}]*\\}`))?.[0] ?? '';
+    expect(rule('.step-signed-title')).toContain('white-space: pre-wrap');
+    expect(rule('.step-signed-value')).toContain('overflow: auto');
+  });
+});
+
+// A value longer than its box scrolled inside it, with nothing saying so:
+// rendered is not read. A box that scrolls now carries a note under it
+// naming how much there is (6093cf13).
+describe('sign-off — a value that scrolls in its box says so', () => {
+  afterEach(() => {
+    FakeNode.scrolls = () => false;
+  });
+  const LONG = Array.from({ length: 40 }, (_, i) => `  line ${i}`).join('\n');
+
+  test('the long value carries the note; the short ones do not', () => {
+    FakeNode.scrolls = (n) =>
+      n.className === 'step-signed-value' && nodeText(n).split('\n').length > 12;
+    const step = presenceStep();
+    (step.metadata as Record<string, unknown>).plan = LONG;
+    const { mount } = loadBundle(() => undefined);
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    const notes = byClass(c, 'step-signed-overflow').map(nodeText).filter((t) => t !== '');
+    expect(notes).toEqual([scrollNote(signedText(LONG))]);
+  });
+
+  test('nothing scrolls, nothing is noted', () => {
+    const step = presenceStep();
+    (step.metadata as Record<string, unknown>).plan = LONG;
+    const { mount } = loadBundle(() => undefined);
+    const c = new FakeNode();
+    mount(c, { step, jobId: 'job-1', onUpdate() {} });
+    expect(byClass(c, 'step-signed-overflow').map(nodeText).filter((t) => t !== '')).toEqual([]);
   });
 });

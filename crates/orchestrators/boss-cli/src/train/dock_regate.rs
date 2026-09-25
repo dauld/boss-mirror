@@ -402,6 +402,27 @@ pub(crate) fn departure_hold(
     })
 }
 
+/// PURE: what this pass writes to the car's claim on the next free gate
+/// bay (`gate::DOCK_WAITING`, design 42279fb2 D3) — `waiting` is the main
+/// the dock is waiting for a bay to re-gate it on, `None` when it is not
+/// waiting. Waiting re-stamps the claim every pass, which is the heartbeat
+/// builders read it by; not waiting deletes a claim the car still carries
+/// (a merge deletes a `null`), so a re-gate that has launched is never
+/// counted twice. `None` = write nothing.
+pub(crate) fn waiting_write(
+    car: &Value,
+    waiting: Option<&str>,
+    now: DateTime<Utc>,
+) -> Option<Value> {
+    match waiting {
+        Some(main) => Some(crate::gate::dock_waiting_stamp(main, now)),
+        None => car
+            .pointer(&format!("/metadata/{}", crate::gate::DOCK_WAITING))
+            .filter(|v| !v.is_null())
+            .map(|_| Value::Null),
+    }
+}
+
 /// When the dock launched the re-gate a car's stamp records — the `at`
 /// every stamp has carried since 969a1092. `None` when absent or
 /// unreadable.
@@ -546,6 +567,43 @@ pub(crate) fn in_flight_reason(car_id: &str, stamp: &RegateStamp, standing: &InF
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D3 of design 42279fb2: the dock's claim on the next free bay is
+    /// written while it waits for one — re-stamped every pass, which is
+    /// its heartbeat — and removed the pass it stops waiting, so a
+    /// launched re-gate is never counted twice (once running, once
+    /// waiting). A car that never waited is never written.
+    #[test]
+    fn the_dock_claims_a_bay_only_while_it_waits_for_one() {
+        let now = DateTime::parse_from_rfc3339("2026-09-25T22:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let bare = json!({"id": "car-g", "metadata": {"branch": "feat/g"}});
+        assert_eq!(
+            waiting_write(&bare, Some("77bf499e"), now),
+            Some(crate::gate::dock_waiting_stamp("77bf499e", now)),
+            "waiting: the claim is written, naming the main it waits on"
+        );
+        assert_eq!(
+            waiting_write(&bare, None, now),
+            None,
+            "a car that is not waiting and carries no claim writes nothing"
+        );
+        let claimed = json!({"id": "car-g", "metadata": {
+            "branch": "feat/g",
+            crate::gate::DOCK_WAITING: crate::gate::dock_waiting_stamp("77bf499e", now),
+        }});
+        assert_eq!(
+            waiting_write(&claimed, None, now),
+            Some(Value::Null),
+            "no longer waiting: the claim is deleted (null deletes on a merge)"
+        );
+        let cleared = json!({"id": "car-g", "metadata": {
+            "branch": "feat/g",
+            crate::gate::DOCK_WAITING: null,
+        }});
+        assert_eq!(waiting_write(&cleared, None, now), None);
+    }
 
     fn paths(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
