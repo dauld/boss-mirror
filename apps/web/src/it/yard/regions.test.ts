@@ -6,16 +6,18 @@ import {
   bandText,
   compactCountText,
   countText,
-  floorHref,
   floorSelection,
   kpiText,
   lampOf,
   parseRegions,
+  regionHref,
   stateText,
   trendText,
   type Region,
   type Trend,
 } from './regions';
+import { parseRoute } from '../../router';
+import { territoryOf } from './world';
 
 // The IT system map (design 0524fc95, car 2): the region cards read
 // from ONE endpoint, /api/yard/regions (car 1), each a door to its
@@ -139,44 +141,70 @@ describe('parseRegions — the payload, parsed once', () => {
   });
 });
 
+/** The server's region names, read out of the constant that decides
+ *  them — `boss_jobs::regions::REGIONS` — never retyped here. */
+function serverRegions(): Readonly<{ declared: number; names: ReadonlyArray<string> }> {
+  const src = readFileSync(
+    join(import.meta.dir, '..', '..', '..', '..', '..', 'crates', 'core', 'boss-jobs', 'src', 'regions', 'mod.rs'),
+    'utf8',
+  );
+  const block = src.match(/pub const REGIONS: \[&str; (\d+)\] = \[([^\]]*)\];/);
+  expect(block, 'boss_jobs::regions::REGIONS is where the names live').not.toBeNull();
+  const names = [...block![2]!.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]!);
+  return { declared: Number(block![1]), names };
+}
+
 describe('the names are the server\'s, in map order', () => {
   it('equal boss_jobs::regions::REGIONS (crates/core/boss-jobs/src/regions/mod.rs)', () => {
     // A fact that lives twice gets an equality test (CLAUDE.md §9a): the
     // server's constant is the decision (0524fc95 Q2); this list is the
     // client's copy so the map can draw a card per name before the read
     // answers, and so a ninth name from a newer server is noticed.
-    const src = readFileSync(
-      join(import.meta.dir, '..', '..', '..', '..', '..', 'crates', 'core', 'boss-jobs', 'src', 'regions', 'mod.rs'),
-      'utf8',
-    );
-    const block = src.match(/pub const REGIONS: \[&str; (\d+)\] = \[([^\]]*)\];/);
-    expect(block, 'boss_jobs::regions::REGIONS is where the names live').not.toBeNull();
-    const names = [...block![2]!.matchAll(/"([a-z-]+)"/g)].map((m) => m[1]!);
-    expect(Number(block![1])).toBe(names.length);
-    expect([...REGION_NAMES] as string[]).toEqual(names);
+    const { declared, names } = serverRegions();
+    expect(declared).toBe(names.length);
+    expect([...REGION_NAMES] as string[]).toEqual([...names]);
   });
 });
 
-describe('floorHref — every card is a door to a floor that already exists', () => {
-  it('every region opens the world zoomed into it — the six on their yard panel, the two queue boards on their board', () => {
-    expect(floorHref('dock')).toBe('/it/yard/dock');
-    expect(floorHref('gates')).toBe('/it/yard/gates');
-    expect(floorHref('track')).toBe('/it/yard/track');
-    expect(floorHref('shed')).toBe('/it/yard/shed');
-    expect(floorHref('arrivals')).toBe('/it/yard/arrivals');
-    expect(floorHref('garage')).toBe('/it/yard/garage');
-    // Car 4 of design d2154293: these two were the only cards that
-    // left the world. They no longer do — their board mounts under
-    // the zoomed territory, like every other floor.
-    expect(floorHref('receiving')).toBe('/it/yard/receiving');
-    expect(floorHref('marshalling')).toBe('/it/yard/marshalling');
-    // The shop floor's board is the crew board, which was the floor
-    // before the region existed (backlog 94c6ffd0).
-    expect(floorHref('shop-floor')).toBe('/it/yard/shop-floor');
+// ONE DOOR PER REGION (backlog 594ffe96, 2026-09-25). The world map's
+// floorHref knew six yard regions and three boards and sent anything
+// else to /it/yard — which the router reads as the TRACK — so the
+// publish territory, the tenth region, opened the track's page, while
+// the transit map's own regionHref sent the same station to
+// /it/yard/publish. Two functions answered "where does a region link
+// lead" and disagreed on one region. Now one does, and this test walks
+// every name the SERVER serves — not the client's copy — through the
+// link, the router and the layout, so the page a link opens is the
+// region it names.
+describe('regionHref — every region the server serves links its own region page', () => {
+  it('each name opens /it/yard/<name>, the router reads that as the same region, and the world has its territory', () => {
+    const { names } = serverRegions();
+    expect(names).toContain('publish');
+    for (const name of names) {
+      const href = regionHref(name);
+      expect(href, name).toBe(`/it/yard/${name}`);
+      expect(parseRoute(href), name).toEqual({ kind: 'systemYardFloor', region: name });
+      // MapPage renders the region's map only for a name the layout
+      // knows; a name it does not leaves the world on screen.
+      const territory: string | undefined = territoryOf(name)?.name;
+      expect(territory, name).toBe(name);
+    }
   });
 
-  it('a name this client does not know still opens the yard, never a dead link', () => {
-    expect(floorHref('siding')).toBe('/it/yard');
+  it('a name that is not a region — the plant, a newer server\'s eleventh — opens the world, never another region\'s page', () => {
+    // /it/yard alone is the TRACK's page (router.ts), which is the
+    // page the publish link used to land on.
+    expect(regionHref('siding')).toBe('/it');
+    expect(regionHref('plant')).toBe('/it');
+    expect(regionHref('')).toBe('/it');
+  });
+
+  it('is the only place a region link is built — no surface under src/ spells /it/yard/${…} itself', () => {
+    const root = join(import.meta.dir, '..', '..');
+    const spelled = [...new Bun.Glob('**/*.{ts,svelte}').scanSync(root)]
+      .filter((f) => !f.endsWith('.test.ts') && f !== join('it', 'yard', 'regions.ts'))
+      .filter((f) => readFileSync(join(root, f), 'utf8').includes('/it/yard/${'));
+    expect(spelled).toEqual([]);
   });
 });
 

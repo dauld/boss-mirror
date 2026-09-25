@@ -330,11 +330,16 @@ impl WorkflowSpec {
     }
 
     /// The outcome a Job whose steps have these `(sort_order,
-    /// completed)` pairs has CLOSED with: the first completed step that
-    /// is a declared terminal. Every writer of a close derives the
-    /// outcome here — the terminal close, the catch-all close that can
-    /// race it, and the repair of a close that lost it (228c9a7d) — so
-    /// they cannot name two.
+    /// completed)` pairs has CLOSED with: the completed declared
+    /// terminal lowest in sort order, in whatever order the pairs
+    /// arrive. This is the ONE statement of that rule (5f99cd11): the
+    /// catch-all close that can race the terminal close (228c9a7d), the
+    /// metadata merge's check of an outcome repair, and `boss job
+    /// outcome` all derive it here, so they cannot name two. The rule
+    /// owns the ordering because its callers read steps from different
+    /// places — the store, and a job GET's JSON — and a copy that
+    /// sorted beside one that did not was how two of them could
+    /// disagree about the same packet.
     pub fn completed_terminal_outcome(
         &self,
         steps: impl IntoIterator<Item = (i32, bool)>,
@@ -342,7 +347,12 @@ impl WorkflowSpec {
         steps
             .into_iter()
             .filter(|&(_, completed)| completed)
-            .find_map(|(sort_order, _)| self.terminal_outcome_at(sort_order))
+            .filter_map(|(sort_order, _)| {
+                self.terminal_outcome_at(sort_order)
+                    .map(|outcome| (sort_order, outcome))
+            })
+            .min_by_key(|&(sort_order, _)| sort_order)
+            .map(|(_, outcome)| outcome)
     }
 }
 
@@ -3370,6 +3380,18 @@ mod tests {
         assert_eq!(
             spec.completed_terminal_outcome([(0, true), (1, false), (2, false)]),
             None
+        );
+        // Two completed terminals name the FIRST by sort_order, whatever
+        // order the caller read the steps in (5f99cd11: the PATCH repair
+        // check's copy sorted and this one did not, so the two could
+        // disagree on the same packet — the rule now owns the order).
+        assert_eq!(
+            spec.completed_terminal_outcome([(0, true), (1, true), (2, true)]),
+            Some("merged")
+        );
+        assert_eq!(
+            spec.completed_terminal_outcome([(2, true), (0, true), (1, true)]),
+            Some("merged")
         );
     }
 

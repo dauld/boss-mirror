@@ -42,9 +42,9 @@
     bandText,
     compactCountText,
     countText,
-    floorHref,
     kpiText,
     lampOf,
+    regionHref,
     stateText,
     trendText,
     type Region,
@@ -294,9 +294,9 @@
         class="territory machine"
         data-region={t.name}
         data-state={state}
-        href={floorHref(t.name)}
+        href={regionHref(t.name)}
         aria-label={titleOf(t.name, r)}
-        onclick={(e) => open(e, floorHref(t.name))}>
+        onclick={(e) => open(e, regionHref(t.name))}>
         <title>{titleOf(t.name, r)}</title>
         <rect x={t.x} y={t.y} width={t.w} height={t.h} class="shed" class:warn={state === 'attention'} class:err={troubled} />
         <text x={lt.name.x} y={lt.name.y}>{t.name}</text>

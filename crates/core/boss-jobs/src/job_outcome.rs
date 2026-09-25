@@ -14,10 +14,8 @@
 //! repair of a close that lost it (`boss job outcome`, 228c9a7d), which
 //! may write exactly the value the completed terminal declares.
 
-use boss_core::job::{JobStatus, Step, StepStatus};
+use boss_core::job::JobStatus;
 use serde_json::Value;
-
-use crate::registry::WorkflowSpec;
 
 /// The job metadata key a close writes its outcome under.
 pub const OUTCOME_KEY: &str = "outcome";
@@ -65,31 +63,15 @@ pub fn put_changes_outcome(stored: &Value, sent: &Value) -> bool {
         .is_some_and(|v| v != stored.get(OUTCOME_KEY).unwrap_or(&Value::Null))
 }
 
-/// PURE: the outcome a packet with these steps closed with — the first
-/// completed step that is a declared terminal of `spec`, paired by
-/// index (`sort_order`, the materializer's contract), steps read in
-/// sort order. `None` when no terminal completed.
-pub fn derived(spec: &WorkflowSpec, steps: &[Step]) -> Option<String> {
-    let mut completed: Vec<&Step> = steps
-        .iter()
-        .filter(|s| s.status == StepStatus::Completed)
-        .collect();
-    completed.sort_by_key(|s| s.sort_order);
-    completed.into_iter().find_map(|s| {
-        usize::try_from(s.sort_order)
-            .ok()
-            .and_then(|i| spec.steps.get(i))
-            .and_then(|spec_step| spec_step.terminal.as_ref())
-            .map(|t| t.outcome.clone())
-    })
-}
-
 /// PURE: may a metadata merge that carries `sent` as the outcome land
 /// on a packet in `status` whose stored metadata is `stored`? Yes for
 /// an unchanged re-send (a `null` where none is recorded included), and
 /// for the repair: a CLOSED packet recording no outcome, merged the one
-/// its completed terminal declares (`derived`). Everything else — a
-/// set on an open packet, a change, a delete — is refused.
+/// its completed terminal declares (`derived`, from
+/// [`crate::registry::WorkflowSpec::completed_terminal_outcome`] — the one statement of
+/// that rule; this module held a second copy until 5f99cd11).
+/// Everything else — a set on an open packet, a change, a delete — is
+/// refused.
 pub fn patch_may_write(
     status: JobStatus,
     stored: &Value,
@@ -107,40 +89,7 @@ pub fn patch_may_write(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::{StepSpec, Terminal};
     use serde_json::json;
-
-    fn spec() -> WorkflowSpec {
-        let step = |title: &str, outcome: Option<&str>| StepSpec {
-            title: title.into(),
-            terminal: outcome.map(|o| Terminal { outcome: o.into() }),
-            ..Default::default()
-        };
-        WorkflowSpec::platform_seed(
-            "k",
-            "K",
-            "platform",
-            vec!["custom".into()],
-            vec![
-                step("work", None),
-                step("done", Some("done")),
-                step("aborted", Some("aborted")),
-            ],
-        )
-    }
-
-    fn steps(statuses: [StepStatus; 3]) -> Vec<Step> {
-        let job = boss_core::job::JobId::new();
-        statuses
-            .into_iter()
-            .enumerate()
-            .map(|(i, status)| {
-                let mut s = Step::new(job, "task", "s", i as i32);
-                s.status = status;
-                s
-            })
-            .collect()
-    }
 
     #[test]
     fn a_put_that_omits_or_resends_the_outcome_is_not_a_change() {
@@ -160,21 +109,6 @@ mod tests {
             &json!({}),
             &json!({ "outcome": "done" })
         ));
-    }
-
-    #[test]
-    fn the_outcome_is_the_first_completed_terminal() {
-        use StepStatus::*;
-        let spec = spec();
-        assert_eq!(
-            derived(&spec, &steps([Completed, Completed, Skipped])).as_deref(),
-            Some("done")
-        );
-        assert_eq!(
-            derived(&spec, &steps([Completed, Skipped, Completed])).as_deref(),
-            Some("aborted")
-        );
-        assert_eq!(derived(&spec, &steps([Completed, Skipped, Skipped])), None);
     }
 
     #[test]

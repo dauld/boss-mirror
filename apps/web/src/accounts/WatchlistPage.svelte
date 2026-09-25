@@ -8,6 +8,8 @@
   import SearchInput from '@boss/web-kit/ui/SearchInput.svelte';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import OverflowBanner from '@boss/web-kit/ui/OverflowBanner.svelte';
+  import SortHeader from '@boss/web-kit/ui/SortHeader.svelte';
+  import { createSortState } from '@boss/web-kit/ui/sort-state.svelte';
   import type { Account } from './types';
   import { fetchAccountsPage } from './api';
   import { isCapped, type Paged } from '../data/paginated';
@@ -36,7 +38,6 @@
     | 'days_since_last_invoice'
     | 'open_ticket_count'
     | 'days_since_last_note';
-  type SortDir = 'asc' | 'desc';
   type Bucket = 'all' | 'high' | 'mid' | 'low';
 
   type LoadState =
@@ -59,8 +60,16 @@
   let query = $state('');
   let tier = $state<TierFilter>({ kind: 'all' });
   let bucket = $state<Bucket>('all');
-  let sortKey = $state<SortKey>('score');
-  let sortDir = $state<SortDir>('desc');
+  // The shared sort (libs/web-kit sort.ts) was extracted FROM this
+  // page's hand-rolled sortKey / sortDir / setSort / arrowFor and never
+  // adopted back, so its headers stayed `<th onclick>` with no tabindex
+  // or key handling and a keyboard could not sort (backlog 8c5664ea;
+  // page audit 08b0c4f8 GAP 13). SortHeader carries tabindex,
+  // Enter/Space and aria-sort; the order is unchanged — a name opens
+  // A to Z, a number largest first, and a null sorts below every value.
+  const sort = createSortState<SortKey>({ key: 'score', dir: 'desc' }, (k) =>
+    k === 'name' ? 'asc' : 'desc',
+  );
 
   $effect(() => {
     let cancelled = false;
@@ -129,12 +138,6 @@
     if (score >= 25) return 'mid';
     return 'low';
   }
-  function nullableCompare(a: number | null, b: number | null): number {
-    if (a === null && b === null) return 0;
-    if (a === null) return -1;
-    if (b === null) return 1;
-    return a - b;
-  }
   function formatDays(d: number | null): string {
     return d === null ? '—' : `${d}d`;
   }
@@ -157,35 +160,15 @@
     }),
   );
 
-  let sorted = $derived.by(() => {
-    const mult = sortDir === 'asc' ? 1 : -1;
-    return [...filtered].sort((a, b) => {
-      switch (sortKey) {
-        case 'name':
-          return mult * a.account_name.localeCompare(b.account_name);
-        case 'score':
-          return mult * (a.score - b.score);
-        case 'open_ticket_count':
-          return mult * (a.factors.open_ticket_count - b.factors.open_ticket_count);
-        case 'days_since_last_invoice':
-          return (
-            mult *
-            nullableCompare(
-              a.factors.days_since_last_invoice,
-              b.factors.days_since_last_invoice,
-            )
-          );
-        case 'days_since_last_note':
-          return (
-            mult *
-            nullableCompare(
-              a.factors.days_since_last_note,
-              b.factors.days_since_last_note,
-            )
-          );
-      }
-    });
-  });
+  let sorted = $derived(
+    sort.sorted(filtered, {
+      name: (r) => r.account_name,
+      score: (r) => r.score,
+      days_since_last_invoice: (r) => r.factors.days_since_last_invoice,
+      open_ticket_count: (r) => r.factors.open_ticket_count,
+      days_since_last_note: (r) => r.factors.days_since_last_note,
+    }),
+  );
 
   // The Tier buttons come from the (account, tier) Classes, plus No
   // tier when an account has none (backlog 1be37454; page audit
@@ -216,19 +199,6 @@
     return rows.filter((r) => scoreTone(r.score) === b).length;
   }
 
-  function setSort(k: SortKey): void {
-    if (k === sortKey) {
-      sortDir = sortDir === 'asc' ? 'desc' : 'asc';
-    } else {
-      sortKey = k;
-      sortDir = k === 'name' ? 'asc' : 'desc';
-    }
-  }
-
-  function arrowFor(k: SortKey): string {
-    if (sortKey !== k) return '';
-    return sortDir === 'asc' ? ' ↑' : ' ↓';
-  }
 </script>
 
 {#if loadState.kind === 'loading'}
@@ -323,39 +293,17 @@
           <table class="data-table data-table-striped risk-table">
             <thead>
               <tr>
-                <th style="cursor:pointer; user-select:none" onclick={() => setSort('name')}>
-                  Account{arrowFor('name')}
-                </th>
-                <th
-                  class="num"
-                  style="cursor:pointer; user-select:none"
-                  onclick={() => setSort('score')}
-                >
-                  Score{arrowFor('score')}
-                </th>
+                <SortHeader {sort} key="name">Account</SortHeader>
+                <SortHeader {sort} key="score" num={true}>Score</SortHeader>
                 <th>Top factor</th>
-                <th
-                  class="num"
-                  style="cursor:pointer; user-select:none"
-                  onclick={() => setSort('days_since_last_invoice')}
-                >
-                  Days since invoice{arrowFor('days_since_last_invoice')}
-                </th>
-                <th
-                  class="num"
-                  style="cursor:pointer; user-select:none"
-                  onclick={() => setSort('open_ticket_count')}
-                >
-                  Open SRs{arrowFor('open_ticket_count')}
-                </th>
+                <SortHeader {sort} key="days_since_last_invoice" num={true}>
+                  Days since invoice
+                </SortHeader>
+                <SortHeader {sort} key="open_ticket_count" num={true}>Open SRs</SortHeader>
                 <th>Contract</th>
-                <th
-                  class="num"
-                  style="cursor:pointer; user-select:none"
-                  onclick={() => setSort('days_since_last_note')}
-                >
-                  Days since contact{arrowFor('days_since_last_note')}
-                </th>
+                <SortHeader {sort} key="days_since_last_note" num={true}>
+                  Days since contact
+                </SortHeader>
               </tr>
             </thead>
             <tbody>

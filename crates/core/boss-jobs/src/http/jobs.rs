@@ -1936,7 +1936,13 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
                     .await,
                 state.jobs.list_steps(&job_id).await,
             ) {
-                (Ok(spec), Ok(steps)) => crate::job_outcome::derived(&spec, &steps),
+                (Ok(spec), Ok(steps)) => spec
+                    .completed_terminal_outcome(
+                        steps
+                            .iter()
+                            .map(|s| (s.sort_order, s.status == StepStatus::Completed)),
+                    )
+                    .map(str::to_owned),
                 _ => None,
             },
             _ => None,

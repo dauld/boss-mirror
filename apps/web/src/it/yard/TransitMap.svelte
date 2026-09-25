@@ -27,7 +27,7 @@
   import { navigate } from '@boss/web-kit/nav';
   import { MediaQuery } from 'svelte/reactivity';
   import type { Border, Borders } from './borders';
-  import { countText, type Region, type Regions } from './regions';
+  import { countText, regionHref, type Region, type Regions } from './regions';
   import {
     LINE_LABEL,
     REPLAY_TEXT,
@@ -38,7 +38,6 @@
     alarmsOf,
     headwayAt,
     headwayText,
-    regionHref,
     ringOf,
     sectionGround,
     sectionKey,

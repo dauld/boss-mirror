@@ -392,20 +392,18 @@ const YARD_SELECTION: Readonly<Record<string, string>> = {
   garage: 'garage',
 };
 
-/** The regions whose floor is a BOARD rather than the yard's own
- *  rolling stock. Since car 4 of design d2154293 they are zooms like
- *  every other territory: the board mounts UNDER the zoomed world, and
- *  /it/operate/receiving and /it/operate/marshalling — the pages they
- *  used to be — resolve to the same route. The shop floor joined them
- *  on backlog 94c6ffd0: its board is the crew board, which was the
- *  floor before the region existed. */
-const BOARD_FLOORS: ReadonlyArray<string> = ['receiving', 'marshalling', 'shop-floor'];
-
-/** Where a card leads. A name this client does not know opens the
- *  yard itself — a door that opens somewhere, never a dead link. */
-export function floorHref(name: string): string {
-  if (BOARD_FLOORS.includes(name)) return `/it/yard/${name}`;
-  return name in YARD_SELECTION ? `/it/yard/${name}` : '/it/yard';
+/** Where a link to a region leads — its region page, `/it/yard/<name>`
+ *  (MapPage with `region` set), for every region the server serves.
+ *  THE ONE DOOR (backlog 594ffe96, 2026-09-25): the world map's
+ *  `floorHref` listed the six yard regions and the three boards and
+ *  sent anything else to /it/yard, which the router reads as the
+ *  TRACK — so the publish territory opened the track's page — while
+ *  the transit map's `regionHref` and the HUD's `machineHref` each
+ *  built the path themselves. A name that is not a region (the plant,
+ *  or a newer server's eleventh) opens the world: somewhere, and never
+ *  another region's page. */
+export function regionHref(name: string): string {
+  return (REGION_NAMES as ReadonlyArray<string>).includes(name) ? `/it/yard/${name}` : '/it';
 }
 
 /** The selection a `/it/yard/<region>` floor opens the yard on; the

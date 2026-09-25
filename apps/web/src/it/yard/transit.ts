@@ -134,11 +134,6 @@ export const TENANT_BRANCH: Readonly<{
 
 export const stationLabel = (name: string): string => name.replace(/-/g, ' ');
 
-/** The region page — the same route a world-map territory opens
- *  (`/it/yard/<region>`, MapPage), so a station click lands on the
- *  region's own map and floor. */
-export const regionHref = (name: string): string => `/it/yard/${name}`;
-
 /** The count in its unit, against a capacity where the region has one.
  *  A threshold is not room ("6 / 1 cars parked" read as six in a space
  *  for one), so it is left to the title; an unread count is "no

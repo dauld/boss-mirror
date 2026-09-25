@@ -38,7 +38,7 @@
 // (`arrivals.trend`). One field rendered twice cannot drift.
 
 import type { Remote } from '../../data/remote';
-import type { MachineAt, Regions, Third } from './regions';
+import { regionHref, type MachineAt, type Regions, type Third } from './regions';
 
 export type Figure =
   | Readonly<{ kind: 'value'; text: string; troubled: boolean }>
@@ -245,7 +245,7 @@ export function hudOf(
 /** Where a listed machine's link goes: its region's map — or, for a
  *  machine of the PLANT (design 62de32ae decision 11; the server's
  *  `thirds::PLANT`), the world, because the plant strip stands under the
- *  world map and serves every region rather than one. */
-export function machineHref(m: MachineAt): string {
-  return m.region === 'plant' ? '/it' : `/it/yard/${m.region}`;
-}
+ *  world map and serves every region rather than one. The plant is not
+ *  a region, so the one region door (`regionHref`, backlog 594ffe96)
+ *  already opens the world for it. */
+export const machineHref = (m: MachineAt): string => regionHref(m.region);

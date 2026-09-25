@@ -229,6 +229,25 @@ test('a state that is not clear says how long it has held and names the band tha
   );
 });
 
+// ONE DOOR PER REGION (backlog 594ffe96): the world map sent its
+// publish territory to /it/yard — the TRACK's page — because its link
+// function knew nine regions, while the transit map linked the same
+// region to /it/yard/publish. Every territory, as rendered, links its
+// own region page, and publish's lands on publish's map.
+test('every territory links its own region page, and publish opens publish — not the track', async ({ page }) => {
+  await mocks(page);
+  await page.goto('/it');
+  const svg = page.locator('section.yard svg');
+  await expect(svg.locator('.territory')).toHaveCount(TERRITORIES.length);
+  for (const t of TERRITORIES) {
+    await expect(svg.locator(`.territory[data-region="${t.name}"]`)).toHaveAttribute('href', `/it/yard/${t.name}`);
+  }
+  await svg.locator('.territory[data-region="publish"]').click();
+  await expect(page).toHaveURL(/\/it\/yard\/publish$/);
+  await expect(page.locator('section[aria-label="the publish region map"]')).toHaveCount(1);
+  await expect(page.locator('section[aria-label="the track region map"]')).toHaveCount(0);
+});
+
 test('a territory click opens its floor, and the floor opens with the region\'s state and why at the head of its panel', async ({ page }) => {
   await mocks(page);
   await page.goto('/it');

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import type { Border } from './borders';
-import type { Region, Regions } from './regions';
+import { regionHref, type Region, type Regions } from './regions';
 import { BORDERS, TERRITORIES } from './world';
 import { pointAt } from './world-motion';
 import {
@@ -16,7 +16,6 @@ import {
   gapText,
   headwayAt,
   headwayText,
-  regionHref,
   sectionGround,
   stationCount,
   stationLabel,
@@ -141,9 +140,9 @@ describe('a station', () => {
     expect(stationLabel('dock')).toBe('dock');
   });
 
-  it('opens its region page', () => {
+  it('opens its region page — every station, through the one regionHref the world map uses too', () => {
+    for (const s of STATIONS) expect(regionHref(s.name), s.name).toBe(`/it/yard/${s.name}`);
     expect(regionHref('publish')).toBe('/it/yard/publish');
-    expect(regionHref('shop-floor')).toBe('/it/yard/shop-floor');
   });
 
   it('prints its count in its unit, against a capacity where it has one, and never 0 for an unread count', () => {

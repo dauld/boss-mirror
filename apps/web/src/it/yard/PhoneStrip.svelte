@@ -12,7 +12,7 @@
   // (phone-strip.ts places them; it derives nothing).
   import { navigate } from '@boss/web-kit/nav';
   import type { Borders } from './borders';
-  import { countText, floorHref, kpiText, lampOf, stateText, type Regions } from './regions';
+  import { countText, kpiText, lampOf, regionHref, stateText, type Regions } from './regions';
   import { railLine, stripGroups, verdictOf } from './phone-strip';
 
   type Props = Readonly<{
@@ -45,8 +45,8 @@
               class="strip-row"
               data-region={row.name}
               data-state={state}
-              href={floorHref(row.name)}
-              onclick={(e) => open(e, floorHref(row.name))}>
+              href={regionHref(row.name)}
+              onclick={(e) => open(e, regionHref(row.name))}>
               <span class="strip-head">
                 <span class="strip-name">{row.name}</span>
                 <span class="strip-state"><span class="lamp {lampOf(state)}"></span>{stateText(r)}</span>
