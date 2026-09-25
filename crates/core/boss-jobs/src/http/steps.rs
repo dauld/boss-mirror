@@ -1717,7 +1717,10 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // that shape: the dispatcher's assignment PUT erased a merged
     // `prompt_bytes` 2 ms after the merge door stored it (run 6b6fe011,
     // 2026-09-25). Refused by name instead; a re-send reads the row
-    // afresh and lands.
+    // afresh and lands. Reproduced live on run 9aa88562 at 11:26:01Z the
+    // same day, same 2 ms gap: it is the ordinary timing of a dispatch,
+    // whose merge lands while the dispatcher is assigning the new run's
+    // ready step, not a one-off.
     match state
         .jobs
         .update_step_if_unchanged_at(&step, &old.metadata, stamp.timestamp, &step_events)
@@ -1728,9 +1731,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({
-                    "error": "step changed while this write was computed — its metadata \
-                              is no longer what the write read, so writing it would erase \
-                              the other write",
+                    "error": crate::step_metadata_write::STEP_CHANGED_ERROR,
                     "step_id": step_id.to_string(),
                     "hint": "nothing was written; send the same request again — the \
                              handler reads the row afresh",

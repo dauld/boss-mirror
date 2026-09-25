@@ -25,6 +25,14 @@ pub const OMITTED_KEYS_HINT: &str = "a step PUT replaces metadata wholesale, so 
      read the step and send every stored key back with the PUT, which is what a \
      read-merge-write does. A PUT without a metadata key is never judged.";
 
+/// The `error` the step PUT answers, with 409, when the row's metadata
+/// moved between the handler's read and its write
+/// ([`crate::port::JobsError::StepChanged`], backlog e381689d) — ONE
+/// copy, because a caller that resends on exactly this refusal (boss
+/// dispatch's status-only completion) recognises it by this text.
+pub const STEP_CHANGED_ERROR: &str = "step changed while this write was computed — its metadata \
+     is no longer what the write read, so writing it would erase the other write";
+
 /// PURE: the keys `stored` holds that `sent` leaves out, in stored
 /// order. Empty when `sent` carries every stored key (a read-merge-write)
 /// or when nothing is stored. A `sent` that is not an object leaves out

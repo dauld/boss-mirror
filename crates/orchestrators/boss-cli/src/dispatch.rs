@@ -1457,12 +1457,25 @@ pub(crate) async fn dispatch_at(
             &report
         ));
     }
-    api_at(
-        Method::PUT,
-        format!("/api/jobs/{run_id}/steps/{briefed_id}"),
-        Some(completed()),
-    )
-    .await
+    // The completion races the same dispatcher writes the merge did
+    // (run 9aa88562, 11:26:01Z: two within ~25 ms of `briefed` going
+    // ready), and the jobs API now refuses the loser of such a race by
+    // name instead of letting it erase the other write. A status-only
+    // body carries nothing that can be stale, so exactly that refusal
+    // is sent once more; any other error, or a second loss, stands.
+    let complete = || {
+        api_at(
+            Method::PUT,
+            format!("/api/jobs/{run_id}/steps/{briefed_id}"),
+            Some(completed()),
+        )
+    };
+    match complete().await {
+        Err(e) if format!("{e:#}").contains(boss_jobs::step_metadata_write::STEP_CHANGED_ERROR) => {
+            complete().await
+        }
+        answer => answer,
+    }
     .context("completing the run's briefed step")?;
     eprintln!(
         "boss dispatch: run {} open for `{slug}` on {} — {} bytes of prompt printed, \
@@ -4000,7 +4013,7 @@ mod wire_tests {
         claim_conflict: bool,
         level: Option<Option<&'static str>>,
     ) -> (String, Log) {
-        stub_losing(packet, row, claim_conflict, level, 0).await
+        stub_losing(packet, row, claim_conflict, level, 0, 0).await
     }
 
     /// `lost`: how many merges onto the run's steps answer 204 and store
@@ -4008,15 +4021,20 @@ mod wire_tests {
     /// concurrent whole-row write erased `prompt_bytes` after the merge
     /// door had answered (backlog e381689d). Every other merge is
     /// stored, so a read-back sees exactly what the door kept.
+    /// `raced`: how many step PUTs on the run answer the 409 the jobs
+    /// API now gives a write whose read another writer moved
+    /// ([`boss_jobs::step_metadata_write::STEP_CHANGED_ERROR`]).
     async fn stub_losing(
         packet: Value,
         row: Value,
         claim_conflict: bool,
         level: Option<Option<&'static str>>,
         lost: usize,
+        raced: usize,
     ) -> (String, Log) {
         let run: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
         let lost = Arc::new(Mutex::new(lost));
+        let raced = Arc::new(Mutex::new(raced));
         serve(move |method, path, target, body| {
             let (status, resp): (&str, String) = match (method, path) {
                     ("GET", p) if p == format!("/api/jobs/{PACKET}") => {
@@ -4064,7 +4082,20 @@ mod wire_tests {
                         }
                     }
                     ("PUT", p) if p.starts_with(&format!("/api/jobs/{RUN}/steps/")) => {
-                        run_step_put(body)
+                        let mut left = raced.lock().unwrap();
+                        if *left > 0 {
+                            *left -= 1;
+                            (
+                                "409 Conflict",
+                                json!({
+                                    "error": boss_jobs::step_metadata_write::STEP_CHANGED_ERROR,
+                                    "step_id": "run-briefed",
+                                })
+                                .to_string(),
+                            )
+                        } else {
+                            run_step_put(body)
+                        }
                     }
                     // The run's step merge door: `briefed`'s fields,
                     // stored on the step unless this merge is one the
@@ -4336,6 +4367,7 @@ mod wire_tests {
             false,
             Some(None),
             1,
+            0,
         )
         .await;
         dispatch_to(&base)
@@ -4345,6 +4377,55 @@ mod wire_tests {
             briefed_calls(&log),
             vec!["PATCH", "PATCH", "PUT"],
             "the field twice, then the status — never the status over a missing field"
+        );
+    }
+
+    /// Reproduced live on run 9aa88562 at 11:26:01Z the same day: the
+    /// dispatcher writes the new run's `briefed` step twice within ~25 ms
+    /// of it going ready, and the completing PUT lands in that window.
+    /// The jobs API now refuses the loser of that race with a named 409
+    /// rather than letting it erase the other write; the status-only
+    /// completion carries nothing that can be stale, so it is sent once
+    /// more on exactly that refusal and on no other.
+    #[tokio::test]
+    async fn a_completion_that_loses_the_race_is_sent_once_more() {
+        let (base, log) = stub_losing(
+            packet_without_projection(),
+            row_with_block(),
+            false,
+            Some(None),
+            0,
+            1,
+        )
+        .await;
+        dispatch_to(&base)
+            .await
+            .expect("dispatches on the second completion");
+        assert_eq!(briefed_calls(&log), vec!["PATCH", "PUT", "PUT"]);
+    }
+
+    /// Losing twice is not a race any longer, and it is not retried
+    /// into silence: the refusal is the API's own, named.
+    #[tokio::test]
+    async fn a_completion_that_keeps_losing_is_refused_with_the_apis_reason() {
+        let (base, log) = stub_losing(
+            packet_without_projection(),
+            row_with_block(),
+            false,
+            Some(None),
+            0,
+            2,
+        )
+        .await;
+        let err = match dispatch_to(&base).await {
+            Ok(_) => panic!("a completion refused twice must not dispatch"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert_eq!(briefed_calls(&log), vec!["PATCH", "PUT", "PUT"]);
+        assert!(
+            err.contains("completing the run's briefed step")
+                && err.contains(boss_jobs::step_metadata_write::STEP_CHANGED_ERROR),
+            "{err}"
         );
     }
 
@@ -4359,6 +4440,7 @@ mod wire_tests {
             false,
             Some(None),
             BRIEFED_ATTEMPTS,
+            0,
         )
         .await;
         let err = match dispatch_to(&base).await {
