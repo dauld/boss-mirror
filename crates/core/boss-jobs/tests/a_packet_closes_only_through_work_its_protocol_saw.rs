@@ -644,3 +644,36 @@ async fn a_cancel_takes_the_close_authority() {
     );
     assert_eq!(get_job(&app, &job_id).await["status"], "open");
 }
+
+/// A cancel is the record that the work did not end; it writes no
+/// outcome. A cancel carrying `merged` stood as a packet that merged.
+#[tokio::test]
+async fn a_cancel_writes_no_outcome() {
+    let app = app();
+    let job_id = open_job(&app).await;
+    let mut body = job_body(&get_job(&app, &job_id).await);
+    body["status"] = json!("cancelled");
+    body["metadata"]["outcome"] = json!("merged");
+    let (status, answer) = put_job(&app, &job_id, body.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a cancel naming an outcome must be refused: {answer}"
+    );
+    assert_eq!(answer["refused_keys"], json!(["outcome"]), "{answer}");
+    assert_still_open(&get_job(&app, &job_id).await);
+
+    // Control: the same cancel without it lands.
+    body["metadata"]
+        .as_object_mut()
+        .expect("metadata")
+        .remove("outcome");
+    let (status, answer) = put_job(&app, &job_id, body).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{answer}");
+    let cancelled = get_job(&app, &job_id).await;
+    assert_eq!(cancelled["status"], "cancelled", "{cancelled:#}");
+    assert!(
+        cancelled["metadata"].get("outcome").is_none(),
+        "{cancelled:#}"
+    );
+}
