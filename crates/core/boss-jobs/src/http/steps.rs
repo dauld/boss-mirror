@@ -886,8 +886,17 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // defect (job 903e6b90), and it says something better than this
     // could: which status the step is, and which one the caller tried
     // to set. Repeating the check here would preempt that message with
-    // a vaguer one. This block covers only the two fields that were
-    // still being dropped in silence.
+    // a vaguer one. This block covers the fields the row freezes that
+    // were still being dropped in silence.
+    //
+    // AND WHAT WAS COMPLETED: title, holder and notes (backlog
+    // 42e7c6b9, the review of car 52ad60e6). None of the three was
+    // checked here or frozen at the row, so after a ticketed completion
+    // a bare `PUT {"title": ...}` answered 204 and the completed
+    // presence step's stored title changed: the ops runner fails closed
+    // on its stamp, but the record then shows a passkey approval of a
+    // title no passkey saw. A correction to a finished step is `boss
+    // correct` (the hint below), never a rewrite of what was signed.
     if is_terminal {
         let mut frozen: Vec<&str> = Vec::new();
         if step.completed_on != old.completed_on {
@@ -895,6 +904,15 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         }
         if step.metadata != old.metadata {
             frozen.push("metadata");
+        }
+        if step.title != old.title {
+            frozen.push("title");
+        }
+        if step.assignee_id != old.assignee_id {
+            frozen.push("assignee_id");
+        }
+        if step.notes != old.notes {
+            frozen.push("notes");
         }
         if !frozen.is_empty() {
             return (
