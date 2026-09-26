@@ -1,0 +1,14 @@
+# Five minutes, boss-gcp's cadence for the same observer
+# (infra/estate/boss-estate-observe-units.timer): a liveness watch wants
+# a short leash, and estate.alarm's silence sweep measures each host's
+# series against its own cadence.
+[Unit]
+Description=BOSS forge: unit self-observation (every 5 minutes)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

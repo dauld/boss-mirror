@@ -43,7 +43,11 @@
 //! route"). A route's end is a region or `None`, off the map. A packet
 //! enters when it is first placed (its admission, or the step that puts
 //! it on the map later); it LEAVES only by a terminal — the step it
-//! closed on names the off-ramp. An open packet that stops being placed
+//! closed on names the off-ramp. A packet a terminal closes ONTO a region
+//! (a train closed on `arrived` stands in arrivals) leaves when the
+//! reading's window passes its closing: the walk places the closed state
+//! again one window later, and the off-ramp it finds is cited to that
+//! terminal ([`AGED_OUT`]; backlog d085dc47). An open packet that stops being placed
 //! is carried (a car aboard its train) or absorbed (a hand-off), and the
 //! record draws that move where the carrier stands; the walk, which sees
 //! one packet, does not guess it as an exit.
@@ -368,16 +372,27 @@ fn admit(spec: &WorkflowSpec, seeds: &Value, now: Instant) -> State {
     st
 }
 
+/// How a closed packet still standing on a region leaves it: the
+/// reading's window passes its closing (see [`walk`]).
+pub const AGED_OUT: &str = "closed, then aged out of the window";
+
 /// WALK ONE PROTOCOL (see the module note). `place` stands one packet on
-/// the map; `seeds` is the job metadata the walk admits the packet with;
-/// `markers` the `(step, key)` pairs a station reads as a marker.
+/// the map as a reading taken at the instant it is handed; `seeds` is the
+/// job metadata the walk admits the packet with; `markers` the `(step,
+/// key)` pairs a station reads as a marker; `window_hours` the window the
+/// placement reads, past which a closed packet it still stands on a
+/// region — an arrived train — is placed again, and wherever that leaves
+/// it is the terminal's off-ramp ([`AGED_OUT`]; backlog d085dc47).
 pub fn walk(
     spec: &WorkflowSpec,
     seeds: &Value,
     markers: &[(String, String)],
     now: Instant,
-    place: impl Fn(&Job, &[Step]) -> Placed,
+    window_hours: i64,
+    place: impl Fn(&Job, &[Step], Instant) -> Placed,
 ) -> Walk {
+    let aged = now + chrono::Duration::hours(window_hours) + chrono::Duration::seconds(1);
+    let place_now = |job: &Job, steps: &[Step]| place(job, steps, now);
     let candidates = Candidates::of(spec);
     let region = |p: &Placed| match p {
         Placed::At(r) => Some(*r),
@@ -397,7 +412,7 @@ pub fn walk(
     let mut at: BTreeMap<String, Placed> = BTreeMap::new();
     let mut seen: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<(State, Placed)> = VecDeque::new();
-    let placed = place(&first.job, &first.steps);
+    let placed = place_now(&first.job, &first.steps);
     if let Some(r) = region(&placed) {
         crossings.insert(Crossing {
             from: None,
@@ -420,6 +435,24 @@ pub fn walk(
             at.entry(slug.clone()).or_insert_with(|| here.clone());
         }
         if !st.open() {
+            // A closed packet the placement still stands on a region (an
+            // arrived train, read inside its window) leaves it when the
+            // window passes its closing: the same packet, placed by the
+            // same function one window later. Without this the walk
+            // stopped here and arrivals served no exit, so every train
+            // that ever arrived vanished off the map by no drawn route
+            // (backlog d085dc47; David's off-ramps, design e765b3fc).
+            if let (Some(a), Some(slug)) = (region(&here), &st.closed_on) {
+                let to = region(&place(&st.job, &st.steps, aged));
+                if to != Some(a) {
+                    crossings.insert(Crossing {
+                        from: Some(a),
+                        to,
+                        step: slug.clone(),
+                        via: AGED_OUT.into(),
+                    });
+                }
+            }
             continue;
         }
         // Every move out of this state: (the next state, the step that
@@ -492,7 +525,7 @@ pub fn walk(
         }
 
         for (n, step, via) in next {
-            let there = place(&n.job, &n.steps);
+            let there = place_now(&n.job, &n.steps);
             // A move that closed the packet is named by the terminal it
             // closed on — the off-ramp, or the region a closed packet
             // still stands in (an arrived train) — and says what closed it.
@@ -588,12 +621,13 @@ pub fn walk_all(specs: &[WorkflowSpec], stations: &Stations, now: Instant) -> Ve
                 &seeds_for(&spec.kind, stations),
                 &markers_for(&spec.kind, stations),
                 now,
-                |job, steps| {
+                crate::regions::DEFAULT_WINDOW_HOURS,
+                |job, steps, at| {
                     place_alone(
                         &(job.clone(), steps.to_vec()),
                         family,
                         stations,
-                        now,
+                        at,
                         crate::regions::DEFAULT_WINDOW_HOURS,
                     )
                 },
@@ -937,6 +971,128 @@ mod tests {
         );
     }
 
+    /// AN ARRIVED TRAIN LEAVES THE MAP BY A DRAWN ROUTE (backlog d085dc47;
+    /// David's off-ramps, design e765b3fc): it closes on `arrived` into
+    /// arrivals, and the placement drops it once its closing ages out of
+    /// the window. Until this car the walk stopped at the closed state, so
+    /// arrivals served no exit and every train that ever arrived simply
+    /// vanished from the map. The exit is the walk's own finding — the
+    /// closed state placed again past the window — cited to the terminal
+    /// that closed it, never drawn by hand.
+    #[test]
+    fn an_arrived_train_leaves_arrivals_by_its_terminal_when_it_ages_out() {
+        let map = tree_routes();
+        let exit = route(&map, Some("arrivals"), None).expect("arrivals serves an exit");
+        assert!(exit.declared, "{exit:#?}");
+        assert_eq!(by_workflow(exit, crate::regions::TRAIN_KIND), ["arrived"]);
+        assert!(
+            exit.sources.iter().any(|s| matches!(
+                s,
+                Source::Workflow { via, .. } if via.contains("aged out of the window")
+            )),
+            "the exit says how it is taken: {exit:#?}"
+        );
+    }
+
+    /// THE ARRIVALS -> PUBLISH CONNECTOR IS DECLARED by the rule that files
+    /// the publish packet — `publish-to-github-daily` spawns it on
+    /// `target = origin/main`, the main the arrived trains landed on — and
+    /// both ends resolve through the walk: the train closed on `arrived`
+    /// stands in arrivals, the publish packet reading its checks stands in
+    /// publish. The design drew it grey; nothing served it (d085dc47).
+    #[test]
+    fn arrivals_connects_to_publish_by_the_rule_that_files_the_publish_packet() {
+        let map = tree_routes();
+        let publish =
+            route(&map, Some("arrivals"), Some("publish")).expect("arrivals -> publish is served");
+        assert!(publish.declared, "{publish:#?}");
+        assert!(
+            publish.sources.iter().any(
+                |s| matches!(s, Source::HandOff { by, .. } if by == "rule:publish-to-github-daily")
+            ),
+            "{publish:#?}"
+        );
+    }
+
+    /// CONSERVATION, PER WINDOW, FOR ARRIVALS (David 2026-09-25, design
+    /// e765b3fc: "packets in = on the map + left by an off-ramp, per
+    /// window"). Trains closed on `arrived` at instants spread over three
+    /// windows, placed by the ONE placement function at the window's start
+    /// and at its end: what stood there at the start plus what arrived
+    /// during it equals what stands there at the end plus what left — and
+    /// every train that left took a route the map declares.
+    #[test]
+    fn arrivals_conserves_every_train_per_window() {
+        let (specs, stations) = tree();
+        let map = derive_from(&specs, &stations, None, now());
+        let spec = specs
+            .iter()
+            .find(|w| w.kind == crate::regions::TRAIN_KIND && w.status == WorkflowStatus::Active)
+            .expect("the tree has an active pr-train");
+        let hours = crate::regions::DEFAULT_WINDOW_HOURS;
+        let end = now();
+        let start = end - chrono::Duration::hours(hours);
+        // One train driven to its arrival by the protocol itself: every
+        // ready step completed until it closes.
+        let mut arrived = admit(spec, &Value::Object(Map::new()), end);
+        while arrived.open() {
+            let i = arrived
+                .steps
+                .iter()
+                .position(|s| s.status == StepStatus::Ready)
+                .expect("an open train has a ready step");
+            arrived = complete(spec, &arrived, i, &[], end);
+        }
+        assert_eq!(arrived.closed_on.as_deref(), Some("arrived"));
+        let stations = Stations::of(&stations);
+        let at = |closed: Instant, when: Instant| {
+            let mut job = arrived.job.clone();
+            set(
+                &mut job.metadata,
+                "closed_at",
+                Value::String(closed.to_rfc3339()),
+            );
+            place_alone(
+                &(job, arrived.steps.clone()),
+                crate::regions::Family::Train,
+                &stations,
+                when,
+                hours,
+            )
+        };
+        let closings: Vec<Instant> = (1..=3 * hours)
+            .step_by(5)
+            .map(|h| end - chrono::Duration::hours(h) + chrono::Duration::minutes(30))
+            .collect();
+        let here = Placed::At("arrivals");
+        let stood = closings.iter().filter(|c| at(**c, start) == here).count();
+        let came = closings
+            .iter()
+            .filter(|c| **c > start && **c <= end)
+            .count();
+        let stands = closings.iter().filter(|c| at(**c, end) == here).count();
+        let left: Vec<Placed> = closings
+            .iter()
+            .filter(|c| at(**c, start) == here && at(**c, end) != here)
+            .map(|c| at(*c, end))
+            .collect();
+        assert!(
+            stood > 0 && came > 0 && !left.is_empty(),
+            "the fixture spans the window"
+        );
+        assert_eq!(stood + came, stands + left.len(), "in = on the map + left");
+        for gone in &left {
+            let to = match gone {
+                Placed::At(r) => Some(*r),
+                _ => None,
+            };
+            assert!(
+                map.declares(Some("arrivals"), to),
+                "a train left arrivals for {gone:?} by no declared route"
+            );
+        }
+    }
+
     /// A CAR IS PLACED ON THE DOCK, HELD INTO THE GARAGE AND BACK, AND
     /// LEAVES BY ITS TERMINALS — and it never crosses from the dock to
     /// the shed by itself: it rides its train there, which the moves
@@ -1153,8 +1309,8 @@ mod tests {
                 last_at: at,
             },
             RouteCount {
-                from: Some("arrivals".into()),
-                to: Some("publish".into()),
+                from: Some("shed".into()),
+                to: Some("arrivals".into()),
                 moves: 1,
                 last_at: at,
             },
@@ -1167,22 +1323,22 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, Source::Observed { moves: 4, .. }))
         );
-        let publish = route(&map, Some("arrivals"), Some("publish")).unwrap();
+        let shed = route(&map, Some("shed"), Some("arrivals")).unwrap();
         assert!(
-            !publish.declared,
-            "nothing leaves arrivals for publish: publish reads main, no packet crosses"
+            !shed.declared,
+            "a car in the shed never walks to arrivals: it leaves by its proof"
         );
         assert_eq!(
             map.undeclared()
                 .iter()
                 .map(|c| (c.from.as_deref(), c.to.as_deref(), c.moves))
                 .collect::<Vec<_>>(),
-            [(Some("arrivals"), Some("publish"), 1)]
+            [(Some("shed"), Some("arrivals"), 1)]
         );
         assert!(
             map.declares(Some("dock"), Some("dock")),
             "a move within one region crosses nothing"
         );
-        assert!(!map.declares(Some("arrivals"), Some("publish")));
+        assert!(!map.declares(Some("shed"), Some("arrivals")));
     }
 }

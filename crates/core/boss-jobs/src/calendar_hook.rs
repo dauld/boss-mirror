@@ -326,6 +326,56 @@ where
     }
 }
 
+/// The calendar half of a START that LANDED: `attempted` is the row the
+/// start computed its hold from, `stored` the row as the write left it,
+/// and `reserved` / `took_held` what [`apply_step_transition`] did.
+///
+/// THE STORED ROW DECIDES WHAT IS HELD (the adversarial review of car
+/// 611fbffd, 2026-09-26). The step PUT writes over the very row it read,
+/// so for it the two are one. The claim CAS judges only status and
+/// holder, so a `scheduled_at` or `duration_minutes` merged between the
+/// claim's read and its CAS lands under it, and the claim's hold stood
+/// on the OLD window while the Active step said another. So when a
+/// start landed on a schedule other than the one it reserved for, the
+/// reservation it made is handed back BY ITS ID (never by the step —
+/// 983696b5) and the time is held as stored.
+///
+/// Otherwise: a start that took a hold it did not place re-asserts it,
+/// since the racer that placed it may be refused and hand it back
+/// (983696b5). A lost hold either way comes back as
+/// [`HookOutcome::HoldLost`] for the caller to record (4bdb8150).
+pub async fn settle_landed_start(
+    calendar: Option<&Arc<dyn CalendarClient>>,
+    old: &Step,
+    reserved: Option<ReservationId>,
+    took_held: bool,
+    attempted: &Step,
+    stored: &Step,
+    actor: &str,
+) -> HookOutcome {
+    let Some(calendar) = calendar else {
+        return HookOutcome::NoOp;
+    };
+    let entered = matches!(old.status, StepStatus::Pending | StepStatus::Ready)
+        && stored.status == StepStatus::Active;
+    if entered && scheduling_fields(attempted) != scheduling_fields(stored) {
+        if let Some(id) = reserved
+            && let Err(e) = calendar.cancel(id, actor).await
+        {
+            tracing::warn!(
+                error = %e,
+                step_id = %stored.id,
+                "calendar: could not release a start's hold on the time it no longer holds"
+            );
+        }
+        return hold_for_landed_start(Some(calendar), stored, actor).await;
+    }
+    if took_held {
+        return hold_for_landed_start(Some(calendar), stored, actor).await;
+    }
+    HookOutcome::NoOp
+}
+
 /// Re-assert the hold of a step that is Active as stored: reserve its
 /// time, taking its own hold on exactly that time as already held.
 ///

@@ -58,7 +58,17 @@ pub fn omitted_keys<'a>(stored: &'a Value, sent: &Value) -> Vec<&'a str> {
 /// could set it on an ordinary terminal, through either door, and then
 /// PUT a bare completion walked round the blocker gate; one that could
 /// delete it turned a real abort into a gated step.
-pub const PROTOCOL_KEYS: &[&str] = &["outcome_kind"];
+///
+/// `audience` is materialised from the spec's `audience` (who the step
+/// is for), and it is claim-for authority: the executor an `individual`
+/// audience names may start the step for someone else (design
+/// 611fbffd). The claim door reads that from the pinned protocol, not
+/// from this key — but a writer that could rewrite it would still make
+/// every reader of the step's metadata (the queue, the brief, the page)
+/// state a declaration the protocol never made (the adversarial review
+/// of car 611fbffd, 2026-09-26: PATCH `{"audience":{"individual":<self>}}`
+/// answered 204).
+pub const PROTOCOL_KEYS: &[&str] = &["outcome_kind", "audience"];
 
 /// The hint a refused protocol key carries, on both doors.
 pub const PROTOCOL_KEYS_HINT: &str = "these metadata keys are materialised from the step's \
@@ -218,6 +228,24 @@ mod tests {
             vec!["outcome_kind"]
         );
         assert!(protocol_keys_changed(&Value::Null, &json!({"other": 1})).is_empty());
+    }
+
+    /// The step's audience is the protocol's (the review of car
+    /// 611fbffd): written in, rewritten or removed, it is named; sent
+    /// back as stored, it is not.
+    #[test]
+    fn the_audience_is_a_protocol_key() {
+        let stored = json!({"audience": {"role": "platform-admin"}});
+        assert!(protocol_keys_changed(&stored, &stored).is_empty());
+        assert_eq!(
+            protocol_keys_changed(&stored, &json!({"audience": {"individual": "emp-tech"}})),
+            vec!["audience"]
+        );
+        assert_eq!(protocol_keys_changed(&stored, &json!({})), vec!["audience"]);
+        assert_eq!(
+            protocol_keys_changed(&json!({}), &json!({"audience": {"individual": "emp-tech"}})),
+            vec!["audience"]
+        );
     }
 
     #[test]

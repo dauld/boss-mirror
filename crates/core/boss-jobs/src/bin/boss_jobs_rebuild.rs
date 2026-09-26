@@ -15,7 +15,7 @@ use boss_jobs::jobs_config::JobsApiConfig;
 use boss_jobs::rebuild_jobs_and_steps;
 use clap::Parser;
 use sqlx::postgres::PgPoolOptions;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -71,14 +71,15 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| "rebuilding jobs + steps projections")?;
 
-    info!(
-        events_processed = report.events_processed,
-        events_skipped = report.events_skipped,
-        jobs_inserted = report.jobs_inserted,
-        jobs_updated = report.jobs_updated,
-        steps_inserted = report.steps_inserted,
-        steps_updated = report.steps_updated,
-        "jobs + steps rebuild complete"
-    );
+    // The report's own Display names every counter (backlog 25590ca4):
+    // this line listed six by hand and dropped `stamps_voided` and
+    // `sign_offs_unreproduced`, the one that says the replay differs.
+    info!(report = %report, "jobs + steps rebuild complete");
+    if report.sign_offs_unreproduced > 0 {
+        warn!(
+            sign_offs_unreproduced = report.sign_offs_unreproduced,
+            "the rebuilt steps lack sign-off stamps the log records only as markers; see the per-marker warnings above"
+        );
+    }
     Ok(())
 }

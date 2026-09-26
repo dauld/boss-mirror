@@ -31,9 +31,13 @@
 # Env: HOST_ID (required — must match the estate node row id),
 #      JOBS_API (required),
 #      UNITS   (optional, space-separated; overrides the derived roster
-#      below for a host that runs a DIFFERENT set — the forge does, by
-#      drop-in. Unset, the roster is derived, which is what boss-gcp
-#      wants: see THE ROSTER IS DERIVED),
+#      below — a hand run. Unset, the roster is derived, which is what
+#      both hosts want: see THE ROSTER IS DERIVED),
+#      OBSERVE_UNITS_INSTALLER (optional; the installer whose `rows` /
+#      `roster` modes the roster is derived from. Unset, boss-gcp's
+#      infra/gcp/install-units.sh; the forge's unit points it at
+#      infra/forge/install.sh, which prints its own UNITS list in the
+#      same shape — backlog c98dcf38),
 #      BOSS_NODE_ROLES (optional; set, it is the host's roles and no
 #      registry read happens — a test, a hand run, `--roster`. Unset,
 #      the roles are read off JOBS_API the way the converge reads them:
@@ -124,7 +128,10 @@ INSTALLER="${OBSERVE_UNITS_INSTALLER:-$(dirname "$0")/../gcp/install-units.sh}"
 #   LATCH: the next reading sees its own failure and stays unhealthy
 #   forever, long after the cause cleared. A dead observer posts nothing
 #   at all, and estate.alarm's silence sweep is what notices that.
-ROSTER_EXCLUDE="boss-estate-observe-units.service"
+# estate-observe-units.service — the same script, as the forge names its
+#   unit (infra/forge/, where units carry no boss- prefix; backlog
+#   c98dcf38). The same latch, the same reason; one entry per spelling.
+ROSTER_EXCLUDE="boss-estate-observe-units.service estate-observe-units.service"
 
 derive_roster() {
     if [ ! -f "$INSTALLER" ]; then

@@ -1,0 +1,41 @@
+# The forge watches its own units (backlog c98dcf38). The unit observer
+# ran on boss-gcp alone: roles.toml's [always] set is read by boss-gcp's
+# installer, and this host converges through infra/forge/install.sh,
+# which never listed it. So on 2026-09-26 forge-converge.service closed
+# failed 72 times in twelve hours (06:20Z-18:10Z) and no ESTATE ALARM
+# fired, while the same observer raised boss-gcp-converge.service after
+# three comparisons. This is the same script, the same five-minute
+# timer, and the same estate chain — compare, then estate.alarm's
+# unit_unhealthy:forge/<unit> — for the forge.
+#
+# THE ROSTER IS THIS HOST'S INSTALLER. OBSERVE_UNITS_INSTALLER points the
+# observer at infra/forge/install.sh, whose `rows` / `roster` modes print
+# its UNITS list in the shape boss-gcp's installer prints roles.toml, so
+# a unit that lands in that list is watched on the tick it is installed
+# (CLAUDE.md §9a). No UNITS= line, for the reason boss-gcp's unit gives.
+#
+# AN ARM THAT NEEDS THE PATIENT IS NOT AN ARM (CLAUDE.md §Diagnosis).
+# It watches forge-converge and owes it nothing: no ordering on it, and
+# it reads the checkout the converge last left, which stands whether or
+# not the converge's latest run succeeded. The packet is best-effort
+# (ExecStartPre=-), so a dark jobs API costs the remote half only — an
+# unhealthy unit still exits 1 here, a failed observer on this host's
+# own systemd, with the journal lines on stderr.
+#
+# Root, like boss-gcp's twin: `journalctl -u` of another unit's journal
+# and the roles cache under /var/lib/boss (infra/estate/node-roles.sh)
+# are root's to read. It writes nothing on the host.
+[Unit]
+Description=BOSS forge: observe this host's units and record what they were doing
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/boss/sor.env
+Type=oneshot
+User=root
+Environment=HOST_ID=forge
+Environment=OBSERVE_UNITS_INSTALLER=/home/david/boss/infra/forge/install.sh
+ExecStartPre=-/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-estate-observe-units "estate unit observation (forge)"
+ExecStart=/home/david/boss/infra/estate/observe-units.sh
+ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-estate-observe-units run

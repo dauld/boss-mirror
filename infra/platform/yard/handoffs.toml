@@ -110,6 +110,12 @@ from = "gate-run@green"
 why = "boss rerail --finish carries a green that stood in the garage onto the car at the dock as its regate_receipt; the gate-run leaves the map, absorbed into the car (design e765b3fc §1, route F)."
 
 [[hand_off]]
+by = "rule:publish-to-github-daily"
+from = "pr-train@arrived"
+to = "publish-to-github@read-checks"
+why = "What the arrived trains landed on main is what the daily publish carries to the mirror: the rule files the publish packet on target origin/main, and once its pull request is open it stands in the publish region. The trains are not consumed — each leaves arrivals by its own terminal when it ages out of the window (backlog d085dc47; the grey reads-main connector of design e765b3fc)."
+
+[[hand_off]]
 by = "rule:refresh-publish-drift-daily"
 from = "publish-to-github@read-checks"
 why = "The daily mirror-drift measurement reads the pull request's state off GitHub and writes it onto the packet as pr_state; a PR GitHub answers closed awaits nothing, and the packet leaves the publish region (regions/publish.rs::publish_prs)."

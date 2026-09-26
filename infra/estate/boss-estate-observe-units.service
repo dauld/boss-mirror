@@ -2,12 +2,11 @@
 # records what the machine IS, this records what its units are DOING —
 # so "is boss-train.service alive" is a SoR read, not a human with ssh.
 # Installed on boss-gcp by install-units.sh (roles.toml row). The forge
-# host runs the SAME pair with drop-in overrides, installed by hand
-# until its config-not-in-repo debt is paid:
-#   sudo install -m644 infra/estate/boss-estate-observe-units.{service,timer} /etc/systemd/system/
-#   sudo mkdir -p /etc/systemd/system/boss-estate-observe-units.service.d
-#   printf '[Service]\nEnvironment=HOST_ID=forge\nEnvironment="UNITS=forgejo.service cluster-deploy-runner.timer cluster-deploy-runner.service"\n' | sudo tee /etc/systemd/system/boss-estate-observe-units.service.d/host.conf
-#   sudo systemctl daemon-reload && sudo systemctl enable --now boss-estate-observe-units.timer
+# runs the same script from its own pair, infra/forge/estate-observe-units.
+# {service,timer}, installed by infra/forge/install.sh with the forge's
+# installer as its roster (backlog c98dcf38). The hand drop-in this note
+# used to prescribe was never installed, and on 2026-09-26 72 failed
+# forge-converge runs raised nothing.
 [Unit]
 Description=BOSS estate: observe this host's units and record what they were doing
 Wants=network-online.target
@@ -37,8 +36,9 @@ Environment=HOST_ID=boss-gcp
 # Run `infra/estate/observe-units.sh --roster` to see exactly what that
 # is for a checkout.
 #
-# A host that runs a DIFFERENT set still names its own, by drop-in — the
-# forge does, above. QUOTE any such UNITS=, because a space in an
+# A host that runs a DIFFERENT set derives it from its OWN installer
+# (OBSERVE_UNITS_INSTALLER) — the forge does, above. A hand UNITS= is a
+# second copy; if one is ever set, QUOTE it, because a space in an
 # unquoted Environment= line starts a SECOND assignment:
 # `Environment=UNITS=a b` sets UNITS=a and drops b.
 # The timers-leave-a-packet pair: a timer with no Job trail fails

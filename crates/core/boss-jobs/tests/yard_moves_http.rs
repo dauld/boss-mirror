@@ -106,9 +106,12 @@ async fn app_with(wired: bool, registries: bool) -> axum::Router {
                 moved(2, "car-1", Some("track"), Some("shed"), Some(false)),
                 // Onto the map at the dock: ship-a-change's own gate step.
                 moved(3, "car-2", None, Some("dock"), None),
-                // Nothing leaves arrivals for publish: publish READS main.
-                moved(4, "car-3", Some("arrivals"), Some("publish"), Some(false)),
-                moved(5, "car-4", Some("arrivals"), Some("publish"), None),
+                // Nothing walks from the shed into arrivals: a car in the
+                // shed leaves by its proof. (arrivals -> publish was the
+                // example here until the publish rule's hand-off declared
+                // it, backlog d085dc47.)
+                moved(4, "car-3", Some("shed"), Some("arrivals"), Some(false)),
+                moved(5, "car-4", Some("shed"), Some("arrivals"), None),
             ])
             .await
             .unwrap();
@@ -191,8 +194,8 @@ async fn the_page_is_the_record_after_a_seq_with_the_undrawn_routes_it_took() {
     assert_eq!(
         (&routes[0]["from"], &routes[0]["to"], &routes[0]["moves"]),
         (
+            &Value::from("shed"),
             &Value::from("arrivals"),
-            &Value::from("publish"),
             &Value::from(2)
         ),
         "track -> shed is declared now, whatever its row was stamped"
@@ -278,19 +281,19 @@ async fn each_region_carries_the_undeclared_routes_into_it_and_is_troubled_by_th
             .unwrap()
             .clone()
     };
-    let publish = region("publish");
-    assert_eq!(publish["undeclared"][0]["from"], "arrivals", "{publish}");
-    assert_eq!(publish["undeclared"][0]["moves"], 2);
-    assert_eq!(publish["state"], "troubled", "{publish}");
-    assert_eq!(publish["band"]["id"], "moves-undeclared", "{publish}");
+    let arrivals = region("arrivals");
+    assert_eq!(arrivals["undeclared"][0]["from"], "shed", "{arrivals}");
+    assert_eq!(arrivals["undeclared"][0]["moves"], 2);
+    assert_eq!(arrivals["state"], "troubled", "{arrivals}");
+    assert_eq!(arrivals["band"]["id"], "moves-undeclared", "{arrivals}");
     assert!(
-        publish["why"]
+        arrivals["why"]
             .as_str()
             .unwrap()
-            .contains("arrivals → publish ×2"),
-        "the verdict names the route and its count: {publish}"
+            .contains("shed → arrivals ×2"),
+        "the verdict names the route and its count: {arrivals}"
     );
-    for name in ["dock", "shed"] {
+    for name in ["dock", "shed", "publish"] {
         assert_eq!(
             region(name)["undeclared"],
             Value::Array(vec![]),
@@ -348,10 +351,25 @@ async fn the_routes_read_serves_every_route_with_its_sources() {
             .any(|s| s["source"] == "workflow" && s["workflow"] == "pr-train" && s["step"] == "pr"),
         "{train}"
     );
+    let undrawn = find("shed".into(), "arrivals".into());
+    assert_eq!(undrawn["declared"], false, "{undrawn}");
+    assert_eq!(undrawn["sources"][0]["source"], "observed");
+    assert_eq!(undrawn["sources"][0]["moves"], 2);
+    // The off-ramp and the connector this read did not serve until
+    // backlog d085dc47: an arrived train ages out of arrivals by its own
+    // terminal, and the publish rule's hand-off joins arrivals to publish.
+    let exit = find("arrivals".into(), Value::Null);
+    assert_eq!(exit["declared"], true, "{exit}");
+    assert!(
+        exit["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["workflow"] == "pr-train" && s["step"] == "arrived"),
+        "{exit}"
+    );
     let publish = find("arrivals".into(), "publish".into());
-    assert_eq!(publish["declared"], false, "{publish}");
-    assert_eq!(publish["sources"][0]["source"], "observed");
-    assert_eq!(publish["sources"][0]["moves"], 2);
+    assert_eq!(publish["declared"], true, "{publish}");
 
     let (status, body) = get(app_with(true, false).await, "/api/yard/routes", "operator").await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);

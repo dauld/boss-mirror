@@ -267,6 +267,83 @@ $role_roster"
 $sentinel_roster"
 done
 
+# 9. THE FORGE WATCHES ITS OWN UNITS, derived from ITS installer
+#    (backlog c98dcf38). Until 2026-09-26 the unit observer ran on
+#    boss-gcp alone — roles.toml's [always] set is read by boss-gcp's
+#    installer, and the forge converges through infra/forge/install.sh —
+#    so forge-converge.service closed failed 72 times in twelve hours
+#    (06:20Z-18:10Z) and no ESTATE ALARM fired, while the same observer
+#    raised boss-gcp-converge.service after three comparisons. The forge
+#    runs the SAME observer, its roster the forge installer's own UNITS
+#    (`rows` / `roster` modes), so the two lists cannot drift (§9a).
+#    Unit files first: a missing pair fails here, before any installer
+#    runs, because an installer with no read-only mode INSTALLS.
+forge_installer="$repo/infra/forge/install.sh"
+forge_unit="$repo/infra/forge/estate-observe-units.service"
+[ -f "$forge_unit" ] && [ -f "${forge_unit%.service}.timer" ] \
+    || fail "infra/forge/estate-observe-units.{service,timer} is missing — the forge's units go
+    unobserved, which is how 72 failed forge-converge runs raised nothing (backlog c98dcf38)"
+grep -qx 'Environment=HOST_ID=forge' "$forge_unit" \
+    || fail "$forge_unit does not name its host HOST_ID=forge (the estate node id)"
+grep -qx 'Environment=OBSERVE_UNITS_INSTALLER=/home/david/boss/infra/forge/install.sh' "$forge_unit" \
+    || fail "$forge_unit does not derive its roster from the forge's own installer"
+grep -qx 'ExecStart=/home/david/boss/infra/estate/observe-units.sh' "$forge_unit" \
+    || fail "$forge_unit does not run the one observer, infra/estate/observe-units.sh"
+! grep -qE '^Environment="?UNITS=' "$forge_unit" \
+    || fail "$forge_unit hardcodes a UNITS list — the second copy check 5 forbids for boss-gcp"
+# AN ARM THAT NEEDS THE PATIENT IS NOT AN ARM (CLAUDE.md §Diagnosis).
+# The wrap opens its packet through the jobs API; a hard ExecStartPre
+# would stop the observer whenever the API is dark, so its local half
+# (a failed unit naming what is unhealthy) would die with the remote one.
+# And nothing may order it behind the converge it watches.
+grep -qE '^ExecStartPre=-' "$forge_unit" \
+    || fail "$forge_unit's ExecStartPre is not best-effort ('ExecStartPre=-'): the observer
+    would not start while the jobs API is dark"
+! grep -qE '^(After|Requires|BindsTo|Wants)=.*forge-converge' "$forge_unit" \
+    || fail "$forge_unit is ordered behind forge-converge, the unit it watches"
+forge_rows=$(bash "$forge_installer" rows 2>/dev/null | grep -E '^[a-z0-9-]+:forge$')
+# Read independently of the `rows` mode, the way timers-leave-a-packet.sh
+# reads it, so a mode that printed a shorter list is caught.
+forge_stems=$(sed -n '/^UNITS=(/,/^)/p' "$forge_installer" | grep -oE '^\s+[a-z0-9-]+' | tr -d ' ')
+[ -n "$forge_stems" ] || fail "no UNITS=( ... ) rows scraped from $forge_installer"
+for stem in $forge_stems; do
+    grep -qx "$stem:forge" <<<"$forge_rows" \
+        || fail "$forge_installer rows does not print $stem:forge — the forge's roster would miss
+    a unit it installs. rows printed:
+$forge_rows"
+done
+grep -qx 'estate-observe-units:forge' <<<"$forge_rows" \
+    || fail "the forge installer does not install its own unit observer (estate-observe-units)"
+forge_roles="cluster-operator,ops-runner"
+forge_roster="$(env -u UNITS -u HOST_ID -u JOBS_API OBSERVE_UNITS_INSTALLER="$forge_installer" \
+    BOSS_NODE_ROLES="$forge_roles" bash "$observer" --roster 2>&1)" \
+    || fail "observe-units.sh --roster with the forge's installer exited non-zero:
+$forge_roster"
+forge_want=0
+for stem in $forge_stems; do
+    for ext in timer service; do
+        case " $excludes " in *" $stem.$ext "*) continue ;; esac
+        grep -qx "$stem.$ext" <<<"$forge_roster" \
+            || fail "$stem.$ext installs on the forge and the forge's observer does not watch it:
+$forge_roster"
+        forge_want=$((forge_want + 1))
+    done
+done
+grep -qx 'forge-converge.service' <<<"$forge_roster" \
+    || fail "forge-converge.service — the unit whose 72 reds raised nothing — is not watched"
+! grep -qx 'estate-observe-units.service' <<<"$forge_roster" \
+    || fail "the forge's observer watches itself, which LATCHES (see ROSTER_EXCLUDE)"
+for ext in timer service; do
+    grep -qx "boss-ops-runner.$ext" <<<"$forge_roster" \
+        || fail "boss-ops-runner.$ext runs on the forge (role ops-runner) and is not watched:
+$forge_roster"
+    forge_want=$((forge_want + 1))
+done
+forge_got=$(printf '%s\n' "$forge_roster" | sed '/^$/d' | wc -l | tr -d ' ')
+[ "$forge_got" -eq "$forge_want" ] \
+    || fail "the forge's roster carries $forge_got units but $forge_want install there:
+$forge_roster"
+
 lint_scanned the-host-observer-watches-what-is-installed "$got" "unit(s) derived from the installer's roles.toml rows"
-echo "the-host-observer-watches-what-is-installed: ok — the host-units roster is derived from the installer's roles.toml rows ($got units, both halves of $((got / 2)) pairs, $n_excl justified exclusions), boss-ml-inference-batch.timer among them, the unit file holds no second copy, an unreadable source refuses with EX_CONFIG instead of answering a smaller question, under boss-gcp's roles the roster is the installer's in-role set ($role_got units), and the ops-request runner is watched exactly where install-ops-runner.sh --in-role installs one"
+echo "the-host-observer-watches-what-is-installed: ok — the host-units roster is derived from the installer's roles.toml rows ($got units, both halves of $((got / 2)) pairs, $n_excl justified exclusions), boss-ml-inference-batch.timer among them, the unit file holds no second copy, an unreadable source refuses with EX_CONFIG instead of answering a smaller question, under boss-gcp's roles the roster is the installer's in-role set ($role_got units), the ops-request runner is watched exactly where install-ops-runner.sh --in-role installs one, and the forge watches its own installer's units ($forge_got, forge-converge.service among them)"
 exit 0

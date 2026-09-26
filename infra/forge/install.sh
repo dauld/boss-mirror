@@ -37,50 +37,6 @@ set -euo pipefail
 cd "$(dirname "$0")" || exit 1
 HERE="$(pwd)"
 
-# What this run leaves for forge-converge's own packet — counts, each
-# sub-installer's verdict, every anomaly verbatim. A no-op unless the
-# caller set BOSS_RUN_SUMMARY_FILE; forge-converge.service does. The forge
-# has a readable journal door, unlike boss-gcp, but a door that answered
-# 200 with a seven-hour-stale journal is already on the record
-# (2026-09-10), and two converges reporting differently about what they
-# installed is the §9a shape. One definition: infra/run-summary.sh.
-# shellcheck source=infra/run-summary.sh
-. "${HERE}/../run-summary.sh"
-
-# Where units land and who reloads them. Overridable so the installer
-# can be exercised into a scratch directory with a stub systemctl —
-# infra/lint/forge-install-covers-the-ops-runner.sh runs it on every
-# gate and asserts what it would install. On the host both are the
-# defaults, and root is required as before.
-ETC="${INSTALL_ETC:-/etc/systemd/system}"
-SYSTEMCTL="${INSTALL_SYSTEMCTL:-systemctl}"
-
-if [ "$ETC" = "/etc/systemd/system" ] && [ "$(id -u)" -ne 0 ]; then
-    echo "install.sh: needs root to write /etc/systemd/system — re-run with sudo." >&2
-    exit 1
-fi
-
-# THE ADDRESS FILE, FIRST. /etc/boss/sor.env is the one place on this
-# host that spells the system of record and the forge's own addresses;
-# every unit installed below reads it with EnvironmentFile= (no `-`: a
-# unit that started without its address would answer a wrong target)
-# and every script sources infra/lib/sor.sh. Rendered from the tree's
-# ONE source, infra/estate/estate.toml, on every converge — so the
-# boss.algedonic.dev cutover is an edit to that file and a tick of this
-# timer (backlog 5222163e, audit H10). Before the units, deliberately:
-# a daemon-reload that finds the file absent would leave every unit
-# refusing to start until the next tick. Overridable for the scratch
-# run the lints drive (a test never writes /etc).
-SOR_ENV="${INSTALL_SOR_ENV:-/etc/boss/sor.env}"
-bash "${HERE}/../estate/render-sor-env.sh" --to "$SOR_ENV"
-run_summary_field sor_env "$SOR_ENV"
-# Now this run itself has the addresses the rest of the install reads
-# (the journal door below, the roles read, the ops-runner installer).
-export BOSS_SOR_ENV="$SOR_ENV"
-# shellcheck source=infra/lib/sor.sh
-. "${HERE}/../lib/sor.sh"
-sor_require BOSS_JOBS_URL BOSS_FORGE_JOURNAL_URL
-
 # Every unit this host runs. A unit absent from this list is a unit
 # nobody installs, which is the entire defect above.
 #
@@ -124,6 +80,12 @@ sor_require BOSS_JOBS_URL BOSS_FORGE_JOURNAL_URL
 #   repository, the runner registration and the signing keys, and
 #   nothing copied them. Local only — the offsite legs need a
 #   credential this host does not hold, and every run says so.
+# estate-observe-units: the forge watches its OWN units every five
+#   minutes (backlog c98dcf38) — the same observer boss-gcp runs,
+#   HOST_ID=forge, its roster read off THIS list through the `rows` /
+#   `roster` modes below. Until it, the unit observer ran on boss-gcp
+#   alone, and forge-converge.service closed failed 72 times in twelve
+#   hours on 2026-09-26 while no ESTATE ALARM fired.
 UNITS=(
     reap-dead-ci-jobs
     cluster-deploy-runner
@@ -132,7 +94,77 @@ UNITS=(
     estate-observe-host
     cluster-watchdog
     forge-backup
+    estate-observe-units
 )
+
+# THE READ-ONLY MODES, before anything that writes or needs root. The
+# unit observer (infra/estate/observe-units.sh, OBSERVE_UNITS_INSTALLER
+# pointed here by infra/forge/estate-observe-units.service) derives the
+# forge's watch roster from these, in the shape boss-gcp's installer
+# prints (infra/gcp/install-units.sh `rows` / `roster`), so what the
+# forge installs and what it watches are ONE list (CLAUDE.md §9a).
+# Every row is in role: this host installs its whole list, whatever its
+# roles; the ops runner, which IS role-gated, the observer asks
+# install-ops-runner.sh --in-role about itself.
+case "${1:-}" in
+    rows)
+        for u in "${UNITS[@]}"; do echo "$u:forge"; done
+        exit 0
+        ;;
+    roster)
+        for u in "${UNITS[@]}"; do echo "in-role $u"; done
+        exit 0
+        ;;
+    "") ;;
+    *)
+        echo "usage: $0 [rows|roster]" >&2
+        exit 2
+        ;;
+esac
+
+# What this run leaves for forge-converge's own packet — counts, each
+# sub-installer's verdict, every anomaly verbatim. A no-op unless the
+# caller set BOSS_RUN_SUMMARY_FILE; forge-converge.service does. The forge
+# has a readable journal door, unlike boss-gcp, but a door that answered
+# 200 with a seven-hour-stale journal is already on the record
+# (2026-09-10), and two converges reporting differently about what they
+# installed is the §9a shape. One definition: infra/run-summary.sh.
+# shellcheck source=infra/run-summary.sh
+. "${HERE}/../run-summary.sh"
+
+# Where units land and who reloads them. Overridable so the installer
+# can be exercised into a scratch directory with a stub systemctl —
+# infra/lint/forge-install-covers-the-ops-runner.sh runs it on every
+# gate and asserts what it would install. On the host both are the
+# defaults, and root is required as before.
+ETC="${INSTALL_ETC:-/etc/systemd/system}"
+SYSTEMCTL="${INSTALL_SYSTEMCTL:-systemctl}"
+
+if [ "$ETC" = "/etc/systemd/system" ] && [ "$(id -u)" -ne 0 ]; then
+    echo "install.sh: needs root to write /etc/systemd/system — re-run with sudo." >&2
+    exit 1
+fi
+
+# THE ADDRESS FILE, FIRST. /etc/boss/sor.env is the one place on this
+# host that spells the system of record and the forge's own addresses;
+# every unit installed below reads it with EnvironmentFile= (no `-`: a
+# unit that started without its address would answer a wrong target)
+# and every script sources infra/lib/sor.sh. Rendered from the tree's
+# ONE source, infra/estate/estate.toml, on every converge — so the
+# boss.algedonic.dev cutover is an edit to that file and a tick of this
+# timer (backlog 5222163e, audit H10). Before the units, deliberately:
+# a daemon-reload that finds the file absent would leave every unit
+# refusing to start until the next tick. Overridable for the scratch
+# run the lints drive (a test never writes /etc).
+SOR_ENV="${INSTALL_SOR_ENV:-/etc/boss/sor.env}"
+bash "${HERE}/../estate/render-sor-env.sh" --to "$SOR_ENV"
+run_summary_field sor_env "$SOR_ENV"
+# Now this run itself has the addresses the rest of the install reads
+# (the journal door below, the roles read, the ops-runner installer).
+export BOSS_SOR_ENV="$SOR_ENV"
+# shellcheck source=infra/lib/sor.sh
+. "${HERE}/../lib/sor.sh"
+sor_require BOSS_JOBS_URL BOSS_FORGE_JOURNAL_URL
 
 installed=0
 for u in "${UNITS[@]}"; do

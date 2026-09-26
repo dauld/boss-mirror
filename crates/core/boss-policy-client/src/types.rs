@@ -145,6 +145,17 @@ impl Resource {
         Self::new("step-plugin")
     }
 
+    /// Starting a step FOR someone else: a claim through the claim door
+    /// that names a holder other than the caller (design 611fbffd,
+    /// answered 2026-09-26). The step's own declared executor needs no
+    /// grant; anyone else needs Update on this. Deliberately not a
+    /// shipped resource — the read-only roles would inherit it — so the
+    /// deploy superuser holds it in `default_rules` and a tenant grants
+    /// its dispatch leads as policy rows.
+    pub fn step_assign() -> Self {
+        Self::new("step-assign")
+    }
+
     // ---- Module-tier shorthands ------------------------------------
     // Helpers stay in core for call-site ergonomics; the tier-purity
     // property is that `Resource::new("specimen")` works for anything

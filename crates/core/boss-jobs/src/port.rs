@@ -1395,6 +1395,12 @@ pub trait JobsRepository: Send + Sync {
     /// it does, and record the `jobs.step.stamps_invalidated` event —
     /// built from `stamp`, after the caller's `events` — in the claim's
     /// own write. `stamp.timestamp` is the claim's instant.
+    ///
+    /// `actor` IS THE HOLDER THE CLAIM INSTALLS, not necessarily the
+    /// caller (design 611fbffd): the route passes the nominee of a claim
+    /// made on someone else's behalf, and signs the events in `stamp` as
+    /// the caller. Both adapters treat it only as the holder, so the
+    /// alias rules above apply to the nominee.
     async fn claim_step_at(
         &self,
         step_id: &StepId,

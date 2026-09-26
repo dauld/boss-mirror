@@ -134,6 +134,29 @@ async fn stamps(pool: &PgPool, step: &Step) -> Vec<SignOffStamp> {
     serde_json::from_value(v).unwrap()
 }
 
+/// The WHOLE step row, less the two columns a replay derives
+/// differently by design: `created_at` (the live insert's clock, the
+/// replay's event time) and `became_ready_at` (backfilled from the first
+/// event that shows the row ready). Asserting only `sign_offs` let every
+/// other column drift unseen (backlog 25590ca4, the review of f146a13a).
+async fn whole_row(pool: &PgPool, step: &Step) -> Value {
+    let (v,): (Value,) = sqlx::query_as(
+        "SELECT to_jsonb(s) - 'created_at' - 'became_ready_at' FROM steps s WHERE id = $1",
+    )
+    .bind(*step.id.inner().as_uuid())
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    v
+}
+
+/// A marker as the door wrote it before presence existed: no nonce.
+fn legacy_marker(step: &Step, st: &SignOffStamp) -> Value {
+    let mut m = door_marker(step, st);
+    m.as_object_mut().unwrap().remove("presence_nonce");
+    m
+}
+
 async fn log(pool: &PgPool, kind: &str, at: DateTime<Utc>, payload: Value) {
     sqlx::query(
         "INSERT INTO audit_log (event_id, kind, source, timestamp, payload) \
@@ -187,12 +210,18 @@ async fn a_live_sign_off_stamp_survives_a_rebuild() {
 
     let live = stamps(&db.pool, &step).await;
     assert_eq!(live.len(), 1, "control: the live row holds the stamp");
+    let live_row = whole_row(&db.pool, &step).await;
 
     let report = rebuild_jobs_and_steps(&db.pool).await.expect("rebuild");
     let rebuilt = stamps(&db.pool, &step).await;
     assert_eq!(
         rebuilt, live,
         "DETERMINISM: the rebuilt row must hold the live stamp"
+    );
+    assert_eq!(
+        whole_row(&db.pool, &step).await,
+        live_row,
+        "DETERMINISM: the rebuilt row is the live row, every column"
     );
     assert_eq!(report.sign_offs_unreproduced, 0, "{report:?}");
 }
@@ -304,12 +333,18 @@ async fn a_voided_stamp_stays_voided_across_a_rebuild() {
     assert_eq!(live.len(), 2, "control: {live:?}");
     assert!(live[0].voided_at.is_some(), "control: the first stamp died");
     assert!(live[1].voided_at.is_none(), "control: the second lives");
+    let live_row = whole_row(&db.pool, &step).await;
 
     let report = rebuild_jobs_and_steps(&db.pool).await.expect("rebuild");
     assert_eq!(
         stamps(&db.pool, &step).await,
         live,
         "the rebuild reproduces the dead stamp dead and the live one alive"
+    );
+    assert_eq!(
+        whole_row(&db.pool, &step).await,
+        live_row,
+        "DETERMINISM: the rebuilt row is the live row, every column"
     );
     assert_eq!(report.sign_offs_unreproduced, 0, "{report:?}");
 }
@@ -348,4 +383,148 @@ async fn a_marker_no_state_event_carried_is_counted_not_invented() {
         "no stamp is invented from a marker without its instant"
     );
     assert_eq!(report.sign_offs_unreproduced, 1, "{report:?}");
+}
+
+/// Log a created job and step, returning nothing — the legacy-log
+/// fixtures below write their events by hand, in the order the door
+/// wrote them before this car.
+async fn opened_in_the_log(pool: &PgPool, j: &Job, step: &Step) {
+    log(
+        pool,
+        "jobs.job.created",
+        t(0),
+        serde_json::to_value(j).unwrap(),
+    )
+    .await;
+    log(
+        pool,
+        "jobs.step.created",
+        t(1),
+        events::step_state_payload(step),
+    )
+    .await;
+}
+
+/// NO EVIDENCE IS NOT A PASS (backlog 25590ca4). A `signed_off` marker
+/// whose payload does not parse says a stamp was recorded and cannot
+/// say which — so the replay cannot show it carried. It was skipped with
+/// a warning and never reached the count; it is counted now.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unparseable_marker_is_counted_not_skipped() {
+    let db = TestDb::new().await;
+    let pool = &db.pool;
+    let j = job("00000000-0000-0000-0000-00000000f14a");
+    let step = approve_step(&j, "approved");
+    opened_in_the_log(pool, &j, &step).await;
+    log(
+        pool,
+        "jobs.step.signed_off",
+        t(2),
+        json!({"job_id": j.id.to_string(), "step_id": step.id.to_string()}),
+    )
+    .await;
+
+    let report = rebuild_jobs_and_steps(pool).await.expect("rebuild");
+    assert_eq!(report.sign_offs_unreproduced, 1, "{report:?}");
+}
+
+/// A VOIDED STAMP CANNOT MASK A LOST ONE (backlog 25590ca4). In a log
+/// written before this car: a legacy marker (no nonce), an edit carrying
+/// its stamp, an invalidation killing it, then a same-shape re-sign by
+/// the same person that only its marker recorded. The dead first stamp
+/// looks exactly like the second marker's — so the second stamp's loss
+/// passed as carried. Markers match by count now: two markers need two
+/// stamps.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voided_stamp_cannot_mask_a_lost_second_stamp() {
+    let db = TestDb::new().await;
+    let pool = &db.pool;
+    let j = job("00000000-0000-0000-0000-00000000f14b");
+    let step = approve_step(&j, "approved");
+    opened_in_the_log(pool, &j, &step).await;
+
+    let mut s1 = stamp_on(&step, "emp-david", t(2));
+    s1.presence_nonce = None;
+    log(
+        pool,
+        "jobs.step.signed_off",
+        t(2),
+        legacy_marker(&step, &s1),
+    )
+    .await;
+    let mut carried = step.clone();
+    carried.sign_offs = vec![s1.clone()];
+    log(
+        pool,
+        "jobs.step.updated",
+        t(3),
+        events::step_state_payload(&carried),
+    )
+    .await;
+    // An invalidation from before the list existed: every live stamp dies.
+    log(
+        pool,
+        "jobs.step.stamps_invalidated",
+        t(4),
+        json!({"step_id": step.id.to_string()}),
+    )
+    .await;
+    // The re-sign on the same shape, recorded only by its marker.
+    let mut s2 = stamp_on(&step, "emp-david", t(5));
+    s2.presence_nonce = None;
+    log(
+        pool,
+        "jobs.step.signed_off",
+        t(5),
+        legacy_marker(&step, &s2),
+    )
+    .await;
+
+    let report = rebuild_jobs_and_steps(pool).await.expect("rebuild");
+    let rebuilt = stamps(pool, &step).await;
+    assert_eq!(rebuilt.len(), 1, "control: {rebuilt:?}");
+    assert!(rebuilt[0].voided_at.is_some(), "control: s1 died");
+    assert_eq!(
+        report.sign_offs_unreproduced, 1,
+        "the second stamp is lost and must be counted: {report:?}"
+    );
+}
+
+/// WHY BY COUNT AND NOT "LIVE ONLY" (backlog 25590ca4). Before this car
+/// an edit's STEP_UPDATED came AFTER the marker, and an edit that moved
+/// the shape carried the stamp it had just killed — dead. That stamp WAS
+/// carried; requiring a live match would count it lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stamp_carried_already_dead_is_carried() {
+    let db = TestDb::new().await;
+    let pool = &db.pool;
+    let j = job("00000000-0000-0000-0000-00000000f14c");
+    let step = approve_step(&j, "approved");
+    opened_in_the_log(pool, &j, &step).await;
+
+    let mut s1 = stamp_on(&step, "emp-david", t(2));
+    s1.presence_nonce = None;
+    log(
+        pool,
+        "jobs.step.signed_off",
+        t(2),
+        legacy_marker(&step, &s1),
+    )
+    .await;
+    let mut edited = step.clone();
+    edited.metadata = json!({"authority_role": ROLE, "decision": "changes-requested"});
+    let mut dead = s1.clone();
+    dead.voided_at = Some(t(3));
+    dead.voided_by_event = Some(Uuid::new_v4());
+    edited.sign_offs = vec![dead];
+    log(
+        pool,
+        "jobs.step.updated",
+        t(3),
+        events::step_state_payload(&edited),
+    )
+    .await;
+
+    let report = rebuild_jobs_and_steps(pool).await.expect("rebuild");
+    assert_eq!(report.sign_offs_unreproduced, 0, "{report:?}");
 }

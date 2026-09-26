@@ -24,10 +24,14 @@
 //! 781b9209): that the next holder arrives through the claim. Once a
 //! step is released it is Ready, and a PUT can still take a Ready step
 //! to Active naming anyone — the PUT-as-claim path the ten platform
-//! step surfaces' Start and the sim's workforce use to start work
-//! (the Scheduling surface's calendar reservation is made only on that
-//! path; the claim door does not run the hook). This module keeps
-//! an ACTIVE step's holder; it does not yet decide who may START one.
+//! step surfaces' Start and the sim's workforce use to start work.
+//! This module keeps an ACTIVE step's holder. Design 611fbffd
+//! (answered 2026-09-26) decided who may START one: the claim door now
+//! reserves as the PUT did (one function, `start_hold`, both doors),
+//! and a claim FOR someone else is admitted only for the executor the
+//! step declares or a holder of `step-assign` ([`nominee`],
+//! [`declared_executor`]). The PUT's refusal of Ready→Active waits for
+//! the surfaces to move to the claim door.
 //!
 //! `""` and a blank are the same clear as `null`: every reader of the
 //! holder here (and the dispatcher's assignee check) reads them as
@@ -93,6 +97,56 @@ pub fn refuses(
     }
 }
 
+/// The holder a claim names when it is NOT the caller (design
+/// 611fbffd): `claimed_for` read as a holder is read everywhere here —
+/// a blank names nobody — and the caller's own id is an ordinary claim
+/// for oneself, so neither is a claim on someone else's behalf.
+pub fn nominee<'a>(claimed_for: Option<&'a str>, caller: &str) -> Option<&'a str> {
+    named(claimed_for.map(str::trim)).filter(|n| *n != caller)
+}
+
+/// The executor the PROTOCOL declares for a step — the `individual`
+/// audience (`{individual = "automation:boss-step"}`) of the step named
+/// `spec_slug` in `pinned`, the Workflow row at the version the packet
+/// was admitted under (or moved to, on the record, by `boss job
+/// convert`). That actor may start the step for someone else without
+/// the `step-assign` authority (design 611fbffd, Q1 (a)); a role,
+/// station or department audience names no one, and a step with no
+/// slug (an ad-hoc add, a pre-slug row) declares no one.
+///
+/// NEVER FROM THE STEP'S METADATA (the adversarial review of car
+/// 611fbffd, 2026-09-26). This read `metadata.audience`, which any
+/// step writer could PATCH: a caller with no `step-assign` wrote
+/// `{"audience":{"individual":<self>}}` (204) and then claimed the
+/// step for anyone (200), logged as an authorised claim-for. The row
+/// is registry data no step write reaches, so it is the one place the
+/// declaration is still the protocol's.
+pub fn declared_executor(
+    pinned: &crate::registry::WorkflowSpec,
+    spec_slug: Option<&str>,
+) -> Option<String> {
+    let slug = spec_slug?;
+    let step = pinned.steps.iter().find(|s| s.title == slug)?;
+    match step.audience.as_ref()? {
+        crate::audience::Audience::Individual(id) => named(Some(id)).map(str::to_string),
+        _ => None,
+    }
+}
+
+/// The 403 a claim for someone else gets from anyone the rule does not
+/// admit, naming the rule and the two ways through it.
+pub fn claim_for_refusal_body(step_id: &str, caller: &str, nominee: &str) -> Value {
+    serde_json::json!({
+        "error": "a claim for someone else (claimed_for) is made only by the step's \
+                  declared executor or a holder of the step-assign authority",
+        "step_id": step_id,
+        "caller": caller,
+        "claimed_for": nominee,
+        "hint": "claim the step for yourself (omit claimed_for), or ask a holder of \
+                 Update on step-assign to start it for them",
+    })
+}
+
 /// The 409's body, in the terminal freeze's shape (`step_status` +
 /// `refused_fields`), naming who holds the step.
 pub fn refusal_body(step_id: &str, holder: &str) -> Value {
@@ -108,7 +162,54 @@ pub fn refusal_body(step_id: &str, holder: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{refuses, stored};
+    use super::{declared_executor, nominee, refuses, stored};
+
+    #[test]
+    fn a_nominee_is_someone_other_than_the_caller() {
+        assert_eq!(nominee(None, "emp-a"), None);
+        assert_eq!(nominee(Some(""), "emp-a"), None);
+        assert_eq!(nominee(Some("  "), "emp-a"), None);
+        assert_eq!(nominee(Some("emp-a"), "emp-a"), None);
+        assert_eq!(nominee(Some(" emp-a "), "emp-a"), None);
+        assert_eq!(nominee(Some("emp-b"), "emp-a"), Some("emp-b"));
+    }
+
+    #[test]
+    fn only_an_individual_audience_in_the_pinned_row_declares_an_executor() {
+        use crate::audience::Audience;
+        use crate::registry::{StepSpec, WorkflowSpec};
+        let step = |slug: &str, audience: Option<Audience>| StepSpec {
+            title: slug.into(),
+            kind: "task".into(),
+            ready_when: "true".into(),
+            audience,
+            ..Default::default()
+        };
+        let row = WorkflowSpec::platform_seed(
+            "k",
+            "K",
+            "platform",
+            vec![],
+            vec![
+                step(
+                    "run",
+                    Some(Audience::Individual("automation:boss-step".into())),
+                ),
+                step("review", Some(Audience::Role("platform-admin".into()))),
+                step("blank", Some(Audience::Individual(" ".into()))),
+                step("plain", None),
+            ],
+        );
+        assert_eq!(
+            declared_executor(&row, Some("run")),
+            Some("automation:boss-step".into())
+        );
+        assert_eq!(declared_executor(&row, Some("review")), None);
+        assert_eq!(declared_executor(&row, Some("blank")), None);
+        assert_eq!(declared_executor(&row, Some("plain")), None);
+        assert_eq!(declared_executor(&row, Some("gone")), None);
+        assert_eq!(declared_executor(&row, None), None);
+    }
 
     #[test]
     fn a_blank_holder_is_stored_as_nobody() {
