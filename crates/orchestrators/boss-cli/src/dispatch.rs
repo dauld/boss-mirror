@@ -2131,6 +2131,15 @@ pub(crate) fn run_record(
     if let (Some(dst), Some(src)) = (body.as_object_mut(), tokens.as_object()) {
         dst.extend(src.clone());
     }
+    // The call count the record has carried since its first day and no
+    // report ever filled (backlog 2f23f4c6): a metered run's transcript
+    // counts them. An unmetered run leaves the key out, as before.
+    if let (Some(m), Some(dst)) = (&r.meter, body.as_object_mut()) {
+        dst.insert(
+            "tool_calls".into(),
+            json!(u32::try_from(m.profile.tool_calls).unwrap_or(u32::MAX)),
+        );
+    }
     // Where a metered count came from, and the two readings that make
     // it checkable (backlog e6b2066f): the final context — the figure a
     // harness total reports — and the typed count it superseded, both
@@ -2612,6 +2621,29 @@ pub(crate) async fn report_with_receipt_at(
         }
     }
 
+    // THE WORK PROFILE (backlog 2f23f4c6): where a metered run's tool
+    // time and context went, held beside its record for the IT retro.
+    // Telemetry, so it is written before the terminal check — a
+    // profile needs no outcome — and never fatal: losing it costs the
+    // measurement, and the line says so rather than going quiet.
+    if let Some(m) = &report.meter {
+        let body = serde_json::to_value(&m.profile).context("the work profile serializes")?;
+        match api_at(
+            Method::PUT,
+            format!("/api/agent-runs/{run_id}/profile"),
+            Some(body),
+        )
+        .await
+        {
+            Ok(_) => eprintln!("{}", profile_line(short, &m.profile)),
+            Err(e) => eprintln!(
+                "boss dispatch: WARNING — run {short}'s work profile was not recorded ({e:#}); \
+                 {}",
+                profile_line(short, &m.profile)
+            ),
+        }
+    }
+
     // THE FINISH RECORD: what the run cost and how it went, where the
     // claim door reads it. The outcome is the terminal the run
     // reached; a run that has reached none is not recorded at all,
@@ -2643,6 +2675,38 @@ pub(crate) async fn report_with_receipt_at(
         record_line(short, &actor_id, out.as_ref(), report).map_err(|e| anyhow::anyhow!("{e}"))?
     );
     Ok(())
+}
+
+/// What a run's work profile says, in one line: where the tool time
+/// and the context went (largest share first), when the first edit
+/// came, and how many searches found nothing (backlog 2f23f4c6).
+pub(crate) fn profile_line(short: &str, p: &boss_jobs::agent_runs::WorkProfile) -> String {
+    let whole = p.by_class.total();
+    let shares = |key: fn(&boss_jobs::agent_runs::ClassTotal) -> u64, of: u64| {
+        let mut named = p.by_class.named().to_vec();
+        named.sort_by_key(|(_, t)| std::cmp::Reverse(key(t)));
+        match of {
+            0 => "none".to_string(),
+            _ => named
+                .iter()
+                .map(|(n, t)| format!("{n} {}%", key(t) * 100 / of))
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    };
+    let edit = match p.calls_before_first_edit {
+        Some(n) => format!("first edit after {n} calls"),
+        None => "no edit outside its scratch directory".to_string(),
+    };
+    format!(
+        "boss dispatch: run {short} work profile — {} tool calls; tool time {}; context {}; \
+         {edit}; {} of {} searches empty",
+        p.tool_calls,
+        shares(|t| t.wall_ms, whole.wall_ms),
+        shares(|t| t.result_bytes, whole.result_bytes),
+        p.empty_searches,
+        p.searches,
+    )
 }
 
 /// `boss dispatch --report <run> …` — the handback, by whichever hand
@@ -3453,6 +3517,10 @@ mod tests {
                     billed: vec!["claude-opus-5-5".into()],
                     identity: Some("claude-opus-5-5[1m]".into()),
                 },
+                profile: boss_jobs::agent_runs::WorkProfile {
+                    tool_calls: 212,
+                    ..Default::default()
+                },
             }),
             tokens: Some(Tokens::Total(153_746)),
         };
@@ -3478,7 +3546,11 @@ mod tests {
         assert_eq!(rec["detail"]["metered"]["typed_tokens"], 153_746);
         assert_eq!(rec["detail"]["metered"]["final_context_tokens"], 153_121);
         assert_eq!(rec["detail"]["metered"]["turns"], 88);
+        // The column the record always had and nobody filled (backlog
+        // 2f23f4c6): the transcript counts the calls.
+        assert_eq!(rec["tool_calls"], 212);
         let parsed: boss_jobs::agent_runs::NewAgentRun = serde_json::from_value(rec).unwrap();
+        assert_eq!(parsed.tool_calls, 212);
         assert_eq!(parsed.tokens.total(), Some(1_509_040));
         assert_eq!(parsed.model.as_deref(), Some("opus-5-5[1m]"));
         assert_eq!(report_patch(&metered)["tokens"], 1_509_040);
@@ -5516,9 +5588,68 @@ mod wire_tests {
                 json!({ "recorded": true, "run": { "run_id": RUN, "usd_micros": 4_200_000 } })
                     .to_string(),
             ),
+            ("PUT", p) if p == format!("/api/agent-runs/{RUN}/profile") => {
+                ("200 OK", json!({ "run_id": RUN }).to_string())
+            }
             _ => ("404 Not Found", format!("unstubbed {method} {target}")),
         })
         .await
+    }
+
+    /// THE WORK PROFILE RIDES THE REPORT (backlog 2f23f4c6): a metered
+    /// run's profile is PUT beside its record, keyed on the run id —
+    /// telemetry, so it is written whether or not the run has reached
+    /// a terminal — and the record carries its call count.
+    #[tokio::test]
+    async fn a_metered_report_records_the_runs_work_profile_beside_its_record() {
+        let (base, log) = report_stub(run_packet("ready")).await;
+        let profile = boss_jobs::agent_runs::WorkProfile {
+            tool_calls: 57,
+            calls_before_first_edit: Some(21),
+            searches: 20,
+            empty_searches: 1,
+            ..Default::default()
+        };
+        let report = Report {
+            summary: "packet cb78818d, branch feat/x".into(),
+            spend_usd: None,
+            tokens: None,
+            meter: Some(crate::transcript_usage::Metered {
+                path: "/p/s/subagents/agent-a1.jsonl".into(),
+                usage: crate::transcript_usage::Usage {
+                    input: 4,
+                    output: 6,
+                    turns: 2,
+                    ..Default::default()
+                },
+                models: crate::transcript_usage::RunModels::default(),
+                profile: profile.clone(),
+            }),
+        };
+        report_at(
+            &reqwest::Client::new(),
+            &base,
+            RUN,
+            &report,
+            None,
+            "claude@algedonic.dev",
+            "2026-09-18T19:00:00Z".parse().unwrap(),
+        )
+        .await
+        .expect("reports");
+        let calls = log.calls.lock().unwrap().clone();
+        let put = calls
+            .iter()
+            .find(|(m, p, _)| m == "PUT" && p.as_str() == format!("/api/agent-runs/{RUN}/profile"))
+            .unwrap_or_else(|| panic!("no profile PUT among {calls:?}"));
+        let sent: boss_jobs::agent_runs::WorkProfile =
+            serde_json::from_value(put.2.clone()).expect("the body is a WorkProfile");
+        assert_eq!(sent, profile);
+        let rec = calls
+            .iter()
+            .find(|(m, p, _)| m == "POST" && p == "/api/agent-runs")
+            .expect("the run is recorded too");
+        assert_eq!(rec.2["tool_calls"], 57);
     }
 
     /// The handback, end to end: the packet holds the report, `reported`

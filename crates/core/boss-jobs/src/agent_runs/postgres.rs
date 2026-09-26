@@ -15,7 +15,9 @@ use sqlx::{PgPool, Row};
 
 use super::port::{
     AgentRunError, AgentRunLog, RecordedRun, RegisteredAgent, admit, resolve_model, validate,
+    validate_profile, validate_window,
 };
+use super::profile::{RunProfile, WorkProfile};
 use super::types::{
     ADMISSION_WINDOW, AgentRun, NewAgentRun, RateCardRow, RunFilter, RunOutcome, TokenUsage,
     measure_load, price_run,
@@ -400,5 +402,66 @@ impl AgentRunLog for PgAgentRuns {
         .await
         .map_err(storage)?;
         rows.iter().map(card_row).collect()
+    }
+
+    // The profile pair: `agent_run_profiles` (20260926050506), the row
+    // its own record — no outbox, no event (see `super::profile`).
+
+    async fn record_profile(
+        &self,
+        run_id: &str,
+        profile: &WorkProfile,
+        at: DateTime<Utc>,
+    ) -> Result<RunProfile, AgentRunError> {
+        validate_profile(run_id)?;
+        let body = serde_json::to_value(profile)
+            .map_err(|e| AgentRunError::BadRequest(format!("profile: {e}")))?;
+        sqlx::query(
+            "INSERT INTO agent_run_profiles (run_id, profile, recorded_at) VALUES ($1, $2, $3) \
+             ON CONFLICT (run_id) DO UPDATE \
+             SET profile = EXCLUDED.profile, recorded_at = EXCLUDED.recorded_at",
+        )
+        .bind(run_id)
+        .bind(&body)
+        .bind(at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(RunProfile {
+            run_id: run_id.to_string(),
+            recorded_at: at,
+            profile: profile.clone(),
+        })
+    }
+
+    async fn list_profiles(
+        &self,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<Vec<RunProfile>, AgentRunError> {
+        validate_window(since, until)?;
+        let rows = sqlx::query(
+            "SELECT run_id, profile, recorded_at FROM agent_run_profiles \
+             WHERE recorded_at >= $1 AND recorded_at < $2 \
+             ORDER BY recorded_at, run_id",
+        )
+        .bind(since)
+        .bind(until)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.iter()
+            .map(|r| {
+                let body: serde_json::Value = r.try_get("profile").map_err(storage)?;
+                Ok(RunProfile {
+                    run_id: r.try_get("run_id").map_err(storage)?,
+                    recorded_at: r.try_get("recorded_at").map_err(storage)?,
+                    // A row the type cannot read is a storage fault,
+                    // named — never a default profile of zeroes.
+                    profile: serde_json::from_value(body)
+                        .map_err(|e| AgentRunError::Storage(format!("profile: {e}")))?,
+                })
+            })
+            .collect()
     }
 }

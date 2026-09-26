@@ -18,9 +18,13 @@ use boss_core::agent::AgentCaps;
 use boss_core::event::Event;
 use tokio::sync::RwLock;
 
+use chrono::{DateTime, Utc};
+
 use super::port::{
     AgentRunError, AgentRunLog, RecordedRun, RegisteredAgent, admit, resolve_model, validate,
+    validate_profile, validate_window,
 };
+use super::profile::{RunProfile, WorkProfile};
 use super::types::{AgentRun, NewAgentRun, RateCardRow, RunFilter, measure_load, price_run};
 
 pub struct InMemoryAgentRuns {
@@ -30,6 +34,8 @@ pub struct InMemoryAgentRuns {
     agents: HashMap<String, RegisteredAgent>,
     runs: RwLock<HashMap<String, AgentRun>>,
     events: RwLock<Vec<Event>>,
+    /// run id -> its work profile; the `agent_run_profiles` table.
+    profiles: RwLock<HashMap<String, RunProfile>>,
 }
 
 impl InMemoryAgentRuns {
@@ -39,6 +45,7 @@ impl InMemoryAgentRuns {
             agents: HashMap::new(),
             runs: RwLock::new(HashMap::new()),
             events: RwLock::new(Vec::new()),
+            profiles: RwLock::new(HashMap::new()),
         }
     }
 
@@ -161,6 +168,48 @@ impl AgentRunLog for InMemoryAgentRuns {
     async fn rate_card(&self) -> Result<Vec<RateCardRow>, AgentRunError> {
         let mut out = self.card.clone();
         out.sort_by(|a, b| a.model.cmp(&b.model));
+        Ok(out)
+    }
+
+    async fn record_profile(
+        &self,
+        run_id: &str,
+        profile: &WorkProfile,
+        at: DateTime<Utc>,
+    ) -> Result<RunProfile, AgentRunError> {
+        validate_profile(run_id)?;
+        let held = RunProfile {
+            run_id: run_id.to_string(),
+            recorded_at: at,
+            profile: profile.clone(),
+        };
+        self.profiles
+            .write()
+            .await
+            .insert(run_id.to_string(), held.clone());
+        Ok(held)
+    }
+
+    async fn list_profiles(
+        &self,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<Vec<RunProfile>, AgentRunError> {
+        validate_window(since, until)?;
+        let mut out: Vec<RunProfile> = self
+            .profiles
+            .read()
+            .await
+            .values()
+            .filter(|p| p.recorded_at >= since && p.recorded_at < until)
+            .cloned()
+            .collect();
+        // The Pg adapter's ORDER BY, stated once there and once here.
+        out.sort_by(|a, b| {
+            a.recorded_at
+                .cmp(&b.recorded_at)
+                .then_with(|| a.run_id.cmp(&b.run_id))
+        });
         Ok(out)
     }
 }

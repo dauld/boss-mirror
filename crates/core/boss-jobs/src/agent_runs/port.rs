@@ -1,4 +1,11 @@
-//! The agent-run log port — three operations and nothing else.
+//! The agent-run log port — three operations on the record, and two on
+//! the work profile that sits beside it.
+//!
+//! The profile pair (backlog 2f23f4c6) is TELEMETRY and records no
+//! event: it lives in `agent_run_profiles`, keyed on the run id, and
+//! is never a source a rebuilder reads (see `super::profile`). It is
+//! on this port rather than a port of its own because it describes the
+//! same runs, through the same door, for the same readers.
 //!
 //! UNLIKE the cadence registry next door, this surface DOES record an
 //! event, and for a reason cadence names: `cadence_firings` is its own
@@ -12,6 +19,9 @@
 use async_trait::async_trait;
 use boss_core::agent::{AgentCaps, AgentLoad, BudgetDecision};
 
+use chrono::{DateTime, Utc};
+
+use super::profile::{RunProfile, WorkProfile};
 use super::types::{AgentRun, NewAgentRun, RateCardRow, RunFilter};
 
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +103,49 @@ pub trait AgentRunLog: Send + Sync {
     /// The rate card, model-ordered. Read-only on purpose — see
     /// `super::mod`'s doc comment for why a price is a tree change.
     async fn rate_card(&self) -> Result<Vec<RateCardRow>, AgentRunError>;
+
+    /// Hold `profile` as run `run_id`'s work profile, read at `at`,
+    /// REPLACING any profile already held for it: a report retried
+    /// after the run went on re-reads a longer transcript, and the
+    /// whole transcript is the truer reading. No event — telemetry.
+    /// No check that the run is recorded: a report records the profile
+    /// even for a run that has reached no terminal yet, and the two
+    /// are joined on the id when read.
+    async fn record_profile(
+        &self,
+        run_id: &str,
+        profile: &WorkProfile,
+        at: DateTime<Utc>,
+    ) -> Result<RunProfile, AgentRunError>;
+
+    /// Every profile read in `[since, until)`, oldest first.
+    async fn list_profiles(
+        &self,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<Vec<RunProfile>, AgentRunError>;
+}
+
+/// The one refusal both adapters give a profile write that cannot be
+/// held, and a window that cannot hold one.
+pub fn validate_profile(run_id: &str) -> Result<(), AgentRunError> {
+    if run_id.trim().is_empty() {
+        return Err(AgentRunError::BadRequest(
+            "run_id is required — a profile describes one recorded run".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// `since >= until` is a bad request, not an empty answer: an empty
+/// list would read as a quiet week (the `surface_opens` rule).
+pub fn validate_window(since: DateTime<Utc>, until: DateTime<Utc>) -> Result<(), AgentRunError> {
+    if since >= until {
+        return Err(AgentRunError::BadRequest(format!(
+            "since ({since}) is not before until ({until}) — the window holds nothing"
+        )));
+    }
+    Ok(())
 }
 
 /// Reject what cannot be a run before anything is written. Shared by

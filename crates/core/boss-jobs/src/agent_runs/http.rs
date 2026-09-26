@@ -21,10 +21,10 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,7 @@ use boss_policy_client::CurrentUser;
 use crate::trust::{can_read, is_trusted};
 
 use super::port::{AgentRunError, AgentRunLog};
+use super::profile::{ProfileRollup, RunProfile, WorkProfile, rollup};
 use super::types::{AgentRunView, NewAgentRun, RunFilter, RunSummary, summarize};
 
 pub struct AgentRunsApiState {
@@ -51,6 +52,8 @@ pub fn router(state: AgentRunsApiState) -> Router {
     Router::new()
         .route("/api/agent-runs", get(list_runs).post(record_run))
         .route("/api/agent-runs/cost", get(cost))
+        .route("/api/agent-runs/profiles", get(profiles))
+        .route("/api/agent-runs/{run_id}/profile", put(record_profile))
         .route("/api/agent-rate-card", get(rate_card))
         .with_state(shared)
 }
@@ -179,6 +182,67 @@ async fn cost(
     }
 }
 
+/// `GET /api/agent-runs/profiles?since=…[&until=…]` — the window's work
+/// profiles and the reading over them (backlog 2f23f4c6). `since` is
+/// required: an unbounded read of telemetry is a question nobody asked.
+#[derive(Debug, Deserialize)]
+pub struct ProfileQuery {
+    pub since: DateTime<Utc>,
+    #[serde(default)]
+    pub until: Option<DateTime<Utc>>,
+}
+
+/// What the profiles read answers: the rollup the IT retro ranks, and
+/// the rows it was taken over so any number in it can be checked.
+#[derive(Debug, Serialize)]
+pub struct ProfilesResponse {
+    pub rollup: ProfileRollup,
+    pub runs: Vec<RunProfile>,
+}
+
+async fn profiles(
+    State(state): State<Arc<AgentRunsApiState>>,
+    CurrentUser(user): CurrentUser,
+    Query(q): Query<ProfileQuery>,
+) -> Response {
+    if !can_read(&user) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    // A window edge on the one real clock: telemetry is not a business
+    // date, so it does not route through the sim-aware clock port.
+    let until = q.until.unwrap_or_else(boss_clock_client::wall_now);
+    match state.log.list_profiles(q.since, until).await {
+        Ok(runs) => Json(ProfilesResponse {
+            rollup: rollup(q.since, until, &runs),
+            runs,
+        })
+        .into_response(),
+        Err(e) => err_response(e),
+    }
+}
+
+/// `PUT /api/agent-runs/{run_id}/profile` — the report's write, the
+/// same operator gate as the record's POST. Idempotent: a re-report
+/// replaces the reading with the longer transcript's.
+async fn record_profile(
+    State(state): State<Arc<AgentRunsApiState>>,
+    CurrentUser(user): CurrentUser,
+    Path(run_id): Path<String>,
+    Json(body): Json<WorkProfile>,
+) -> Response {
+    if !is_trusted(&user) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match state
+        .log
+        .record_profile(&run_id, &body, boss_clock_client::wall_now())
+        .await
+    {
+        Ok(held) => Json(held).into_response(),
+        Err(e) => err_response(e),
+    }
+}
+
 async fn rate_card(
     State(state): State<Arc<AgentRunsApiState>>,
     CurrentUser(user): CurrentUser,
@@ -228,6 +292,7 @@ mod tests {
     const READS: &[&str] = &[
         "/api/agent-runs",
         "/api/agent-runs/cost",
+        "/api/agent-runs/profiles?since=2026-09-01T00:00:00Z",
         "/api/agent-rate-card",
     ];
 
@@ -750,6 +815,90 @@ mod tests {
                 .map(Vec::len),
             Some(0),
             "body: {theirs}"
+        );
+    }
+
+    /// THE PROFILE DOOR (backlog 2f23f4c6): the report PUTs a run's work
+    /// profile, the retro GETs the window's reading. Operator-gated like
+    /// the record's POST; a window that holds nothing is refused rather
+    /// than answered with an empty week.
+    #[tokio::test]
+    async fn a_profile_is_put_by_an_operator_and_read_back_in_the_weeks_reading() {
+        let log = Arc::new(InMemoryAgentRuns::new(card()));
+        let app = router(AgentRunsApiState { log: log.clone() });
+        let operator = header("platform-admin", AccessTier::Operator);
+        let profile = serde_json::json!({
+            "tool_calls": 3,
+            "by_class": {
+                "search_read": {"calls": 2, "wall_ms": 40, "result_bytes": 900},
+                "build_test": {"calls": 0, "wall_ms": 0, "result_bytes": 0},
+                "edit": {"calls": 1, "wall_ms": 10, "result_bytes": 100},
+                "other": {"calls": 0, "wall_ms": 0, "result_bytes": 0}
+            },
+            "calls_before_first_edit": 2,
+            "searches": 2,
+            "empty_searches": 1,
+            "top_files_read": [{"path": "crates/a.rs", "reads": 2}]
+        });
+        let put = |user: Option<String>| {
+            let mut req = Request::put("/api/agent-runs/run-1/profile")
+                .header("content-type", "application/json");
+            if let Some(u) = user {
+                req = req.header("x-boss-user", u);
+            }
+            req.body(Body::from(profile.to_string()))
+                .expect("request builds")
+        };
+        let guest = header("audit-readonly", AccessTier::User);
+        let refused = app.clone().oneshot(put(Some(guest))).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+        let refused = app.clone().oneshot(put(None)).await.unwrap();
+        assert_eq!(refused.status(), StatusCode::FORBIDDEN, "headerless");
+
+        let ok = app
+            .clone()
+            .oneshot(put(Some(operator.clone())))
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK);
+
+        let read = |path: &str| {
+            Request::get(path)
+                .header("x-boss-user", operator.clone())
+                .body(Body::empty())
+                .expect("request builds")
+        };
+        let resp = app
+            .clone()
+            .oneshot(read("/api/agent-runs/profiles?since=2020-01-01T00:00:00Z"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes())
+                .expect("JSON");
+        assert_eq!(body["rollup"]["runs"], 1, "{body}");
+        assert_eq!(
+            body["rollup"]["largest_time_share"], "search_read",
+            "{body}"
+        );
+        assert_eq!(body["rollup"]["empty_search_share_pct"], 50.0, "{body}");
+        assert_eq!(body["runs"][0]["run_id"], "run-1", "{body}");
+        assert_eq!(
+            body["runs"][0]["profile"]["top_files_read"][0]["path"], "crates/a.rs",
+            "{body}"
+        );
+
+        let resp = app
+            .oneshot(read(
+                "/api/agent-runs/profiles?since=2026-09-02T00:00:00Z&until=2026-09-01T00:00:00Z",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "a window that holds nothing"
         );
     }
 }

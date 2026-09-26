@@ -126,6 +126,7 @@ pub mod in_memory;
 pub mod port;
 #[cfg(feature = "postgres")]
 pub mod postgres;
+pub mod profile;
 #[cfg(feature = "postgres")]
 pub mod rebuild;
 pub mod types;
@@ -135,6 +136,10 @@ pub use in_memory::InMemoryAgentRuns;
 pub use port::{AgentRunError, AgentRunLog, RecordedRun, RegisteredAgent, admit};
 #[cfg(feature = "postgres")]
 pub use postgres::PgAgentRuns;
+pub use profile::{
+    ByClass, ClassShare, ClassTotal, FileReads, ProfileRollup, RunProfile, TOP_FILES, WorkProfile,
+    rank_files, rollup,
+};
 #[cfg(feature = "postgres")]
 pub use rebuild::rebuild_agent_runs;
 pub use types::{

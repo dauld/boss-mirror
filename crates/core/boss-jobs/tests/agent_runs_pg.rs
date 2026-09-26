@@ -1031,3 +1031,70 @@ async fn the_rate_card_is_the_published_page_as_read_2026_09_25() {
     let out = log.record_run(&run, &filer()).await.expect("records");
     assert_eq!(out.run.usd_micros, Some(1_192_900));
 }
+
+/// THE WORK PROFILE IS TELEMETRY BESIDE THE RECORD (backlog 2f23f4c6):
+/// it is held in its own table, a re-report replaces it, the window
+/// read returns it, and a rebuild of `agent_runs` — which DELETEs every
+/// row and replays the log — leaves it where it was. A column on the
+/// projection would have been wiped by that rebuild; this is the claim
+/// that it is not.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_work_profile_survives_a_rebuild_and_a_re_report_replaces_it() {
+    use boss_jobs::agent_runs::{ClassTotal, WorkProfile};
+    let db = TestDb::new().await;
+    let log = PgAgentRuns::new(db.pool.clone());
+    log.record_run(
+        &a_run("run-profiled", TokenUsage::TotalOnly { total: 10 }),
+        &filer(),
+    )
+    .await
+    .expect("records");
+
+    let first = WorkProfile {
+        tool_calls: 4,
+        calls_before_first_edit: Some(3),
+        ..WorkProfile::default()
+    };
+    let at = Utc.with_ymd_and_hms(2026, 9, 26, 5, 0, 0).unwrap();
+    log.record_profile("run-profiled", &first, at)
+        .await
+        .expect("a profile records");
+    let mut longer = first.clone();
+    longer.tool_calls = 9;
+    longer.by_class.build_test = ClassTotal {
+        calls: 2,
+        wall_ms: 90_000,
+        result_bytes: 1_200,
+    };
+    let later = at + chrono::Duration::minutes(5);
+    log.record_profile("run-profiled", &longer, later)
+        .await
+        .expect("a re-report replaces the reading");
+
+    rebuild_agent_runs(&db.pool).await.expect("rebuilds");
+
+    let window = |from, to| log.list_profiles(from, to);
+    let held = window(
+        at - chrono::Duration::days(7),
+        later + chrono::Duration::seconds(1),
+    )
+    .await
+    .expect("reads");
+    assert_eq!(held.len(), 1, "one row per run, replaced not appended");
+    assert_eq!(held[0].profile, longer);
+    assert_eq!(held[0].recorded_at, later);
+    assert!(
+        window(
+            later + chrono::Duration::seconds(1),
+            later + chrono::Duration::days(1)
+        )
+        .await
+        .expect("reads")
+        .is_empty(),
+        "the window's edge is honoured"
+    );
+    assert!(
+        window(later, at).await.is_err(),
+        "an inverted window is refused, not answered empty"
+    );
+}

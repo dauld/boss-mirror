@@ -63,6 +63,7 @@ mod tenant_publish;
 mod tenant_stamp;
 mod train;
 mod train_gate;
+mod transcript_profile;
 mod transcript_usage;
 mod upgrade;
 mod workflow;

@@ -337,6 +337,8 @@ pub(crate) struct Metered {
     pub usage: Usage,
     /// The model the transcript says ran (backlog 6bb85880).
     pub models: RunModels,
+    /// Where its tool time and context went (backlog 2f23f4c6).
+    pub profile: boss_jobs::agent_runs::WorkProfile,
 }
 
 /// The run's metered usage: from `explicit` when the operator named a
@@ -388,10 +390,12 @@ pub(crate) fn meter(
     let usage = sum_usage(&text)
         .ok_or_else(|| format!("transcript {} holds no turn usage", path.display()))?;
     let models = read_models(&text);
+    let profile = crate::transcript_profile::work_profile(&text);
     Ok(Metered {
         path,
         usage,
         models,
+        profile,
     })
 }
 
