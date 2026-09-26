@@ -394,7 +394,7 @@ mod tests {
             pool: PgPool::connect_lazy("postgres://nobody@127.0.0.1:1/none").unwrap(),
             publisher: None,
             clock: Arc::new(boss_clock_client::WallClockClient),
-            policy: Some(Arc::new(boss_policy_client::ReqwestPolicyClient::new(dark))),
+            policy: Arc::new(boss_policy_client::ReqwestPolicyClient::new(dark)),
         });
         let resp = app
             .oneshot(
