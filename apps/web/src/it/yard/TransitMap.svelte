@@ -47,6 +47,10 @@
   // rate.
   import { navigate } from '@boss/web-kit/nav';
   import { MediaQuery } from 'svelte/reactivity';
+  import { flightOn } from '@boss/web-kit/session/flights.svelte';
+  import LiveMotion from './LiveMotion.svelte';
+  import { geometryOf } from './live-geometry';
+  import { LIVE_TEXT } from './live-motion';
   import type { Border, Borders } from './borders';
   import { countText, regionHref, type Region, type Regions } from './regions';
   import type { Routes } from './routes';
@@ -82,6 +86,11 @@
 
   const prefersReduced = new MediaQuery('(prefers-reduced-motion: reduce)');
   const reduced = $derived(prefersReduced.current);
+  /** REAL PACKETS MOVE (design e765b3fc car M2, flight `it-map-live`):
+   *  the recorded moves ride the sections, and the rate-replay blocks
+   *  are off — a replayed rate beside the real moves would draw each
+   *  crossing twice, once as a picture of it. */
+  const live = $derived(flightOn('it-map-live'));
 
   const byName = $derived(new Map(regions.regions.map((r) => [r.name, r] as const)));
   const byKey = $derived(new Map<string, Border>((borders?.borders ?? []).map((b) => [sectionKey(b.from, b.to), b])));
@@ -117,7 +126,7 @@
         <!-- THE ROUTES (design e765b3fc, car R3): every section, exit and
              entry the routes read serves, drawn by RouteLayer.svelte from
              route-layout.ts — the layer the moves of car M2 travel. -->
-        <RouteLayer sections={laid.sections} borders={byKey} {reduced} {selected} />
+        <RouteLayer sections={laid.sections} borders={byKey} {reduced} {selected} {live} />
 
         <!-- THE STATIONS: a ring each in the region's state, pulsing when
              troubled, and a door to its panel. The selected one wears a
@@ -142,6 +151,11 @@
             <text x={st.x} y={st.below ? st.y + 46 : st.y + 40} text-anchor="middle" class="sub">{stationCount(r)}</text>
           </a>
         {/each}
+
+        {#if live}
+          <!-- THE MOVES (car M2): over the stations, so a ping reads on top. -->
+          <LiveMotion geometry={geometryOf(routes)} {reduced} />
+        {/if}
       </svg>
     </div>
 
@@ -178,7 +192,7 @@
     <p class="unplaced" data-unplaced>served, with no station on this map to draw it at: {laid.unplaced.join(', ')}</p>
   {/if}
   <p class="replay" data-replay>
-    {REPLAY_TEXT}{reduced ? '. Reduced motion is on: nothing moves, and a section\'s panel carries its rate.' : ''}
+    {live ? LIVE_TEXT : REPLAY_TEXT}{reduced && live ? '. Reduced motion is on: a move flashes its count at the station it reached, and nothing travels.' : reduced ? '. Reduced motion is on: nothing moves, and a section\'s panel carries its rate.' : ''}
   </p>
 </section>
 

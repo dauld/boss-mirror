@@ -21,18 +21,22 @@
 //!     same after a run — this is the writer that rewound main, gone
 //!   * a rewound forge main is REFUSED as non-fast-forward, named, and the
 //!     target keeps what it had — never overwritten
-//!   * the Forgejo mirror is deleted only after the push has read back;
+//!   * the Forgejo mirror is deleted only after main has read back;
 //!     a push that fails leaves it in place, so the off-site copy is never
-//!     lost; a refused or ignored delete is exit 1
-//!   * no GitHub token, a world-readable one, or no forge credential:
-//!     exit 4 before anything is pushed or deleted
+//!     lost; a refused or ignored delete is exit 1; a refusal on a
+//!     publish/<date> is exit 1 but no longer keeps the mirror (b176fd60)
+//!   * no GitHub token, a world-readable one, one root does not own, or
+//!     no forge credential: exit 4 before anything is pushed or deleted
+//!   * a system gitconfig cannot redirect the push or run a hook; the
+//!     push and read-back carry a low-speed bound; the credential helper
+//!     answers only https://github.com; a nameless mirror row is an error
 //!   * the declaration names the canonical dauld/boss-mirror (the fork the
 //!     publish verb opens its PRs from), and carries no force refspec
 //!   * forge-converge.sh runs it after protect-main.sh, and its verdict
 //!     reaches the packet
 
 use boss_testing::repo_root;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -248,6 +252,13 @@ struct Opts {
     dead_target: bool,
     /// The forge answers the mirror list 200 with an empty body.
     empty_get: bool,
+    /// A system gitconfig (its body) the run can see: GIT_CONFIG_SYSTEM
+    /// names it and GIT_CONFIG_NOSYSTEM is NOT set, the way a host's
+    /// /etc/gitconfig reaches a root unit.
+    system_gitconfig: Option<String>,
+    /// The token file is owned by an account other than the one the
+    /// script is told must own it (root on the forge host).
+    foreign_token_owner: bool,
 }
 
 struct Run {
@@ -255,12 +266,53 @@ struct Run {
     stdout: String,
     stderr: String,
     log: String,
+    /// Every git invocation the script made, argv one per line, each
+    /// followed by `=== git ===`.
+    git_log: String,
     mirrors: serde_json::Value,
     summary: Option<serde_json::Value>,
 }
 
+/// The real git, found on PATH before the recording wrapper goes in
+/// front of it.
+fn real_git() -> PathBuf {
+    std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .map(|d| Path::new(d).join("git"))
+        .find(|p| p.is_file())
+        .expect("git is on PATH")
+}
+
+/// A `git` first on the script's PATH that records its argv to
+/// `$GIT_LOG` and hands on to the real one — so a test can read what the
+/// push and the read-back were CALLED with, not what the script's text
+/// happens to say.
+fn write_git_wrapper(dir: &Path) -> PathBuf {
+    let bin = dir.join("bin");
+    boss_testing::create_dir(&bin);
+    boss_testing::write_exec(
+        &bin.join("git"),
+        &format!(
+            "#!/usr/bin/env bash\n{{ printf '%s\\n' \"$@\"; echo '=== git ==='; }} >> \"$GIT_LOG\"\nexec '{}' \"$@\"\n",
+            real_git().display()
+        ),
+    );
+    bin
+}
+
+/// The argv of each recorded git invocation that carries `verb`.
+fn git_calls<'a>(r: &'a Run, verb: &str) -> Vec<Vec<&'a str>> {
+    r.git_log
+        .split("=== git ===\n")
+        .map(|c| c.lines().collect::<Vec<_>>())
+        .filter(|argv| argv.contains(&verb))
+        .collect()
+}
+
 fn run(w: &World, o: Opts) -> Run {
     let curl = write_curl_stub(&w.dir);
+    let bin = write_git_wrapper(&w.dir);
     let mirrors = o.mirrors.clone().unwrap_or_else(|| serde_json::json!([]));
     boss_testing::write_file(&w.state.join("mirrors.json"), &mirrors.to_string());
     if o.empty_get {
@@ -305,14 +357,40 @@ fn run(w: &World, o: Opts) -> Run {
     }
     let log = w.dir.join("calls.log");
     let _ = std::fs::remove_file(&log);
+    let git_log = w.dir.join("git.log");
+    let _ = std::fs::remove_file(&git_log);
     let summary = w.dir.join("summary.json");
     let _ = std::fs::remove_file(&summary);
-    let out = Command::new("bash")
-        .arg(script())
+    // Who must own the token file: root on the forge host. The fixture's
+    // file is owned by whoever runs the test, so that account is named —
+    // or, for the foreign-owner case, one that is not it.
+    let me = std::fs::metadata(&w.dir).unwrap().uid();
+    let owner = if o.foreign_token_owner { me + 1 } else { me };
+    let mut cmd = Command::new("bash");
+    cmd.arg(script())
         .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
         .env("HOME", &w.dir)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_LOG", &git_log)
+        .env("BOSS_OFFSITE_TOKEN_OWNER_UID", owner.to_string());
+    match &o.system_gitconfig {
+        Some(body) => {
+            let sys = w.dir.join("system.gitconfig");
+            boss_testing::write_file(&sys, body);
+            cmd.env("GIT_CONFIG_SYSTEM", &sys);
+        }
+        None => {
+            cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+        }
+    }
+    let out = cmd
         .env("BOSS_OFFSITE_PUSH_DECL", &decl_path)
         .env("BOSS_OFFSITE_STATE_DIR", w.dir.join("offsite-state"))
         .env("BOSS_OFFSITE_CURL", &curl)
@@ -335,6 +413,7 @@ fn run(w: &World, o: Opts) -> Run {
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         log: std::fs::read_to_string(&log).unwrap_or_default(),
+        git_log: std::fs::read_to_string(&git_log).unwrap_or_default(),
         mirrors: read_json(&w.state.join("mirrors.json")).unwrap_or(serde_json::Value::Null),
         summary: read_json(&summary),
     }
@@ -510,6 +589,229 @@ fn a_rewound_forge_main_is_refused_and_the_target_keeps_its_main() {
     assert!(verdict(&r).starts_with("REFUSED"), "{:?}", r.summary);
 }
 
+/// The mirror is the writer that rewound main, and main is what the
+/// off-site copy exists to keep — so main reading back is what retires
+/// it. A same-day re-publish force-moves publish/<date> on the forge, and
+/// a tick in the seconds before the verb's own fork push finds that ref
+/// non-fast-forward. Until b176fd60 (S1) that kept the mirror alive every
+/// tick until a person stepped in. The refusal is still named and still
+/// exit 1; it just no longer holds the writer in place.
+#[test]
+fn a_publish_refusal_with_main_current_still_removes_the_mirror() {
+    let w = world("publish-refused");
+    let first = run(&w, Opts::default());
+    assert_eq!(first.code, Some(0), "{}{}", first.stdout, first.stderr);
+    let published = head_of(&w.target, "publish/2026-09-25").expect("publish arrived");
+    // The verb re-publishes: a new snapshot, NOT a descendant of the old.
+    let republish = commit(&w.forge, Some(&w.a), "publish snapshot, again");
+    git_in(
+        &w.forge,
+        &["update-ref", "refs/heads/publish/2026-09-25", &republish],
+    );
+    // ...and main moves on in the same tick, so the push that is refused
+    // on one ref still lands the other.
+    let c = commit(&w.forge, Some(&w.b), "c");
+    git_in(&w.forge, &["update-ref", "refs/heads/main", &c]);
+    let r = run(
+        &w,
+        Opts {
+            mirrors: Some(live_mirror()),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.code, Some(1), "{}{}", r.stdout, r.stderr);
+    assert_eq!(head_of(&w.target, "main"), Some(c), "main lands");
+    assert_eq!(
+        head_of(&w.target, "publish/2026-09-25"),
+        Some(published),
+        "the refused ref is never overwritten"
+    );
+    assert!(
+        r.stderr.contains("refs/heads/publish/2026-09-25") && r.stderr.contains("non-fast-forward"),
+        "the refusal is still named: {}",
+        r.stderr
+    );
+    assert_eq!(
+        calls(&r.log),
+        vec![
+            format!("GET {LIST_URL}"),
+            format!("DELETE {LIST_URL}/{MIRROR_NAME}"),
+            format!("GET {LIST_URL}"),
+        ],
+        "main read back, so the mirror goes"
+    );
+    assert_eq!(r.mirrors, serde_json::json!([]));
+    let v = verdict(&r);
+    assert!(
+        v.starts_with("REFUSED") && v.contains("publish/2026-09-25") && v.contains(MIRROR_NAME),
+        "the verdict names both the refusal and the removal: {v}"
+    );
+    no_token_anywhere(&r);
+}
+
+/// A root unit reads /etc/gitconfig; the tests never did (they set
+/// GIT_CONFIG_NOSYSTEM), so a host's `pushInsteadOf` could send the push
+/// somewhere else and a `core.hooksPath` could run a hook as root, and no
+/// test would have seen either (b176fd60 S3). The script sets it itself.
+#[test]
+fn a_system_gitconfig_cannot_redirect_the_push_or_run_a_hook() {
+    let w = world("system-gitconfig");
+    let hooks = w.dir.join("system-hooks");
+    let marker = w.dir.join("a-system-hook-ran");
+    boss_testing::create_dir(&hooks);
+    boss_testing::write_exec(
+        &hooks.join("pre-push"),
+        &format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+    );
+    let elsewhere = w.dir.join("github/somewhere-else.git");
+    init_bare(&elsewhere);
+    let sys = format!(
+        "[url \"{}\"]\n\tpushInsteadOf = {}\n[core]\n\thooksPath = {}\n",
+        elsewhere.display(),
+        w.target.display(),
+        hooks.display()
+    );
+    let r = run(
+        &w,
+        Opts {
+            system_gitconfig: Some(sys),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    assert_eq!(
+        head_of(&w.target, "main"),
+        Some(w.b.clone()),
+        "main arrives where declared"
+    );
+    assert_eq!(head_of(&elsewhere, "main"), None, "nothing was redirected");
+    assert!(!marker.exists(), "no system hook ran");
+}
+
+/// A stalled GitHub used to hang the push to the unit's ten-minute
+/// timeout, which kills the converge before offsite_push is written
+/// (b176fd60 S4). Both network calls carry a low-speed bound, so a stall
+/// is a git failure this script names.
+#[test]
+fn the_push_and_the_read_back_fail_fast_on_a_stall() {
+    let w = world("low-speed");
+    let r = run(&w, Opts::default());
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    for verb in ["push", "ls-remote"] {
+        let argvs = git_calls(&r, verb);
+        assert_eq!(argvs.len(), 1, "one {verb}: {}", r.git_log);
+        for key in ["http.lowSpeedLimit=", "http.lowSpeedTime="] {
+            let value: u32 = argvs[0]
+                .iter()
+                .find_map(|a| a.strip_prefix(key))
+                .unwrap_or_else(|| panic!("{verb} carries no {key}: {:?}", argvs[0]))
+                .parse()
+                .expect("a number");
+            assert!(value > 0, "{verb} {key}{value}");
+        }
+        let time: u32 = argvs[0]
+            .iter()
+            .find_map(|a| a.strip_prefix("http.lowSpeedTime="))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(time <= 120, "a stall is named in minutes, not ten: {time}s");
+    }
+}
+
+/// The helper hands the token to whatever asks. The declared remote is
+/// GitHub, but a redirect, an insteadOf or a changed declaration would
+/// have had it hand dauld's token to another host (b176fd60 S5). It is
+/// driven here exactly as the script passed it to the push.
+#[test]
+fn the_credential_helper_answers_only_github_over_https() {
+    let w = world("helper");
+    let r = run(&w, Opts::default());
+    assert_eq!(r.code, Some(0), "{}{}", r.stdout, r.stderr);
+    let push = git_calls(&r, "push");
+    let helper = push[0]
+        .iter()
+        .find(|a| a.starts_with("credential.helper=!"))
+        .unwrap_or_else(|| panic!("the push carries a helper: {:?}", push[0]))
+        .to_string();
+    let fill = |protocol: &str, host: &str| {
+        let mut child = Command::new(real_git())
+            .args([
+                "-c",
+                "credential.helper=",
+                "-c",
+                &helper,
+                "credential",
+                "fill",
+            ])
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_default())
+            .env("HOME", &w.dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("git runs");
+        boss_testing::feed_stdin(
+            &mut child,
+            format!("protocol={protocol}\nhost={host}\npath=dauld/boss-mirror.git\n\n").as_bytes(),
+        );
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert!(
+        fill("https", "github.com").contains(&format!("password={GH_TOKEN}")),
+        "GitHub gets the token"
+    );
+    for (protocol, host) in [
+        ("https", "evil.example"),
+        ("https", "github.com.evil.example"),
+        ("http", "github.com"),
+    ] {
+        assert!(
+            !fill(protocol, host).contains(GH_TOKEN),
+            "{protocol}://{host} must not get the token"
+        );
+    }
+}
+
+/// A row Forgejo lists without a remote_name is a mirror that is still
+/// there — `// empty` dropped it and reported "no Forgejo push mirror"
+/// (b176fd60 S5). It is a failure that says so.
+#[test]
+fn a_mirror_row_with_no_name_is_an_error_not_none() {
+    for (case, mirrors) in [
+        (
+            "null-name",
+            serde_json::json!([{"remote_name": null, "remote_address": "https://github.com/dauld/boss-fork.git"}]),
+        ),
+        (
+            "no-name",
+            serde_json::json!([{"remote_address": "https://github.com/dauld/boss-fork.git"}]),
+        ),
+    ] {
+        let w = world(&format!("nameless-{case}"));
+        let r = run(
+            &w,
+            Opts {
+                mirrors: Some(mirrors.clone()),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(r.code, Some(1), "{case}: {}{}", r.stdout, r.stderr);
+        assert!(!r.stdout.contains("no push mirror"), "{case}: {}", r.stdout);
+        let v = verdict(&r);
+        assert!(
+            v.starts_with("FAILED") && v.contains("remote_name"),
+            "{case}: {v}"
+        );
+        assert_eq!(r.mirrors, mirrors, "{case}: nothing deleted");
+    }
+}
+
 #[test]
 fn a_push_that_fails_leaves_the_forgejo_mirror_in_place() {
     let w = world("dead-target");
@@ -620,6 +922,16 @@ fn a_missing_or_loose_credential_is_exit_4_before_anything_is_written() {
             "no-forge-auth",
             Opts {
                 no_forge_auth: true,
+                ..Opts::default()
+            },
+        ),
+        // 0600 says who may read it; the owner says who could have written
+        // it. A token file some other account owns can be swapped for a
+        // token of that account's choosing (backlog b176fd60 S5).
+        (
+            "foreign-owned-gh-token",
+            Opts {
+                foreign_token_owner: true,
                 ..Opts::default()
             },
         ),

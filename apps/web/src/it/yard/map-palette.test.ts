@@ -34,6 +34,9 @@ const MAP_FILES = [
   // The route layer it mounts (design e765b3fc, car R3): the served
   // routes' strokes, the same tokens.
   'RouteLayer.svelte',
+  // The real moves on the transit map (design e765b3fc car M2, flight
+  // it-map-live): its dots and pings wear the lines' own tokens.
+  'LiveMotion.svelte',
 ] as const;
 
 /** The grammar round 2 swaps: grounds, text, rules, the accent, and

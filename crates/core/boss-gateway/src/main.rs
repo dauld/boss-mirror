@@ -496,6 +496,30 @@ fn build_router(
             "/api/yard/borders",
             axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
+        // The ROUTES the Department Map draws (design e765b3fc, car R3):
+        // the served sections, exits and entries. Car R3 landed its fetch
+        // in train #718 without this route, so /it's routes read would
+        // have 404'd at the human door — `every_api_path_the_web_fetches
+        // _is_routed` red on main — and car M2, which rides these routes,
+        // routes it with its own reads.
+        .route(
+            "/api/yard/routes",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
+        // The MOVES record (design e765b3fc): each packet that moved on
+        // the map, and the stream the map's live layer holds open (car
+        // M2, flight `it-map-live`). Served by the jobs upstream since
+        // car M1, and routed in the car that first fetches it — the
+        // stations shape again otherwise. The proxy streams the body,
+        // as it does `/api/events/stream`.
+        .route(
+            "/api/yard/moves",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
+        .route(
+            "/api/yard/moves/stream",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         // Every dispatcher rule's newest firing and dead-letters, read by
         // the rules list at /it/registry/rules (backlog 43c4451a). Same
         // upstream as the borders, whose record it re-reads, and routed
@@ -1188,6 +1212,13 @@ mod routing_tests {
             // David's screen; `every_api_path_the_web_fetches_is_routed`
             // below now derives this list from the bundle instead.
             "/api/yard/regions",
+            // The moves record (design e765b3fc, cars M1 and M2): served
+            // by the jobs upstream since M1 and first fetched by the map's
+            // live layer in M2, so routed in the car that reads it.
+            "/api/yard/moves",
+            "/api/yard/moves/stream",
+            // The served routes the map draws (car R3), fetched since #718.
+            "/api/yard/routes",
             // The flights read (73c31776): inlined on index.html, and
             // the same answer for a page the gateway did not serve.
             "/api/flights/mine",

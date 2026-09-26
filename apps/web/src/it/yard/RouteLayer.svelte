@@ -41,8 +41,12 @@
     reduced: boolean;
     /** The selected section's key, marked with a casing; null for none. */
     selected: string | null;
+    /** The real moves ride these sections (flight `it-map-live`, car M2
+     *  of design e765b3fc): the rate-replay blocks are then off, so no
+     *  crossing is drawn twice, once as a picture of it. */
+    live?: boolean;
   }>;
-  let { sections, borders, reduced, selected }: Props = $props();
+  let { sections, borders, reduced, selected, live = false }: Props = $props();
 
   const track = $derived(sections.filter((s) => s.kind === 'section'));
   const ramps = $derived(sections.filter((s) => s.kind !== 'section'));
@@ -93,7 +97,7 @@
     {@const b = borders.get(s.key)}
     {@const ground = sectionGround(b)}
     {@const waiting = waitingBlocks(s, b)}
-    {@const trains = trainsOf(b, reduced)}
+    {@const trains = live ? null : trainsOf(b, reduced)}
     {@const href = sectionHref(from, to)}
     {@const isSelected = selected === s.key}
     <a class="section-link" {href} data-section-link={s.key} data-selected={isSelected ? 'true' : undefined}
