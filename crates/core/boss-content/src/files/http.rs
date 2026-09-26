@@ -145,11 +145,13 @@ async fn check_policy(
         Ok(boss_policy_client::Decision::Deny { reason }) => {
             Err((StatusCode::FORBIDDEN, format!("policy denied: {reason}")).into_response())
         }
-        Err(e) => Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("policy unreachable: {e}"),
-        )
-            .into_response()),
+        // The one rendering every door gives: 503 + Retry-After and the
+        // fixed word, never the client's text, which names the policy
+        // service's internal URL (backlog fe9d212c).
+        Err(e) => {
+            tracing::warn!(error = %e, "files: policy check failed");
+            Err(e.into_response())
+        }
     }
 }
 
@@ -593,11 +595,8 @@ async fn audit(
             return (StatusCode::FORBIDDEN, format!("policy denied: {reason}")).into_response();
         }
         Err(e) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                format!("policy unreachable: {e}"),
-            )
-                .into_response();
+            tracing::warn!(error = %e, "files audit: policy check failed");
+            return e.into_response();
         }
     }
     let Some(pool) = state.pool.clone() else {
@@ -668,16 +667,61 @@ mod tests {
     const BOUNDARY: &str = "boss-attach-limit-test";
 
     fn app() -> Router {
+        app_with(Arc::new(boss_policy_client::PermissivePolicyClient))
+    }
+
+    fn app_with(policy: Arc<dyn PolicyClient>) -> Router {
         router(FilesApiState {
             repo: Arc::new(InMemoryFileRepository::new()),
             storage: Arc::new(InMemoryFileStorage::new()),
             publisher: None,
-            policy: Arc::new(boss_policy_client::PermissivePolicyClient),
+            policy,
             bucket: "test".into(),
             #[cfg(feature = "postgres")]
             pool: None,
             clock: Arc::new(boss_clock_client::WallClockClient),
         })
+    }
+
+    /// Backlog fe9d212c: the files door answered a policy outage as 503
+    /// "policy unreachable: <the client's error>" — the policy service's
+    /// internal URL — with no Retry-After. It answers through
+    /// `PolicyClientError`'s one rendering now. The real adapter against
+    /// a port nothing listens on, so the outage is the production one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_policy_outage_answers_503_with_retry_after_and_no_address() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dark = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let app = app_with(Arc::new(boss_policy_client::ReqwestPolicyClient::new(dark)));
+        let resp = app
+            .oneshot(
+                Request::get("/api/files?target_kind=job&target_id=job-1")
+                    .header(
+                        "x-boss-user",
+                        r#"{"id":"agent-test","role":"platform-admin","access_tier":"operator"}"#,
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(
+                boss_policy_client::POLICY_OUTAGE_RETRY_AFTER_SECS
+                    .to_string()
+                    .as_str()
+            )
+        );
+        let body = http_body_util::BodyExt::collect(resp.into_body())
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(String::from_utf8_lossy(&body), "policy-unreachable");
     }
 
     /// A multipart body of EXACTLY `total` bytes: the two text fields,

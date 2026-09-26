@@ -4079,8 +4079,9 @@ pub(crate) fn is_transient(msg: &str) -> bool {
         || m.contains("broken pipe")
         || m.contains("timed out")
         || m.contains("dns error")
-        // The jobs API answering 403 because ITS policy client failed
-        // closed while the policy service rolled — the conductor's
+        // The jobs API refusing because ITS policy client could not ask
+        // while the policy service rolled — a 503 `policy-unreachable`
+        // since 45553536, a 403 before it — the conductor's
         // classifier's predicate, not a second copy (backlog 5d4ad086:
         // this wait exited 1 on it at 21:35Z on 2026-09-25 while the
         // gate it watched went green).
@@ -4093,7 +4094,7 @@ pub(crate) fn is_transient(msg: &str) -> bool {
 fn absence_named(msg: &str) -> &'static str {
     if crate::train::names_a_policy_outage(msg) {
         "the jobs API is refusing reads because its policy service is failing \
-         (a fail-closed 403: policy-unreachable, or a policy 5xx)"
+         (a 503: policy-unreachable)"
     } else {
         "system of record unreachable"
     }
