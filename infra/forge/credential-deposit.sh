@@ -242,7 +242,19 @@ else
     # host: infra/forge/host-absent-tools.txt).
     KC="${BOSS_OPS_DIR:-/etc/boss-ops}/kubeconfig"
     KUBECTL=(docker run --rm --network host -v "$KC:/kc:ro" alpine/k8s:1.33.3 kubectl --kubeconfig=/kc)
-    [ -r "$KC" ] || KC_STATE="unreadable: $KC is absent or unreadable (the cluster-operator role's admin kubeconfig)"
+    # ABSENT is not REFUSED (backlog 714bc71f). A kubeconfig David has
+    # not placed is root material no converge can mint or repair, so it
+    # is recorded as not ready and does not red the pass — install-
+    # cluster-operator.sh records the same fact as `ops_credentials`,
+    # and the estate compare alarms on it. Exiting 1 here (car 78a88f65)
+    # closed every forge converge failed for twelve hours, a permanent
+    # red that hid any real one. A file that IS there and cannot be
+    # read is the estate's fault, and stays `unreadable` (rc 1).
+    if [ ! -e "$KC" ] && [ ! -L "$KC" ]; then
+        KC_STATE="not ready: $KC absent — root material, placed by David (design 835c0c9c); the broker's rotation cannot be delivered until it is"
+    elif [ ! -r "$KC" ]; then
+        KC_STATE="unreadable: $KC is present but unreadable (the cluster-operator role's admin kubeconfig)"
+    fi
 fi
 # read_secret — one read of the declared Secret into READ_VALUE (the
 # value, or empty) and READ_STATE (what a record may say about it). A

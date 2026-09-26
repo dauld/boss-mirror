@@ -62,21 +62,20 @@ _co_talosctl() {
     rm -f "$tmp"
 }
 
+# The check itself is infra/estate/ops-credentials.sh, which the host
+# observer reads too, so the estate compare can raise the absence this
+# field only records (backlog 714bc71f). Not-ready is recorded and never
+# fails the converge: only David can place root material.
+# shellcheck source=infra/estate/ops-credentials.sh
+. "$(dirname "${BASH_SOURCE[0]}")/ops-credentials.sh"
+
 _co_credentials() {
-    local missing="" cred f
-    for cred in talosconfig kubeconfig; do
-        f="$BOSS_OPS_DIR/$cred"
-        if [ ! -f "$f" ]; then
-            missing="$missing $cred:absent"
-        elif [ "$(stat -c '%U:%G %a' "$f" 2>/dev/null)" != "root:root 600" ]; then
-            missing="$missing $cred:$(stat -c '%U:%G %a' "$f")"
-        fi
-    done
-    if [ -n "$missing" ]; then
-        echo "install-cluster-operator: credentials not ready —${missing} (want root:root 600 under $BOSS_OPS_DIR; placed by hand, never by this script)"
-        if declare -F run_summary_field >/dev/null; then run_summary_field ops_credentials "not ready:${missing}"; fi
-    else
+    local state
+    state="$(ops_credentials_state)"
+    if [ "$state" = "present" ]; then
         echo "install-cluster-operator: credentials present (root:root 600)"
-        if declare -F run_summary_field >/dev/null; then run_summary_field ops_credentials "present"; fi
+    else
+        echo "install-cluster-operator: credentials ${state} (want root:root 600 under $BOSS_OPS_DIR; placed by hand, never by this script)"
     fi
+    if declare -F run_summary_field >/dev/null; then run_summary_field ops_credentials "$state"; fi
 }

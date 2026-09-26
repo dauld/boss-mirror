@@ -277,6 +277,8 @@ pub(crate) fn compare_host(declared: &[Json], observation: &Json) -> Json {
     let mut drift: Vec<Json> = Vec::new();
     let mut disk_tight: Vec<Json> = Vec::new();
     let mut not_ready: Vec<Json> = Vec::new();
+    let mut ops_absent: Vec<Json> = Vec::new();
+    let mut ops_unmeasured: Vec<Json> = Vec::new();
 
     for node in &observed {
         let Some(id) = node.get("id").and_then(Json::as_str) else {
@@ -300,6 +302,11 @@ pub(crate) fn compare_host(declared: &[Json], observation: &Json) -> Json {
             }));
             continue;
         };
+        match ops_credentials_finding(dec, node) {
+            Some(Ok(finding)) => ops_absent.push(finding),
+            Some(Err(unmeasured)) => ops_unmeasured.push(unmeasured),
+            None => {}
+        }
         let mut fields = serde_json::Map::new();
         for key in ["cpu", "memory_gb"] {
             let d = dec.get(key).cloned().unwrap_or(Json::Null);
@@ -324,14 +331,80 @@ pub(crate) fn compare_host(declared: &[Json], observation: &Json) -> Json {
             "observed_not_declared": observed_not_declared.len(),
             "drift": drift.len(),
             "disk_tight": disk_tight.len(),
+            "ops_credentials_absent": ops_absent.len(),
         },
         "findings": {
             "observed_not_declared": observed_not_declared,
             "drift": drift,
             "disk_tight": disk_tight,
             "not_ready": not_ready,
+            "ops_credentials_absent": ops_absent,
+            "ops_credentials_unmeasured": ops_unmeasured,
         },
     })
+}
+
+/// The role whose declaration obliges a host to hold root material
+/// under its ops directory (`infra/estate/roles.toml`, design 1bc4b4ed).
+const CLUSTER_OPERATOR_ROLE: &str = "cluster-operator";
+
+/// The declared credential set, judged (backlog 714bc71f). A host that
+/// DECLARES `cluster-operator` is expected to hold the admin kubeconfig
+/// and talosconfig David places (design 835c0c9c: root material "cannot
+/// be minted from anything the estate holds, so placing it stays
+/// David's act"). The converge records their absence as not-ready and
+/// must not fail over it — no converge can repair it — so this is where
+/// the absence becomes something a reader is interrupted by: a HARD
+/// finding `estate.alarm` raises as one urgent packet per host, whose
+/// entry names the act that clears it.
+///
+/// The observation carries `ops_credentials: {dir, state}`, where
+/// `state` is the one check's own words (`infra/estate/ops-credentials.sh`,
+/// read by the converge too): `present`, `not ready: <cred>:<why> …`,
+/// or `unmeasured: …`. Only `not ready` is hard — it covers a file that
+/// is there with the wrong owner or mode as well as one that is absent,
+/// and the entry quotes which. A reading that is missing or unmeasured
+/// on a declared operator is `Err` — informational, never hard (a guess
+/// is the crying-wolf class), but never silently clean either.
+/// `None` for a host that does not declare the role or holds its set.
+fn ops_credentials_finding(declared: &Json, node: &Json) -> Option<Result<Json, Json>> {
+    let declares = declared
+        .get("roles")
+        .and_then(Json::as_array)
+        .is_some_and(|r| r.iter().any(|x| x.as_str() == Some(CLUSTER_OPERATOR_ROLE)));
+    if !declares {
+        return None;
+    }
+    let id = node.get("id").and_then(Json::as_str).unwrap_or("");
+    let creds = node.get("ops_credentials");
+    let state = creds
+        .and_then(|c| c.get("state"))
+        .and_then(Json::as_str)
+        .unwrap_or("");
+    if state == "present" {
+        return None;
+    }
+    if !state.starts_with("not ready") {
+        let why = if state.is_empty() {
+            "the observation carries no ops_credentials reading"
+        } else {
+            state
+        };
+        return Some(Err(json!({ "id": id, "state": why })));
+    }
+    let dir = creds
+        .and_then(|c| c.get("dir"))
+        .and_then(Json::as_str)
+        .unwrap_or("/etc/boss-ops");
+    Some(Ok(json!({
+        "id": id,
+        "state": state,
+        "act": format!(
+            "place {dir}/kubeconfig and {dir}/talosconfig root:root 600 on {id} — root \
+             material, David's act (design 835c0c9c); until then the broker's rotations \
+             cannot be delivered there"
+        ),
+    })))
 }
 
 /// How long an UNRECORDED dead-letter stays a finding (8834804a). The
@@ -1555,6 +1628,86 @@ mod tests {
             body["findings"]["observed_not_declared"][0]["id"],
             "mystery-box"
         );
+    }
+
+    // ----- the declared credential set (backlog 714bc71f) -----
+
+    fn host_obs_creds(id: &str, creds: Json) -> Json {
+        let mut obs = host_obs(id, 95, 228);
+        obs["nodes"][0]["ops_credentials"] = creds;
+        obs
+    }
+
+    fn operator(id: &str) -> Json {
+        json!({"id": id, "role": "forge", "roles": ["cluster-operator", "ops-runner"]})
+    }
+
+    #[test]
+    fn a_declared_cluster_operator_without_its_root_material_is_the_finding() {
+        // The forge declared cluster-operator and held neither file from
+        // 2026-09-25 22:04Z on; the converge recorded it every tick and
+        // nothing read it. The finding names the host, what was seen,
+        // and the act only David can perform.
+        let obs = host_obs_creds(
+            "forge",
+            json!({"dir": "/etc/boss-ops", "state": "not ready: talosconfig:absent kubeconfig:absent"}),
+        );
+        let body = compare_host(&[operator("forge")], &obs);
+        let found = &body["findings"]["ops_credentials_absent"];
+        assert_eq!(found.as_array().map(Vec::len), Some(1), "{body}");
+        assert_eq!(found[0]["id"], "forge");
+        assert_eq!(
+            found[0]["state"],
+            "not ready: talosconfig:absent kubeconfig:absent"
+        );
+        let act = found[0]["act"].as_str().unwrap_or("");
+        assert!(
+            act.contains("/etc/boss-ops/kubeconfig")
+                && act.contains("/etc/boss-ops/talosconfig")
+                && act.contains("root:root 600")
+                && act.contains("David")
+                && act.contains("forge"),
+            "the finding names David's act: {act}"
+        );
+        assert_eq!(body["counts"]["ops_credentials_absent"], 1);
+    }
+
+    #[test]
+    fn present_credentials_or_an_undeclared_role_are_no_finding() {
+        let present = host_obs_creds("forge", json!({"dir": "/etc/boss-ops", "state": "present"}));
+        let body = compare_host(&[operator("forge")], &present);
+        assert_eq!(body["counts"]["ops_credentials_absent"], 0, "{body}");
+        // A host that does not declare the role owes no root material:
+        // the same reading is not a finding there.
+        let absent = host_obs_creds(
+            "w-host",
+            json!({"dir": "/etc/boss-ops", "state": "not ready: talosconfig:absent kubeconfig:absent"}),
+        );
+        let plain = json!({"id": "w-host", "role": "conductor", "roles": ["ml-batch-host"]});
+        let body = compare_host(&[plain], &absent);
+        assert_eq!(body["counts"]["ops_credentials_absent"], 0, "{body}");
+    }
+
+    #[test]
+    fn a_cluster_operator_whose_credentials_were_not_read_is_unmeasured_not_clean() {
+        // An observer that predates the field, or that could not search
+        // the directory, has not said the credentials are there. Not a
+        // hard finding — a guess is the crying-wolf class — but not
+        // silence either.
+        for obs in [
+            host_obs("forge", 95, 228),
+            host_obs_creds(
+                "forge",
+                json!({"dir": "/etc/boss-ops", "state": "unmeasured: /etc/boss-ops is not searchable by david"}),
+            ),
+        ] {
+            let body = compare_host(&[operator("forge")], &obs);
+            assert_eq!(body["counts"]["ops_credentials_absent"], 0, "{body}");
+            assert_eq!(
+                body["findings"]["ops_credentials_unmeasured"][0]["id"], "forge",
+                "{body}"
+            );
+        }
     }
 
     // ----- the self-scoped unit comparison (729329c6) -----

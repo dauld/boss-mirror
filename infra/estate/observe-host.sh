@@ -28,6 +28,12 @@
 set -eu
 # shellcheck source=/dev/null
 . "$(dirname "$0")/observe-lib.sh"
+# The declared root material, read by the ONE check the converge also
+# uses (backlog 714bc71f). Carried on every host's reading; estate.compare
+# judges it against the host's declared roles, so this script needs no
+# copy of which host owes what.
+# shellcheck source=/dev/null
+. "$(dirname "$0")/ops-credentials.sh"
 
 : "${HOST_ID:?HOST_ID is required and must match the estate node id}"
 : "${JOBS_API:?JOBS_API is required}"
@@ -43,8 +49,12 @@ free_kb=$(df -k / | awk 'NR==2 {print $4}')
 disk_gb=$(( (disk_kb + 524288) / 1048576 ))
 free_gb=$(( (free_kb + 524288) / 1048576 ))
 up_s=$(awk '{print int($1)}' /proc/uptime)
+ops_dir="${BOSS_OPS_DIR:-/etc/boss-ops}"
+ops_state=$(ops_credentials_state)
 
 observation=$(jq -n \
+  --arg ops_dir "$ops_dir" \
+  --arg ops_state "$ops_state" \
   --arg id "$HOST_ID" \
   --arg address "$ADDRESS" \
   --arg observer "boss-estate-observe-host" \
@@ -60,7 +70,8 @@ observation=$(jq -n \
     nodes: [{
       id: $id, address: $address, cpu: $cpu, memory_gb: $memory_gb,
       disk_gb: $disk_gb, disk_free_gb: $disk_free_gb,
-      uptime_s: $uptime_s, ready: true
+      uptime_s: $uptime_s, ready: true,
+      ops_credentials: { dir: $ops_dir, state: $ops_state }
     }]
   }')
 
