@@ -638,6 +638,7 @@ mod tests {
             session_key: vec![0u8; 32],
             proxy_client: reqwest::Client::new(),
             perf: Arc::new(PerfCollector::new()),
+            machine_token: Default::default(),
         });
         let root = boss_testing::scratch_dir("gateway-inquiries");
         boss_testing::create_dir(&root);

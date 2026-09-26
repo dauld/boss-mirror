@@ -55,15 +55,19 @@ pub(super) async fn yard_regions<R: JobsRepository + 'static, B: EventBus + 'sta
         Err(resp) => return resp,
     };
     let map = regions::regions(&rows.inputs(now, window_hours));
-    // THE OBSERVED-UNDECLARED READING (design e765b3fc §2b, car M1):
-    // the routes the map does not draw that moves took in this window,
-    // from the moves record. Wall clock, as the record stamps it. A
-    // failed read leaves the reading null — never an empty list, which
-    // would say every move took a drawn route.
+    // THE OBSERVED-UNDECLARED READING (design e765b3fc §2b; M1 read it,
+    // R2 made it judge): every route the moves record saw taken in this
+    // window, judged against the routes derived now from the protocols
+    // and the declared hand-offs. Wall clock, as the record stamps it. A
+    // failed read of either leaves the reading null and judges nothing —
+    // never an empty list, which would say every move took a declared
+    // route.
     let map = match state.yard_moves.as_ref() {
         Some(feed) => {
             let since = boss_clock_client::wall_now() - chrono::Duration::hours(window_hours);
-            crate::moves::with_undeclared(map, feed.store.undeclared(since).await.ok())
+            let crossings = feed.store.crossings(since).await.ok();
+            let routes = super::routes::derived(&state, None).await.ok();
+            crate::moves::with_undeclared(map, crossings, routes.as_ref(), now)
         }
         None => map,
     };

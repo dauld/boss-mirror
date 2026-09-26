@@ -211,11 +211,75 @@ pub(crate) fn block_in_row(row: &Value, slug: &str) -> Option<Settings> {
 /// verb reads, sharing `projected` so "carries a projection" is decided
 /// once. The row half stays here because this verb holds the row as
 /// served JSON, not as a parsed spec.
+///
+/// The row half answers only when the pinned step declares the same
+/// fields as the row's step (`boss_jobs::agent_spec::same_contract`,
+/// backlog 09b354e7): otherwise the block was written for a contract
+/// the packet does not run, and [`pinned_skew_refusal`] says so.
 pub(crate) fn settings_for(step: &Value, row: Option<&Value>) -> Option<Settings> {
     block_on_step(step).or_else(|| {
         let slug = step.get("spec_slug").and_then(Value::as_str)?;
-        block_in_row(row?, slug)
+        let row = row?;
+        if !contract_agrees(step, row, slug) {
+            return None;
+        }
+        block_in_row(row, slug)
     })
+}
+
+/// The `fields` a step (packet or row, same serde shape) declares. An
+/// absent key is none, as the serde default reads it; an unreadable one
+/// is `None`, which [`contract_agrees`] counts as disagreement — a
+/// contract it cannot read is not one it can vouch for.
+fn declared_fields(step: &Value) -> Option<Vec<boss_core::job::StepField>> {
+    match step.get("fields") {
+        None | Some(Value::Null) => Some(Vec::new()),
+        Some(v) => serde_json::from_value(v.clone()).ok(),
+    }
+}
+
+/// Whether the packet's pinned `step` and `row`'s step `slug` declare
+/// the same fields — the one rule, `boss_jobs::agent_spec::same_contract`,
+/// that the station queue and the claim door also apply.
+fn contract_agrees(step: &Value, row: &Value, slug: &str) -> bool {
+    let Some(row_step) = row.get("steps").and_then(Value::as_array).and_then(|s| {
+        s.iter()
+            .find(|s| s.get("title").and_then(Value::as_str) == Some(slug))
+    }) else {
+        return false;
+    };
+    match (declared_fields(step), declared_fields(row_step)) {
+        (Some(pinned), Some(active)) => boss_jobs::agent_spec::same_contract(&pinned, &active),
+        _ => false,
+    }
+}
+
+/// The refusal a pinned step gets when the active row declares a block
+/// for a DIFFERENT contract (backlog 09b354e7): it names the step, both
+/// versions and the convert that moves the packet — or a human, since
+/// the step is still workable by one under the version it runs. `None`
+/// when the row's block would not have applied anyway.
+pub(crate) fn pinned_skew_refusal(job: &Value, step: &Value, row: &Value) -> Option<String> {
+    let slug = step.get("spec_slug").and_then(Value::as_str)?;
+    block_in_row(row, slug)?;
+    if contract_agrees(step, row, slug) {
+        return None;
+    }
+    let kind = job.get("kind").and_then(Value::as_str).unwrap_or("?");
+    let packet = crate::envelope::job_id(job).unwrap_or("?");
+    let packet = &packet[..8.min(packet.len())];
+    let version = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_i64)
+            .map_or_else(|| "v?".to_string(), |n| format!("v{n}"))
+    };
+    let (pinned, active) = (version(job, "workflow_version"), version(row, "version"));
+    Some(format!(
+        "step `{slug}` of {kind} {pinned} (the version packet {packet} is pinned to) declares no \
+         agent block, and {active}'s `{slug}` declares one for different fields — a run briefed \
+         from {active} would be asked for a contract this step does not have. Move the packet \
+         with `boss job convert {packet} --to {active}`, or give the step to a human"
+    ))
 }
 
 /// The refusal a step with no block gets: it names the fix, in the
@@ -1282,8 +1346,13 @@ pub(crate) async fn dispatch_at(
             let row = api_at(Method::GET, format!("/api/workflows/{kind}"), None)
                 .await
                 .with_context(|| format!("reading the {kind} Workflow row for its agent block"))?;
-            let block = settings_for(step, row.as_ref())
-                .ok_or_else(|| anyhow::anyhow!("{}", no_block_refusal(&kind, &slug)))?;
+            let block = settings_for(step, row.as_ref()).ok_or_else(|| {
+                let why = row
+                    .as_ref()
+                    .and_then(|r| pinned_skew_refusal(&job, step, r))
+                    .unwrap_or_else(|| no_block_refusal(&kind, &slug));
+                anyhow::anyhow!("{why}")
+            })?;
             (block, row)
         }
     };
@@ -4642,6 +4711,56 @@ mod wire_tests {
         assert_eq!(writes, 0, "nothing claimed, nothing filed");
     }
 
+    /// THE 09b354e7 CASE: a packet pinned to v2, whose step carries the
+    /// fields v2 declared (none), is NOT dispatched under the active
+    /// row's block when that row's step declares different fields — the
+    /// run would be briefed for a contract its pinned step does not
+    /// have. Refused before the claim, naming the step, both versions
+    /// and the convert that moves the packet.
+    #[tokio::test]
+    async fn a_pinned_step_whose_fields_differ_from_the_active_row_is_refused() {
+        let mut packet = packet_without_projection();
+        packet["workflow_version"] = json!(2);
+        packet["steps"][1]["fields"] = json!([]);
+        let mut row = row_with_block();
+        row["version"] = json!(11);
+        row["steps"][1]["fields"] = json!([
+            { "name": "evidence", "field_type": "text", "required": true },
+        ]);
+        let (base, log) = stub(packet, row, false).await;
+        let err = dispatch_at(
+            &reqwest::Client::new(),
+            &base,
+            &repo(),
+            PACKET,
+            None,
+            None,
+            &Overrides::default(),
+            false,
+            "claude@algedonic.dev",
+            "emp-david",
+            "h",
+            BriefSource::Rendered,
+        )
+        .await
+        .expect_err("refused");
+        let text = format!("{err:#}");
+        assert!(text.contains("step `build`"), "{text}");
+        assert!(text.contains("v2") && text.contains("v11"), "{text}");
+        assert!(
+            text.contains(&format!("boss job convert {} --to v11", &PACKET[..8])),
+            "{text}"
+        );
+        let writes = log
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _, _)| m != "GET")
+            .count();
+        assert_eq!(writes, 0, "nothing claimed, nothing filed");
+    }
+
     /// The packet, declaring the paths its change will touch.
     fn packet_declaring(paths: &[&str]) -> Value {
         let mut p = packet_without_projection();
@@ -6294,6 +6413,19 @@ mod wire_tests {
                     .and_then(|s| s["spec_slug"].as_str()),
                 Some("build")
             );
+        }
+
+        /// THE 09b354e7 CASE, at the inbox: the pinned step declares
+        /// fields the active row's step does not, so the active block is
+        /// not its block and the inbox does not take it — the same
+        /// answer the station queue's `agent_spec::resolved` gives.
+        #[test]
+        fn a_pinned_step_whose_fields_differ_is_not_waiting() {
+            let mut row = row_with_block();
+            row["steps"][1]["fields"] = json!([
+                { "name": "evidence", "field_type": "text", "required": true },
+            ]);
+            assert!(waiting_step(&pinned_packet(), Some(&row)).is_none());
         }
 
         /// And end to end: the queue names only the pinned packet, and

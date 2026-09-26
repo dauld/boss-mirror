@@ -38,6 +38,7 @@ mod presence;
 mod queue_age;
 mod refusals;
 mod regions;
+mod routes;
 mod rule_firings;
 mod sim_clock;
 mod stations;
@@ -56,6 +57,7 @@ use plugins::*;
 use queue_age::*;
 use refusals::*;
 use regions::*;
+use routes::*;
 use rule_firings::*;
 use sim_clock::*;
 use stations::*;
@@ -318,6 +320,10 @@ pub fn router_shared<R: JobsRepository + 'static, B: EventBus + 'static>(
         // as a page after a seq and as a stream that resumes from one.
         .route("/api/yard/moves", get(yard_moves::<R, B>))
         .route("/api/yard/moves/stream", get(yard_moves_stream::<R, B>))
+        // THE ROUTES (design e765b3fc §2b, car R2): every line the map
+        // may draw, derived from the protocols, the declared hand-offs
+        // and the moves record — each with the sources that support it.
+        .route("/api/yard/routes", get(yard_routes::<R, B>))
         .route("/api/jobs", get(list_jobs::<R, B>))
         .route("/api/jobs", post(create_job::<R, B>))
         .route("/api/jobs/{id}", get(get_job::<R, B>))

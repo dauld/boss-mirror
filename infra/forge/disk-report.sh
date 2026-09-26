@@ -1,5 +1,20 @@
 #!/usr/bin/env bash
-# disk-report.sh — what is consuming the forge host's disk, READ-ONLY.
+# disk-report.sh — what is consuming this host's disk, READ-ONLY. It
+# serves the forge and boss-gcp (infra/ops/verbs/disk-report.json);
+# every section skips what the host does not have, so one script reads
+# both.
+#
+# BOSS-GCP (backlog d3c7eada, 2026-09-26). boss-gcp's 48 GB root sat at
+# 11-13 GB free for nine days under its 17 GB floor, and the only disk
+# verb serving it was `df` — so what filled the root could not be read
+# through a door. The residue suspected there is the retired second
+# stack (ops-request 7912c9ae left its unit files and binaries, and put
+# its database capture under /var/backups/boss/second-stack/), so the
+# fixed list carries /var/backups and /usr/local, and /var/backups,
+# /opt, /home and /var/lib are also read one level down. That host
+# mounts its builds (/var/lib/boss-build, sdc) and postgres (sdb) UNDER
+# /var/lib, so a directory that is a mount point is marked as its own
+# filesystem: its size says nothing about the root the alarm is about.
 #
 # WHY. On 2026-09-05 the locomotive refused train #204 at 65GB free
 # against its 70GB floor; the bounded reclaim (disk-floor-sweep.sh)
@@ -69,22 +84,38 @@ hr "rootless docker (converge builds; the daemon disk-floor-sweep prunes)"
 export DOCKER_HOST="${DOCKER_HOST:-unix:///run/user/1000/docker.sock}"
 docker system df 2>/dev/null || say "rootless docker: not reachable at $DOCKER_HOST"
 
+# One directory's size, one line: sudo -n first, then an unprivileged
+# read that says it may undercount, then "not readable" — so a reader
+# tells "small" from "unreadable". A mount point is marked as its own
+# filesystem (d3c7eada: boss-gcp mounts sdb and sdc under /var/lib).
+measure() {
+    local d="$1" out note=""
+    if mountpoint -q "$d" 2>/dev/null; then
+        note="	(its own filesystem, not the root: $(findmnt -no SOURCE "$d" 2>/dev/null | sed -n '1p'))"
+    fi
+    if out=$(sudo -n du -xsh "$d" 2>/dev/null); then
+        say "$out$note"
+    elif out=$(du -xsh "$d" 2>/dev/null); then
+        say "$out	(unprivileged read; may undercount)$note"
+    else
+        say "?	$d	(not readable)$note"
+    fi
+}
+
 hr "directories, largest first (du -xsh; sudo -n where refused it says so)"
 # Fixed list — the places a forge host grows: both docker roots,
 # Forgejo's data (repos, packages/registry, actions logs+artifacts),
-# the runner's workspaces, journals, and home.
+# the runner's workspaces, journals, and home; and the places a
+# retired stack leaves residue on boss-gcp: backups and /usr/local; and
+# /var/lib whole, which `du -x` counts on the ROOT only — the mounts
+# under it are left out, so this line is /var/lib's share of the root.
 for d in /var/lib/docker /var/lib/containerd /var/lib/forgejo /var/lib/gitea \
          /opt /srv /var/log /var/log/journal /var/cache /var/tmp /tmp \
+         /var/backups /usr/local /var/lib \
          /home /home/david/.local/share/docker /home/david/boss /home/david/.cache \
          /root /snap; do
     [ -e "$d" ] || continue
-    if out=$(sudo -n du -xsh "$d" 2>/dev/null); then
-        say "$out"
-    elif out=$(du -xsh "$d" 2>/dev/null); then
-        say "$out	(unprivileged read; may undercount)"
-    else
-        say "?	$d	(not readable)"
-    fi
+    measure "$d"
 done | sort -h -r
 
 hr "forgejo data, one level down (if readable)"
@@ -94,8 +125,18 @@ for base in /var/lib/forgejo /var/lib/gitea /opt/forgejo /srv/forgejo; do
         || du -xsh "$base"/* 2>/dev/null | sort -h -r | sed -n '1,15p'
 done
 
-hr "top-level /var/lib, largest first (sudo -n)"
-sudo -n du -xsh /var/lib/* 2>/dev/null | sort -h -r | sed -n '1,15p' || say "/var/lib: not readable without sudo"
+# One level down, bounded to the 15 largest entries each — the level a
+# reclaim is decided at (d3c7eada). /var/lib's entries are measured one
+# by one so a mount point under it is marked, not counted as root.
+for base in /var/backups /opt /home /var/lib; do
+    [ -d "$base" ] || continue
+    set -- "$base"/*
+    [ -e "$1" ] || continue
+    hr "$base, one level down, largest first (15 at most)"
+    for d in "$@"; do
+        measure "$d"
+    done | sort -h -r | sed -n '1,15p'
+done
 
 hr "verdict"
 # THE READING CARRIES ITS VERDICT (backlog 970c0c94, measured

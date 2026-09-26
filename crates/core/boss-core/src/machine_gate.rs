@@ -59,7 +59,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -68,12 +68,60 @@ use std::time::Duration;
 pub const MODE_FILE_ENV: &str = "BOSS_MACHINE_GATE_MODE_FILE";
 pub const DEFAULT_MODE_FILE: &str = "/etc/boss/machine-gate/mode";
 /// The directory holding the `current`, `next` and `previous` slots —
-/// the `boss-machine-token` Secret's mount (car 4).
-pub const TOKEN_DIR_ENV: &str = "BOSS_MACHINE_TOKEN_DIR";
-pub const DEFAULT_TOKEN_DIR: &str = "/etc/boss/machine-token";
+/// the `boss-machine-token` Secret's mount (car 4). Defined ONCE, in
+/// `machine_token`, because every caller reads its `current` from the
+/// same directory this gate accepts from (car 2).
+pub use crate::machine_token::{DEFAULT_TOKEN_DIR, TOKEN_DIR_ENV};
 
+/// The gate's own routes live under this prefix on every service.
+pub const ROUTE_PREFIX: &str = "/api/machine-gate/";
 pub const MISSES_PATH: &str = "/api/machine-gate/misses";
 pub const ACCEPTS_PATH: &str = "/api/machine-gate/accepts";
+
+/// Does `path` lead to the gate's own routes, however it is spelled?
+/// Percent-decoded, case-folded, with empty segments and `\` read as a
+/// separator, so no spelling a proxy or an upstream might normalise
+/// differently slips past. The gateway asks this before it stamps the
+/// token: stamped, a signed-in user's request would read `/misses` —
+/// every caller's address — with the gateway's credential (review of
+/// car 1, a159e1ee).
+pub fn is_gate_route(path: &str) -> bool {
+    let decoded = percent_decode(path).to_ascii_lowercase();
+    let mut segments = decoded.split(['/', '\\']).filter(|s| !s.is_empty());
+    let prefix: Vec<&str> = ROUTE_PREFIX.split('/').filter(|s| !s.is_empty()).collect();
+    prefix.iter().all(|p| segments.next() == Some(p))
+}
+
+/// `%XX` decoded as bytes, repeatedly until it stops changing (so a
+/// double-encoded `%252d` is read the way a second decoder would read
+/// it); anything that is not valid UTF-8 afterwards is read lossily.
+fn percent_decode(path: &str) -> String {
+    let mut cur = path.to_string();
+    for _ in 0..4 {
+        let bytes = cur.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            let hex = |b: u8| (b as char).to_digit(16);
+            if bytes[i] == b'%'
+                && i + 2 < bytes.len()
+                && let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+            {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+            } else {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+        let next = String::from_utf8_lossy(&out).into_owned();
+        if next == cur {
+            break;
+        }
+        cur = next;
+    }
+    cur
+}
 
 /// How many distinct miss keys one process holds. Past it, a new key is
 /// counted in `overflow` rather than stored: a caller spraying routes
@@ -262,22 +310,27 @@ impl MountedFiles {
     /// so the first request is judged by the configured mode and not by
     /// a default.
     pub fn read_blocking(&self) -> Reading {
-        let file = |p: &Path| std::fs::read_to_string(p).ok();
-        Self::reading(file(&self.mode_file), |name| {
-            file(&self.token_dir.join(name))
+        // Each slot through the one bounded reader every caller uses
+        // (machine_token::read_slot, car 2), so the gate and its callers
+        // cannot disagree about what a slot file holds.
+        Self::reading(std::fs::read_to_string(&self.mode_file).ok(), |name| {
+            machine_token::read_slot(&self.token_dir, name)
         })
     }
 
     /// Read once, without blocking the runtime.
     pub async fn read(&self) -> Reading {
-        let mode = tokio::fs::read_to_string(&self.mode_file).await.ok();
-        let mut slots = HashMap::new();
-        for name in ["current", "next", "previous"] {
-            if let Ok(v) = tokio::fs::read_to_string(self.token_dir.join(name)).await {
-                slots.insert(name, v);
+        let files = self.clone();
+        match tokio::task::spawn_blocking(move || files.read_blocking()).await {
+            Ok(reading) => reading,
+            // Never a default: a default reading is `off`, and a gate
+            // that fell to `off` because a read task died is the quiet
+            // this gate exists to end. Read again, here.
+            Err(e) => {
+                tracing::error!("machine gate: the file read task failed ({e}); reading inline");
+                self.read_blocking()
             }
         }
-        Self::reading(mode, |name| slots.get(name).cloned())
     }
 }
 
@@ -699,6 +752,34 @@ mod tests {
             .await
             .unwrap();
         (status, String::from_utf8_lossy(&body).to_string())
+    }
+
+    #[test]
+    fn the_gate_routes_are_recognised_however_they_are_spelled() {
+        for path in [
+            MISSES_PATH,
+            ACCEPTS_PATH,
+            "/api/machine-gate",
+            "//api//machine-gate/misses",
+            "/API/Machine-Gate/misses",
+            "/api/machine%2dgate/misses",
+            "/api/machine%252Dgate/misses",
+            "%2fapi%2fmachine-gate%2fmisses",
+            "\\api\\machine-gate\\misses",
+        ] {
+            assert!(is_gate_route(path), "{path} was not read as the gate's");
+        }
+        for path in [
+            "/api/jobs/health",
+            "/api/machine-gates/misses",
+            "/api/jobs/machine-gate/misses",
+            "/api/machine",
+            "/",
+            "",
+            "/api/%zz/x",
+        ] {
+            assert!(!is_gate_route(path), "{path} was read as the gate's");
+        }
     }
 
     #[test]

@@ -126,6 +126,7 @@ pub(crate) fn gateway_declaring(
         session_key: KEY.to_vec(),
         proxy_client,
         perf: Arc::new(PerfCollector::new()),
+        machine_token: Default::default(),
     });
     build_router(Some(local_auth(guests)), reads).with_state(state)
 }

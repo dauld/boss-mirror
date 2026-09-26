@@ -170,6 +170,128 @@ fn an_unmeasured_disk_is_not_a_clean_one() {
 }
 
 // ---------------------------------------------------------------------------
+// disk-report on boss-gcp
+// ---------------------------------------------------------------------------
+//
+// WHY (backlog d3c7eada, 2026-09-26). boss-gcp's 48 GB root has sat at
+// 11-13 GB free for nine days, under its 17 GB floor, and the estate
+// alarm now files it. The only disk verb serving that host was `df`, so
+// what fills the root could not be read through a door. The verb now
+// serves boss-gcp, and the script reads the places a retired stack
+// leaves residue there (/var/backups, /opt, /home, /usr/local, /var/lib)
+// and marks a directory that is its OWN filesystem, because boss-gcp's
+// builds (/var/lib/boss-build, sdc) and postgres (sdb) are mounted under
+// /var/lib and would otherwise read as root usage.
+
+/// The disk-report stubs, with `du` also recording every path it was
+/// asked about, one per line, in `du.log` beside the stubs.
+fn disk_report_stubs_logging_du(case: &str) -> (PathBuf, PathBuf) {
+    let stubs = disk_report_stubs(case, 48 * GIB_KB, 12 * GIB_KB);
+    let log = stubs.join("du.log");
+    write_exec(
+        &stubs.join("du"),
+        &format!(
+            "#!/bin/bash\nfor a in \"$@\"; do case \"$a\" in -*) ;; *) printf '%s\\n' \"$a\" >> '{}'; printf '0\\t%s\\n' \"$a\";; esac; done\n",
+            log.display()
+        ),
+    );
+    (stubs, log)
+}
+
+/// Every one of the places the triage named that exists on the host
+/// running the test is measured, and each of /var/backups, /opt, /home
+/// and /var/lib that has entries is also measured one level down — the
+/// level the reclaim will be decided at.
+#[test]
+fn the_report_measures_the_residue_directories_and_one_level_below_them() {
+    let (stubs, log) = disk_report_stubs_logging_du("disk-residue-dirs");
+    let (rc, all) = run_disk_report(&stubs);
+    assert_eq!(rc, 0, "{all}");
+    let asked = std::fs::read_to_string(&log).unwrap_or_default();
+    let asked: Vec<&str> = asked.lines().collect();
+    let mut checked = 0;
+    for dir in ["/var/backups", "/opt", "/home", "/usr/local", "/var/lib"] {
+        if !Path::new(dir).exists() {
+            continue;
+        }
+        checked += 1;
+        assert!(
+            asked.contains(&dir),
+            "{dir} exists here and the report never measured it; du was asked: {asked:?}\n{all}"
+        );
+        // /usr/local is measured whole; the other four one level down too.
+        if dir == "/usr/local" {
+            continue;
+        }
+        let first_child = std::fs::read_dir(dir)
+            .ok()
+            .and_then(|mut entries| entries.next())
+            .and_then(Result::ok)
+            .map(|e| e.path().display().to_string());
+        if let Some(child) = first_child {
+            assert!(
+                asked.iter().any(|a| a.starts_with(&format!("{dir}/"))),
+                "{dir} has entries (e.g. {child}) and none was measured one level down: {asked:?}\n{all}"
+            );
+        }
+    }
+    assert!(
+        checked > 0,
+        "none of the residue directories exists on this host — the test proved nothing"
+    );
+}
+
+/// A directory that is a mount point is a SEPARATE filesystem: its size
+/// says nothing about the root the alarm is about, so the line says so.
+#[test]
+fn a_mount_point_is_marked_as_not_the_root_filesystem() {
+    let (stubs, _) = disk_report_stubs_logging_du("disk-mountpoint");
+    // Every path answers "I am a mount point"; findmnt names the source.
+    write_exec(&stubs.join("mountpoint"), "#!/bin/bash\nexit 0\n");
+    let (rc, all) = run_disk_report(&stubs);
+    assert_eq!(rc, 0, "{all}");
+    let lib_lines: Vec<&str> = all.lines().filter(|l| l.contains("\t/var/lib/")).collect();
+    assert!(
+        !lib_lines.is_empty(),
+        "no /var/lib entry was listed:\n{all}"
+    );
+    for l in &lib_lines {
+        assert!(
+            l.contains("its own filesystem, not the root"),
+            "a mount point under /var/lib must be marked as its own filesystem: {l}\n{all}"
+        );
+    }
+}
+
+/// The verb serves boss-gcp as well as the forge — the only way the
+/// host's root can be measured through a door.
+#[test]
+fn the_disk_report_verb_serves_boss_gcp_and_the_forge() {
+    let verb: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("infra/ops/verbs/disk-report.json"))
+            .expect("the verb file is readable"),
+    )
+    .expect("the verb file is JSON");
+    let hosts: Vec<&str> = verb["hosts"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|h| h.as_str()).collect())
+        .unwrap_or_default();
+    assert!(
+        hosts.contains(&"boss-gcp") && hosts.contains(&"forge"),
+        "disk-report must serve boss-gcp and forge: {hosts:?}"
+    );
+    assert!(
+        !verb["about"].as_str().unwrap_or("").contains("MUTATING"),
+        "disk-report stays read-only: {verb}"
+    );
+    assert_eq!(
+        verb["params"],
+        serde_json::json!([]),
+        "no arguments: {verb}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // conformance-report
 // ---------------------------------------------------------------------------
 

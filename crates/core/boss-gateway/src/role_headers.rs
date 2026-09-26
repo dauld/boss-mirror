@@ -79,19 +79,6 @@ pub async fn inject_role_headers(
         if let Ok(val) = axum::http::HeaderValue::from_str(&session.access_tier) {
             req.headers_mut().insert("x-boss-access-tier", val);
         }
-        // Machine token (7fcd78fa phase 1): the gateway vouches for
-        // session-authenticated browser traffic at the machine door.
-        // Stamped INSIDE the session branch on purpose — the token
-        // asserts "this write came through an authenticated front
-        // door", and stamping it on sessionless traffic would turn the
-        // door's one credential into a blanket pass. The edge strip
-        // above already removed any client-forged copy (x-boss-*).
-        if let Some(token) = boss_core::machine_token::from_env()
-            && let Ok(val) = axum::http::HeaderValue::from_str(&token)
-        {
-            req.headers_mut()
-                .insert(boss_core::machine_token::HEADER, val);
-        }
         // Presence ticket swap (docs/design/presence.md): a verified
         // assertion travels as `x-presence-ticket` — a name outside
         // the x-boss-* prefix so the edge strip above doesn't eat it.
@@ -118,6 +105,28 @@ pub async fn inject_role_headers(
                     .insert(boss_gateway::passkey::PRESENCE_HEADER, val);
             }
         }
+    }
+
+    // Machine token (design 6805c764 choice 6, car 2): stamped on EVERY
+    // request the gateway forwards, session or not. It used to ride the
+    // session branch only (7fcd78fa phase 1), on the reasoning that on
+    // sessionless traffic it would be a blanket pass; once reads join the
+    // gate that would refuse every guest and public read the gateway
+    // proxies. What the token asserts on this hop is "this passed the
+    // edge strip above", so the identity headers beside it are always
+    // the gateway's own resolution — the session's, or none — and a
+    // guest's authority stays where it is decided today, in policy. The
+    // strip already removed any client-forged copy (x-boss-*).
+    //
+    // Never on the gate's own routes (review of car 1, a159e1ee): there
+    // the token would let any signed-in user read `/misses`, every
+    // caller's address, with the gateway's credential.
+    if !boss_core::machine_gate::is_gate_route(req.uri().path())
+        && let Some(token) = state.machine_token.current()
+        && let Ok(val) = axum::http::HeaderValue::from_str(&token)
+    {
+        req.headers_mut()
+            .insert(boss_core::machine_token::HEADER, val);
     }
 
     next.run(req).await
@@ -272,6 +281,7 @@ mod tests {
             session_key: TEST_KEY.to_vec(),
             proxy_client: reqwest::Client::new(),
             perf: Arc::new(crate::perf::PerfCollector::new()),
+            machine_token: Default::default(),
         });
         axum::Router::new()
             .route("/probe", axum::routing::get(probe))
@@ -329,5 +339,204 @@ mod tests {
             seen.contains("\"id\":\"emp-001\"") && !seen.contains("attacker"),
             "session identity must replace the forged headers, got: {seen}"
         );
+    }
+
+    // --- The machine door behind the gateway (design 6805c764, car 2;
+    // backlog 2710c8fc). A service port, gated in `enforce` with the
+    // estate token in its `current` slot, reached two ways: straight at
+    // its port (the LAN machine door) and through this middleware (the
+    // gateway). The in-process "proxy" below forwards method, path and
+    // headers exactly as proxy.rs does, minus the network. ---
+
+    use boss_core::machine_gate::{self, MachineGate, Mode, Reading, Slots};
+    use boss_core::machine_token::{HEADER as TOKEN_HEADER, Source};
+    use tower::ServiceExt;
+
+    const ESTATE_TOKEN: &str = "estate-token-under-test";
+    const FORGED_ADMIN: &str = r#"{"id":"attacker","role":"platform-admin"}"#;
+
+    /// A service port in `enforce`, answering the `x-boss-user` it
+    /// received — so a test reads who the service believed it served.
+    fn service_port() -> axum::Router {
+        let gate = Arc::new(MachineGate::new(
+            "things",
+            &["/api/things/health"],
+            Reading::new(
+                Mode::Enforce,
+                Slots::new(Some(ESTATE_TOKEN.into()), None, None),
+            ),
+        ));
+        let whoami = |headers: axum::http::HeaderMap| async move {
+            headers
+                .get("x-boss-user")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("-")
+                .to_string()
+        };
+        machine_gate::gated(
+            axum::Router::new().route("/api/things/{id}", axum::routing::put(whoami)),
+            gate,
+        )
+    }
+
+    /// The gateway in front of that port, holding `token` as the
+    /// mounted `current` slot it stamps from.
+    fn gateway_before(token: Option<&str>) -> axum::Router {
+        let state = Arc::new(crate::AppState {
+            session_key: TEST_KEY.to_vec(),
+            proxy_client: reqwest::Client::new(),
+            perf: Arc::new(crate::perf::PerfCollector::new()),
+            machine_token: Arc::new(Source::fixed(token.map(String::from))),
+        });
+        let forward = |req: Request<axum::body::Body>| async move {
+            let (parts, body) = req.into_parts();
+            let upstream = Request::from_parts(parts, body);
+            service_port().oneshot(upstream).await.unwrap()
+        };
+        axum::Router::new()
+            .fallback(forward)
+            .layer(axum::middleware::from_fn_with_state(
+                state,
+                inject_role_headers,
+            ))
+    }
+
+    fn put(path: &str, headers: &[(&str, &str)]) -> Request<axum::body::Body> {
+        let mut req = Request::builder().method("PUT").uri(path);
+        for (n, v) in headers {
+            req = req.header(*n, *v);
+        }
+        req.body(axum::body::Body::empty()).unwrap()
+    }
+
+    fn session_cookie() -> String {
+        let mut session = Session::new("real@example.com", 3600);
+        session.employee_id = Some("emp-001".to_string());
+        session.role = Some("team-lead".to_string());
+        format!("{}={}", session::COOKIE_NAME, session.encode(TEST_KEY))
+    }
+
+    async fn send(app: axum::Router, req: Request<axum::body::Body>) -> (u16, String) {
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        (status, String::from_utf8_lossy(&body).to_string())
+    }
+
+    /// The attack the item names: platform-admin asserted straight at a
+    /// service port, with no token or a guessed one, is refused once the
+    /// port enforces. And the control: a machine caller that attaches
+    /// the mounted token is admitted, its asserted identity intact.
+    #[tokio::test]
+    async fn a_forged_identity_at_a_service_port_is_refused_and_a_token_holder_admitted() {
+        for forged in [
+            vec![("x-boss-user", FORGED_ADMIN)],
+            vec![("x-boss-user", FORGED_ADMIN), (TOKEN_HEADER, "a-guess")],
+        ] {
+            let (status, body) = send(service_port(), put("/api/things/1", &forged)).await;
+            assert_eq!(status, 401, "forged {forged:?} was admitted: {body}");
+            assert!(!body.contains("attacker"), "{body}");
+        }
+        let (status, body) = send(
+            service_port(),
+            put(
+                "/api/things/1",
+                &[
+                    ("x-boss-user", r#"{"id":"agent-seeder"}"#),
+                    (TOKEN_HEADER, ESTATE_TOKEN),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(status, 200, "the token holder was refused: {body}");
+        assert!(body.contains("agent-seeder"), "{body}");
+    }
+
+    /// Design choice 6: the gateway stamps the token on EVERY request it
+    /// forwards, sessionless or not, after its edge strip — so a forged
+    /// identity or a forged token sent through it arrives as neither,
+    /// and a session arrives as the session. Before car 2 a sessionless
+    /// request went unstamped and every guest read would be refused the
+    /// day reads joined the gate.
+    #[tokio::test]
+    async fn the_gateway_stamps_every_request_it_forwards_after_the_edge_strip() {
+        let forged = [("x-boss-user", FORGED_ADMIN), (TOKEN_HEADER, "a-guess")];
+        let (status, body) = send(
+            gateway_before(Some(ESTATE_TOKEN)),
+            put("/api/things/1", &forged),
+        )
+        .await;
+        assert_eq!(status, 200, "a sessionless forward was refused: {body}");
+        assert_eq!(body, "-", "a forged identity survived the edge: {body}");
+
+        let cookie = session_cookie();
+        let with_session = [(header::COOKIE.as_str(), cookie.as_str()), forged[0]];
+        let (status, body) = send(
+            gateway_before(Some(ESTATE_TOKEN)),
+            put("/api/things/1", &with_session),
+        )
+        .await;
+        assert_eq!(status, 200, "a session forward was refused: {body}");
+        assert!(
+            body.contains("\"id\":\"emp-001\"") && !body.contains("attacker"),
+            "{body}"
+        );
+
+        // Nothing mounted (every pod until car 4): nothing stamped, so an
+        // enforcing port refuses — the gateway is inert without its file.
+        let (status, _) = send(gateway_before(None), put("/api/things/1", &with_session)).await;
+        assert_eq!(status, 401);
+    }
+
+    /// The review of car 1 (a159e1ee): stamped, a signed-in user's read of
+    /// `/api/machine-gate/misses` would carry the gateway's credential and
+    /// answer every caller's address. The gate's own routes are never
+    /// stamped, however the path is spelled.
+    #[tokio::test]
+    async fn the_gateway_never_stamps_the_gate_routes() {
+        let cookie = session_cookie();
+        for path in [
+            "/api/machine-gate/misses",
+            "/api/machine%2Dgate/misses",
+            "//api/machine-gate/accepts",
+        ] {
+            let req = Request::builder()
+                .uri(path)
+                .header(header::COOKIE, cookie.as_str())
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let seen = probe_response(stamping_probe_app(), req).await;
+            assert!(
+                !seen.contains(TOKEN_HEADER),
+                "{path} was stamped with the machine token: {seen}"
+            );
+        }
+        // Control: the same session on an ordinary path IS stamped.
+        let req = Request::builder()
+            .uri("/probe")
+            .header(header::COOKIE, cookie.as_str())
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let seen = probe_response(stamping_probe_app(), req).await;
+        assert!(seen.contains(TOKEN_HEADER), "{seen}");
+    }
+
+    /// The header probe, behind a gateway that holds the token, on every
+    /// path.
+    fn stamping_probe_app() -> axum::Router {
+        let state = Arc::new(crate::AppState {
+            session_key: TEST_KEY.to_vec(),
+            proxy_client: reqwest::Client::new(),
+            perf: Arc::new(crate::perf::PerfCollector::new()),
+            machine_token: Arc::new(Source::fixed(Some(ESTATE_TOKEN.into()))),
+        });
+        axum::Router::new()
+            .fallback(axum::routing::get(probe))
+            .layer(axum::middleware::from_fn_with_state(
+                state,
+                inject_role_headers,
+            ))
     }
 }

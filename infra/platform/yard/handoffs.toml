@@ -1,0 +1,115 @@
+# THE HAND-OFFS — every place a rule, a cadence or a verb turns one
+# packet into another on the IT map (design e765b3fc §2b, source 2; car
+# R2 on feedback 84cba7e2).
+#
+# WHY THIS FILE EXISTS. The map's routes are DERIVED: `crate::routes`
+# walks each protocol a region can hold and records every place the
+# packet crosses from one region to another (source 1). A protocol
+# cannot say when a DIFFERENT packet takes over — a gate-run's green
+# filing a car, a merged train's cars peeling off into the shed. That
+# filing is code (a dispatcher handler, the conductor, a `boss` verb),
+# and the rules' own `why` already says so: "decisions a protocol row
+# has no way to express". So it is declared, here, in data, and the
+# server reads it (compiled into boss-jobs) as the second source of a
+# route. A move the record makes on a route neither source declares is
+# drawn dashed red and troubles its region (source 3).
+#
+# ONE FILE FOR RULES, CADENCES AND VERBS, not a field on each rule's own
+# file. The design placed a rule's declaration in its file; the jobs API
+# that serves the routes cannot read the dispatcher's rule directory (it
+# is neither in its image nor its registry), and two closed key sets —
+# the dispatcher's RawRule and the cadence row — would each have grown a
+# field only this reader reads. One file the server compiles in is one
+# copy, and the pin below holds every row to the file it names, so a
+# rule renamed or retired fails the test that names this row.
+#
+# EACH ROW:
+#   by   — who makes the move: `rule:<name>` (infra/dispatcher/rules/
+#          <name>.toml), `cadence:<name>` (infra/platform/cadence/
+#          <name>.toml) or `verb:<name>` (a `boss <name>` subcommand).
+#   from — `<kind>@<step>`: the packet handed off, standing where its
+#          protocol puts it while that step is ready (or once it closed
+#          on that step, for a terminal). Omitted for a filing onto the
+#          map from nowhere.
+#   to   — `<kind>@<step>`: the packet that continues, standing where
+#          its protocol puts it while that step is ready. Omitted when
+#          the maker takes the packet OFF the map without a terminal:
+#          absorbed into a packet already standing (a green carried onto
+#          the car it re-gated), or released by a reading the maker
+#          writes onto it (a publish PR GitHub answers closed).
+#   why  — the move, in a sentence, with where it is made.
+#
+# Each `kind@step` is resolved by the SAME walk the protocol routes come
+# from, through the one placement function — so this file names steps,
+# never regions, and cannot draw a line by hand. Pinned by
+# `routes::tests::every_declared_hand_off_is_walked_and_names_its_maker`
+# (and, for verbs, boss-cli's `every_hand_off_verb_is_a_subcommand`).
+
+[[hand_off]]
+by = "rule:auto-park-on-gate-green"
+from = "gate-run@record-verdict"
+to = "ship-a-change@review"
+why = "A green gate files the car it vouches for: the gate-run leaves its bay and the car stands on the loading dock (handlers/jobs_auto_park.rs)."
+
+[[hand_off]]
+by = "cadence:train-board-on-dock-depth"
+from = "ship-a-change@review"
+to = "pr-train@collect"
+why = "The dock's depth fires a train, and the cars it collects ride it from the dock; the train is made up where they stood, so this hand-off crosses no border."
+
+[[hand_off]]
+by = "cadence:train-reconcile"
+from = "pr-train@deployed"
+to = "ship-a-change@proven"
+why = "A merged train's reconcile writes merged=true on the cars it carried, and each leaves the track for the shed to await its proof (design e765b3fc §1, route H)."
+
+[[hand_off]]
+by = "cadence:train-reconcile"
+from = "pr-train@ci"
+to = "ship-a-change@review"
+why = "A train refused at its gate is disassembled, and the cars it did not strike go back to the dock unstruck (pr-train `cancelled`, train_gate.rs; design e765b3fc §1, route C)."
+
+[[hand_off]]
+by = "rule:an-abandoned-step-is-reclaimed-when-its-run-died"
+from = "agent-run@building"
+to = "backlog-item@build"
+why = "A run that died two hours ago releases the step it held: the step goes back to ready, unassigned, at its station (handler jobs.reclaim_abandoned_step; design e765b3fc §1, route G)."
+
+[[hand_off]]
+by = "verb:dispatch"
+from = "backlog-item@build"
+to = "agent-run@briefed"
+why = "boss dispatch claims a ready step at its station and files the run that will execute it on the shop floor."
+
+[[hand_off]]
+by = "verb:gate"
+from = "agent-run@building"
+to = "gate-run@record-verdict"
+why = "boss gate, run by a builder, files the gate-run that takes its branch into a bay."
+
+[[hand_off]]
+by = "verb:gate"
+from = "gate-run@failed"
+to = "gate-run@record-verdict"
+why = "A re-gate after a red: boss gate files a fresh gate-run on the branch the garage holds, and the branch goes back into a bay (design e765b3fc §1, route F)."
+
+[[hand_off]]
+by = "verb:park"
+from = "gate-run@green"
+to = "ship-a-change@review"
+why = "boss park files a car from a green gate-run by hand, copying its receipt; a green no car claimed stood in the garage as stranded."
+
+[[hand_off]]
+by = "rule:auto-park-on-gate-green"
+from = "gate-run@record-verdict"
+why = "A green on a branch whose car already stands on the dock refreshes that car in place (ParkAction::Refresh, the receipt copied to regate_receipt): the gate-run leaves its bay and the map, and nothing new is filed."
+
+[[hand_off]]
+by = "verb:rerail"
+from = "gate-run@green"
+why = "boss rerail --finish carries a green that stood in the garage onto the car at the dock as its regate_receipt; the gate-run leaves the map, absorbed into the car (design e765b3fc §1, route F)."
+
+[[hand_off]]
+by = "rule:refresh-publish-drift-daily"
+from = "publish-to-github@read-checks"
+why = "The daily mirror-drift measurement reads the pull request's state off GitHub and writes it onto the packet as pr_state; a PR GitHub answers closed awaits nothing, and the packet leaves the publish region (regions/publish.rs::publish_prs)."

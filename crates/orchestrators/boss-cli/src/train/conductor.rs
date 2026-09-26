@@ -1180,7 +1180,10 @@ impl Conductor {
             let Some(hours) = dead_gate_run_hours(&run, now) else {
                 // One refused settle must not cost the rest of the pass
                 // (the clock settles below still owe their runs).
-                if let Err(e) = self.settle_orphaned_gate_run(&rid, &run, now).await {
+                if let Err(e) = self
+                    .settle_orphaned_gate_run(&rid, &run, now, &crate::gate::gate_jobs_for_packet)
+                    .await
+                {
                     log(format!(
                         "reconcile: orphaned gate-run {} not settled this pass (retries next): {e:#}",
                         id8(&rid)
@@ -1257,23 +1260,40 @@ impl Conductor {
     /// packet re-read after it, then judged again: a waiter that launched
     /// in between either shows its Job or has refreshed its beat, which
     /// `queue_clear_patch` now keeps. A re-gate that reuses this packet
-    /// after the re-read can still lose it to this write — no atomic claim
-    /// on a gate-run exists (gate.rs, 76d41004) — and its runner's report
-    /// is then refused loudly by the completed step, never silently.
+    /// and stamps `launching_at` after the re-read can still lose it to
+    /// this write — no atomic claim on a gate-run exists (gate.rs,
+    /// 76d41004). What catches it is on the LAUNCH side: `boss gate`
+    /// re-reads the packet just before `kubectl create` and refuses one
+    /// this settle has closed (`gate::launch_target_refusal`, b24e29cb).
+    /// Without that, the runner's report met a completed step and was
+    /// refused only as a line in the pod's log (run.sh), and the waiter
+    /// read `lost` with a receipt saying no Job existed while one ran.
+    ///
+    /// The evidence is written AFTER the verdict step, dated at the
+    /// cluster read — so no open packet carries an orphan finding for a
+    /// settle that did not happen.
     ///
     /// FAILS CLOSED: a cluster that cannot be read is logged and the run
     /// is left to the clock, never settled on an absence nobody observed.
+    /// The read is a parameter (`gate::gate_jobs_for_packet` in
+    /// production) so every refusal above is driven by a test.
     async fn settle_orphaned_gate_run(
         &self,
         rid: &str,
         run: &Value,
         now: DateTime<Utc>,
+        gate_jobs: &(dyn Fn(&str, &str) -> Result<Vec<String>> + Sync),
     ) -> Result<()> {
         if orphaned_gate_run(run, now).is_none() {
             return Ok(());
         }
         let ns = self.cfg.gate_namespace.clone();
-        match crate::gate::gate_jobs_for_packet(&ns, rid) {
+        let read = gate_jobs(&ns, rid);
+        // The instant the evidence reports is the READ, not the pass's
+        // `now`: a pass walks up to a hundred runs, so the pass start can
+        // be minutes older than the reading it would date (b24e29cb).
+        let observed_at = Utc::now();
+        match read {
             Ok(jobs) if jobs.is_empty() => {}
             Ok(_) => return Ok(()),
             Err(e) => {
@@ -1303,13 +1323,6 @@ impl Conductor {
             orphan.last_alive_key,
             orphan.last_alive,
         ));
-        if !self.cfg.dry {
-            self.merge_job_metadata(
-                rid,
-                vec![("orphaned_gate_run", orphan_evidence(&orphan, rid, &ns, now))],
-            )
-            .await?;
-        }
         let verdict_step = find_step(&run, "record-verdict", "Record the gate verdict");
         self.complete_step(
             &run,
@@ -1319,7 +1332,32 @@ impl Conductor {
                 ("receipt", Some(orphan_receipt(&orphan, &branch, &ns))),
             ],
         )
-        .await
+        .await?;
+        // THE EVIDENCE FOLLOWS THE VERDICT (b24e29cb item 3). Written
+        // first, a refused step write left `orphaned_gate_run {runner_jobs:
+        // 0}` on a packet still open — and nothing cleared it when a Job
+        // was later found. After the step, it only ever annotates a run
+        // this pass settled. A failed write here costs the structured copy,
+        // not the settle: the receipt names the same reading, and the
+        // journal says the annotation is missing.
+        if !self.cfg.dry
+            && let Err(e) = self
+                .merge_job_metadata(
+                    rid,
+                    vec![(
+                        "orphaned_gate_run",
+                        orphan_evidence(&orphan, rid, &ns, observed_at),
+                    )],
+                )
+                .await
+        {
+            log(format!(
+                "reconcile: gate-run {} settled lost, but its orphaned_gate_run evidence was not \
+                 written ({e:#}) — the receipt carries the reading",
+                id8(rid)
+            ));
+        }
+        Ok(())
     }
 
     /// A change that landed buries its own verdicts. A closed gate-run
@@ -5807,6 +5845,251 @@ mod tests {
             (&settled["status"], &settled["metadata"]["verdict"]),
             (&json!("completed"), &json!("lost")),
             "the run after the unreadable one is still settled: {settled}"
+        );
+    }
+
+    // -- the orphan settle, driven through its cluster port ----------------
+    //
+    // Review of car dcdc6c64 (backlog b24e29cb item 2): the settle called
+    // real kubectl, so its three refusals — a Job exists, the cluster
+    // cannot be read, the re-read shows a fresh sign of life — were
+    // unpinned, and a fall-through on `Ok(_)` would have passed every
+    // test. The cluster read is now a parameter, and each branch is
+    // driven below against an in-process jobs API that records every
+    // write in the order it arrived.
+
+    /// A gate-run whose last sign of life (its filing) was `idle_min`
+    /// minutes before `now`, with its verdict step open.
+    fn idle_gate_run(now: DateTime<Utc>, idle_min: i64) -> Value {
+        json!({
+            "id": "orph", "kind": "gate-run", "status": "open",
+            "metadata": { "branch": "fix/orphan",
+                          "opened_at": crate::gate::stamp(now - chrono::Duration::minutes(idle_min)) },
+            "steps": [{"id": "s-v", "spec_slug": "record-verdict",
+                       "title": "Record the gate verdict", "status": "ready", "metadata": {}}]
+        })
+    }
+
+    /// Serve `reread` on the job GET and record every write, in order, as
+    /// (method, path, body). `refuse_step_put` answers the status PUT 409,
+    /// an answer the blip guard does not retry.
+    async fn settle_api(
+        reread: Value,
+        refuse_step_put: bool,
+    ) -> (
+        String,
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>,
+    ) {
+        use axum::extract::Path;
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use axum::routing::{get, patch, put};
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let writes: Arc<Mutex<Vec<(String, String, Value)>>> = Arc::default();
+        let (w1, w2, w3) = (writes.clone(), writes.clone(), writes.clone());
+        let app = Router::new()
+            .route(
+                "/api/jobs/{id}",
+                get(move || {
+                    let r = reread.clone();
+                    async move { Json(r) }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                patch(move |Path(id): Path<String>, Json(b): Json<Value>| {
+                    let w = w1.clone();
+                    async move {
+                        w.lock().unwrap().push((
+                            "PATCH".into(),
+                            format!("/api/jobs/{id}/metadata"),
+                            b,
+                        ));
+                        StatusCode::NO_CONTENT
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{sid}/metadata",
+                patch(
+                    move |Path((id, sid)): Path<(String, String)>, Json(b): Json<Value>| {
+                        let w = w2.clone();
+                        async move {
+                            w.lock().unwrap().push((
+                                "PATCH".into(),
+                                format!("/api/jobs/{id}/steps/{sid}/metadata"),
+                                b,
+                            ));
+                            StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{sid}",
+                put(
+                    move |Path((id, sid)): Path<(String, String)>, Json(b): Json<Value>| {
+                        let w = w3.clone();
+                        async move {
+                            if refuse_step_put {
+                                return (StatusCode::CONFLICT, "refused").into_response();
+                            }
+                            w.lock().unwrap().push((
+                                "PUT".into(),
+                                format!("/api/jobs/{id}/steps/{sid}"),
+                                b,
+                            ));
+                            StatusCode::NO_CONTENT.into_response()
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), writes)
+    }
+
+    fn settle_conductor(jobs: String) -> Conductor {
+        let mut c = cleanup_conductor(
+            "forgejo",
+            Box::new(FakeForge {
+                deleted: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                fail_deletes: false,
+            }),
+        );
+        c.cfg.jobs = jobs;
+        c
+    }
+
+    #[tokio::test]
+    async fn a_gate_run_a_job_carries_is_not_settled() {
+        let now = Utc::now();
+        let run = idle_gate_run(now, 40);
+        let (jobs, writes) = settle_api(run.clone(), false).await;
+        let asked = std::sync::Mutex::new(Vec::new());
+        let cluster = |ns: &str, packet: &str| -> Result<Vec<String>> {
+            asked.lock().unwrap().push(format!("{ns}/{packet}"));
+            Ok(vec!["gate-abc12".to_string()])
+        };
+        settle_conductor(jobs)
+            .settle_orphaned_gate_run("orph", &run, now, &cluster)
+            .await
+            .expect("a carried run is left alone, not refused");
+        assert_eq!(
+            *asked.lock().unwrap(),
+            vec!["boss-dev/orph".to_string()],
+            "the cluster was asked, in the gate namespace, for this packet"
+        );
+        assert!(
+            writes.lock().unwrap().is_empty(),
+            "a run a Job carries gets no write at all: {:?}",
+            writes.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cluster_that_cannot_be_read_settles_nothing() {
+        let now = Utc::now();
+        let run = idle_gate_run(now, 40);
+        let (jobs, writes) = settle_api(run.clone(), false).await;
+        let cluster =
+            |_: &str, _: &str| -> Result<Vec<String>> { Err(anyhow!("kubectl: forbidden")) };
+        settle_conductor(jobs)
+            .settle_orphaned_gate_run("orph", &run, now, &cluster)
+            .await
+            .expect("an unreadable cluster is logged and left to the clock");
+        assert!(
+            writes.lock().unwrap().is_empty(),
+            "an absence nobody observed settles nothing: {:?}",
+            writes.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_that_came_alive_during_the_read_is_not_settled() {
+        let now = Utc::now();
+        let run = idle_gate_run(now, 40);
+        // Between the pass's read and the cluster read, a re-gate stamped
+        // the packet alive at launch.
+        let mut reread = run.clone();
+        reread["metadata"][crate::gate::LAUNCHING_AT] =
+            json!(crate::gate::stamp(now - chrono::Duration::minutes(1)));
+        let (jobs, writes) = settle_api(reread, false).await;
+        let cluster = |_: &str, _: &str| -> Result<Vec<String>> { Ok(vec![]) };
+        settle_conductor(jobs)
+            .settle_orphaned_gate_run("orph", &run, now, &cluster)
+            .await
+            .expect("a fresh stamp on the re-read is left alone");
+        assert!(
+            writes.lock().unwrap().is_empty(),
+            "the re-read's fresh stamp wins over the pass's stale read: {:?}",
+            writes.lock().unwrap()
+        );
+    }
+
+    /// Item 3 of b24e29cb. The evidence is dated at the cluster read it
+    /// reports, not at the start of the pass; and it is written only AFTER
+    /// the verdict step completed, so no open packet ever carries an
+    /// `orphaned_gate_run {runner_jobs: 0}` for a run that was not settled.
+    #[tokio::test]
+    async fn an_orphan_is_settled_lost_and_its_evidence_follows_the_step() {
+        let now = Utc::now() - chrono::Duration::minutes(3);
+        let run = idle_gate_run(now, 40);
+        let (jobs, writes) = settle_api(run.clone(), false).await;
+        let before = Utc::now();
+        let cluster = |_: &str, _: &str| -> Result<Vec<String>> { Ok(vec![]) };
+        settle_conductor(jobs)
+            .settle_orphaned_gate_run("orph", &run, now, &cluster)
+            .await
+            .expect("an orphan is settled");
+        let after = Utc::now();
+        let w = writes.lock().unwrap().clone();
+        let order: Vec<(String, String)> =
+            w.iter().map(|(m, p, _)| (m.clone(), p.clone())).collect();
+        assert_eq!(
+            order,
+            vec![
+                ("PATCH".into(), "/api/jobs/orph/steps/s-v/metadata".into()),
+                ("PUT".into(), "/api/jobs/orph/steps/s-v".into()),
+                ("PATCH".into(), "/api/jobs/orph/metadata".into()),
+            ],
+            "the verdict first, the evidence after it"
+        );
+        assert_eq!(w[0].2["verdict"], "lost");
+        let ev = &w[2].2["orphaned_gate_run"];
+        assert_eq!(ev["runner_jobs"], 0, "{ev}");
+        let observed = ev["observed_at"]
+            .as_str()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.with_timezone(&Utc))
+            .expect("observed_at is an instant");
+        assert!(
+            observed >= before - chrono::Duration::seconds(1) && observed <= after,
+            "observed_at {observed} is the cluster read, not the pass start {now}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_step_write_leaves_no_evidence_on_the_open_packet() {
+        let now = Utc::now();
+        let run = idle_gate_run(now, 40);
+        let (jobs, writes) = settle_api(run.clone(), true).await;
+        let cluster = |_: &str, _: &str| -> Result<Vec<String>> { Ok(vec![]) };
+        let res = settle_conductor(jobs)
+            .settle_orphaned_gate_run("orph", &run, now, &cluster)
+            .await;
+        assert!(res.is_err(), "a refused step write is an error to log");
+        assert!(
+            !writes
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, _, b)| b.get("orphaned_gate_run").is_some()),
+            "no orphan evidence rides a packet whose step did not complete: {:?}",
+            writes.lock().unwrap()
         );
     }
 

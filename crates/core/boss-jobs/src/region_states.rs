@@ -414,24 +414,24 @@ pub const BORDER_STILL: Band = band(
 
 // --- every region: the moves record ------------------------------------
 
-/// A MOVE ON A ROUTE THE MAP DOES NOT DRAW (design e765b3fc §2b, source
-/// 3; car M1): the moves record (`crate::moves`) saw packets take a
-/// region-to-region route that no drawn border declares. Zero on a
-/// network whose map is true — the `station_reach` pattern, a number
-/// that corrects the drawing beside it. Each region's
-/// `undeclared` reading names the routes into it and their counts.
+/// A MOVE ON A ROUTE NOTHING DECLARES (design e765b3fc §2b, source 3):
+/// the moves record (`crate::moves`) saw packets take a route — between
+/// two regions, onto the map or off it — that no protocol walk and no
+/// declared hand-off supports (`crate::routes`). Zero on a network
+/// whose map is true — the `station_reach` pattern, a number that
+/// corrects the drawing beside it. Each region's `undeclared` reading
+/// names the routes into it (or out of it, off the map) and their
+/// counts, and the region is troubled at once
+/// (`crate::moves::with_undeclared`).
 ///
-/// A READING, NOT YET A STATE, and deliberately so until the routes are
-/// derived (car R2). The design put R2 before the moves record; M1 was
-/// moved ahead of it (David, on 84cba7e2 Q1: "let the motion cars jump
-/// the line too"), so the declared set is still the ten hand-drawn
-/// borders — and the design itself measured ten real routes none of them
-/// draws (§1, A-J), one of which, track -> shed, every landed car takes.
-/// Deciding the state on it now would hold the shed troubled all day for
-/// the map's own known gap: the permanently-red check CLAUDE.md
-/// §Diagnosis forbids, and one that would bury the shed's real troubles
-/// under it. Like [`BORDER_STILL`], it is declared here and decides no
-/// region's state; R2, which derives the declared set, makes it decide.
+/// It DECIDES since car R2. Car M1 declared it as a reading only,
+/// because the declared set was still the ten hand-drawn borders and the
+/// design had measured ten real routes none of them draws — track ->
+/// shed among them, which every landed car takes — so a state decided on
+/// it would have held the shed troubled for the map's own known gap. The
+/// routes are derived now, from the protocols and the declared
+/// hand-offs, and every move is judged against the set derived at read
+/// time: a red here is a route the record took and nothing declares.
 pub const MOVES_UNDECLARED: Band = band(
     "moves-undeclared",
     "*",

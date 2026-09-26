@@ -433,11 +433,15 @@ enum Commands {
         /// steps, because trains land every ~45 min.
         #[arg(long)]
         rebase: bool,
-        /// Gate and deliberately do NOT park: stamp `hold: <reason>` on
-        /// the gate-run so its green reads HELD (in the yard, `boss
-        /// orient` and the stranded-green alarm) rather than stranded.
-        /// For a car that must land at a timed restart, or behind
-        /// another car. Never combines with --park-*.
+        /// Hold this green on purpose: stamp `hold: <reason>` on the
+        /// gate-run. Alone, the green is not parked and reads HELD (in
+        /// the yard, `boss orient` and the stranded-green alarm) rather
+        /// than stranded — for a car that must land at a timed restart.
+        /// WITH --park-*, the car is filed on green as usual and stands
+        /// at the dock already held with this reason on its review step
+        /// (the key `boss hold` writes), so it boards only after `boss
+        /// release` — for a trust-boundary car awaiting its adversarial
+        /// review, with every receipt field carried (backlog 486dde37).
         #[arg(long, value_name = "REASON")]
         hold: Option<String>,
     },
@@ -2403,6 +2407,33 @@ mod tests {
     #[test]
     fn command_tree_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    /// EVERY HAND-OFF VERB IS A SUBCOMMAND (design e765b3fc §2b, car R2):
+    /// a `verb:<name>` row in `infra/platform/yard/handoffs.toml` sources
+    /// a route on the IT map, and boss-jobs — which serves the routes —
+    /// cannot see this command tree. So the pin lives here: a verb
+    /// renamed or removed fails this test naming the row, rather than
+    /// leaving a route sourced by a verb that no longer exists.
+    #[test]
+    fn every_hand_off_verb_is_a_subcommand() {
+        let rows = boss_jobs::routes::hand_offs(boss_jobs::routes::HANDOFFS_TOML)
+            .expect("handoffs.toml parses");
+        let cmd = Cli::command();
+        let verbs: Vec<&str> = rows
+            .iter()
+            .filter_map(|h| h.by.strip_prefix("verb:"))
+            .collect();
+        assert!(
+            !verbs.is_empty(),
+            "the verbs that file packets declare theirs"
+        );
+        for verb in verbs {
+            assert!(
+                cmd.find_subcommand(verb).is_some(),
+                "handoffs.toml names `verb:{verb}`, and `boss {verb}` is no subcommand"
+            );
+        }
     }
 
     /// The prose flags that carry a sentence have a shell-free twin,

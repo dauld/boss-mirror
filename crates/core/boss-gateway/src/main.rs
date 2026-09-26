@@ -58,6 +58,10 @@ pub(crate) struct AppState {
     pub session_key: Vec<u8>,
     pub proxy_client: reqwest::Client,
     pub perf: Arc<PerfCollector>,
+    /// The estate machine token the gateway stamps on what it forwards —
+    /// the mounted `current` slot every service's gate accepts from,
+    /// re-read in the background (design 6805c764, car 2).
+    pub machine_token: Arc<boss_core::machine_token::Source>,
 }
 
 /// Auth-event staging (docs/architecture-decisions.md §Policy &
@@ -202,6 +206,9 @@ async fn main() -> Result<()> {
         session_key,
         proxy_client,
         perf: Arc::new(PerfCollector::new()),
+        machine_token: boss_core::machine_token::Source::watch(
+            boss_core::machine_token::token_dir(),
+        ),
     });
 
     // The sessionless read set — the tenant's declaration, resolved
@@ -1054,6 +1061,7 @@ mod routing_tests {
             session_key: vec![0u8; 32],
             proxy_client: reqwest::Client::new(),
             perf: Arc::new(PerfCollector::new()),
+            machine_token: Default::default(),
         });
         build_router(local_auth, reads).with_state(state)
     }

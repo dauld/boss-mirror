@@ -6,14 +6,17 @@
 //! What this pins:
 //!
 //! 1. **The page is the record.** Moves after a seq, oldest first, with
-//!    the newest seq and the undrawn routes moves took in the window —
-//!    the observed-undeclared count, under its band.
+//!    the newest seq and the routes moves took in the window that no
+//!    derived route declares — the observed-undeclared count, under its
+//!    band (car R2 derives the routes from the protocols and hand-offs).
 //! 2. **The stream resumes from the record.** A viewer that reconnects
 //!    with `Last-Event-ID` is sent the rows after it under their own
 //!    seq; one that connects fresh is sent a `resync`, never a flood.
-//! 3. **Each region carries the undrawn routes INTO it**, and a jobs API
-//!    with no record wired leaves that reading null — never an empty
-//!    list that says every move took a drawn route.
+//! 3. **Each region carries the undeclared routes INTO it, and they
+//!    trouble it** (car R2 switched the band on); a jobs API with no
+//!    record wired, or no registries to derive the routes from, leaves
+//!    that reading null and judges nothing — never an empty list that
+//!    says every move took a declared route.
 //! 4. **Unread is not empty, and scoped is not empty.** No record wired
 //!    is a 503; a caller whose packet scope is narrowed is refused by
 //!    name rather than served a record naming packets outside it.
@@ -28,6 +31,8 @@ use boss_core::publisher::DomainPublisher;
 use boss_jobs::InMemoryJobs;
 use boss_jobs::http::{JobsApiState, router};
 use boss_jobs::moves::{InMemoryMoves, Move, MovesFeed, MovesStore};
+use boss_jobs::registry::InMemoryWorkflows;
+use boss_jobs::stations::InMemoryStations;
 use boss_policy_client::types::{AccessTier, User};
 use boss_policy_client::{Action, FakePolicyClient, PolicyClient, Resource, Scope};
 use boss_testing::RecordingEventBus;
@@ -74,6 +79,12 @@ fn moved(
 }
 
 async fn app(wired: bool) -> axum::Router {
+    app_with(wired, true).await
+}
+
+/// `registries`: the tree's protocols and stations wired, so the routes
+/// can be derived.
+async fn app_with(wired: bool, registries: bool) -> axum::Router {
     let jobs = Arc::new(InMemoryJobs::new());
     let policy: Arc<dyn PolicyClient> = Arc::new(
         FakePolicyClient::builder()
@@ -87,10 +98,17 @@ async fn app(wired: bool) -> axum::Router {
         let store = Arc::new(InMemoryMoves::new());
         store
             .record(&[
+                // Declared by auto-park's hand-off.
                 moved(1, "car-1", Some("gates"), Some("dock"), Some(true)),
+                // Stamped undeclared under the ten drawn borders (car M1);
+                // train-reconcile's hand-off declares it now, and the read
+                // judges against the routes derived now, not the stamp.
                 moved(2, "car-1", Some("track"), Some("shed"), Some(false)),
+                // Onto the map at the dock: ship-a-change's own gate step.
                 moved(3, "car-2", None, Some("dock"), None),
-                moved(4, "car-3", Some("track"), Some("shed"), Some(false)),
+                // Nothing leaves arrivals for publish: publish READS main.
+                moved(4, "car-3", Some("arrivals"), Some("publish"), Some(false)),
+                moved(5, "car-4", Some("arrivals"), Some("publish"), None),
             ])
             .await
             .unwrap();
@@ -98,8 +116,29 @@ async fn app(wired: bool) -> axum::Router {
     } else {
         None
     };
+    let (kind_registry, stations) = if registries {
+        let kinds = Arc::new(InMemoryWorkflows::new());
+        for spec in boss_jobs::registry::seedable_platform_workflows() {
+            kinds.seed(spec).unwrap();
+        }
+        let stations = Arc::new(InMemoryStations::new());
+        for spec in
+            boss_jobs::seed_loader::load_stations(boss_jobs::station_seed::platform_stations_path())
+                .unwrap()
+        {
+            stations.seed(spec).unwrap();
+        }
+        (
+            Some(kinds as Arc<dyn boss_jobs::registry::WorkflowRegistry>),
+            Some(stations as Arc<dyn boss_jobs::stations::StationRegistry>),
+        )
+    } else {
+        (None, None)
+    };
     router(JobsApiState {
         yard_moves,
+        kind_registry,
+        stations,
         ..JobsApiState::minimal(
             jobs,
             bus,
@@ -138,8 +177,8 @@ async fn the_page_is_the_record_after_a_seq_with_the_undrawn_routes_it_took() {
         .iter()
         .map(|m| m["seq"].as_i64().unwrap())
         .collect();
-    assert_eq!(seqs, [2, 3, 4], "after seq 1, oldest first");
-    assert_eq!(body["latest_seq"], 4);
+    assert_eq!(seqs, [2, 3, 4, 5], "after seq 1, oldest first");
+    assert_eq!(body["latest_seq"], 5);
     assert_eq!(body["moves"][0]["from"], "track");
     assert_eq!(
         body["moves"][0]["cause_event_id"],
@@ -151,7 +190,12 @@ async fn the_page_is_the_record_after_a_seq_with_the_undrawn_routes_it_took() {
     assert_eq!(routes.len(), 1, "{routes:?}");
     assert_eq!(
         (&routes[0]["from"], &routes[0]["to"], &routes[0]["moves"]),
-        (&Value::from("track"), &Value::from("shed"), &Value::from(2))
+        (
+            &Value::from("arrivals"),
+            &Value::from("publish"),
+            &Value::from(2)
+        ),
+        "track -> shed is declared now, whatever its row was stamped"
     );
     assert_eq!(
         body["mover"]["state"], "starting",
@@ -203,9 +247,10 @@ async fn frames(uri: &str, last_event_id: Option<&str>, want: usize) -> String {
 
 #[tokio::test]
 async fn the_stream_resumes_from_the_record_and_a_fresh_viewer_is_sent_a_resync() {
-    let resumed = frames("/api/yard/moves/stream", Some("2"), 2).await;
+    let resumed = frames("/api/yard/moves/stream", Some("2"), 3).await;
     assert!(resumed.contains("event: move\nid: 3\n"), "{resumed}");
     assert!(resumed.contains("event: move\nid: 4\n"), "{resumed}");
+    assert!(resumed.contains("event: move\nid: 5\n"), "{resumed}");
     assert!(
         !resumed.contains("id: 2\n"),
         "nothing at or before the resume point: {resumed}"
@@ -213,7 +258,7 @@ async fn the_stream_resumes_from_the_record_and_a_fresh_viewer_is_sent_a_resync(
 
     let fresh = frames("/api/yard/moves/stream", None, 1).await;
     assert!(fresh.starts_with("event: resync\n"), "{fresh}");
-    assert!(fresh.contains("\"seq\":4"), "{fresh}");
+    assert!(fresh.contains("\"seq\":5"), "{fresh}");
     assert!(
         !fresh.contains("event: move"),
         "a fresh viewer is not sent a flood: {fresh}"
@@ -221,7 +266,7 @@ async fn the_stream_resumes_from_the_record_and_a_fresh_viewer_is_sent_a_resync(
 }
 
 #[tokio::test]
-async fn each_region_carries_the_undrawn_routes_into_it_and_unwired_reads_null() {
+async fn each_region_carries_the_undeclared_routes_into_it_and_is_troubled_by_them() {
     let (status, body) = get(app(true).await, "/api/yard/regions", "operator").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let region = |name: &str| {
@@ -233,22 +278,85 @@ async fn each_region_carries_the_undrawn_routes_into_it_and_unwired_reads_null()
             .unwrap()
             .clone()
     };
-    let shed = region("shed");
-    assert_eq!(shed["undeclared"][0]["from"], "track", "{shed}");
-    assert_eq!(shed["undeclared"][0]["moves"], 2);
-    assert_eq!(
-        region("dock")["undeclared"],
-        Value::Array(vec![]),
-        "every move in was drawn"
+    let publish = region("publish");
+    assert_eq!(publish["undeclared"][0]["from"], "arrivals", "{publish}");
+    assert_eq!(publish["undeclared"][0]["moves"], 2);
+    assert_eq!(publish["state"], "troubled", "{publish}");
+    assert_eq!(publish["band"]["id"], "moves-undeclared", "{publish}");
+    assert!(
+        publish["why"]
+            .as_str()
+            .unwrap()
+            .contains("arrivals → publish ×2"),
+        "the verdict names the route and its count: {publish}"
     );
-
-    let (_, body) = get(app(false).await, "/api/yard/regions", "operator").await;
-    for r in body["regions"].as_array().unwrap() {
+    for name in ["dock", "shed"] {
         assert_eq!(
-            r["undeclared"],
-            Value::Null,
-            "{}: unread, not empty",
-            r["name"]
+            region(name)["undeclared"],
+            Value::Array(vec![]),
+            "{name}: every move in took a declared route"
         );
+        assert_ne!(region(name)["band"]["id"], "moves-undeclared");
     }
+}
+
+#[tokio::test]
+async fn an_unwired_record_or_underivable_routes_read_null_and_judge_nothing() {
+    for (wired, registries) in [(false, true), (true, false)] {
+        let (_, body) = get(
+            app_with(wired, registries).await,
+            "/api/yard/regions",
+            "operator",
+        )
+        .await;
+        for r in body["regions"].as_array().unwrap() {
+            assert_eq!(
+                r["undeclared"],
+                Value::Null,
+                "{} (record {wired}, registries {registries}): unread, not empty",
+                r["name"]
+            );
+            assert_ne!(r["band"]["id"], "moves-undeclared", "{r}");
+        }
+    }
+}
+
+/// `GET /api/yard/routes` serves the derived routes with their sources,
+/// the observed counts beside them, and 503 — naming the registry — when
+/// there is nothing to walk.
+#[tokio::test]
+async fn the_routes_read_serves_every_route_with_its_sources() {
+    let (status, body) = get(app(true).await, "/api/yard/routes", "operator").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["observed"], true);
+    assert_eq!(body["refused"], Value::Array(vec![]), "{body}");
+    let routes = body["routes"].as_array().unwrap();
+    let find = |from: Value, to: Value| {
+        routes
+            .iter()
+            .find(|r| r["from"] == from && r["to"] == to)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let train = find("dock".into(), "gates".into());
+    assert_eq!(train["declared"], true, "{train}");
+    assert!(
+        train["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["source"] == "workflow" && s["workflow"] == "pr-train" && s["step"] == "pr"),
+        "{train}"
+    );
+    let publish = find("arrivals".into(), "publish".into());
+    assert_eq!(publish["declared"], false, "{publish}");
+    assert_eq!(publish["sources"][0]["source"], "observed");
+    assert_eq!(publish["sources"][0]["moves"], 2);
+
+    let (status, body) = get(app_with(true, false).await, "/api/yard/routes", "operator").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        body.as_str().unwrap().contains("workflow registry"),
+        "{body}"
+    );
 }

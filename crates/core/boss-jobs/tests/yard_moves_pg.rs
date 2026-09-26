@@ -70,19 +70,24 @@ async fn a_replayed_batch_writes_nothing_twice_and_reads_back_in_order() {
     assert_eq!(store.latest_seq().await.unwrap(), back[2].seq);
     assert_eq!(store.since(back[0].seq, 10).await.unwrap().len(), 2);
 
-    let undrawn = store.undeclared(t("2026-09-26T00:00:00Z")).await.unwrap();
-    assert_eq!(undrawn.len(), 1);
+    // Every route taken in the window, counted, declared or not — onto
+    // the map included (a NULL end groups like any other); whether each
+    // is declared is judged at read time against the derived routes.
+    let taken = store.crossings(t("2026-09-26T00:00:00Z")).await.unwrap();
     assert_eq!(
-        (
-            undrawn[0].from.as_str(),
-            undrawn[0].to.as_str(),
-            undrawn[0].moves
-        ),
-        ("track", "shed", 1)
+        taken
+            .iter()
+            .map(|r| (r.from.as_deref(), r.to.as_deref(), r.moves))
+            .collect::<Vec<_>>(),
+        [
+            (Some("dock"), Some("track"), 1),
+            (Some("track"), Some("shed"), 1),
+            (None, Some("track"), 1),
+        ]
     );
     assert!(
         store
-            .undeclared(t("2026-09-26T04:00:00Z"))
+            .crossings(t("2026-09-26T04:00:00Z"))
             .await
             .unwrap()
             .is_empty(),

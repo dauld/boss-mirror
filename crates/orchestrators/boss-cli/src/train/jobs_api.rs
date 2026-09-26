@@ -751,22 +751,46 @@ pub(crate) const GATE_DEADLINE_HOURS: i64 = 3;
 /// long enough to call it dead — `None` means leave it alone.
 ///
 /// Pure so the decision is testable without an API: a run is dead when
-/// it has NOT reported a verdict AND its `opened_at` predates the Job
-/// deadline. A run with no `opened_at` yields `None` — absence of a
-/// stamp is not evidence of death, and settling on a guess would put a
-/// verdict nobody observed into the audit log.
+/// it has NOT reported a verdict AND its newest sign of life
+/// ([`ALIVE_STAMPS`]) predates the Job deadline. A run with no
+/// `opened_at` yields `None` — absence of a stamp is not evidence of
+/// death, and settling on a guess would put a verdict nobody observed
+/// into the audit log.
+///
+/// FROM THE NEWEST STAMP, NOT THE FILING (backlog 95d81e50; b24e29cb
+/// item 4). The deadline is the Job's, and a Job starts no earlier than
+/// the last stamp its launcher wrote: a queued run launches after its
+/// last beat, and a REUSED packet carries the `opened_at` of the run
+/// that filed it. Read from `opened_at` alone, a packet filed four hours
+/// ago and relaunched thirty minutes ago was settled `lost` under a Job
+/// with two and a half hours left to run.
 pub(crate) fn dead_gate_run_hours(run: &Value, now: DateTime<Utc>) -> Option<i64> {
     let verdict_step = find_step(run, "record-verdict", "Record the gate verdict");
     if step_done(verdict_step) {
         return None;
     }
-    let opened = metadata_map(run)
-        .get("opened_at")
-        .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|t| t.with_timezone(&Utc))?;
-    let hours = (now - opened).num_hours();
+    let (_, (_, at)) = last_sign_of_life(&metadata_map(run))?;
+    let hours = (now - at).num_hours();
     (hours >= GATE_DEADLINE_HOURS).then_some(hours)
+}
+
+/// The newest parseable of [`ALIVE_STAMPS`] — its key, its value verbatim
+/// and its instant — or `None` when `opened_at` itself does not parse
+/// (no stamp, no claim). A stamp that does not parse is skipped, never a
+/// reason to call a run older than it is. Shared by both clocks, so the
+/// orphan window and the Job deadline cannot read different lives.
+fn last_sign_of_life(md: &Map<String, Value>) -> Option<(&'static str, (String, DateTime<Utc>))> {
+    let instant = |key: &str| {
+        md.get(key)
+            .and_then(Value::as_str)
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(|t| (s, t)))
+            .map(|(s, t)| (s.to_string(), t.with_timezone(&Utc)))
+    };
+    instant("opened_at")?;
+    ALIVE_STAMPS
+        .iter()
+        .filter_map(|k| instant(k).map(|v| (*k, v)))
+        .max_by_key(|(_, (_, t))| *t)
 }
 
 /// How long a gate-run may go with nothing saying it is alive before the
@@ -790,15 +814,21 @@ const _: () = assert!(ORPHAN_GATE_RUN_MINUTES < GATE_DEADLINE_HOURS * 60 / 4);
 /// is dated from its last beat, not from its filing), and the launch of
 /// a REUSED packet, whose other stamps belong to an earlier run.
 ///
-/// THREE CLOCKS MEET HERE. `opened_at` is the jobs API's clock, stamped
-/// by its create handler; the queue stamps and `launching_at` are the
-/// clock of the host running `boss gate` (the dev pod for a builder, the
-/// conductor for a train gate — `now` minted once, carried forward by
-/// monotonic time); and the `now` they are judged against is the
-/// conductor's. All are cluster hosts on synchronised UTC, so their skew
-/// is seconds against a fifteen-minute window — and a skew of minutes
-/// would shorten or lengthen the window by exactly that much, never
-/// settle a run a Job carries, because the cluster read decides that.
+/// THREE CLOCKS MEET HERE. `opened_at` is stamped by the jobs API's
+/// create handler from its clock port (`boss_clock_client::now_from` —
+/// the deploy-mode clock, wall time in production and sim-aware by
+/// design, not the record stamp `wall_now`); the queue stamps and
+/// `launching_at` are the clock of the host running `boss gate` (the dev
+/// pod for a builder, the conductor for a train gate — `now` minted
+/// once, carried forward by monotonic time); and the `now` they are
+/// judged against is the conductor's. All are cluster hosts on
+/// synchronised UTC, so their skew is seconds against a fifteen-minute
+/// window — and a skew of minutes would shorten or lengthen the window
+/// by exactly that much, never settle a run a Job carries, because the
+/// cluster read decides that.
+///
+/// Both clocks read these: the orphan window ([`orphaned_gate_run`]) and
+/// the Job deadline ([`dead_gate_run_hours`]).
 const ALIVE_STAMPS: [&str; 4] = [
     "opened_at",
     crate::gate::QUEUED_AT,
@@ -848,17 +878,7 @@ pub(crate) fn orphaned_gate_run(run: &Value, now: DateTime<Utc>) -> Option<Orpha
         return None;
     }
     let md = metadata_map(run);
-    let instant = |key: &str| {
-        md.get(key)
-            .and_then(Value::as_str)
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok().map(|t| (s, t)))
-            .map(|(s, t)| (s.to_string(), t.with_timezone(&Utc)))
-    };
-    instant("opened_at")?;
-    let (last_alive_key, (last_alive, at)) = ALIVE_STAMPS
-        .iter()
-        .filter_map(|k| instant(k).map(|v| (*k, v)))
-        .max_by_key(|(_, (_, t))| *t)?;
+    let (last_alive_key, (last_alive, at)) = last_sign_of_life(&md)?;
     let idle_minutes = (now - at).num_minutes();
     (idle_minutes >= ORPHAN_GATE_RUN_MINUTES).then(|| OrphanCandidate {
         last_alive_key,
@@ -874,11 +894,13 @@ pub(crate) fn orphaned_gate_run(run: &Value, now: DateTime<Utc>) -> Option<Orpha
 
 /// The evidence an orphan settle leaves on the packet, as data: the
 /// cluster read that came back empty and the last sign of life.
+/// `observed_at` is the instant of that cluster read — the reading the
+/// evidence reports — not the start of the pass (b24e29cb item 3).
 pub(crate) fn orphan_evidence(
     o: &OrphanCandidate,
     packet: &str,
     namespace: &str,
-    now: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
 ) -> Value {
     serde_json::json!({
         "runner_jobs": 0,
@@ -888,7 +910,7 @@ pub(crate) fn orphan_evidence(
         "last_alive": o.last_alive,
         "idle_minutes": o.idle_minutes,
         "queued_at": o.queued_at,
-        "observed_at": crate::gate::stamp(now),
+        "observed_at": crate::gate::stamp(observed_at),
         "observer": "boss train cadence (conductor reconcile)",
     })
 }
@@ -1355,6 +1377,51 @@ mod tests {
             "steps": [{"spec_slug":"record-verdict","title":"Record the gate verdict","status":"ready","metadata":{}}]
         });
         assert_eq!(dead_gate_run_hours(&unstamped, now), None);
+    }
+
+    /// Backlog 95d81e50 (and item 4 of b24e29cb). The Job deadline runs
+    /// from the Job's START, and a REUSED packet's `opened_at` belongs to
+    /// the run that filed it: a packet opened four hours ago and relaunched
+    /// thirty minutes ago carries a Job with two and a half hours left.
+    /// Read from `opened_at` alone, the clock settled it `lost` under that
+    /// running Job. The clock now reads the same signs of life the orphan
+    /// judgement reads, and measures from the newest.
+    #[test]
+    fn the_job_deadline_is_measured_from_the_newest_sign_of_life() {
+        let now = at("2026-09-24T13:00:00Z");
+        let run = |extra: Value| {
+            let mut md = serde_json::json!({ "branch": "feat/x",
+                                             "opened_at": "2026-09-24T09:00:00Z" });
+            for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+                md[k.as_str()] = v;
+            }
+            serde_json::json!({
+                "id": "55555555-5555-5555-5555-555555555555",
+                "metadata": md,
+                "steps": [{"spec_slug":"record-verdict","title":"Record the gate verdict",
+                           "status":"ready","metadata":{}}]
+            })
+        };
+        // The control: filed four hours ago and nothing since — dead.
+        assert_eq!(
+            dead_gate_run_hours(&run(serde_json::json!({})), now),
+            Some(4)
+        );
+        // Relaunched thirty minutes ago: its Job is inside its deadline.
+        let relaunched = crate::gate::launching_patch(at("2026-09-24T12:30:00Z"));
+        assert_eq!(dead_gate_run_hours(&run(relaunched), now), None);
+        // Held in the queue until an hour ago, then launched: the same.
+        assert_eq!(
+            dead_gate_run_hours(
+                &run(serde_json::json!({ "queue_heartbeat_at": "2026-09-24T12:00:00Z" })),
+                now
+            ),
+            None
+        );
+        // A relaunch that is itself past the deadline is dead, and the
+        // hours reported are counted from it.
+        let old_launch = crate::gate::launching_patch(at("2026-09-24T09:40:00Z"));
+        assert_eq!(dead_gate_run_hours(&run(old_launch), now), Some(3));
     }
 
     /// Gate-run 91594262 as it stood on 2026-09-24: queued at 01:26:24,

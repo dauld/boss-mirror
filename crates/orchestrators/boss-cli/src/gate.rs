@@ -837,6 +837,34 @@ pub(crate) fn launching_patch(at: chrono::DateTime<chrono::Utc>) -> Value {
     json!({ LAUNCHING_AT: stamp(at) })
 }
 
+/// Why a launch must NOT go onto this packet, read just before
+/// `kubectl create` — `None` when it is still open with its verdict owed.
+///
+/// WHY (backlog b24e29cb item 1, review of car dcdc6c64). The conductor
+/// settles an orphaned gate-run `lost` with no atomic claim on it
+/// (76d41004: none exists), so a REUSED packet can be closed between the
+/// [`launching_patch`] this verb writes and the Job it creates. A runner
+/// launched onto that packet was not refused loudly: its report met a
+/// completed step and died as one line in a pod log (run.sh), and the
+/// waiter read `lost` with a receipt saying the cluster held no Job while
+/// one ran. Re-read here, minutes after the stamp, a settle that judged
+/// the packet before the stamp landed has already written — so it is
+/// seen, and the launch refuses instead of racing it.
+pub(crate) fn launch_target_refusal(packet: &str, job: &Value) -> Option<String> {
+    let status = job.get("status").and_then(Value::as_str).unwrap_or("");
+    let verdict = crate::train::find_step(job, "record-verdict", "Record the gate verdict");
+    let settled = crate::train::step_done(verdict);
+    (status != "open" || settled).then(|| {
+        format!(
+            "gate-run packet {packet} was closed (status {status:?}, verdict step {}) while this \
+             launch was being prepared — most likely settled lost by the conductor's orphan \
+             reconcile. No Job was created. re-run `boss gate` with the same flags: a closed \
+             packet is not reused, so it files a fresh one.",
+            if settled { "completed" } else { "open" }
+        )
+    })
+}
+
 /// A place in the gate queue that NO LIVE PROCESS HOLDS — a gate-run
 /// that is marked queued, has no Job behind it, and has nothing left
 /// that would ever launch it.
@@ -1984,24 +2012,28 @@ async fn free_at_green(http: &reqwest::Client, job: &Value, now: chrono::DateTim
 /// rather than stranded (a green someone forgot) — in `boss orient`,
 /// the stranded-green alarm and the yard, which all read that one key
 /// (69daaba2: a boss-dev manifest car waiting for a David-timed roll
-/// was indistinguishable from a forgotten one). A hold never combines
-/// with park intent: auto-park would file the car on green and board
-/// it, which is the opposite of holding it. An empty reason is refused
-/// — the marker IS the reason, and "held: (blank)" tells the next
-/// reader nothing.
-pub fn hold_guard(hold: Option<&str>, park: &ParkIntent) -> Result<Option<String>> {
+/// was indistinguishable from a forgotten one). An empty reason is
+/// refused — the marker IS the reason, and "held: (blank)" tells the
+/// next reader nothing.
+///
+/// WITH PARK INTENT, THE HOLD IS THE CAR'S (backlog 486dde37). The pair
+/// used to be refused, because auto-park would file the car on green and
+/// board it. That left a trust-boundary car — one that must wait for an
+/// adversarial review — two bad doors: park unheld and race the dock
+/// (it boards on depth within minutes of the green) for the operator's
+/// `boss hold`, or gate held and park by hand after the review through
+/// `boss park`, which carries no probe and no partial item. Three such
+/// cars hit it on 2026-09-26. Now `jobs.auto-park` files the car as it
+/// always has and writes this reason onto the car's review step BEFORE
+/// the gate step completes, so the car stands at the dock HELD from the
+/// instant it can board, and `boss release` is the one door out.
+pub fn hold_guard(hold: Option<&str>, _park: &ParkIntent) -> Result<Option<String>> {
     let Some(reason) = hold else {
         return Ok(None);
     };
     let reason = reason.trim();
     if reason.is_empty() {
         anyhow::bail!("--hold needs a reason: what is this green waiting for?");
-    }
-    if !park.is_empty() {
-        anyhow::bail!(
-            "--hold and --park-* cannot combine: a hold keeps the green off the dock, \
-             auto-park files a car for it on green. Pass one or the other."
-        );
     }
     Ok(Some(reason.to_string()))
 }
@@ -3248,7 +3280,10 @@ pub async fn run(
     // when no Job carries it and nothing has held it for
     // `train::ORPHAN_GATE_RUN_MINUTES`, so without this stamp a reconcile
     // in that gap closes the packet under a launch a second from its Job.
-    // Dated now, not at this verb's start: `now` advanced by the monotonic
+    // The stamp narrows that race and does not close it — a settle that
+    // judged the packet before the stamp landed still writes — so the
+    // packet is re-read just before `kubectl create` and a closed one is
+    // refused there (`launch_target_refusal`, b24e29cb). Dated now, not at this verb's start: `now` advanced by the monotonic
     // time since (the no-wallclock rule). A refusal here files nothing —
     // the packet already exists and stays reusable — so it is a plain `?`.
     if let Some(id) = reuse.as_deref().filter(|_| !dry) {
@@ -3688,6 +3723,35 @@ pub async fn run(
         }
         println!("boss gate: DRY would create a Job for {branch} (packet {packet})");
         return Ok(());
+    }
+
+    // THE PACKET IS STILL OURS TO LAUNCH ONTO — re-read, not assumed
+    // (b24e29cb item 1). The `launching_at` stamp above narrows the
+    // conductor's orphan settle but cannot close it: a reconcile that
+    // judged this packet before the stamp landed still writes `lost`, and
+    // nothing makes that write and this create one act (76d41004). Read
+    // here, as late as the create allows, that write has already landed,
+    // so it is seen rather than raced. FAILS CLOSED: a packet this verb
+    // cannot read is not launched onto blind — the one it just filed is
+    // closed as refused, a reused one stays for the next invocation.
+    let target = api(
+        &http,
+        reqwest::Method::GET,
+        &format!("/api/jobs/{packet}"),
+        None,
+    )
+    .await
+    .and_then(|v| v.context("the jobs api returned no body for the gate-run packet"))
+    .context("re-reading the gate-run packet before creating its Job");
+    let refusal = match &target {
+        Ok(job) => launch_target_refusal(&packet, job),
+        Err(e) => Some(format!("{e:#}")),
+    };
+    if let Some(why) = refusal {
+        if target.is_err() && should_close_on_park_failure(reused, dry) {
+            close_refused(&http, &packet, &why).await;
+        }
+        bail!("{why}");
     }
 
     let mut child = kubectl(namespace)
@@ -4602,6 +4666,64 @@ fn job_names(table: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Backlog b24e29cb item 1. The conductor settles an orphan with no
+    /// atomic claim on the packet, so a reused packet can be closed
+    /// `lost` in the gap between this verb's `launching_at` stamp and its
+    /// `kubectl create`. Launched anyway, the runner's report met a
+    /// completed step, the waiter read `lost` with a receipt saying the
+    /// cluster held no Job — while one ran — and the refusal was one line
+    /// in a pod log. The launch now re-reads the packet and refuses one
+    /// that is no longer open for a verdict.
+    #[test]
+    fn a_packet_closed_before_its_launch_is_not_launched_onto() {
+        let packet = |status: &str, verdict: &str| {
+            json!({
+                "id": "p", "status": status,
+                "steps": [{"spec_slug": "record-verdict", "title": "Record the gate verdict",
+                           "status": verdict, "metadata": {}}]
+            })
+        };
+        assert_eq!(
+            launch_target_refusal("pkt-91594262", &packet("open", "ready")),
+            None,
+            "an open packet with its verdict owed is launched onto"
+        );
+        for closed in [
+            packet("closed", "completed"),
+            packet("open", "completed"),
+            packet("closed", "ready"),
+        ] {
+            let why = launch_target_refusal("pkt-91594262", &closed)
+                .unwrap_or_else(|| panic!("{closed} must refuse"));
+            assert!(why.contains("re-run"), "{why}");
+            assert!(why.contains("pkt-91594262"), "{why}");
+        }
+    }
+
+    /// The ORDER is the fix: the stamp is written before the create, and
+    /// the re-read sits between them — the re-read is what a reconcile
+    /// that judged the packet before the stamp landed is caught by. Read
+    /// off `run` itself, because the order lives nowhere else.
+    #[test]
+    fn the_launch_stamps_then_rereads_then_creates() {
+        let src = include_str!("gate.rs");
+        let start = src.find("pub async fn run(").expect("fn run");
+        let end = start
+            + src[start..]
+                .find("\nasync fn wait_for_verdict(")
+                .expect("the fn after run");
+        let body = &src[start..end];
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("{needle:?} is not in fn run"))
+        };
+        let stamp = at("Some(launching_patch(at))");
+        let reread = at("launch_target_refusal(&packet,");
+        let create = at(".args([\"create\", \"-f\", \"-\"])");
+        assert!(stamp < reread, "the stamp precedes the re-read");
+        assert!(reread < create, "the re-read precedes kubectl create");
+    }
 
     /// A pod scheduled but never started is an infrastructure refusal
     /// after the tolerance, never before it, and never once it started
@@ -6155,8 +6277,7 @@ mod tests {
     }
 
     /// An item answer alone is still park intent: it opts into auto-park,
-    /// so the four receipt fields are still required and `--hold` still
-    /// refuses to combine.
+    /// so the four receipt fields are still required.
     #[test]
     fn an_item_answer_alone_is_still_park_intent() {
         let p = ParkIntent {
@@ -6165,32 +6286,52 @@ mod tests {
         };
         assert!(!p.is_empty());
         assert!(p.require_complete().is_err(), "the four are still needed");
-        assert!(hold_guard(Some("waiting"), &p).is_err());
     }
 
     /// `--hold` marks a green as deliberately waiting. It needs a reason
-    /// (the marker is the reason), and never combines with park intent
-    /// (a hold keeps the green off the dock; auto-park boards it).
+    /// (the marker is the reason), with park intent or without it.
     #[test]
-    fn a_hold_needs_a_reason_and_never_combines_with_park_intent() {
+    fn a_hold_needs_a_reason() {
         let plain = ParkIntent::default();
         assert_eq!(hold_guard(None, &plain).unwrap(), None);
         assert_eq!(
             hold_guard(Some("  lands at the next dev-pod restart "), &plain).unwrap(),
             Some("lands at the next dev-pod restart".to_string())
         );
-        let err = hold_guard(Some("   "), &plain).unwrap_err().to_string();
-        assert!(err.contains("needs a reason"), "{err}");
-        let err = hold_guard(Some("waiting"), &park_full())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("--hold and --park-* cannot combine"), "{err}");
-        // A partial park intent is still park intent.
+        for park in [plain, park_full()] {
+            let err = hold_guard(Some("   "), &park).unwrap_err().to_string();
+            assert!(err.contains("needs a reason"), "{err}");
+        }
+    }
+
+    /// A HOLD RIDES BESIDE PARK INTENT (backlog 486dde37). A trust-
+    /// boundary car waits for its adversarial review, and until
+    /// 2026-09-26 the pair was refused: the car either auto-parked
+    /// unheld and could board on depth before the operator's `boss
+    /// hold` landed (the dock boards within minutes), or was gated held
+    /// and parked by hand later through a verb that carries no probe and
+    /// no partial item. Three trust-boundary cars hit it in one day. The
+    /// pair is accepted now: the gate-run carries both, and auto-park
+    /// files the car with the reason already on its review step.
+    #[test]
+    fn a_hold_combines_with_park_intent_and_keeps_its_reason() {
+        assert_eq!(
+            hold_guard(
+                Some(" trust-boundary car: adversarial review "),
+                &park_full()
+            )
+            .unwrap(),
+            Some("trust-boundary car: adversarial review".to_string())
+        );
+        // A partial park intent is still park intent, and still combines.
         let partial = ParkIntent {
             summary: Some("x".into()),
             ..Default::default()
         };
-        assert!(hold_guard(Some("waiting"), &partial).is_err());
+        assert_eq!(
+            hold_guard(Some("waiting"), &partial).unwrap(),
+            Some("waiting".to_string())
+        );
     }
 
     /// A TRANSIENT SoR BLIP ON THE PARK-INTENT PATCH MUST NOT ORPHAN

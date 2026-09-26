@@ -61,6 +61,7 @@ use crate::region_states::{self as bands, Finding, OutRail, Settled, at_capacity
 use crate::registry::WorkflowSpec;
 use crate::yard::{ConductorHealth, Reading, YardStatus};
 
+mod alone;
 mod arrivals;
 mod dock;
 #[cfg(test)]
@@ -79,6 +80,9 @@ mod stale_proof;
 mod stuck;
 mod track;
 
+pub use self::alone::{
+    CAR_KIND, Family, GATE_RUN_KIND, Stations, TRAIN_KIND, family_of, place_alone,
+};
 use self::arrivals::arrivals;
 pub(crate) use self::arrivals::released_awaiting_repair;
 use self::dock::dock;

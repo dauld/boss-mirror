@@ -37,8 +37,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::common::{
-    StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, row_or_refuse,
-    rows_or_refuse, sim_origin_value,
+    StepEvent, api_client, dispatcher_actor_header, dispatcher_reader_header, open_jobs,
+    row_or_refuse, rows_or_refuse, sim_origin_value,
 };
 use super::sweep_deploy_convergence;
 
@@ -361,9 +361,11 @@ impl Handler for MaintenanceSweepInspect {
         let approval = approval_kinds(&step_type_rows(&step_types)?);
 
         // The warm packets: open Jobs whose approval steps have completed
-        // are the ones still worth asking the approver about.
-        let open = self.get("/api/jobs?status=open&limit=1000").await?;
-        let open = listing_rows(&open, "the open-packet read (GET /api/jobs?status=open)")?;
+        // are the ones still worth asking the approver about. The whole
+        // open board, paged on `total`: this was one `limit=1000` page
+        // that never read `total`, so past the server's page cap the
+        // sweep judged the first page and cleared on it (04e14848).
+        let open = open_jobs(&self.client, &self.jobs_base, None, &ctx.rule_name).await?;
         let findings = empty_approval_decisions(&open, &approval, &since);
 
         // Complete the Inspect checklist. Its own fields are `findings`
@@ -669,6 +671,116 @@ mod tests {
             seen[2].2,
             json!({ "status": "completed" }),
             "the flip carries no metadata, so it can drop no stored key"
+        );
+    }
+
+    /// A LIMIT IS NOT A FILTER (backlog 04e14848). The open-packet read
+    /// was one `status=open&limit=1000` page and never looked at
+    /// `total`, so past 1000 open packets the sweep judged the first
+    /// page and cleared on it. Measured against a stub that clamps a
+    /// page at 1000 the way `GET /api/jobs` does (`MAX_LIMIT`), with the
+    /// one empty decision sitting on page two: the sweep must find it.
+    #[tokio::test]
+    async fn an_empty_decision_on_page_two_of_the_open_board_is_found() {
+        use axum::{
+            Json as AxJson, Router,
+            extract::{Query, State},
+            http::StatusCode,
+            routing::{get, patch},
+        };
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        const SERVER_CAP: usize = 1000;
+        let mut board: Vec<Value> = (0..SERVER_CAP + 200)
+            .map(|i| json!({ "id": format!("j{i}"), "steps": [] }))
+            .collect();
+        board.push(json!({
+            "id": "j-tail",
+            "steps": [{
+                "id": "s-tail", "title": "Approve the tail", "kind": "sign-off",
+                "status": "completed", "completed_on": "2026-09-24",
+                "metadata": {}, "notes": ""
+            }]
+        }));
+        let board = Arc::new(board);
+        async fn page(
+            State(board): State<Arc<Vec<Value>>>,
+            Query(q): Query<HashMap<String, String>>,
+        ) -> AxJson<Value> {
+            let num = |k: &str, d: usize| q.get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
+            let limit = num("limit", 50).min(SERVER_CAP);
+            let offset = num("offset", 0);
+            let data: Vec<Value> = board.iter().skip(offset).take(limit).cloned().collect();
+            AxJson(json!({ "data": data, "total": board.len(), "limit": limit, "offset": offset }))
+        }
+        type Seen = Arc<Mutex<Vec<Value>>>;
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let merged = seen.clone();
+        let app = Router::new()
+            .route(
+                "/api/jobs/{id}",
+                get(|| async {
+                    AxJson(json!({
+                        "id": "j-sweep", "kind": "maintenance-sweep",
+                        "opened_on": "2026-09-24",
+                        "metadata": { "target": "empty-decisions", "opened_at": "2026-09-24T00:00:00Z" },
+                        "steps": [{ "id": "s-inspect", "kind": "checklist", "status": "ready" }],
+                    }))
+                }),
+            )
+            .route(
+                "/api/jobs/step-types",
+                get(|| async { AxJson(json!([{ "kind": "sign-off", "surface": "approval" }])) }),
+            )
+            .route("/api/jobs", get(page))
+            .with_state(board)
+            .route(
+                "/api/jobs/{id}/steps/{sid}/metadata",
+                patch(move |AxJson(body): AxJson<Value>| async move {
+                    merged.lock().expect("lock").push(body);
+                    StatusCode::NO_CONTENT
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                patch(|| async { StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/api/jobs/{id}/steps/{sid}",
+                axum::routing::put(|| async { StatusCode::NO_CONTENT }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let handler =
+            MaintenanceSweepInspect::with_client(reqwest::Client::new(), format!("http://{addr}"));
+        let ctx = InvocationContext {
+            rule_name: "inspect-empty-decisions-sweep-on-step-ready".into(),
+            triggering_event_id: "evt-1".into(),
+            triggering_topic: "step.ready.checklist".into(),
+            event_payload: json!({
+                "job_id": "j-sweep",
+                "step_id": "s-inspect",
+                "kind": "checklist",
+                "metadata": {},
+            }),
+        };
+        handler
+            .invoke(&[], &ctx)
+            .await
+            .expect("the inspection completes");
+        let seen = seen.lock().expect("lock").clone();
+        let findings = seen
+            .first()
+            .and_then(|b| b.get("findings"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            findings.contains("j-tail/s-tail"),
+            "the empty decision on page two must be found, not cleared off page one: {findings:?}"
         );
     }
 

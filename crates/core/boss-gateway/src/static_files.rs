@@ -583,6 +583,7 @@ mod traversal_tests {
             session_key: KEY.to_vec(),
             proxy_client: reqwest::Client::new(),
             perf: Arc::new(PerfCollector::new()),
+            machine_token: Default::default(),
         }
     }
 

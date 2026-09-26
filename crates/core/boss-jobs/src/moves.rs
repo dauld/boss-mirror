@@ -224,10 +224,14 @@ pub struct Move {
     pub label: String,
     pub from: Option<String>,
     pub to: Option<String>,
-    /// Whether the map DRAWS the route this move took — a border in
-    /// [`crate::borders::BORDERS`]. `None` for a move onto or off the
-    /// map, which is not a route between two stations; its off-ramp is
-    /// declared with the derived routes (car R2).
+    /// Whether a DERIVED route supports the move this took — a protocol
+    /// crossing or a declared hand-off ([`crate::routes`], car R2), on-
+    /// and off-ramps included. Stamped by the mover when it records the
+    /// move ([`judged`]); `None` where the routes could not be derived
+    /// then, which is unjudged — never "drawn". The regions read judges
+    /// every move in its window again against the routes derived now,
+    /// so a row stamped under an older derivation is never trusted over
+    /// the current one.
     pub declared: Option<bool>,
     pub cause_event_id: Uuid,
     pub cause_seq: i64,
@@ -403,13 +407,12 @@ pub fn moves(prev: &Snapshot, next: &Snapshot, causes: &[Cause]) -> Vec<Move> {
                 if handoff && departed && links.carrier(q, next).is_none() {
                     folded.insert(q);
                 }
-                drafts.push((
-                    p,
-                    prev.place(q).region(),
-                    is.region(),
-                    Some((q, key)),
-                    handoff,
-                ));
+                // A predecessor that stood where this packet now stands
+                // did not send it anywhere: a train made up on the dock
+                // from the cars standing there (car R1) is filed ONTO
+                // the map at the dock, the lineage still named.
+                let from = prev.place(q).region().filter(|r| Some(*r) != is.region());
+                drafts.push((p, from, is.region(), Some((q, key)), handoff));
             }
             None => drafts.push((p, None, is.region(), None, false)),
         }
@@ -439,6 +442,15 @@ pub fn moves(prev: &Snapshot, next: &Snapshot, causes: &[Cause]) -> Vec<Move> {
     let facts = |p: &str| next.facts.get(p).or_else(|| prev.facts.get(p));
     let mut out: Vec<Move> = drafts
         .into_iter()
+        // A ROW THAT GOES NOWHERE IS NOT A MOVE. Since a train is placed
+        // by its active step (car R1), a car that boards stands aboard a
+        // train that is still on the dock, and its row is drawn where the
+        // train stands — from the dock to the dock. The table refuses
+        // exactly that (`yard_moves_goes_somewhere`), and a refused
+        // batch is retried every tick, so one boarding would have wedged
+        // the mover for good. The car did not move on the map; it rides
+        // the train, whose own row carries it (`aboard`).
+        .filter(|(_, from, to, _, _)| from != to)
         .filter_map(|(p, from, to, linked, handoff)| {
             let cause = newest
                 .get(p)
@@ -458,11 +470,9 @@ pub fn moves(prev: &Snapshot, next: &Snapshot, causes: &[Cause]) -> Vec<Move> {
                 label: f.map_or_else(|| p.to_string(), |f| f.label.clone()),
                 from: from.map(str::to_string),
                 to: to.map(str::to_string),
-                declared: from.zip(to).map(|(a, b)| {
-                    crate::borders::BORDERS
-                        .iter()
-                        .any(|spec| spec.from == a && spec.to == b)
-                }),
+                // Judged by the mover against the derived routes
+                // ([`judged`]); the diff itself knows no routes.
+                declared: None,
                 cause_event_id: cause.event_id,
                 cause_seq: cause.seq,
                 cause_kind: cause.kind.clone(),
@@ -476,6 +486,20 @@ pub fn moves(prev: &Snapshot, next: &Snapshot, causes: &[Cause]) -> Vec<Move> {
         .collect();
     out.sort_by(|a, b| (a.cause_seq, &a.packet).cmp(&(b.cause_seq, &b.packet)));
     out
+}
+
+/// STAMP each move with whether a derived route supports it
+/// ([`crate::routes::RouteMap::declares`]) — the mover's judgement at
+/// record time, so a stream frame says whether its dot rides a drawn
+/// line.
+pub fn judged(moves: Vec<Move>, routes: &crate::routes::RouteMap) -> Vec<Move> {
+    moves
+        .into_iter()
+        .map(|m| Move {
+            declared: Some(routes.declares(m.from.as_deref(), m.to.as_deref())),
+            ..m
+        })
+        .collect()
 }
 
 /// What the mover holds between ticks: the log position its last
@@ -575,12 +599,12 @@ pub fn advance(baseline: Option<&Baseline>, tick: Tick) -> (Baseline, Reading) {
     )
 }
 
-/// One undrawn route and how many moves took it: the observed-undeclared
-/// count (design e765b3fc §2b, source 3).
+/// One route and how many moves took it in a window (design e765b3fc
+/// §2b, source 3): a region, or `None` off the map, at either end.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteCount {
-    pub from: String,
-    pub to: String,
+    pub from: Option<String>,
+    pub to: Option<String>,
     pub moves: i64,
     pub last_at: Instant,
 }
@@ -608,9 +632,11 @@ pub trait MovesStore: Send + Sync {
     async fn since(&self, seq: i64, limit: i64) -> Result<Vec<Recorded>, MovesError>;
     /// The newest seq recorded, 0 when there is none.
     async fn latest_seq(&self) -> Result<i64, MovesError>;
-    /// Every route the map does not draw that a move took at or after
-    /// `since`, with how many did.
-    async fn undeclared(&self, since: Instant) -> Result<Vec<RouteCount>, MovesError>;
+    /// Every route a move took at or after `since` — drawn or not, onto
+    /// and off the map included — with how many did. Whether each is
+    /// declared is judged against the routes derived NOW
+    /// ([`with_undeclared`]), not the stamp a row was written with.
+    async fn crossings(&self, since: Instant) -> Result<Vec<RouteCount>, MovesError>;
 }
 
 /// In-memory adapter: a log a test appends to, and the record.
@@ -667,6 +693,14 @@ impl MovesStore for InMemoryMoves {
     async fn record(&self, moves: &[Move]) -> Result<u64, MovesError> {
         let mut rows = self.rows.lock().map_err(poisoned)?;
         let mut added = 0;
+        // The table's own check (`yard_moves_goes_somewhere`), kept here
+        // so the in-memory record refuses what Postgres refuses.
+        if let Some(m) = moves.iter().find(|m| m.from == m.to) {
+            return Err(MovesError::Storage(format!(
+                "a move goes somewhere: {} from {:?} to {:?}",
+                m.packet, m.from, m.to
+            )));
+        }
         for m in moves {
             let known = rows.iter().any(|r| {
                 r.r#move.cause_event_id == m.cause_event_id && r.r#move.packet == m.packet
@@ -704,21 +738,19 @@ impl MovesStore for InMemoryMoves {
             .map_or(0, |r| r.seq))
     }
 
-    async fn undeclared(&self, since: Instant) -> Result<Vec<RouteCount>, MovesError> {
+    async fn crossings(&self, since: Instant) -> Result<Vec<RouteCount>, MovesError> {
         let rows = self.rows.lock().map_err(poisoned)?;
-        let mut out: BTreeMap<(String, String), RouteCount> = BTreeMap::new();
+        type Key = (Option<String>, Option<String>);
+        let mut out: BTreeMap<Key, RouteCount> = BTreeMap::new();
         for m in rows.iter().map(|r| &r.r#move) {
-            let (Some(from), Some(to)) = (&m.from, &m.to) else {
-                continue;
-            };
-            if m.declared != Some(false) || m.at < since {
+            if m.at < since {
                 continue;
             }
             let slot = out
-                .entry((from.clone(), to.clone()))
+                .entry((m.from.clone(), m.to.clone()))
                 .or_insert_with(|| RouteCount {
-                    from: from.clone(),
-                    to: to.clone(),
+                    from: m.from.clone(),
+                    to: m.to.clone(),
                     moves: 0,
                     last_at: m.at,
                 });
@@ -855,10 +887,10 @@ mod pg {
                 .map_err(storage)
         }
 
-        async fn undeclared(&self, since: Instant) -> Result<Vec<RouteCount>, MovesError> {
+        async fn crossings(&self, since: Instant) -> Result<Vec<RouteCount>, MovesError> {
             let rows = sqlx::query(
                 "SELECT from_region, to_region, COUNT(*)::BIGINT AS moves, MAX(at) AS last_at \
-                 FROM yard_moves WHERE declared = false AND at >= $1 \
+                 FROM yard_moves WHERE at >= $1 \
                  GROUP BY 1, 2 ORDER BY 1, 2",
             )
             .bind(since)
@@ -882,22 +914,84 @@ mod pg {
 #[cfg(feature = "postgres")]
 pub use pg::PgMoves;
 
-/// Fold the observed-undeclared counts into the regions read: each
-/// region gets the undrawn routes that moves INTO it took. `None` (the
-/// record could not be read) leaves every region's reading `null` —
-/// never empty, which would say every move took a drawn route.
+/// Fold the observed-undeclared reading into the regions read, and let
+/// it JUDGE (design e765b3fc §2b; car R2 switched it on).
+///
+/// `crossings` is every route the moves record saw taken in the window;
+/// each is judged against the routes derived now
+/// ([`crate::routes::RouteMap::declares`]), and a region carries the
+/// undeclared ones that end in it — or, for an exit, that leave it for
+/// off the map, since a route to nowhere has no other region to name.
+/// A region carrying any is TROUBLED on
+/// [`crate::region_states::MOVES_UNDECLARED`], at once and naming each
+/// route with its count: a packet took a route no protocol, rule or verb
+/// declares, so either the map or the record is wrong, and zero is what
+/// a healthy network reads.
+///
+/// UNREAD IS NOT EMPTY. `None` for either input — the record could not
+/// be read, or the routes could not be derived — leaves every region's
+/// reading `null` and judges nothing: an empty route set would call
+/// every move undeclared, and an empty record would say none was.
 pub fn with_undeclared(
     map: crate::regions::Regions,
-    routes: Option<Vec<RouteCount>>,
+    crossings: Option<Vec<RouteCount>>,
+    routes: Option<&crate::routes::RouteMap>,
+    now: Instant,
 ) -> crate::regions::Regions {
+    use crate::region_states::{Finding, MOVES_UNDECLARED, decide};
+    use crate::regions::RegionState;
+    let undeclared: Option<Vec<RouteCount>> = crossings.zip(routes).map(|(all, routes)| {
+        all.into_iter()
+            .filter(|c| c.from != c.to && !routes.declares(c.from.as_deref(), c.to.as_deref()))
+            .collect()
+    });
     let regions = map
         .regions
         .into_iter()
-        .map(|r| crate::regions::Region {
-            undeclared: routes
-                .as_ref()
-                .map(|all| all.iter().filter(|c| c.to == r.name).cloned().collect()),
-            ..r
+        .map(|r| {
+            let mine: Option<Vec<RouteCount>> = undeclared.as_ref().map(|all| {
+                all.iter()
+                    .filter(|c| match &c.to {
+                        Some(to) => *to == r.name,
+                        None => c.from.as_deref() == Some(r.name.as_str()),
+                    })
+                    .cloned()
+                    .collect()
+            });
+            let said: Vec<String> = mine
+                .iter()
+                .flatten()
+                .filter(|c| c.moves > 0)
+                .map(|c| {
+                    format!(
+                        "{} → {} ×{}",
+                        c.from.as_deref().unwrap_or("off the map"),
+                        c.to.as_deref().unwrap_or("off the map"),
+                        c.moves
+                    )
+                })
+                .collect();
+            let region = crate::regions::Region {
+                undeclared: mine,
+                ..r
+            };
+            if said.is_empty() || region.state == RegionState::Troubled {
+                return region;
+            }
+            let lead = format!(
+                "packets took {} the map does not declare: {}",
+                if said.len() == 1 { "a route" } else { "routes" },
+                said.join(", ")
+            );
+            crate::regions::Region {
+                state: RegionState::Troubled,
+                band: Some(decide(
+                    &Finding::new(MOVES_UNDECLARED, None, String::new(), lead.clone()),
+                    now,
+                )),
+                why: format!("{lead} · {}", region.why),
+                ..region
+            }
         })
         .collect();
     crate::regions::Regions { regions, ..map }
@@ -1055,7 +1149,10 @@ mod tests {
         );
         assert_eq!(m.handoff_from.as_deref(), Some("gate-1"));
         assert_eq!(m.lineage.as_deref(), Some(SAME_BRANCH));
-        assert_eq!(m.declared, Some(true), "gates -> dock is a drawn border");
+        assert_eq!(
+            m.declared, None,
+            "the diff knows no routes; the mover judges it against the derived ones"
+        );
         // It cites the newest event that names the car itself.
         assert_eq!(m.cause_seq, 104);
         assert_eq!(m.cause_event_id, Uuid::from_u128(104));
@@ -1200,11 +1297,91 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("train-1", Some("track"), Some("arrivals"), Some(true)),
+                ("train-1", Some("track"), Some("arrivals"), None),
                 // The route the design measured undrawn (e765b3fc §1, H):
-                // counted, not hidden.
-                ("car-1", Some("track"), Some("shed"), Some(false)),
+                // a row of its own, judged by the mover (car R2 declares
+                // it through train-reconcile's hand-off).
+                ("car-1", Some("track"), Some("shed"), None),
             ]
+        );
+    }
+
+    /// A CAR BOARDS A TRAIN STILL BEING MADE UP ON THE DOCK (car R1 places
+    /// a train by its active step): the car rides the train and stands
+    /// where it stands — the dock — so it has not moved on the map, and
+    /// no row is written. Written, it would go from the dock to the dock,
+    /// which the table refuses (`yard_moves_goes_somewhere`) — and a
+    /// refused batch is judged again every tick, so the mover would never
+    /// have recorded another move. The in-memory record refuses it too.
+    #[tokio::test]
+    async fn a_car_boarding_a_train_on_the_dock_goes_nowhere_and_writes_no_row() {
+        let car = facts("ship-a-change", Some("fix/x"), &[]);
+        let train = facts("pr-train", None, &[(CARRIES, "car-1")]);
+        let parked = snapshot(&[("car-1", "dock")], &[("car-1", car.clone())]);
+        let made_up = snapshot(
+            &[("train-1", "dock")],
+            &[("car-1", car.clone()), ("train-1", train.clone())],
+        );
+        let out = moves(
+            &parked,
+            &made_up,
+            &[
+                cause(1, "train-1", "jobs.job.created"),
+                cause(2, "car-1", "jobs.job.updated"),
+            ],
+        );
+        let rows: Vec<_> = out
+            .iter()
+            .map(|m| (m.packet.as_str(), m.from.as_deref(), m.to.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [("train-1", None, Some("dock"))],
+            "the train is filed onto the dock; the car it collected did not move"
+        );
+        let store = InMemoryMoves::new();
+        assert_eq!(store.record(&out).await.unwrap(), 1);
+        let mut nowhere = out[0].clone();
+        nowhere.from = nowhere.to.clone();
+        assert!(
+            store.record(&[nowhere]).await.is_err(),
+            "the in-memory record refuses what the table refuses"
+        );
+    }
+
+    /// THE MOVER'S STAMP is the derived routes' answer: a move on a
+    /// declared route is `declared`, one on no route is not, and a move
+    /// the diff wrote carries no stamp until it is judged.
+    #[test]
+    fn a_move_is_stamped_against_the_derived_routes() {
+        let routes = crate::routes::derive(
+            &[],
+            &[],
+            Some(&[RouteCount {
+                from: Some("track".into()),
+                to: Some("shed".into()),
+                moves: 1,
+                last_at: t("2026-09-26T03:00:00Z"),
+            }]),
+        );
+        let gate = facts("gate-run", Some("fix/x"), &[]);
+        let car = facts("ship-a-change", Some("fix/x"), &[]);
+        let prev = snapshot(&[("gate-1", "gates")], &[("gate-1", gate.clone())]);
+        let next = snapshot(&[("car-1", "dock")], &[("gate-1", gate), ("car-1", car)]);
+        let found = moves(
+            &prev,
+            &next,
+            &[
+                cause(1, "gate-1", "jobs.job.updated"),
+                cause(2, "car-1", "jobs.job.created"),
+            ],
+        );
+        assert!(found.iter().all(|m| m.declared.is_none()));
+        let stamped = judged(found, &routes);
+        assert_eq!(
+            stamped.iter().map(|m| m.declared).collect::<Vec<_>>(),
+            [Some(false)],
+            "observed only, gates -> dock is not declared by an empty route set"
         );
     }
 
@@ -1327,14 +1504,19 @@ mod tests {
             .collect();
         assert_eq!(held, rows);
         assert_eq!(store.latest_seq().await.unwrap(), 5);
-        let undrawn = store.undeclared(t("2026-09-26T00:00:00Z")).await.unwrap();
+        let taken = store.crossings(t("2026-09-26T00:00:00Z")).await.unwrap();
         assert_eq!(
-            undrawn
+            taken
                 .iter()
-                .map(|r| (r.from.as_str(), r.to.as_str(), r.moves))
+                .map(|r| (r.from.as_deref(), r.to.as_deref(), r.moves))
                 .collect::<Vec<_>>(),
-            [("track", "shed", 1)],
-            "the one route the fixture took that the map does not draw"
+            [
+                (Some("dock"), Some("track"), 2),
+                (Some("gates"), Some("dock"), 1),
+                (Some("track"), Some("arrivals"), 1),
+                (Some("track"), Some("shed"), 1),
+            ],
+            "every route the fixture took, counted, whether declared or not"
         );
     }
 

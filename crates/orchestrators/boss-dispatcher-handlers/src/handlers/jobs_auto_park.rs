@@ -67,6 +67,34 @@ impl JobsAutoPark {
         self.jobs_base.trim_end_matches('/')
     }
 
+    /// Put the gate's `--hold` onto `car`'s review step ([`hold_write`]),
+    /// or do nothing for an unheld gate. A car that cannot carry the hold
+    /// is a PERMANENT refusal — redelivering cannot give it a review
+    /// step — and a failed write propagates, so either way the caller
+    /// stops before anything makes the car boardable.
+    async fn hold_car(
+        &self,
+        car: &Value,
+        inputs: &AutoParkInputs,
+        rule: &str,
+    ) -> Result<(), HandlerError> {
+        let Some((path, body)) = hold_write(car, inputs).map_err(HandlerError::Permanent)? else {
+            return Ok(());
+        };
+        write_json(
+            &self.client,
+            reqwest::Method::PATCH,
+            &format!("{}{path}", self.base()),
+            &body,
+            rule,
+        )
+        .await?;
+        tracing::info!(rule = %rule, branch = %inputs.branch,
+            hold = %inputs.hold.as_deref().unwrap_or_default(),
+            "the gate carried --hold: the car stands at the dock held until boss release");
+        Ok(())
+    }
+
     /// BEST-EFFORT: state the linked item's ROUTE, because parking this
     /// car is what decided it.
     ///
@@ -205,6 +233,53 @@ struct AutoParkInputs {
     /// carry fields the gate did not state — an `owner` added by hand —
     /// and [`waits_on_patch`] merges into those rather than over them.
     waits_on: Option<Value>,
+    /// THE HOLD THE GATE CARRIED BESIDE ITS PARK INTENT (backlog
+    /// 486dde37): the gate-run's `hold`, read by the one definition of
+    /// the marker (`stranded::hold_reason`). `Some` = the car is filed
+    /// already held — see [`hold_write`].
+    hold: Option<String>,
+}
+
+/// PURE: the review-step merge write that puts a gate's `--hold` onto
+/// its car — `(path, body)` — or `None` when the gate carried no hold.
+///
+/// THE REVIEW STEP, BECAUSE THAT IS WHERE A HOLD IS READ. `boss hold`
+/// writes `hold: <reason>` there; the conductor's `parked_ready`, the
+/// loading-dock station row and `boss orient` all read it there, through
+/// `stranded::hold_reason`. So the car a held gate files is held by the
+/// same brake an operator would have applied, and `boss release` takes
+/// it off — no second mechanism.
+///
+/// An open review only (pending on a car being filed, ready on one at
+/// the dock): the step API refuses a write to a finished step, and a
+/// car past review has boarded — holding it is no longer possible. That
+/// case REFUSES rather than parking the car as though it were held,
+/// because a hold that silently did not land is a trust-boundary car
+/// boarding unreviewed.
+fn hold_write(car: &Value, inputs: &AutoParkInputs) -> Result<Option<(String, Value)>, String> {
+    let Some(reason) = inputs.hold.as_deref() else {
+        return Ok(None);
+    };
+    let car_id = car.get("id").and_then(Value::as_str).unwrap_or_default();
+    let review = car::find_step(car, car::REVIEW_SLUG, car::REVIEW)
+        .filter(|s| {
+            !matches!(
+                s.get("status").and_then(Value::as_str),
+                Some("completed" | "skipped")
+            )
+        })
+        .and_then(|s| s.get("id").and_then(Value::as_str))
+        .filter(|_| !car_id.is_empty());
+    let Some(step_id) = review else {
+        return Err(format!(
+            "the gate carried --hold ({reason}) but car {car_id} has no open review step to \
+             carry it — refusing to park the car unheld; nothing further was written to it"
+        ));
+    };
+    Ok(Some((
+        format!("/api/jobs/{car_id}/steps/{step_id}/metadata"),
+        json!({ "hold": reason }),
+    )))
 }
 
 /// PURE: the `waits_on` a park writes onto `existing` (the car's own
@@ -395,6 +470,9 @@ fn auto_park_inputs(
             .get(car::PARK_WAITS_ON)
             .filter(|w| w.is_object())
             .cloned(),
+        hold: gate_run
+            .get("metadata")
+            .and_then(boss_jobs::stranded::hold_reason),
     })
 }
 
@@ -1024,6 +1102,10 @@ impl Handler for JobsAutoPark {
             let id = parked.get("id").and_then(Value::as_str).ok_or_else(|| {
                 HandlerError::Downstream("auto-park: parked car has no id".into())
             })?;
+            // A held re-gate holds the car it refreshes, FIRST: the car
+            // is already at the dock, so the fresh receipt must not make
+            // it boardable a moment before the brake is on.
+            self.hold_car(parked, &inputs, &ctx.rule_name).await?;
             let note = format!(
                 "re-gated in place: green at {} (gate-run {}) — receipt machine-copied to \
                  regate_receipt by the auto-park handler; the frozen gate step stays as the \
@@ -1196,6 +1278,15 @@ impl Handler for JobsAutoPark {
                  behind that one and will board in the next window; PATCH \
                  /api/jobs/{car_id}/metadata with boards_after to restore it");
         }
+
+        // THE HOLD, BEFORE THE CAR IS PARKED — for the reason the edge
+        // above gives, and harder: the gate step's completion makes
+        // review ready, and a car whose review is ready and unheld is
+        // boardable on the next tick. Unlike the edge this write is NOT
+        // best-effort: a trust-boundary car that lost its hold boards
+        // unreviewed, so a failure stops here, the gate step stays open,
+        // and the car stays short of the dock (backlog 486dde37).
+        self.hold_car(&car, &inputs, &ctx.rule_name).await?;
 
         // In order (scope → build → gate): each completion re-evaluates
         // readiness so the next is ready. A step the OPEN already
@@ -2409,6 +2500,7 @@ mod building_car_tests {
             agent_run: serde_json::Map::new(),
             tiers: serde_json::Map::new(),
             waits_on: None,
+            hold: None,
         };
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-10T18:30:00Z")
             .unwrap()
@@ -2470,6 +2562,7 @@ mod building_car_tests {
             agent_run: serde_json::Map::new(),
             tiers: serde_json::Map::new(),
             waits_on: None,
+            hold: None,
         };
         let patch = adopt_patch(&building(), &inputs);
         assert_eq!(
@@ -2526,6 +2619,7 @@ mod building_car_tests {
             agent_run: serde_json::Map::new(),
             tiers: serde_json::Map::new(),
             waits_on: None,
+            hold: None,
         };
         let patch = adopt_patch(&opened, &inputs);
         assert_explicit_null!(
@@ -2596,6 +2690,7 @@ mod building_car_tests {
             agent_run: serde_json::Map::new(),
             tiers: serde_json::Map::new(),
             waits_on: None,
+            hold: None,
         };
 
         // ONE PIECE, stated at open and confirmed at the gate.
@@ -2671,6 +2766,7 @@ mod building_car_tests {
                 agent_run: serde_json::Map::new(),
                 tiers: serde_json::Map::new(),
                 waits_on: None,
+                hold: None,
             }
         };
         let opened = |key: &str, value: &str| {
@@ -2746,6 +2842,7 @@ mod building_car_tests {
                 agent_run: serde_json::Map::new(),
                 tiers: serde_json::Map::new(),
                 waits_on: None,
+                hold: None,
             }
         };
         // The gate names the closing edge too: agreement, not conflict.
@@ -2799,6 +2896,7 @@ mod building_car_tests {
             agent_run: serde_json::Map::new(),
             tiers: serde_json::Map::new(),
             waits_on: None,
+            hold: None,
         };
         let patch = adopt_patch(&building(), &inputs);
         assert!(
@@ -2964,5 +3062,181 @@ mod no_data_array_tests {
             "no car filed for work that may have landed"
         );
         assert_refused_by_name(res, "the landed-car read");
+    }
+}
+
+/// A GATE THAT CARRIES PARK INTENT AND A HOLD FILES A HELD CAR (backlog
+/// 486dde37). Until 2026-09-26 `boss gate` refused `--hold` beside
+/// `--park-*`, so a trust-boundary car waiting for its adversarial
+/// review auto-parked UNHELD and could board on depth before the
+/// operator's `boss hold` landed — three such cars on one day. The
+/// handler now writes the gate-run's hold reason onto the car's review
+/// step, the key `boss hold` writes and the conductor, the dock row and
+/// orient read, BEFORE the gate step completes and makes the car
+/// boardable.
+#[cfg(test)]
+mod held_park_tests {
+    use super::*;
+    use crate::handlers::listing_stub::{empty_listing, serve};
+
+    const GATE_RUN: &str = "5e1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f";
+    const REASON: &str = "trust-boundary car: parks after its adversarial review";
+
+    fn held_gate_run() -> Value {
+        json!({
+            "id": GATE_RUN,
+            "kind": "gate-run",
+            "metadata": {
+                "branch": "fix/x",
+                "sha": "abc",
+                "park_summary": "does a thing.",
+                "park_excludes": "not that",
+                "park_test": "ran it",
+                "park_verified": "seen",
+                "park_partial_item": "b8e75382-0000-0000-0000-000000000000",
+                "hold": REASON,
+            },
+        })
+    }
+
+    fn green_meta() -> serde_json::Map<String, Value> {
+        json!({
+            "verdict": "green",
+            "receipt": "{\"verdict\":\"green\",\"head\":\"deadbeef\",\"mode\":\"full\",\"fails\":[]}",
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    /// A car as the create answers it: every step still ahead.
+    fn fresh_car() -> Value {
+        json!({
+            "id": "stub-created",
+            "kind": "ship-a-change",
+            "status": "open",
+            "metadata": { "branch": "fix/x" },
+            "steps": [
+                {"id": "s-scope", "spec_slug": "scope", "title": car::SCOPE, "status": "ready"},
+                {"id": "s-build", "spec_slug": "build", "title": car::BUILD, "status": "pending"},
+                {"id": "s-gate", "spec_slug": "gate", "title": car::GATE, "status": "pending"},
+                {"id": "s-review", "spec_slug": "review", "title": car::REVIEW, "status": "pending"},
+            ]
+        })
+    }
+
+    #[test]
+    fn a_held_gate_still_parks_and_carries_its_reason() {
+        let inputs = auto_park_inputs(&held_gate_run(), &green_meta())
+            .expect("a hold does not stop the park — it rides it");
+        assert_eq!(inputs.hold.as_deref(), Some(REASON));
+        // Every receipt field still rides: the hold replaces none of them.
+        assert_eq!(
+            inputs.item_provenance.get(car::PARTIAL_ITEM),
+            Some(&json!("b8e75382-0000-0000-0000-000000000000"))
+        );
+    }
+
+    #[test]
+    fn the_hold_lands_on_the_review_step_in_the_shape_every_reader_reads() {
+        let inputs = auto_park_inputs(&held_gate_run(), &green_meta()).unwrap();
+        let (path, body) = hold_write(&fresh_car(), &inputs)
+            .expect("a pending review takes the hold")
+            .expect("a held gate owes the car its hold");
+        assert_eq!(path, "/api/jobs/stub-created/steps/s-review/metadata");
+        // Read back by the ONE definition of the marker — the function the
+        // conductor's `parked_ready`, the dock row and orient all call.
+        assert_eq!(
+            boss_jobs::stranded::hold_reason(&body).as_deref(),
+            Some(REASON)
+        );
+        assert_eq!(body, json!({ "hold": REASON }));
+        // A car already at the dock (review ready) is held the same way.
+        let mut parked = fresh_car();
+        parked["steps"][3]["status"] = json!("ready");
+        assert!(hold_write(&parked, &inputs).unwrap().is_some());
+    }
+
+    #[test]
+    fn an_unheld_gate_writes_no_hold() {
+        let mut gr = held_gate_run();
+        gr["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("hold")
+            .unwrap();
+        let inputs = auto_park_inputs(&gr, &green_meta()).unwrap();
+        assert_eq!(inputs.hold, None);
+        assert_eq!(hold_write(&fresh_car(), &inputs), Ok(None));
+        // Nor does a released one (`false` / blank are no marker).
+        for released in [json!(false), json!(""), Value::Null] {
+            gr["metadata"]["hold"] = released;
+            let inputs = auto_park_inputs(&gr, &green_meta()).unwrap();
+            assert_eq!(hold_write(&fresh_car(), &inputs), Ok(None));
+        }
+    }
+
+    /// A held gate whose car has no open review cannot be held, and must
+    /// not be parked as though it were: refused, naming the hold.
+    #[test]
+    fn a_held_gate_refuses_a_car_it_cannot_hold() {
+        let inputs = auto_park_inputs(&held_gate_run(), &green_meta()).unwrap();
+        let mut done = fresh_car();
+        done["steps"][3]["status"] = json!("completed");
+        let err = hold_write(&done, &inputs).unwrap_err();
+        assert!(err.contains(REASON), "{err}");
+        let mut none = fresh_car();
+        none["steps"].as_array_mut().unwrap().pop();
+        assert!(hold_write(&none, &inputs).is_err());
+    }
+
+    /// END TO END: the car is filed, the hold is written onto its review
+    /// step, and only THEN does the gate step complete (which is what
+    /// makes review ready and the car boardable). A hold written after
+    /// that completion would leave a window in which the dock could board
+    /// the car unheld — the race this item exists to close.
+    #[tokio::test]
+    async fn a_held_gate_files_its_car_held_before_it_can_board() {
+        let stub = serve(vec![
+            (
+                "/api/jobs/5e1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
+                held_gate_run(),
+            ),
+            ("/api/jobs/stub-created", fresh_car()),
+            ("/api/jobs?status=open", empty_listing()),
+            ("/api/jobs?status=closed", empty_listing()),
+        ])
+        .await;
+        let ctx = InvocationContext {
+            rule_name: "jobs.auto-park".into(),
+            triggering_event_id: "evt-green-held".into(),
+            triggering_topic: "step.done.gate-verdict".into(),
+            event_payload: json!({
+                "job_id": GATE_RUN,
+                "step_id": "s-verdict",
+                "kind": "gate-verdict",
+                "metadata": green_meta(),
+            }),
+        };
+        JobsAutoPark::new(
+            stub.base.clone(),
+            "http://unused",
+            Arc::new(boss_core::platform_owner::Fixed("emp-owner".into())),
+        )
+        .invoke(&[], &ctx)
+        .await
+        .expect("a held green parks");
+        let sent = stub.sent();
+        let at = |w: &str| sent.iter().position(|(k, _)| k == w);
+        assert!(at("POST /api/jobs").is_some(), "the car is filed: {sent:?}");
+        let hold = at("PATCH /api/jobs/stub-created/steps/s-review/metadata")
+            .expect("the hold is written onto the review step");
+        assert_eq!(sent[hold].1, json!({ "hold": REASON }));
+        let gate_done = at("PUT /api/jobs/stub-created/steps/s-gate")
+            .expect("the gate step still completes: every receipt field rides");
+        assert!(
+            hold < gate_done,
+            "held BEFORE the gate step completes: {sent:?}"
+        );
     }
 }

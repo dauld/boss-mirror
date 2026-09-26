@@ -278,6 +278,7 @@ mod tests {
             session_key: vec![0u8; 32],
             proxy_client: reqwest::Client::new(),
             perf: Arc::new(PerfCollector::new()),
+            machine_token: Default::default(),
         });
         mount(
             crate::build_router(None, &crate::public_reads::PublicReads::none()).with_state(state),

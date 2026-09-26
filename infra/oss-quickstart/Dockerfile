@@ -109,6 +109,11 @@ COPY infra/ops/verbs ./infra/ops/verbs
 # judges a tenant's sensor references offline, with no registry to ask
 # (b8d8c928).
 COPY infra/platform/workflows ./infra/platform/workflows
+# boss-jobs `include_str!`s the IT map's declared hand-offs — the one
+# file every rule, cadence and verb that turns one packet into another
+# declares its route in (design e765b3fc car R2) — so the routes it
+# serves need no file at run time.
+COPY infra/platform/yard/handoffs.toml ./infra/platform/yard/handoffs.toml
 
 # NO `ENV BOSS_BUILD_COMMIT` HERE — see the stage header; it is set in
 # the runtime stage so this layer keys on the sources alone.

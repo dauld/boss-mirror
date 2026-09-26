@@ -390,7 +390,7 @@ pub fn sign_as_gateway(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         })
         .to_string(),
     );
-    match boss_core::machine_token::from_env() {
+    match boss_core::machine_token::current() {
         Some(token) => rb.header(boss_core::machine_token::HEADER, token),
         None => rb,
     }
@@ -407,7 +407,7 @@ pub fn sign_as_gateway(rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
 /// made on an employee's behalf is that employee's read.
 fn sign_as_session(rb: reqwest::RequestBuilder, user_json: String) -> reqwest::RequestBuilder {
     let rb = rb.header("x-boss-user", user_json);
-    match boss_core::machine_token::from_env() {
+    match boss_core::machine_token::current() {
         Some(token) => rb.header(boss_core::machine_token::HEADER, token),
         None => rb,
     }

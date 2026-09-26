@@ -180,6 +180,17 @@ pub fn projected(metadata: &serde_json::Value) -> Option<AgentSpec> {
 /// `station`) are the contract of WHO does the work and stay as
 /// admitted; `station_reach` still counts a packet absent for want of
 /// one of those.
+///
+/// ONLY WHEN THE CONTRACT AGREES (backlog 09b354e7). The block is
+/// resourcing for a contract, and the active row's block was written
+/// for the active row's step. When the pinned step declares different
+/// `fields` ([`same_contract`]) the block is not its block: measured
+/// 2026-09-25, two backlog-item v2 packets whose `measure` declared no
+/// fields were queued and dispatched to analysts briefed for v11's
+/// `disposition` + `evidence`, and both refused, two runs spent. Such a
+/// step resolves to nothing here — no queue holds it, no claim routes an
+/// agent to it — and `boss dispatch` refuses it naming the convert that
+/// moves the packet onto the active version.
 pub fn resolved(
     step: &boss_core::job::Step,
     active: Option<&crate::registry::WorkflowSpec>,
@@ -188,12 +199,11 @@ pub fn resolved(
         return step.clone();
     }
     let declared = step.spec_slug.as_deref().and_then(|slug| {
-        active?
-            .steps
-            .iter()
-            .find(|s| s.title == slug)?
-            .agent
-            .as_ref()
+        let row_step = active?.steps.iter().find(|s| s.title == slug)?;
+        if !same_contract(&step.fields, &row_step.fields) {
+            return None;
+        }
+        row_step.agent.as_ref()
     });
     let Some(declared) = declared else {
         return step.clone();
@@ -209,6 +219,21 @@ pub fn resolved(
         metadata: serde_json::Value::Object(metadata),
         ..step.clone()
     }
+}
+
+/// Whether a pinned step and the active row's step declare the same
+/// completion contract, so the active block may stand in for the one
+/// the pinned version never declared. The step's own `fields` ARE its
+/// pinned version's: materialisation copies them off the spec that sets
+/// `workflow_version` (`registry::materialize_steps_at`), and `boss job convert`
+/// rewrites them with the version (`repin`) — so no second read of the
+/// pinned row is needed to know them. Order-free: the same fields
+/// authored in another order are the same contract.
+pub fn same_contract(
+    pinned: &[boss_core::job::StepField],
+    active: &[boss_core::job::StepField],
+) -> bool {
+    pinned.len() == active.len() && pinned.iter().all(|f| active.contains(f))
 }
 
 /// [`resolved`] over a packet's steps.
@@ -369,6 +394,48 @@ mod tests {
             "the step's own keys survive the overlay"
         );
         assert!(step.metadata.get(MODEL_KEY).is_none(), "nothing written");
+    }
+
+    /// THE 09b354e7 CASE: a step pinned to a version whose row declares
+    /// DIFFERENT fields than the active one is not the step the active
+    /// block was written for, so it resolves to nothing. Measured
+    /// 2026-09-25: backlog-item v2's `measure` carried `fields: []` and
+    /// v11's declared `disposition` + `evidence`; the queue handed two
+    /// v2 packets to analysts briefed for v11, and both refused.
+    #[test]
+    fn a_pinned_step_whose_fields_differ_from_the_active_row_does_not_resolve() {
+        let field = |name: &str| -> boss_core::job::StepField {
+            serde_json::from_value(serde_json::json!({
+                "name": name, "field_type": "text", "required": true
+            }))
+            .unwrap()
+        };
+        let step = step_carrying(serde_json::json!({ "authority_role": "platform-admin" }));
+        let mut row = active_row(Some(builder()));
+        row.steps
+            .iter_mut()
+            .find(|s| s.title == "build")
+            .unwrap()
+            .fields = vec![field("evidence")];
+        assert_eq!(
+            resolved(&step, Some(&row)),
+            step,
+            "fields [] against [evidence] is a different contract"
+        );
+
+        // The same fields, in another order, are the same contract: the
+        // block added later still resolves (51aef4dd).
+        let mut agreeing = step.clone();
+        agreeing.fields = vec![field("disposition"), field("evidence")];
+        row.steps
+            .iter_mut()
+            .find(|s| s.title == "build")
+            .unwrap()
+            .fields = vec![field("evidence"), field("disposition")];
+        assert_eq!(
+            projected(&resolved(&agreeing, Some(&row)).metadata),
+            Some(builder())
+        );
     }
 
     /// The step's own projection wins over the active row: a packet

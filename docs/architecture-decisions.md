@@ -1702,6 +1702,12 @@ granter's. **The caller's authority is read before the transaction:**
 only the row being written is locked and judged inside it, so a change
 to the caller's own grants that commits between the read and the write
 — a revocation racing a write — is not seen by that one write.
+The reads that answer about a person — `check-batch`, `my-scope` and a
+user's override list, whose rows carry free-text reasons — answer the
+caller about itself and anyone else only to a holder of Read on
+`policy-rule`, never to an anonymous visitor's identity. `/check` and
+the rule list are not yet bounded: every service asks them with no
+identity of its own, so they follow callers signing their policy calls.
 
 SPA auth is file-backed
 credentials managed by the gateway's admin CLI; SSH is

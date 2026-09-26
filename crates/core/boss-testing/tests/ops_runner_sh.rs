@@ -571,6 +571,36 @@ fn a_read_only_verb_answers_on_boss_gcp() {
     assert!(out.contains("answered df"), "{out}");
 }
 
+/// `disk-report` answers on boss-gcp too (backlog d3c7eada, 2026-09-26):
+/// the host's 48 GB root sat under its floor for nine days with only
+/// `df` to read it, so nothing could say what fills it. Run through the
+/// real allowlist with the host-shaped commands stubbed, it answers with
+/// its verdict line rather than a refusal.
+#[test]
+fn disk_report_answers_on_boss_gcp() {
+    needs_jq!();
+    let root = scratch("disk-report-gcp");
+    let bin = stub_sor(&root);
+    for tool in ["sudo", "docker"] {
+        write_exec(&bin.join(tool), "#!/bin/sh\nexit 1\n");
+    }
+    write_exec(
+        &bin.join("du"),
+        "#!/bin/sh\nfor a in \"$@\"; do last=\"$a\"; done\nprintf '0\\t%s\\n' \"$last\"\n",
+    );
+    let verbs = real_verbs(&root);
+    packet_for(&root, "boss-gcp", "disk-report", "[]");
+    let (out, payload) = run(&root, &verbs, &[("HOST_ID", "boss-gcp".to_string())]);
+    let md = payload.unwrap_or_else(|| panic!("no step completed: {out}"));
+    assert_eq!(md["disposition"], "answered", "{md} / {out}");
+    assert_eq!(md["exit_code"], "0", "{md} / {out}");
+    assert_eq!(md["runner_host"], "boss-gcp", "{md}");
+    assert!(
+        md["output"].as_str().unwrap_or("").contains("verdict: "),
+        "the report must reach its verdict line: {md}"
+    );
+}
+
 /// ABSENT MEANS REFUSE, so a verb cannot reach a host by forgetting to
 /// say which hosts it serves — the fail-closed half, without which the
 /// scoping would be advice rather than a rule.

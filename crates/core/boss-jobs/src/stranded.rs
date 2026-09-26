@@ -24,7 +24,9 @@
 //!   writes, and so the one an operator reaches for (6cd1c369).
 //! - `hold` — the green is deliberately waiting: gated on purpose
 //!   without a park, e.g. a car that must land at a David-timed
-//!   restart. A brake deliberately on is not an alarm.
+//!   restart. A brake deliberately on is not an alarm. Beside a park
+//!   intent it is the CAR's brake instead (auto-park writes it onto the
+//!   car's review step, 486dde37), so it silences nothing here.
 //! - `rerailed_to` — spent: `boss rerail --finish` moved the car onto
 //!   another branch, and without this stamp the ORIGINAL branch read as
 //!   stranded forever (69daaba2).
@@ -180,10 +182,16 @@ pub fn unparked_green<'a>(
     if claimed(branch) {
         return None;
     }
+    // A hold BESIDE park intent is the CAR's hold: `jobs.auto-park`
+    // writes it onto the car's review step (backlog 486dde37). So when
+    // that car is missing, the hold explains nothing — the handler owed
+    // a car and did not file one — and it must not make every reader
+    // list a failed park as deliberately waiting.
+    let intent = park_intent(gate_run_metadata);
     Some(UnparkedGreen {
         branch: branch.to_string(),
-        hold: hold_reason(gate_run_metadata),
-        park_intent: park_intent(gate_run_metadata),
+        hold: hold_reason(gate_run_metadata).filter(|_| !intent),
+        park_intent: intent,
     })
 }
 
@@ -307,6 +315,23 @@ mod tests {
         let bare = json!({"branch": "fix/a", "hold": true});
         let got = call(&bare, &green(), &[]).expect("unparked");
         assert_eq!(got.hold.as_deref(), Some("no reason recorded"));
+    }
+
+    /// A hold BESIDE park intent is the car's hold, not the green's
+    /// (backlog 486dde37): `jobs.auto-park` carries it onto the car's
+    /// review step. So a held green with park intent and NO car is the
+    /// handler having failed — stranded, and it must alarm like any
+    /// other intent-carrying green, not list as deliberately waiting.
+    #[test]
+    fn a_hold_beside_park_intent_does_not_silence_a_missing_car() {
+        let md = json!({"branch": "fix/a", "hold": "trust-boundary review",
+                        "park_summary": "does the thing"});
+        let got = call(&md, &green(), &[]).expect("unparked");
+        assert!(got.park_intent);
+        assert!(got.is_stranded(), "{got:?}");
+        assert_eq!(got.hold, None, "no reader may list it as held");
+        // With its car filed, it is not unparked at all.
+        assert!(call(&md, &green(), &["fix/a"]).is_none());
     }
 
     /// The park intent rides through, so a reader can tell "the handler

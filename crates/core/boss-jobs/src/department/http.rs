@@ -191,7 +191,25 @@ async fn departments_or_response(state: &DepartmentsApiState) -> Result<Vec<Depa
 /// would take every department tab away from everyone below operator.
 /// The gateway's session cookie is still the door — this is a service
 /// behind it, the posture `/api/classes` and `/api/subject-kinds` take.
-async fn list(State(state): State<Arc<DepartmentsApiState>>) -> Response {
+///
+/// So a request that holds NO identity is refused here, 401 (backlog
+/// e5f7b51e). "Behind the session" was the gateway's promise, not this
+/// door's, and it did not hold: the `/ics` traversal (1d9b7db7) and the
+/// LAN machine door (2710c8fc) both reach this port with no
+/// `x-boss-user`. Everyone who reads it signs — the chrome bar through
+/// its session, the dispatcher's retro rule as its rule actor — so the
+/// only caller this turns away is the one with no name.
+async fn list(
+    State(state): State<Arc<DepartmentsApiState>>,
+    CurrentUser(user): CurrentUser,
+) -> Response {
+    if user.is_anonymous() {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "the departments list is read by a signed-in caller; this request names none",
+        )
+            .into_response();
+    }
     match departments_or_response(&state).await {
         Ok(rows) => Json(json!({ "data": rows, "total": rows.len() })).into_response(),
         Err(r) => r,
@@ -480,7 +498,7 @@ mod tests {
     }
 
     async fn codes(registry: &Arc<InMemoryDepartments>) -> Vec<String> {
-        let (status, body) = send(app(registry), "GET", "/api/departments", None, None).await;
+        let (status, body) = send(app(registry), "GET", "/api/departments", None, seed()).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let v: Value = serde_json::from_str(&body).expect("json");
         v["data"]
@@ -489,6 +507,38 @@ mod tests {
             .iter()
             .map(|d| d["code"].as_str().unwrap_or_default().to_string())
             .collect()
+    }
+
+    /// THE ORG CHART IS READ BY SOMEBODY (backlog e5f7b51e). A request
+    /// with no identity at all — the `/ics` traversal of 1d9b7db7, or
+    /// anything reaching the jobs port directly — read the list; it is
+    /// refused 401 now. Every other caller still reads it without a
+    /// tier, the gateway's guest session among them, because the
+    /// chrome bar builds its tabs from it for everyone signed in.
+    #[tokio::test]
+    async fn the_org_chart_refuses_a_request_with_no_identity_and_no_one_else() {
+        let registry = seeded();
+        let (status, body) = send(app(&registry), "GET", "/api/departments", None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(
+            !body.contains("sales"),
+            "a refusal carried the chart: {body}"
+        );
+        let guest_session = header("guest@algedonic.dev", "audit-readonly", AccessTier::User);
+        for caller in [
+            guest_session,
+            header("emp-tech-001", "service-tech", AccessTier::User),
+        ] {
+            let (status, body) = send(
+                app(&registry),
+                "GET",
+                "/api/departments",
+                None,
+                Some(caller),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
     }
 
     /// THE DEFECT (backlog 7edf0e97): the seeded roster could not be

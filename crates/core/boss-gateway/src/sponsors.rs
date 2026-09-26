@@ -219,7 +219,7 @@ impl ClosedSponsorships for JobsApi {
             })
             .to_string(),
         );
-        if let Some(token) = boss_core::machine_token::from_env() {
+        if let Some(token) = boss_core::machine_token::current() {
             rb = rb.header(boss_core::machine_token::HEADER, token);
         }
         let resp = rb
@@ -451,6 +451,7 @@ mod tests {
             session_key: vec![0u8; 32],
             proxy_client: reqwest::Client::new(),
             perf: Arc::new(PerfCollector::new()),
+            machine_token: Default::default(),
         });
         let root = boss_testing::scratch_dir("gateway-sponsors");
         boss_testing::create_dir(&root);
@@ -724,6 +725,7 @@ mod tests {
             session_key: vec![0u8; 32],
             proxy_client: reqwest::Client::new(),
             perf: Arc::new(PerfCollector::new()),
+            machine_token: Default::default(),
         });
         let root = boss_testing::scratch_dir("gateway-sponsors-unwired");
         boss_testing::create_dir(&root);

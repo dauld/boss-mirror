@@ -64,6 +64,7 @@ pub mod region_states;
 pub mod regions;
 pub mod registry;
 pub mod repin;
+pub mod routes;
 pub mod scheduling;
 pub mod schema_level;
 pub mod station_flow;

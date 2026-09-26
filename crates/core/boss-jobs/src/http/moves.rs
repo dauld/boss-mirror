@@ -131,23 +131,31 @@ pub(super) async fn yard_moves<R: JobsRepository + 'static, B: EventBus + 'stati
         Ok::<_, crate::moves::MovesError>((
             feed.store.since(q.since.unwrap_or(0), limit).await?,
             feed.store.latest_seq().await?,
-            feed.store.undeclared(since).await?,
+            feed.store.crossings(since).await?,
         ))
     };
     match read.await {
-        Ok((moves, latest_seq, undeclared)) => Json(serde_json::json!({
-            "moves": moves,
-            "latest_seq": latest_seq,
-            "window_hours": window_hours,
-            "undeclared": {
-                "band": crate::region_states::MOVES_UNDECLARED.id,
-                "reads": crate::region_states::MOVES_UNDECLARED.band,
-                "moves": undeclared.iter().map(|r| r.moves).sum::<i64>(),
-                "routes": undeclared,
-            },
-            "mover": feed.status(),
-        }))
-        .into_response(),
+        Ok((moves, latest_seq, crossings)) => {
+            // Judged against the routes derived now (car R2). Routes that
+            // cannot be derived leave the reading null, never empty.
+            let undeclared = super::routes::derived(&state, Some(&crossings))
+                .await
+                .ok()
+                .map(|routes| routes.undeclared());
+            Json(serde_json::json!({
+                "moves": moves,
+                "latest_seq": latest_seq,
+                "window_hours": window_hours,
+                "undeclared": {
+                    "band": crate::region_states::MOVES_UNDECLARED.id,
+                    "reads": crate::region_states::MOVES_UNDECLARED.band,
+                    "moves": undeclared.as_ref().map(|u| u.iter().map(|r| r.moves).sum::<i64>()),
+                    "routes": undeclared,
+                },
+                "mover": feed.status(),
+            }))
+            .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("the moves record could not be read: {e}"),
@@ -243,6 +251,23 @@ pub(super) async fn yard_moves_stream<R: JobsRepository + 'static, B: EventBus +
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+/// Stamp `found` against the routes derived now (car R2) — or leave it
+/// unjudged (`declared: null`) when they cannot be derived, rather than
+/// stamping a guess into a record that keeps it. Only a batch that
+/// holds a move pays for the derivation.
+async fn judge<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &JobsApiState<R, B>,
+    found: Vec<crate::moves::Move>,
+) -> Vec<crate::moves::Move> {
+    if found.is_empty() {
+        return found;
+    }
+    match super::routes::derived(state, None).await {
+        Ok(routes) => crate::moves::judged(found, &routes),
+        Err(_) => found,
+    }
 }
 
 /// THE MOVER LOOP (design e765b3fc §3): read the log's head every
@@ -385,23 +410,26 @@ pub async fn run_mover<R: JobsRepository + 'static, B: EventBus + 'static>(
                 });
                 reason
             }
-            Reading::Moves(found) => match feed.store.record(&found).await {
-                Ok(added) => format!(
-                    "{} move(s) found, {added} new, at log position {head}",
-                    found.len()
-                ),
-                Err(e) => {
-                    // The baseline does not advance: the same batch is
-                    // judged again next tick, and the record's key
-                    // dedupes whatever did land.
-                    feed.set_status(status(
-                        "failing",
-                        format!("the moves could not be recorded: {e}"),
-                        cursor,
-                    ));
-                    continue;
+            Reading::Moves(found) => {
+                let found = judge(&state, found).await;
+                match feed.store.record(&found).await {
+                    Ok(added) => format!(
+                        "{} move(s) found, {added} new, at log position {head}",
+                        found.len()
+                    ),
+                    Err(e) => {
+                        // The baseline does not advance: the same batch is
+                        // judged again next tick, and the record's key
+                        // dedupes whatever did land.
+                        feed.set_status(status(
+                            "failing",
+                            format!("the moves could not be recorded: {e}"),
+                            cursor,
+                        ));
+                        continue;
+                    }
                 }
-            },
+            }
         };
         baseline = Some(next);
         pending_since = None;

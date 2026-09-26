@@ -87,6 +87,53 @@ async fn health() -> Json<boss_core::startup::HealthResponse> {
     ))
 }
 
+// ----- who may ask about whom ---------------------------------------------
+//
+// Until backlog b8e75382's rule 7 (F7) `check-batch`, `my-scope` and the
+// override list answered any caller about any user, and an override's
+// row and the deny it decides both carry its `reason` — free text an
+// operator wrote about a person. They now answer the caller about
+// itself, and anyone else only to a holder of Read on `policy-rule` at
+// scope all, the authority to read the table those answers come from.
+//
+// `/check` does NOT take this bound yet: every service asks it through
+// `ReqwestPolicyClient` with no `x-boss-user`, so a caller-only `/check`
+// would deny every policy check in the estate. It follows when callers
+// sign their policy calls (e84de48e, and the machine token of design
+// 6805c764) — the sequencing recorded on the item. So do the rule reads
+// (`GET /api/policy/rules`), which the headerless bootstrap reads.
+
+/// Allow a read about `id` (holding `role`, when the read names one),
+/// or the refusal to return.
+async fn may_read_for<R: PolicyRepository + 'static>(
+    state: &PolicyApiState<R>,
+    caller: &User,
+    id: &str,
+    role: Option<&str>,
+) -> Result<(), Response> {
+    // Its own authority, as itself: a body naming the caller's id with
+    // another role asks what that role would get, which is a question
+    // about someone else.
+    if caller.id == id && role.is_none_or(|r| r == caller.role) {
+        return Ok(());
+    }
+    let about = format!("{} asks about {id}", caller.id);
+    // The guest session's role holds Read on policy-rule by shipped
+    // default; the identity never reads another's authority (rule 5).
+    if boss_core::roles::ANONYMOUS_VISITOR_IDS.contains(&caller.id.as_str()) {
+        return Err(forbidden(format!(
+            "{about}; an anonymous visitor reads only its own authority"
+        )));
+    }
+    let decision = state
+        .engine
+        .check(caller, Action::Read, Resource::policy_rule())
+        .await
+        .map_err(err_response)?;
+    authority::may(&caller.role, Action::Read, &decision)
+        .map_err(|reason| forbidden(format!("{about}, and only reads its own: {reason}")))
+}
+
 // ----- check ---------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -131,8 +178,13 @@ struct CheckBatchResult {
 
 async fn check_batch<R: PolicyRepository + 'static>(
     State(state): State<Arc<PolicyApiState<R>>>,
+    CurrentUser(caller): CurrentUser,
     Json(body): Json<CheckBatchBody>,
 ) -> Response {
+    if let Err(refused) = may_read_for(&state, &caller, &body.user.id, Some(&body.user.role)).await
+    {
+        return refused;
+    }
     let mut out = Vec::with_capacity(body.checks.len());
     for c in body.checks {
         let resource = c.resource.clone();
@@ -171,8 +223,13 @@ struct ScopeEntry {
 
 async fn my_scope<R: PolicyRepository + 'static>(
     State(state): State<Arc<PolicyApiState<R>>>,
+    CurrentUser(caller): CurrentUser,
     Json(body): Json<MyScopeBody>,
 ) -> Response {
+    if let Err(refused) = may_read_for(&state, &caller, &body.user.id, Some(&body.user.role)).await
+    {
+        return refused;
+    }
     let mut entries = Vec::new();
     // Iterate the platform's shipped resources (defaults::shipped_resources)
     // so the discovery endpoint covers everything `default_rules` enumerates
@@ -404,8 +461,12 @@ async fn deactivate_rule<R: PolicyRepository + 'static>(
 
 async fn list_user_overrides<R: PolicyRepository + 'static>(
     State(state): State<Arc<PolicyApiState<R>>>,
+    CurrentUser(caller): CurrentUser,
     Path(user_id): Path<String>,
 ) -> Response {
+    if let Err(refused) = may_read_for(&state, &caller, &user_id, None).await {
+        return refused;
+    }
     match state.repo.list_user_overrides(&user_id).await {
         Ok(ovs) => Json(ovs).into_response(),
         Err(e) => err_response(e),
@@ -1488,5 +1549,136 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(repo.writes(), vec![]);
+    }
+
+    // ----- backlog b8e75382, rule 7 (F7): a read answers for its caller ---
+    //
+    // `check-batch`, `my-scope` and the override list answered any caller
+    // about any user, and an override's decision and row both carry its
+    // `reason` — free text an operator wrote about a person ("covering a
+    // leave"). `/check` is not here: every service asks it with no
+    // identity of its own yet, so it waits for callers to sign
+    // (e84de48e), as the item's sequencing note decided.
+
+    /// The three read doors about someone ELSE, each carrying the seeded
+    /// override's user, and one that names the caller itself.
+    fn reads_about(id: &str, role: &str) -> Vec<(Method, String, Option<serde_json::Value>)> {
+        let who = serde_json::json!({"id": id, "role": role, "access_tier": "user"});
+        vec![
+            (
+                Method::POST,
+                "/api/policy/check-batch".to_string(),
+                Some(serde_json::json!({
+                    "user": who,
+                    "checks": [{"action": "close", "resource": "job"}],
+                })),
+            ),
+            (
+                Method::POST,
+                "/api/policy/my-scope".to_string(),
+                Some(serde_json::json!({"user": who})),
+            ),
+            (
+                Method::GET,
+                format!("/api/policy/user-overrides/{id}"),
+                None,
+            ),
+        ]
+    }
+
+    async fn ask(
+        repo: &Arc<Recording>,
+        method: Method,
+        uri: &str,
+        body: Option<&serde_json::Value>,
+        caller: Option<&str>,
+    ) -> (StatusCode, String) {
+        let mut req = Request::builder().method(method).uri(uri);
+        if let Some(c) = caller {
+            req = req.header("x-boss-user", c);
+        }
+        let req = match body {
+            Some(b) => req
+                .header("content-type", "application/json")
+                .body(Body::from(b.to_string())),
+            None => req.body(Body::empty()),
+        }
+        .expect("request");
+        let resp = app(repo).oneshot(req).await.expect("infallible");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// THE DEFECT: a caller without Read on `policy-rule` — a drafter, a
+    /// guest session (whose role holds that Read by shipped default, so
+    /// the refusal is by the identity, rule 5), a request with no
+    /// identity — learned another user's authority and the reason text
+    /// on their overrides. Each is refused, and the reason never leaves.
+    #[tokio::test]
+    async fn a_read_about_someone_else_is_refused_without_policy_read() {
+        let repo = repo(vec![]).await;
+        let drafter = user("emp-drafter", "rule-drafter");
+        let guest = user("guest@algedonic.dev", "audit-readonly");
+        let callers: [(&str, Option<&str>); 3] = [
+            ("a drafter", Some(&drafter)),
+            ("a guest session", Some(&guest)),
+            ("no identity", None),
+        ];
+        for (who, caller) in callers {
+            for (method, uri, body) in reads_about("emp-cover", "reviewer") {
+                let (status, text) = ask(&repo, method.clone(), &uri, body.as_ref(), caller).await;
+                assert_eq!(
+                    status,
+                    StatusCode::FORBIDDEN,
+                    "{who}: {method} {uri} must be refused: {text}"
+                );
+                assert!(!text.contains("covering a leave"), "{who}: {text}");
+            }
+        }
+    }
+
+    /// A caller always reads its OWN authority — but as itself: the
+    /// role in the body is the one the question is about, so naming
+    /// its own id with a wider role is asking about someone else.
+    #[tokio::test]
+    async fn a_caller_reads_its_own_authority_and_only_as_itself() {
+        let repo = repo(vec![]).await;
+        let cover = user("emp-cover", "reviewer");
+        for (method, uri, body) in reads_about("emp-cover", "reviewer") {
+            let (status, text) =
+                ask(&repo, method.clone(), &uri, body.as_ref(), Some(&cover)).await;
+            assert_eq!(status, StatusCode::OK, "{method} {uri}: {text}");
+        }
+        for (method, uri, body) in reads_about("emp-cover", "platform-admin") {
+            if method == Method::GET {
+                continue; // the override list names no role
+            }
+            let (status, text) =
+                ask(&repo, method.clone(), &uri, body.as_ref(), Some(&cover)).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}: {text}");
+        }
+    }
+
+    /// The control: a holder of Read on `policy-rule` still reads
+    /// anyone's — the operator, and the seeded auditor login, whose
+    /// Read on override reasons design 2830b6b7 decides, not this car.
+    #[tokio::test]
+    async fn a_policy_reader_reads_anyones_authority() {
+        let repo = repo(vec![]).await;
+        let admin = user("emp-founder", "platform-admin");
+        let auditor = user("emp-audit", "audit-readonly");
+        for caller in [&admin, &auditor] {
+            for (method, uri, body) in reads_about("emp-cover", "reviewer") {
+                let (status, text) =
+                    ask(&repo, method.clone(), &uri, body.as_ref(), Some(caller)).await;
+                assert_eq!(status, StatusCode::OK, "{caller}: {method} {uri}: {text}");
+                if method == Method::GET {
+                    assert!(text.contains("covering a leave"), "{text}");
+                }
+            }
+        }
     }
 }

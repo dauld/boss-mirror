@@ -252,6 +252,30 @@ fn listed(body: Option<Value>, what: &str) -> Result<(Vec<Value>, usize)> {
     Ok((rows, total))
 }
 
+/// Every backlog item, for the mix. `get` answers one jobs-API path.
+///
+/// Backlog items are classified one by one, so they must all be read —
+/// a `limit` is a page, not a filter (a-limit-is-not-a-filter). This was
+/// one `limit=1000` page, the server's cap, and past it the mix printed
+/// "backlog CAPPED, mix is a floor" rather than reading the rest:
+/// measured 2026-09-26, 226 of 1226 items unread (04e14848). Paged on
+/// `total` through the one pager, which refuses a body without `data`
+/// or `total` exactly as [`listed`] did.
+async fn read_backlog<F, Fut>(get: F) -> Result<Vec<Value>>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Option<Value>>>,
+{
+    crate::train::list_all_pages(|offset| {
+        get(format!(
+            "/api/jobs?kind=backlog-item&limit={}&offset={offset}",
+            crate::train::PAGE_LIMIT
+        ))
+    })
+    .await
+    .context("the backlog read")
+}
+
 /// `boss channels` — read recent work-originating jobs and report the
 /// input-channel mix with the proactive-vs-reactive reading, the
 /// delivery mix over the dock, and the per-tier mix (ba429e7f) over the
@@ -263,19 +287,11 @@ pub async fn run(
 ) -> Result<()> {
     let http = reqwest::Client::new();
 
-    // Backlog items are classified one by one, so they must all be
-    // fetched — a `limit` is a page, not a filter, and a capped page is
-    // a smaller question answered (a-limit-is-not-a-filter). Fetch wide
-    // and say so if it still capped.
-    let bl = crate::gate::api(
-        &http,
-        reqwest::Method::GET,
-        "/api/jobs?kind=backlog-item&limit=1000",
-        None,
-    )
+    let backlog = read_backlog(|path| {
+        let http = http.clone();
+        async move { crate::gate::api(&http, reqwest::Method::GET, &path, None).await }
+    })
     .await?;
-    let (backlog, bl_total) = listed(bl, "the backlog read")?;
-    let capped = bl_total > backlog.len();
 
     // Every user-feedback job is the user-feedback lane, so it needs a
     // COUNT, not a full fetch — read `total` off a single-row page.
@@ -304,15 +320,10 @@ pub async fn run(
     let total: usize = mix.values().sum();
     println!("boss channels — where the work comes from (input mix)");
     println!(
-        "  {} work-originating job(s) ({} backlog + {} feedback){}\n",
+        "  {} work-originating job(s) ({} backlog + {} feedback)\n",
         total,
         backlog.len(),
         uf_total,
-        if capped {
-            " — backlog CAPPED, mix is a floor"
-        } else {
-            ""
-        }
     );
     for (ch, n) in &mix {
         let pct = if total > 0 {
@@ -1109,6 +1120,37 @@ mod tests {
         let (rows, total) = listed(Some(json!({"data": [{"id": "a"}], "total": 7})), "x")
             .expect("a page of a larger set");
         assert_eq!((rows.len(), total), (1, 7));
+    }
+
+    /// A LIMIT IS NOT A FILTER (backlog 04e14848). The mix read the
+    /// backlog as one `limit=1000` page; measured 2026-09-26 there were
+    /// 1226 backlog items, so the mix left out 226 (18%) and printed
+    /// "backlog CAPPED, mix is a floor" instead of reading them. Against
+    /// a fake that clamps a page at 1000 the way `GET /api/jobs` does
+    /// (`MAX_LIMIT`) and answers `offset`, every item must be read.
+    #[tokio::test]
+    async fn the_backlog_read_reads_every_page_past_the_server_cap() {
+        const SERVER_CAP: usize = 1000;
+        let all: Vec<Value> = (0..1226).map(|i| json!({ "id": i })).collect();
+        let all_ref = &all;
+        let param = |path: &str, key: &str| -> Option<usize> {
+            path.split(['?', '&'])
+                .find_map(|kv| kv.strip_prefix(&format!("{key}=")))
+                .and_then(|v| v.parse().ok())
+        };
+        let read = read_backlog(|path| async move {
+            assert!(path.contains("kind=backlog-item"), "{path}");
+            let limit = param(&path, "limit").unwrap_or(50).min(SERVER_CAP);
+            let offset = param(&path, "offset").unwrap_or(0);
+            let data: Vec<Value> = all_ref.iter().skip(offset).take(limit).cloned().collect();
+            anyhow::Ok(Some(json!({
+                "data": data, "total": all_ref.len(), "limit": limit, "offset": offset
+            })))
+        })
+        .await
+        .unwrap();
+        assert_eq!(read.len(), all.len(), "every backlog item, not one page");
+        assert_eq!(read.last(), all.last(), "the tail is read, in order");
     }
 
     fn job(kind: &str, md: Value) -> Value {
