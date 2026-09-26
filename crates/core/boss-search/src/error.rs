@@ -13,12 +13,3 @@ impl SearchError {
         SearchError::Storage(e.to_string())
     }
 }
-
-impl SearchError {
-    /// A storage-shaped error from a non-sqlx source (the policy
-    /// call). Same class to the caller: the query could not be
-    /// answered, and it is not their input that is wrong.
-    pub fn storage_msg(msg: impl Into<String>) -> Self {
-        SearchError::Storage(msg.into())
-    }
-}

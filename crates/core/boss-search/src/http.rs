@@ -74,8 +74,10 @@ async fn search_handler(
             tracing::warn!(error = %e, "search policy scope failed");
             // Fail closed. A search box that answers unscoped when
             // the policy engine is unreachable is worse than one that
-            // says it cannot answer.
-            return (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response();
+            // says it cannot answer — and it says so the way every
+            // door does: 503 + Retry-After, the fixed word, no detail
+            // (backlog fe9d212c; the detail is in the warn above).
+            return e.into_response();
         }
     };
 
@@ -86,5 +88,53 @@ async fn search_handler(
             tracing::warn!(error = %e, "search failed");
             (StatusCode::SERVICE_UNAVAILABLE, e.to_string()).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, header};
+    use boss_policy_client::ReqwestPolicyClient;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    /// Backlog fe9d212c: a policy outage answered 503 with the policy
+    /// client's error text — the policy service's internal URL — and no
+    /// Retry-After. It answers through `PolicyClientError`'s one
+    /// rendering now, like every other door. The real adapter against a
+    /// port nothing listens on, so the outage is the production one; the
+    /// pool is lazy and never reached, because scope is decided first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_policy_outage_answers_503_with_retry_after_and_no_address() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dark = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let app = router(SearchApiState {
+            pool: sqlx::PgPool::connect_lazy("postgres://nobody@127.0.0.1:1/none").unwrap(),
+            policy: Arc::new(ReqwestPolicyClient::new(dark)),
+        });
+        let resp = app
+            .oneshot(
+                Request::get("/api/search?q=anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(
+                boss_policy_client::POLICY_OUTAGE_RETRY_AFTER_SECS
+                    .to_string()
+                    .as_str()
+            )
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(String::from_utf8_lossy(&body), "policy-unreachable");
     }
 }

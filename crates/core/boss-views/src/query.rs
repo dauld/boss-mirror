@@ -220,11 +220,7 @@ impl PgViewResolver {
     async fn scope_for(&self, source: ViewSource, user: &User) -> Result<SourceScope, ViewsError> {
         match source {
             ViewSource::Jobs => {
-                let predicate = self
-                    .policy
-                    .scope_predicate(user, Resource::job())
-                    .await
-                    .map_err(|e| ViewsError::Storage(format!("policy check failed: {e}")))?;
+                let predicate = self.policy.scope_predicate(user, Resource::job()).await?;
                 // One translation, shared with boss-search: `None`
                 // means unrestricted and an empty list means deny,
                 // which is exactly the asymmetry worth having in one
@@ -241,11 +237,7 @@ impl PgViewResolver {
                 // their own predicate rather than inheriting the Job's.
                 // The owner allow-list lands on `assignee_id`: a
                 // Step's owner is whoever it is assigned to.
-                let predicate = self
-                    .policy
-                    .scope_predicate(user, Resource::step())
-                    .await
-                    .map_err(|e| ViewsError::Storage(format!("policy check failed: {e}")))?;
+                let predicate = self.policy.scope_predicate(user, Resource::step()).await?;
                 Ok(match predicate.owner_allow_list(user) {
                     None => SourceScope::All,
                     Some(ids) if ids.is_empty() => SourceScope::None,
@@ -258,11 +250,7 @@ impl PgViewResolver {
                 } else {
                     Resource::event()
                 };
-                let predicate = self
-                    .policy
-                    .scope_predicate(user, resource)
-                    .await
-                    .map_err(|e| ViewsError::Storage(format!("policy check failed: {e}")))?;
+                let predicate = self.policy.scope_predicate(user, resource).await?;
                 Ok(match predicate {
                     Predicate::Unrestricted => SourceScope::All,
                     _ => SourceScope::None,
@@ -588,5 +576,82 @@ mod tests {
         let row = json!({"id": "j1"});
         let out = project(&row, &["id".into(), "owner_id".into()]);
         assert_eq!(out, json!({"id": "j1", "owner_id": null}));
+    }
+
+    /// Backlog fe9d212c: a policy outage became `ViewsError::Storage`
+    /// and so a bare 500 carrying the policy client's text — the policy
+    /// service's internal URL. It is its own error now, rendered the
+    /// way every door renders it. Driven through the router with the
+    /// REAL resolver and the real policy adapter against a port nothing
+    /// listens on; the pool is lazy and never reached, because scope is
+    /// decided before any row is read.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_policy_outage_answers_503_with_retry_after_and_no_address() {
+        use crate::http::{ViewsApiState, router};
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode, header};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dark = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let app = router(ViewsApiState {
+            repo: Arc::new(crate::in_memory::InMemoryViewsRepo::new(
+                chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            )),
+            resolver: Arc::new(PgViewResolver::new(
+                PgPool::connect_lazy("postgres://nobody@127.0.0.1:1/none").unwrap(),
+                Arc::new(boss_policy_client::ReqwestPolicyClient::new(dark)),
+            )),
+            os_map: None,
+            flow: None,
+            fleet: None,
+            stages: None,
+        });
+        let who = json!({"id": "emp-1", "role": "operator", "access_tier": "operator"}).to_string();
+        let created = app
+            .clone()
+            .oneshot(
+                Request::post("/api/views")
+                    .header("x-boss-user", &who)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({"title": "t", "source": "jobs", "filter": "", "columns": [],
+                               "layout": "table", "visibility": "private"})
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let view: Value =
+            serde_json::from_slice(&created.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let id = view["id"].as_str().unwrap();
+
+        let resp = app
+            .oneshot(
+                Request::get(format!("/api/views/{id}/results"))
+                    .header("x-boss-user", &who)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(
+                boss_policy_client::POLICY_OUTAGE_RETRY_AFTER_SECS
+                    .to_string()
+                    .as_str()
+            )
+        );
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(String::from_utf8_lossy(&body), "policy-unreachable");
     }
 }
