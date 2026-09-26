@@ -178,9 +178,24 @@ elif [ -s "$FORGE_TOKEN_FILE" ] \
 fi
 BOSS_FORGE_AUTH_HEADER_FILE="$auth_hdr" "$REPO/infra/forge/protect-main.sh" || protect_rc=$?
 
+# THE OFF-SITE COPY, pushed by us and not by Forgejo (backlog 21d54f4a,
+# decided 2026-09-26: no mirror can wipe what it mirrors). Forgejo's push
+# mirror is `git push -f --mirror` whatever its filter, and it was the
+# writer that rewound main on 2026-09-25; infra/forge/offsite-push.sh is
+# the one definition and carries the reasoning. A plain push of main and
+# publish/* to dauld/boss-mirror as offsite-push.json declares — a
+# non-fast-forward is refused and named, never overwritten — read back,
+# and only then the Forgejo push mirror deleted. Same forge header as
+# protect-main (deleting a mirror is the same repository administration);
+# the GitHub token is the publish verb's file, read by git's credential
+# helper, never here.
+offsite_rc=0
+BOSS_FORGE_AUTH_HEADER_FILE="$auth_hdr" "$REPO/infra/forge/offsite-push.sh" || offsite_rc=$?
+
 # install.sh's verdict first (it is the older and wider one), then the
-# protection's, then the deposit's: any reds this run and puts the
-# packet on `failed`.
+# protection's, then the off-site push's, then the deposit's: any reds
+# this run and puts the packet on `failed`.
 [ "$install_rc" -eq 0 ] || exit "$install_rc"
 [ "$protect_rc" -eq 0 ] || exit "$protect_rc"
+[ "$offsite_rc" -eq 0 ] || exit "$offsite_rc"
 exit "$deposit_rc"
