@@ -121,6 +121,18 @@ authority_role = "platform-admin"
 # same thing, and every machine withdrawal (sensor.poll, estate.recover,
 # cadence silence) already writes it when it completes this step.
 #
+# AND A MEASUREMENT THAT CONFIRMS THE CLAIM ROUTES ONWARD (backlog
+# c4d82c6f). 2802ba8c gave a DISPROVING measurement its exits; the
+# confirming one kept exactly one — `closed`, whose outcome says the
+# work was completed. Measured 2026-09-24: four items triaged `verify`
+# on 2026-09-22 (07eee681, 9b0ad69d, af27db95, ddf0773e) were
+# re-measured on origin/main 518a4f8 and every claim held, and
+# completing this step would have closed all four as done with nothing
+# built, so they sat here. `build` and `design` are triage's own words
+# for the same two routes: `build` opens the build and `design` opens
+# the draft, each of which names this step in its `ready_when`, and
+# `closed` excludes both. No `verify` — this step IS the verification.
+#
 # HOW AN AGENT RUNS IT (backlog cf6be734, 2026-09-25): `boss dispatch`
 # refused this step on 70da1212 and 8db1d6a6 the day before, for want
 # of this block. The same analyst setting as `triage` and for the same
@@ -128,12 +140,14 @@ authority_role = "platform-admin"
 # stays as it was: the convert door compares authority, and an
 # unchanged one keeps every open item's move automatic.
 #
-# THE PROCEDURE SAYS WHAT A CONFIRMED CLAIM DOES, because the row alone
-# does not: a measurement with no disposition reaches `closed`, the
-# `completed` terminal, since the measurement was the work this route
-# asked for. A claim that HOLDS and needs a change therefore leaves
-# that change as its own filed item — otherwise the finding closes
-# with the packet and nobody acts on it (analyst rule 7).
+# THE PROCEDURE SAYS WHAT A CONFIRMED CLAIM DOES. cf6be734 wrote it
+# while the row had no onward route, so it told the analyst to leave
+# the disposition off and file the change as a second item — the
+# workaround for this defect. Since c4d82c6f the row carries the route:
+# a claim that HOLDS and needs a change says `build` or `design` and
+# THIS item goes on to it. A measurement with no disposition still
+# reaches `closed` (the closure fallback), for a claim that held and
+# asked for nothing beyond being measured.
 agent = { profile = "analyst", model = "opus-5[1m]", budget_usd = 2, effort = "medium" }
 metadata_defaults = { procedure = """Re-measure the claim triage could not settle, and put the measurement in `evidence` — it is required: no evidence is not a pass (828381c0). Triage routed here with `verify`, and its evidence names what would measure the claim; start there.
 
@@ -141,11 +155,11 @@ MEASURE ON origin/main AND THE LIVE SYSTEM, NOW. Run `git fetch origin`, read th
 
 DEDUP AGAINST WHAT IS OPEN. Read `boss-api GET '/api/jobs?kind=backlog-item&status=open&limit=500'` into a file in your run directory, page with `offset=` until the rows you hold match `.total`, and search titles and descriptions for the claim's own nouns. Another open item making the same claim makes this one the duplicate when it is the younger; name the other by its full id in the evidence.
 
-THE DISPOSITION IS THE OUTCOME. `stale` when origin/main or the live system no longer shows the claim, naming the commit or the read; `duplicate` when another item covers it; `decline` when it holds and is not worth acting on, with the reason. When it HOLDS and needs a change, leave the disposition off: this item closes `completed`, because the measurement was the work it asked for — so file the change the measurement found as its own item (`boss job file --kind backlog-item --channel <lane>`, the verb's refusal names the lanes) and put its id in the evidence, or the finding dies with this packet.
+THE DISPOSITION IS THE OUTCOME. `stale` when origin/main or the live system no longer shows the claim, naming the commit or the read; `duplicate` when another item covers it; `decline` when it holds and is not worth acting on, with the reason. When it HOLDS and needs a change, `build` opens this item's own build step, and `design` its draft-design when the change needs a decision first — the item goes on to the work, it does not close on the measurement (c4d82c6f). Leave the disposition off only when the claim held and asked for nothing beyond being measured: this item then closes `completed`.
 
-RECORD IT WITH THE VERB. Write the evidence to a file in your run directory and run `boss step complete <this packet> --step measure --field-file evidence=<PATH>`, adding `--field disposition=<stale|duplicate|decline>` when one applies. The verb refuses a field this row does not declare, lays the write over this step's metadata so this procedure and the agent keys stay, and reads the packet back. The evidence names what you read, the origin/main sha (`git rev-parse origin/main`), when (`date -u`), the open list's `.total`, and anything filed.""" }
+RECORD IT WITH THE VERB. Write the evidence to a file in your run directory and run `boss step complete <this packet> --step measure --field-file evidence=<PATH>`, adding `--field disposition=<stale|duplicate|decline|build|design>` when one applies. The verb refuses a field this row does not declare, lays the write over this step's metadata so this procedure and the agent keys stay, and reads the packet back. The evidence names what you read, the origin/main sha (`git rev-parse origin/main`), when (`date -u`), the open list's `.total`, and anything filed.""" }
 fields = [
-  { name = "disposition", field_type = "stale|duplicate|decline", required = false },
+  { name = "disposition", field_type = "stale|duplicate|decline|build|design", required = false },
   { name = "evidence", field_type = "string", required = true },
 ]
 
@@ -158,10 +172,15 @@ fields = [
 # the bundle names no tenant's role or agent (e2580840). `boss design
 # --answers <this item>` files the design, writes the review's
 # question, and completes this step with `design_id`.
+#
+# TWO WAYS IN since c4d82c6f: triage's `design`, or a re-measurement
+# that confirmed the claim and chose `design` (see `measure` above).
+# Naming `measure` also holds this step Pending across a `verify`
+# route instead of Skipped at triage time — the af28e250 mechanism.
 [[workflow.step]]
 title = "draft-design"
 kind = "task"
-ready_when = "steps.triage.done AND steps.triage.metadata.disposition = \"design\""
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"design\") OR (steps.measure.done AND steps.measure.metadata.disposition = \"design\")"
 title_template = "Draft the design"
 audience = { role = "platform-admin" }
 # An analyst's step, not a builder's: agent-claude completed it 4 times
@@ -275,7 +294,12 @@ kind = "task"
 # holds this one Pending across it instead of resolving it at triage
 # time. `user-feedback` has carried exactly this edge since v9 and its
 # design route works; backlog-item simply never got it.
-ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"build\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"approved\")"
+#
+# AND A THIRD, for the same reason (backlog c4d82c6f): a re-measurement
+# that CONFIRMED the claim and chose `build`. Before it, this step
+# referenced only triage and the review, so a `verify` route skipped it
+# at triage time and a confirmed claim could reach only `closed`.
+ready_when = "(steps.triage.done AND steps.triage.metadata.disposition = \"build\") OR (steps.measure.done AND steps.measure.metadata.disposition = \"build\") OR (steps.design-review.done AND steps.design-review.metadata.verdict = \"approved\")"
 title_template = "Build the change"
 authority_role = "platform-admin"
 # HOW AN AGENT RUNS IT, declared once (design c87fb59b car 1, backlog
@@ -410,7 +434,13 @@ kind = "outcome"
 # own arm instead, `steps.prove-delivery.done` (4bcf1265): a delivered
 # build closes the item as `completed` only once the live read-back is
 # on the record, never on the build alone.
-ready_when = "(steps.measure.done AND NOT (steps.measure.metadata.disposition = \"stale\" OR steps.measure.metadata.disposition = \"duplicate\" OR steps.measure.metadata.disposition = \"decline\")) OR (steps.build.done AND NOT (steps.build.metadata.disposition = \"stale\" OR steps.build.metadata.disposition = \"duplicate\" OR steps.build.metadata.disposition = \"decline\" OR steps.build.metadata.disposition = \"delivered\")) OR steps.prove-delivery.done OR (steps.design-review.done AND NOT (steps.design-review.metadata.verdict = \"approved\" OR steps.design-review.metadata.verdict = \"declined\"))"
+#
+# THE MEASURE DISJUNCT EXCLUDES FIVE, since c4d82c6f: the three
+# withdrawals plus `build` and `design`, which route a CONFIRMED claim
+# onward. Left out, a confirming measurement would make this Ready
+# beside the build it opened — the race above — and close the item as
+# completed with nothing built, which is the defect.
+ready_when = "(steps.measure.done AND NOT (steps.measure.metadata.disposition = \"stale\" OR steps.measure.metadata.disposition = \"duplicate\" OR steps.measure.metadata.disposition = \"decline\" OR steps.measure.metadata.disposition = \"build\" OR steps.measure.metadata.disposition = \"design\")) OR (steps.build.done AND NOT (steps.build.metadata.disposition = \"stale\" OR steps.build.metadata.disposition = \"duplicate\" OR steps.build.metadata.disposition = \"decline\" OR steps.build.metadata.disposition = \"delivered\")) OR steps.prove-delivery.done OR (steps.design-review.done AND NOT (steps.design-review.metadata.verdict = \"approved\" OR steps.design-review.metadata.verdict = \"declined\"))"
 title_template = "Backlog item closed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "completed" }

@@ -3704,9 +3704,12 @@ impl Conductor {
         reading: &dock_regate::BaseReading,
         touched: &[String],
     ) -> Option<DockHold> {
+        // The misses a departure counted on the car's last stamp ride on
+        // to this one (backlog d9530df2): this launch is what follows one.
         let stamp = dock_regate::RegateStamp {
             base: reading.base.clone(),
             ..dock_regate::RegateStamp::for_main(&reading.main, touched)
+                .carrying(dock_regate::RegateStamp::of(car).as_ref())
         };
         if self.cfg.dry {
             log(format!(
@@ -3821,8 +3824,10 @@ impl Conductor {
                     stamp: Some(stamp.to_value(at)),
                     // A gate is running for it now: this departure's round.
                     in_round: Some(dock_regate::InRound {
+                        car: jid.to_string(),
                         main: stamp.main.clone(),
                         since: at,
+                        missed: stamp.missed,
                     }),
                     waiting: None,
                 }
@@ -3982,6 +3987,50 @@ impl Conductor {
         dock_regate::departure_hold(round, &main, now, minutes)
     }
 
+    /// A train has DEPARTED leaving every car in `round` behind while its
+    /// re-gate was in flight: count the miss on each car's stamp
+    /// (`base_regate.missed`), so the next departure on its main waits for
+    /// its own verdict (backlog d9530df2, `dock_regate::departure_hold`).
+    ///
+    /// INFALLIBLE BY SIGNATURE: the train has already left, and a count
+    /// that cannot be written is not a reason to fail the departure after
+    /// the fact (a fallible write in the boarding loop froze every landing
+    /// once). Each failure is journalled with the car it concerns; the
+    /// cost is one more oldest-first wait for that car.
+    async fn count_misses(&self, round: &[dock_regate::InRound]) {
+        for r in round {
+            let car = match self.get_job(&r.car).await {
+                Ok(car) => car,
+                Err(e) => {
+                    log(format!(
+                        "{}: left behind mid-re-gate, but the car could not be read to count \
+                         the miss ({e:#})",
+                        id8(&r.car)
+                    ));
+                    continue;
+                }
+            };
+            let Some(stamp) = dock_regate::missed_stamp(&car) else {
+                continue;
+            };
+            let missed = stamp["missed"].as_u64().unwrap_or_default();
+            match self
+                .merge_job_metadata(&r.car, vec![(dock_regate::BASE_REGATE, stamp)])
+                .await
+            {
+                Ok(()) => log(format!(
+                    "{}: left behind while its re-gate was in flight ({missed}x) — the next \
+                     departure on its main waits for its own verdict",
+                    id8(&r.car)
+                )),
+                Err(e) => log(format!(
+                    "{}: left behind mid-re-gate, but the miss could not be counted ({e:#})",
+                    id8(&r.car)
+                )),
+            }
+        }
+    }
+
     /// A car the dock replayed, whose receipt has not caught up: where its
     /// re-gate stands, and the gate-run filed if the launch never got that
     /// far. Always a hold — the car's receipt does not vouch for its head.
@@ -4013,17 +4062,27 @@ impl Conductor {
         };
         let standing = dock_regate::in_flight(&stamp, verdict.as_deref());
         // Still running: part of the round a departure on its main waits
-        // for, dated from the launch its stamp recorded. A verdict already
-        // in — green not yet copied, or red — is nothing to wait for.
+        // for, dated from the launch its stamp recorded. A red verdict is
+        // nothing to wait for, and neither, for a car in its first round,
+        // is a green not yet copied. But a car a departure has already
+        // left behind mid-re-gate waits for that copy too (backlog
+        // d9530df2): train 14:39 of 2026-09-26 departed 49 s after this
+        // car's green and before the refresh had copied it, and a wait
+        // for "its own verdict" that ends at the green would lose it the
+        // same way. The bound in `departure_hold` still caps it.
         let in_round = match standing {
-            dock_regate::InFlight::Running => {
-                dock_regate::launched_at(car).map(|since| dock_regate::InRound {
-                    main: stamp.main.clone(),
-                    since,
-                })
-            }
-            _ => None,
-        };
+            dock_regate::InFlight::Running => true,
+            dock_regate::InFlight::GreenNotCopied => stamp.missed > 0,
+            _ => false,
+        }
+        .then(|| dock_regate::launched_at(car))
+        .flatten()
+        .map(|since| dock_regate::InRound {
+            car: jid.to_string(),
+            main: stamp.main.clone(),
+            since,
+            missed: stamp.missed,
+        });
         DockHold {
             reason: dock_regate::in_flight_reason(jid, &stamp, &standing),
             stamp: None,
@@ -4234,7 +4293,9 @@ impl Conductor {
         // rule is `dock_regate::departure_hold`). Cars are ready, but the
         // dock has re-gates in flight on the main this train would move:
         // departing now re-stales every one of them. Hold — bounded by the
-        // registry's `regate_hold_minutes` from the OLDEST re-gate — and
+        // registry's `regate_hold_minutes` from the OLDEST re-gate, or by
+        // twice that from its own launch for a car a departure already
+        // left behind mid-re-gate (d9530df2, counted by `count_misses`) — and
         // the next board, a minute away, departs with every car the round
         // turned green. A held board boards nothing, so the cadence loop
         // records it idle and the cooldown does not start from it.
@@ -4245,6 +4306,8 @@ impl Conductor {
                 main: hold.main,
                 oldest_minutes: hold.oldest_minutes,
                 hold_minutes: hold.hold_minutes,
+                missed: hold.missed,
+                more_minutes: hold.more_minutes,
             })
             .await?;
             return Ok(());
@@ -4552,6 +4615,7 @@ impl Conductor {
             ],
         )
         .await?;
+        self.count_misses(&round).await;
         let train = self.get_job(&train_id).await?;
         let boarded_note = boarded
             .iter()
@@ -7583,8 +7647,10 @@ mod tests {
         let now = Utc::now();
         assert_eq!(c.departure_hold(&[], now).await, None);
         let round = [dock_regate::InRound {
+            car: "c-1".into(),
             main: main.clone(),
             since: now,
+            missed: 0,
         }];
         assert_eq!(
             dock_regate::departure_hold(&round, &main, now, 15).map(|h| h.in_flight),

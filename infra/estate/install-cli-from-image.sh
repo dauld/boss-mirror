@@ -118,8 +118,10 @@
 # caller can tell a wait from a fault. On the forge the converge that
 # installs the CLI runs on the host that builds the image, ten minutes
 # apart, so the first tick after every train lands in this state; a
-# red there would be a red on every train (infra/forge/install.sh
-# waits; boss-gcp's converge, every half hour, still reds and heals).
+# red there would be a red on every train. Both callers wait on it:
+# infra/forge/install.sh, and since 2026-09-26 boss-gcp's converge,
+# which until then redded and healed every half hour (backlog f15ff5f2)
+# and now reds only on a wait older than its limit.
 #
 # IDEMPOTENT AND CHEAP WHEN NOTHING MOVED: a tick whose `current`
 # already names the sha re-verifies through the wrapper and fetches

@@ -211,6 +211,12 @@ pub(crate) struct RegateStamp {
     pub touched: Vec<String>,
     /// How many there were.
     pub touched_count: usize,
+    /// How many departures have left this car behind while a re-gate of
+    /// it was in flight (backlog d9530df2). Carried from launch to launch,
+    /// because the re-launch on the next main is exactly what follows a
+    /// miss; a car with one is waited for to its own verdict
+    /// (`departure_hold`).
+    pub missed: u32,
 }
 
 impl RegateStamp {
@@ -221,6 +227,14 @@ impl RegateStamp {
             touched: touched.iter().take(STAMP_SAMPLE).cloned().collect(),
             touched_count: touched.len(),
             ..Default::default()
+        }
+    }
+
+    /// This stamp, keeping the misses the car's `prior` stamp counted.
+    pub(crate) fn carrying(self, prior: Option<&RegateStamp>) -> Self {
+        RegateStamp {
+            missed: prior.map_or(0, |p| p.missed),
+            ..self
         }
     }
 
@@ -259,6 +273,10 @@ impl RegateStamp {
                 .and_then(Value::as_u64)
                 .map_or(touched.len(), |n| n as usize),
             touched,
+            missed: s
+                .get("missed")
+                .and_then(Value::as_u64)
+                .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX)),
         })
     }
 
@@ -271,6 +289,7 @@ impl RegateStamp {
             "refused": self.refused,
             "touched": self.touched,
             "touched_count": self.touched_count,
+            "missed": self.missed,
             "at": at.to_rfc3339(),
             "why": "backlog 969a1092: main moved into this car's files after its gate",
         })
@@ -360,24 +379,45 @@ pub(crate) fn in_flight(stamp: &RegateStamp, verdict: Option<&str>) -> InFlight 
 // never a moving target. A re-gate on a main that has since moved is not
 // this departure's round, and a stamp with no readable launch time cannot
 // bound a wait, so it holds nothing.
+//
+// EXCEPT FOR A CAR THE ROUND HAS ALREADY FAILED (backlog d9530df2). The
+// oldest-first bound never waits for a re-gate launched late, and a car
+// in a busy crate is re-gated on every main, so it can be launched late
+// every time. Measured 2026-09-26: car 70165082 was left behind by trains
+// 14:39, 15:19 and 16:14 while its own re-gate ran each time — launched
+// 2 to 17 minutes after main moved, running 17 to 24 minutes — and
+// boarded at 17:09 only because that board happened to fire after the
+// green. So a departure that leaves a car behind mid-re-gate counts it on
+// the car (`base_regate.missed`), and from then on a departure on its
+// main waits for that car's OWN verdict, bounded by TWICE the hold from
+// its own launch, so even a re-gate that never answers is waited for a
+// fixed time. A car in its first round keeps the oldest-first rule: one
+// miss is the accepted cost of a bounded wait.
 // ---------------------------------------------------------------------------
 
-/// One re-gate the dock has in flight: the main it was launched for, and
-/// when.
+/// One re-gate the dock has in flight: whose car, the main it was
+/// launched for, when, and how many departures have already left the car
+/// behind mid-re-gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InRound {
+    pub car: String,
     pub main: String,
     pub since: DateTime<Utc>,
+    pub missed: u32,
 }
 
 /// Why a departure waits: the round on `main`, how many re-gates are in
-/// it, how old the oldest is, and the bound it waits against.
+/// it, how old the oldest is, the bound it waits against, how many of its
+/// cars a departure already left behind mid-re-gate and are waited for to
+/// their own verdict, and the most minutes the wait can still last.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RoundHold {
     pub main: String,
     pub in_flight: usize,
     pub oldest_minutes: i64,
     pub hold_minutes: u32,
+    pub missed: usize,
+    pub more_minutes: i64,
 }
 
 /// PURE: does a departure on `main` wait for the dock's round? `None` =
@@ -391,15 +431,45 @@ pub(crate) fn departure_hold(
     if hold_minutes == 0 {
         return None;
     }
+    let age = |r: &InRound| (now - r.since).num_minutes().max(0);
+    let hold = i64::from(hold_minutes);
     let on_main: Vec<&InRound> = round.iter().filter(|r| r.main == main).collect();
-    let oldest = on_main.iter().map(|r| r.since).min()?;
-    let oldest_minutes = (now - oldest).num_minutes().max(0);
-    (oldest_minutes < i64::from(hold_minutes)).then(|| RoundHold {
+    let oldest_minutes = on_main.iter().map(|r| age(r)).max()?;
+    // A car already left behind mid-re-gate, still inside its own bound.
+    let owed: Vec<i64> = on_main
+        .iter()
+        .filter(|r| r.missed > 0)
+        .map(|r| 2 * hold - age(r))
+        .filter(|left| *left > 0)
+        .collect();
+    let more_minutes = owed
+        .iter()
+        .copied()
+        .chain(std::iter::once(hold - oldest_minutes))
+        .max()
+        .unwrap_or(0);
+    (more_minutes > 0).then(|| RoundHold {
         main: main.to_string(),
         in_flight: on_main.len(),
         oldest_minutes,
         hold_minutes,
+        missed: owed.len(),
+        more_minutes,
     })
+}
+
+/// PURE: the `base_regate` stamp a car carries, with one more miss
+/// counted — what a departure that leaves it behind mid-re-gate writes.
+/// Replaced whole, like every write of the stamp, so everything else it
+/// said (its launch time above all) is kept. `None` when it carries none.
+pub(crate) fn missed_stamp(car: &Value) -> Option<Value> {
+    let mut stamp = car
+        .pointer(&format!("/metadata/{BASE_REGATE}"))
+        .filter(|s| s.is_object())?
+        .clone();
+    let missed = stamp.get("missed").and_then(Value::as_u64).unwrap_or(0);
+    stamp["missed"] = json!(missed.saturating_add(1));
+    Some(stamp)
 }
 
 /// PURE: what this pass writes to the car's claim on the next free gate
@@ -974,9 +1044,138 @@ mod tests {
 
     fn in_round(main: &str, at: &str) -> InRound {
         InRound {
+            car: format!("car-{at}"),
             main: main.into(),
             since: at.parse().unwrap(),
+            missed: 0,
         }
+    }
+
+    /// A re-gate whose car a departure has already left behind `missed`
+    /// times while a re-gate of it was running.
+    fn missed_round(car: &str, main: &str, at: &str, missed: u32) -> InRound {
+        InRound {
+            car: car.into(),
+            missed,
+            ..in_round(main, at)
+        }
+    }
+
+    /// Backlog d9530df2, replayed from the 15:19 departure of 2026-09-26.
+    /// Car 70165082's re-gate 69236ad5 was still running when train 14:39
+    /// departed (a miss). On main 604ed86f the oldest dock re-gate,
+    /// 14458749, launched at 15:02:35Z, so the oldest-first bound ended at
+    /// 15:17:35Z; the car's OWN re-gate 93ffd5ee launched only at
+    /// 15:14:49Z and went green at 15:35:53Z. Train 15:19 opened at
+    /// 15:21:00Z, six minutes into it — the second miss of three. A car
+    /// already left behind mid-re-gate is waited for to its own verdict,
+    /// bounded by twice the hold from its own launch.
+    #[test]
+    fn a_car_left_behind_mid_regate_holds_the_next_departure_for_its_own_verdict() {
+        let main = "604ed86faaaa";
+        let at = |t: &str| -> DateTime<Utc> { format!("2026-09-26T{t}Z").parse().unwrap() };
+        let round = [
+            in_round(main, "2026-09-26T15:02:35Z"),
+            missed_round("70165082", main, "2026-09-26T15:14:49Z", 1),
+        ];
+        assert_eq!(
+            departure_hold(&round, main, at("15:21:00"), 15),
+            Some(RoundHold {
+                main: main.into(),
+                in_flight: 2,
+                oldest_minutes: 18,
+                hold_minutes: 15,
+                missed: 1,
+                more_minutes: 24,
+            }),
+            "the oldest is past its bound, but a car that already missed a train mid-re-gate \
+             is six minutes into its own: hold, up to 30 minutes from ITS launch"
+        );
+        assert!(
+            departure_hold(&round, main, at("15:35:00"), 15).is_some(),
+            "still running at 15:35 — its green came at 15:35:53Z"
+        );
+        // 15:36: the verdict is in, so the car is no longer in the round
+        // (a Running re-gate is the only kind that joins it), and the
+        // oldest re-gate alone is long past its bound: depart, with the
+        // car aboard once the refresh has copied its green.
+        let after_green = [in_round(main, "2026-09-26T15:02:35Z")];
+        assert_eq!(departure_hold(&after_green, main, at("15:36:00"), 15), None);
+        // BOUNDED: a re-gate that never answers is waited for 2 x the
+        // hold from its own launch, and not a minute more.
+        assert!(departure_hold(&round, main, at("15:44:00"), 15).is_some());
+        assert_eq!(
+            departure_hold(&round, main, at("15:44:49"), 15),
+            None,
+            "thirty minutes from its own launch: the bound is reached, depart"
+        );
+    }
+
+    /// A car in its FIRST round keeps the oldest-first rule — the 14:39
+    /// departure of the same day, which the car missed with no miss behind
+    /// it yet: its re-gate 69236ad5 was the only one on 564d044c, launched
+    /// 14:22:58Z, and the train opened at 14:40:38Z. That miss is the
+    /// accepted cost of a bounded wait; the stamp it leaves is what makes
+    /// the next one wait.
+    #[test]
+    fn a_car_on_its_first_round_keeps_the_oldest_first_rule() {
+        let main = "564d044caaaa";
+        let now: DateTime<Utc> = "2026-09-26T14:40:38Z".parse().unwrap();
+        let first = [missed_round("70165082", main, "2026-09-26T14:22:58Z", 0)];
+        assert_eq!(departure_hold(&first, main, now, 15), None);
+        // A late launch in its first round still cannot extend the wait.
+        let late = [
+            in_round(main, "2026-09-26T14:22:58Z"),
+            missed_round("late", main, "2026-09-26T14:38:00Z", 0),
+        ];
+        assert_eq!(departure_hold(&late, main, now, 15), None);
+        // A missed car on a main that has since moved is not this
+        // departure's round, however starved.
+        let stale = [missed_round(
+            "70165082",
+            "0ldma1n0bbbb",
+            "2026-09-26T14:38:00Z",
+            3,
+        )];
+        assert_eq!(departure_hold(&stale, main, now, 15), None);
+        // And a registry that declares no hold holds nothing, missed or not.
+        let missed = [missed_round("70165082", main, "2026-09-26T14:38:00Z", 1)];
+        assert_eq!(departure_hold(&missed, main, now, 0), None);
+    }
+
+    /// The miss is recorded on the car's own stamp, and a stamp it
+    /// carries survives the next launch on a new main — otherwise the
+    /// re-launch that follows every miss would forget it.
+    #[test]
+    fn a_miss_is_counted_on_the_stamp_and_carried_to_the_next_launch() {
+        let at: DateTime<Utc> = "2026-09-26T14:22:58Z".parse().unwrap();
+        let s = RegateStamp {
+            head: "cafef00d".into(),
+            gate_run: "69236ad5".into(),
+            ..RegateStamp::for_main("564d044c", &[])
+        };
+        assert_eq!(s.missed, 0, "a fresh stamp has missed nothing");
+        let car = json!({"metadata": {BASE_REGATE: s.to_value(at)}});
+        let once = missed_stamp(&car).expect("a car with a stamp can miss");
+        assert_eq!(once["missed"], 1);
+        assert_eq!(
+            once["gate_run"], "69236ad5",
+            "the rest of the stamp is kept"
+        );
+        assert_eq!(
+            once["at"],
+            s.to_value(at)["at"],
+            "and so is its launch time"
+        );
+        let car = json!({"metadata": {BASE_REGATE: once}});
+        assert_eq!(RegateStamp::of(&car).map(|s| s.missed), Some(1));
+        assert_eq!(missed_stamp(&car).unwrap()["missed"], 2);
+        assert_eq!(missed_stamp(&json!({"metadata": {}})), None);
+        // The next launch, on the next main, inherits the count.
+        let next = RegateStamp::for_main("604ed86f", &[]).carrying(RegateStamp::of(&car).as_ref());
+        assert_eq!(next.missed, 1);
+        assert_eq!(next.main, "604ed86f");
+        assert_eq!(RegateStamp::for_main("m", &[]).carrying(None).missed, 0);
     }
 
     /// D2 of design 42279fb2, measured on its founding pass: at 19:26 on
@@ -1001,6 +1200,8 @@ mod tests {
                 in_flight: 2,
                 oldest_minutes: 5,
                 hold_minutes: 15,
+                missed: 0,
+                more_minutes: 10,
             }),
             "two re-gates on this main, the oldest five minutes in: hold"
         );

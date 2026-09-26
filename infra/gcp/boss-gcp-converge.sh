@@ -346,11 +346,65 @@ echo "boss-gcp-converge: units converged on ${after:0:8} ($REMOTE/main)"
 # still a failed converge: the host has not converged on the tree until
 # its CLI is the tree's, and a packet that read `ok` over a stale CLI
 # would be the 2026-09-15 defect with a green light on it.
+#
+# EXCEPT A WAIT, since 2026-09-26 (backlog f15ff5f2). Exit 75 is the
+# installer's `not yet`: the registry answered and has no image for this
+# commit's tag, because the deploy runner builds it after each train —
+# measured on #713, landed 16:14Z, this tick 404'd at 16:41:58Z, the
+# image rolled at 16:43:49Z. Redding on it made the tick after nearly
+# every train a failed unit, and the unit observer an URGENT alarm the
+# next tick closed by itself: 7 between 2026-09-23 and 2026-09-26, none
+# a fault — an alarm nobody could read (CLAUDE.md §Diagnosis). The forge
+# made this choice first (infra/forge/install.sh). So a wait is exit 0,
+# on the packet as the installer's `cli_result` plus `cli_wait_minutes`
+# here, and the next tick retries.
+#
+# THE WAIT HAS A LIMIT, so the stale-CLI concern above stays loud: the
+# age is measured from the OLDEST commit on main the host's CLI lacks
+# (the first after `current` in the installer's store; the converged
+# commit itself when there is no generation to measure from), so a
+# train landing every half hour cannot keep resetting it. Past
+# BOSS_GCP_CONVERGE_CLI_WAIT_MAX_MIN (90: three ticks, against a build
+# measured at ~30 min after landing) the image is not coming and the
+# wait reds like any other failure. The alarm is the age of the wait,
+# not the first tick after every train.
+CLI_WAIT_MAX_MIN="${BOSS_GCP_CONVERGE_CLI_WAIT_MAX_MIN:-90}"
 log="$(mktemp -t boss-gcp-converge-cli.XXXXXX)"
 cli_rc=0
 "$CLI_INSTALLER" "$after" >"$log" 2>&1 || cli_rc=$?
 sed 's/^/  cli: /' "$log"
 rm -f "$log"
+if [ "$cli_rc" -eq 75 ]; then
+    have=$(readlink "${BOSS_CLI_STORE:-/opt/boss-cli}/current" 2>/dev/null || true)
+    missing=""
+    if [ -n "$have" ]; then
+        missing=$(as_owner "git -C '$REPO' rev-list --reverse '$have..$after'" 2>/dev/null || true)
+    fi
+    oldest="${missing%%$'\n'*}"
+    oldest="${oldest:-$after}"
+    landed=$(as_owner "git -C '$REPO' log -1 --format=%ct '$oldest'" 2>/dev/null || true)
+    case "${landed:-empty}" in
+        empty|*[!0-9]*)
+            # An age that cannot be read is not a wait that can be
+            # bounded: red, naming why, rather than wait forever.
+            echo "boss-gcp-converge: cannot read when ${oldest:0:8} landed — the CLI wait cannot be bounded" >&2
+            run_summary_field cli_exit "$cli_rc"
+            exit "$cli_rc" ;;
+    esac
+    wait_min=$(( ($(date +%s) - landed) / 60 ))
+    [ "$wait_min" -ge 0 ] || wait_min=0
+    run_summary_field cli_wait_minutes "$wait_min"
+    if [ "$wait_min" -lt "$CLI_WAIT_MAX_MIN" ]; then
+        echo "boss-gcp-converge: units converged on ${after:0:8}; the CLI image is not built yet —"
+        echo "    ${wait_min} min since ${oldest:0:8} landed (limit ${CLI_WAIT_MAX_MIN} min). The deploy runner"
+        echo "    builds it after each train; the next tick retries, and /usr/local/bin/boss stays"
+        echo "    whatever the previous converge confirmed (cli_result on the packet)."
+        exit 0
+    fi
+    run_summary_note "the CLI image is not built ${wait_min} min after ${oldest:0:8} landed (limit ${CLI_WAIT_MAX_MIN} min) — the host's boss is falling behind the tree"
+    echo "boss-gcp-converge: the CLI image is still not built ${wait_min} min after ${oldest:0:8} landed" >&2
+    echo "    (limit ${CLI_WAIT_MAX_MIN} min) — not a wait any longer: the deploy runner is not building it." >&2
+fi
 if [ "$cli_rc" -ne 0 ]; then
     echo "boss-gcp-converge: the CLI step FAILED (exit $cli_rc) at ${after:0:8} — its complete" >&2
     echo "    output is above. Units on this host are converged; /usr/local/bin/boss is" >&2

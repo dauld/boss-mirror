@@ -68,13 +68,19 @@ pub(crate) enum NoDeparture {
     /// re-gates launched on `main`, the oldest `oldest_minutes` in,
     /// against a hold of `hold_minutes` read from the cadence registry.
     /// Bounded by construction — once the oldest reaches the hold, the
-    /// next board departs with what is green.
+    /// next board departs with what is green. `missed` of the round's cars
+    /// were already left behind by a departure mid-re-gate and are waited
+    /// for to their own verdict, up to twice the hold from their own
+    /// launch (backlog d9530df2); `more_minutes` is the most the wait can
+    /// still last.
     AwaitingRegates {
         cars: usize,
         in_flight: usize,
         main: String,
         oldest_minutes: i64,
         hold_minutes: u32,
+        missed: usize,
+        more_minutes: i64,
     },
 }
 
@@ -279,15 +285,23 @@ pub(crate) fn no_departure_line(refusal: &NoDeparture) -> String {
             main,
             oldest_minutes,
             hold_minutes,
+            missed,
+            more_minutes,
         } => format!(
             "BOARDING HELD — {in_flight} re-gate(s) on main {} in flight, oldest \
              {oldest_minutes} min: {cars} car(s) are ready and wait for the round, up to \
-             {} more min (regate_hold_minutes={hold_minutes}), so one departure carries \
+             {} more min (regate_hold_minutes={hold_minutes}{}), so one departure carries \
              every car it turns green and main moves once. No train packet opened.",
             &main[..8.min(main.len())],
-            i64::from(*hold_minutes)
-                .saturating_sub(*oldest_minutes)
-                .max(0),
+            (*more_minutes).max(0),
+            if *missed > 0 {
+                format!(
+                    "; {missed} car(s) already left behind mid-re-gate are waited for to \
+                     their own verdict, up to twice that from their own launch"
+                )
+            } else {
+                String::new()
+            },
         ),
     }
 }
@@ -697,6 +711,8 @@ mod persistence_tests {
             main: "22c1a876aaaa".into(),
             oldest_minutes: 6,
             hold_minutes: 15,
+            missed: 0,
+            more_minutes: 9,
         };
         assert!(
             !refusal_persists(&held),
@@ -710,6 +726,34 @@ mod persistence_tests {
             "2 car(s)",
             "up to 9 more min",
             "No train packet opened",
+        ] {
+            assert!(line.contains(want), "{want}: {line}");
+        }
+        assert!(!line.contains("left behind"), "{line}");
+    }
+
+    /// Backlog d9530df2: a hold that waits past the oldest re-gate's bound
+    /// for a car a departure already left behind says so — otherwise the
+    /// line reads "oldest 18 min" against a hold of 15, which looks like a
+    /// broken bound. Still bounded, so still no alarm.
+    #[test]
+    fn a_hold_for_a_car_left_behind_mid_regate_says_whom_it_waits_for() {
+        let held = NoDeparture::AwaitingRegates {
+            cars: 3,
+            in_flight: 2,
+            main: "604ed86faaaa".into(),
+            oldest_minutes: 18,
+            hold_minutes: 15,
+            missed: 1,
+            more_minutes: 24,
+        };
+        assert!(!refusal_persists(&held));
+        let line = no_departure_line(&held);
+        for want in [
+            "oldest 18 min",
+            "up to 24 more min",
+            "1 car(s) already left behind mid-re-gate",
+            "their own verdict",
         ] {
             assert!(line.contains(want), "{want}: {line}");
         }

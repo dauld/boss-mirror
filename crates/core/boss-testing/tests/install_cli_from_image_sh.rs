@@ -61,7 +61,9 @@
 //! `not yet`, exit 0 — the forge converges every ten minutes and builds
 //! the image on the same host a few minutes after each train, so a red
 //! there would be a red on every train; and a real refusal still reds
-//! the converge with the units installed and reported.
+//! the converge with the units installed and reported. boss-gcp's
+//! converge took the same treatment on 2026-09-26 (backlog f15ff5f2),
+//! with a limit on the wait's age that reds a build that is not coming.
 //!
 //! Nothing here touches a host or a registry. `curl` is a stub on
 //! every path.
@@ -1135,6 +1137,11 @@ impl Converge {
             )
             .env("BOSS_NODE_ROLES_CACHE", self.case.root.join("roles.cache"))
             .env("STUB_CALLS", &self.calls);
+        // A case's own env wins over the defaults above — how a case
+        // swaps the real CLI installer for a stub with one exit code.
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
         let out = cmd.output().expect("boss-gcp-converge.sh runs");
         (out.status.code().unwrap_or(-1), text(&out))
     }
@@ -1225,12 +1232,18 @@ fn a_cli_failure_does_not_stop_the_units_converge_and_is_on_the_packet() {
     );
 }
 
-/// boss-gcp's converge is UNCHANGED by the not-yet exit (9f00a805 car
-/// 1 moved the installer and retargeted nothing else): a tag the
-/// registry lacks is still a failed converge there, healed by its next
-/// half-hourly tick, and the packet says which state it is in.
+/// boss-gcp's converge WAITS on a tag the registry lacks, the way the
+/// forge's does (backlog f15ff5f2). Until 2026-09-26 it redded there:
+/// the tick after every train ran before the deploy runner had pushed
+/// the image, systemd recorded 75/TEMPFAIL, and the unit observer filed
+/// an URGENT alarm that the next tick closed by itself — 7 of them
+/// between 2026-09-23 and 2026-09-26, none a fault (alarm 4c79e76d:
+/// train #713 landed 16:14Z, the tick 404'd at 16:41:58Z, the image
+/// rolled 16:43:49Z). The wait is on the packet — `cli_result` from the
+/// installer, `cli_wait_minutes` from the converge — and nothing reads
+/// FAILED.
 #[test]
-fn the_gcp_converge_still_reds_on_a_tag_the_registry_lacks() {
+fn the_gcp_converge_waits_on_a_tag_the_registry_lacks_and_records_the_wait() {
     if !tools() || !has("git") {
         return;
     }
@@ -1238,15 +1251,113 @@ fn the_gcp_converge_still_reds_on_a_tag_the_registry_lacks() {
     // Forget the image for the commit the tree converges to.
     write_file(&cv.case.fix.join("tags"), "");
     let (rc, out) = cv.run(&[]);
-    assert_ne!(rc, 0, "{out}");
-    assert!(cv.installer_calls().contains("args=units"), "{out}");
-    assert_eq!(cv.case.summary("cli_sha"), cv.want);
-    assert!(
-        cv.case.summary("cli_result").starts_with("not yet"),
-        "{}",
-        cv.case.summary("cli_result")
+    assert_eq!(
+        rc, 0,
+        "an image the deploy runner has not built yet is a wait, not a red converge: {out}"
     );
-    assert!(out.contains("the CLI step FAILED"), "{out}");
+    assert!(cv.installer_calls().contains("args=units"), "{out}");
+    let c = &cv.case;
+    assert_eq!(c.summary("converge_sha"), cv.want, "{out}");
+    assert_eq!(c.summary("cli_sha"), cv.want);
+    assert!(
+        c.summary("cli_result").starts_with("not yet")
+            && c.summary("cli_result").contains("HTTP 404"),
+        "the installer's own verdict rides the packet: {}",
+        c.summary("cli_result")
+    );
+    assert!(
+        !c.summary("cli_wait_minutes").is_empty(),
+        "the converge records how long the CLI has waited: {out}"
+    );
+    assert_eq!(
+        c.summary("cli_exit"),
+        "",
+        "a wait is not an exit to report: {out}"
+    );
+    assert!(
+        !out.contains("FAILED"),
+        "nothing about a failure — this is a wait, not a fault: {out}"
+    );
+    assert!(
+        out.contains("next tick"),
+        "the converge says what happens next: {out}"
+    );
+}
+
+/// THE WAIT HAS A LIMIT. A CLI still `not yet` long after the commit it
+/// lacks landed is no longer the deploy runner's few minutes — it is a
+/// build that is not coming, and the host's CLI is falling behind the
+/// tree: the 2026-09-15 defect this step exists to prevent. Past
+/// BOSS_GCP_CONVERGE_CLI_WAIT_MAX_MIN the converge reds, naming the age
+/// — the alarm is the age of the wait, not the first tick after every
+/// train. A limit of 0 makes any wait too long.
+#[test]
+fn a_cli_wait_past_its_limit_reds_the_gcp_converge_naming_the_age() {
+    if !tools() || !has("git") {
+        return;
+    }
+    let cv = Converge::new("not-yet-too-long");
+    write_file(&cv.case.fix.join("tags"), "");
+    let (rc, out) = cv.run(&[("BOSS_GCP_CONVERGE_CLI_WAIT_MAX_MIN", "0".into())]);
+    assert_eq!(rc, 75, "a wait past its limit reds the converge: {out}");
+    assert!(cv.installer_calls().contains("args=units"), "{out}");
+    let c = &cv.case;
+    assert_eq!(c.summary("cli_exit"), "75", "{out}");
+    assert!(!c.summary("cli_wait_minutes").is_empty(), "{out}");
+    assert!(
+        out.contains("the CLI step FAILED") && out.contains("limit 0 min"),
+        "the red names the age and the limit it crossed: {out}"
+    );
+    assert!(
+        c.summary("anomalies").contains("not built"),
+        "and the packet says why: {}",
+        c.summary("anomalies")
+    );
+}
+
+/// The converge's verdict turns on the CLI step's EXIT CODE alone, so a
+/// stub pins it without a registry: 75 is a recorded wait and exit 0;
+/// any other non-zero is still a failed converge carrying its exit.
+#[test]
+fn a_stubbed_cli_step_exit_75_is_a_wait_and_exit_1_is_a_red() {
+    if !tools() || !has("git") {
+        return;
+    }
+    let cv = Converge::new("stub-cli");
+    let stub = |rc: i32| {
+        let p = cv.case.bin.join(format!("cli-exit-{rc}"));
+        write_exec(
+            &p,
+            &format!("#!/usr/bin/env bash\necho \"stub cli step: sha=$1 exit {rc}\"\nexit {rc}\n"),
+        );
+        p
+    };
+    let wait = stub(75);
+    let (rc, out) = cv.run(&[(
+        "BOSS_GCP_CONVERGE_CLI_INSTALLER",
+        wait.display().to_string(),
+    )]);
+    assert_eq!(rc, 0, "exit 75 from the CLI step is a wait: {out}");
+    assert!(out.contains("stub cli step: sha="), "{out}");
+    assert!(
+        !cv.case.summary("cli_wait_minutes").is_empty(),
+        "the converge records the wait itself, even when the step recorded nothing: {out}"
+    );
+    assert_eq!(cv.case.summary("cli_exit"), "", "{out}");
+
+    let bad = stub(1);
+    let (rc, out) = cv.run(&[("BOSS_GCP_CONVERGE_CLI_INSTALLER", bad.display().to_string())]);
+    assert_eq!(
+        rc, 1,
+        "any other non-zero exit still reds the converge: {out}"
+    );
+    assert!(out.contains("the CLI step FAILED (exit 1)"), "{out}");
+    assert_eq!(cv.case.summary("cli_exit"), "1", "{out}");
+    assert_eq!(
+        cv.case.summary("cli_wait_minutes"),
+        "",
+        "a refusal is not a wait: {out}"
+    );
 }
 
 // ---------------------------------------------------------------------------
