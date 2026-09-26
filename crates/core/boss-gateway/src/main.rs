@@ -496,6 +496,20 @@ fn build_router(
             "/api/yard/borders",
             axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
         )
+        // The MOVES record (design e765b3fc): each packet that moved on
+        // the map, and the stream the map's live layer holds open (car
+        // M2, flight `it-map-live`). Served by the jobs upstream since
+        // car M1, and routed in the car that first fetches it — the
+        // stations shape again otherwise. The proxy streams the body,
+        // as it does `/api/events/stream`.
+        .route(
+            "/api/yard/moves",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
+        .route(
+            "/api/yard/moves/stream",
+            axum::routing::get(|s, r| proxy::handle(s, r, &proxy::JOBS)),
+        )
         // Every dispatcher rule's newest firing and dead-letters, read by
         // the rules list at /it/registry/rules (backlog 43c4451a). Same
         // upstream as the borders, whose record it re-reads, and routed
@@ -1188,6 +1202,11 @@ mod routing_tests {
             // David's screen; `every_api_path_the_web_fetches_is_routed`
             // below now derives this list from the bundle instead.
             "/api/yard/regions",
+            // The moves record (design e765b3fc, cars M1 and M2): served
+            // by the jobs upstream since M1 and first fetched by the map's
+            // live layer in M2, so routed in the car that reads it.
+            "/api/yard/moves",
+            "/api/yard/moves/stream",
             // The flights read (73c31776): inlined on index.html, and
             // the same answer for a page the gateway did not serve.
             "/api/flights/mine",

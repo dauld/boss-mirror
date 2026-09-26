@@ -31,6 +31,9 @@ const MAP_FILES = [
   // The transit monitor (design 16091dfb, flight it-map-transit): its
   // lines are --map-line-* tokens, its rings the map's own states.
   'TransitMap.svelte',
+  // The real moves on the transit map (design e765b3fc car M2, flight
+  // it-map-live): its dots and pings wear the lines' own tokens.
+  'LiveMotion.svelte',
 ] as const;
 
 /** The grammar round 2 swaps: grounds, text, rules, the accent, and

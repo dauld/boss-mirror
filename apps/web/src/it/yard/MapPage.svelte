@@ -93,8 +93,11 @@
   /** THE TRANSIT MONITOR (design 16091dfb, Q2 decided 2026-09-25):
    *  behind its flight, on for David first. Off — and for every viewer
    *  the flight does not list — the world map is the map; the phone
-   *  keeps its strip either way. */
-  const transit = $derived(flightOn('it-map-transit'));
+   *  keeps its strip either way. The real moves (flight `it-map-live`,
+   *  design e765b3fc car M2) ride the transit map, so that flight
+   *  draws it too — and the world map's rate-replay tokens are never
+   *  shown under it. */
+  const transit = $derived(flightOn('it-map-transit') || flightOn('it-map-live'));
 
   let regions = $state<Remote<Regions>>({ kind: 'loading' });
   let borders = $state<Remote<Borders>>({ kind: 'loading' });

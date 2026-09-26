@@ -38,6 +38,10 @@
   // rate.
   import { navigate } from '@boss/web-kit/nav';
   import { MediaQuery } from 'svelte/reactivity';
+  import { flightOn } from '@boss/web-kit/session/flights.svelte';
+  import LiveMotion from './LiveMotion.svelte';
+  import { transitGeometry } from './live-geometry';
+  import { LIVE_TEXT } from './live-motion';
   import type { Border, Borders } from './borders';
   import { countText, regionHref, sectionHref, type Region, type Regions } from './regions';
   import {
@@ -73,6 +77,11 @@
 
   const prefersReduced = new MediaQuery('(prefers-reduced-motion: reduce)');
   const reduced = $derived(prefersReduced.current);
+  /** REAL PACKETS MOVE (design e765b3fc car M2, flight `it-map-live`):
+   *  the recorded moves ride the sections, and the rate-replay blocks
+   *  are off — a replayed rate beside the real moves would draw each
+   *  crossing twice, once as a picture of it. */
+  const live = $derived(flightOn('it-map-live'));
 
   const byName = $derived(new Map(regions.regions.map((r) => [r.name, r] as const)));
   const byKey = $derived(new Map<string, Border>((borders?.borders ?? []).map((b) => [sectionKey(b.from, b.to), b])));
@@ -126,7 +135,7 @@
           {@const b = byKey.get(s.key)}
           {@const ground = sectionGround(b)}
           {@const waiting = waitingBlocks(s, b)}
-          {@const trains = trainsOf(b, reduced)}
+          {@const trains = live ? null : trainsOf(b, reduced)}
           {@const href = sectionHref(s.from, s.to)}
           {@const isSelected = selected === s.key}
           <a class="section-link" {href} data-section-link={s.key} data-selected={isSelected ? 'true' : undefined}
@@ -180,6 +189,11 @@
             <text x={st.x} y={st.below ? st.y + 46 : st.y + 40} text-anchor="middle" class="sub">{stationCount(r)}</text>
           </a>
         {/each}
+
+        {#if live}
+          <!-- THE MOVES (car M2): over the stations, so a ping reads on top. -->
+          <LiveMotion geometry={transitGeometry} {reduced} />
+        {/if}
       </svg>
     </div>
 
@@ -207,7 +221,7 @@
     <span class="key-item"><svg class="swatch" viewBox="0 0 20 4" aria-hidden="true"><line x1="0" y1="2" x2="20" y2="2" class="held" /></svg>a held section: the server judges nothing is crossing</span>
   </div>
   <p class="replay" data-replay>
-    {REPLAY_TEXT}{reduced ? '. Reduced motion is on: nothing moves, and a section\'s panel carries its rate.' : ''}
+    {live ? LIVE_TEXT : REPLAY_TEXT}{reduced && live ? '. Reduced motion is on: a move flashes its count at the station it reached, and nothing travels.' : reduced ? '. Reduced motion is on: nothing moves, and a section\'s panel carries its rate.' : ''}
   </p>
 </section>
 
