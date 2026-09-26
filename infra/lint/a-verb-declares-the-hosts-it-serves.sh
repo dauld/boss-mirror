@@ -157,6 +157,17 @@ GCP_MUTATING_ADMITTED = {
     # Flagged for David's review as the first verb that publishes
     # MORE THAN ONE registry row per request.
     "publish-drift": "David 2026-09-18, retro 27fad542 / backlog a2f97942 — flagged for review",
+    # backlog d3c7eada car 2, 2026-09-26: boss-gcp's root at 12 GB free
+    # against its 17 GB floor. Bounded to two globs fixed in the script
+    # (/opt/boss-binbak-*, /opt/boss-dev-bak — July binary backups) plus
+    # a journal vacuum to a fixed 1G; the only param is the mode; a
+    # symlink, a fresh backup, or one a live tree, link, process or unit
+    # resolves into is refused; --dry-run exercisable without acting.
+    # /var/backups, homes, /usr/local, /opt/boss and /opt/boss-cli are
+    # data and David's call, out of reach by construction. The car rode
+    # under a boarding hold for adversarial review; its release is the
+    # authorization this entry records.
+    "reclaim-gcp-root": "David 2026-09-26, backlog d3c7eada — boarding hold released after adversarial review",
 }
 
 problems = []

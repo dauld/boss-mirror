@@ -1,0 +1,20 @@
+{
+  "about": "MUTATING — free boss-gcp's root disk by removing EXACTLY the obsolete binary backup directories /opt/boss-binbak-* and /opt/boss-dev-bak, then vacuuming the systemd journal to a fixed 1G, and nothing else (infra/gcp/reclaim-gcp-root.sh). boss-gcp's 48 GB root sat at 11-13 GB free for nine days against its 17 GB floor (backlog d3c7eada, estate finding disk_tight:boss-gcp); car 1's disk-report reading (ops-request b21ddeb3, 2026-09-26) found four July 2026 pre-deploy binary backups under /opt (~2.3 GB, written by the bare-metal deploy deleted 2026-09-18) and a 4.1 GB journal — about the 5 GB the floor needs. THE BOUND IS THE SCRIPT'S, NEVER A PARAM: the paths are two globs fixed in the script and the only param is the mode, so no packet can name a path; each candidate must be a real directory (a symlink is refused) whose realpath is /opt/<its own name>, nothing inside it may be younger than 30 days, and it is refused as LIVE when /opt/boss or /opt/boss-cli resolves into or around it, when a symlink in /opt, /usr/local/bin, /usr/bin, /usr/sbin or /etc/systemd/system resolves into it, when a running process's executable is in it, or when a loaded service unit's ExecStart/ExecStartPre/WorkingDirectory/FragmentPath resolves into it — any refusal removes nothing. The journal bound is fixed at 1G so no packet can ask for 0. OUT OF REACH BY CONSTRUCTION, because they are data and David's call on retention: /var/backups/* (the cluster-pg dumps and the second-stack capture), every home directory, /usr/local, /opt/boss and /opt/boss-cli. `--dry-run` runs every bound, prints each directory it would remove with its size, the journal's usage and the root's free space, and removes nothing; `--for-real` removes one directory at a time with rm -rf --one-file-system, printing each as it lands so a run killed at the timeout leaves an exact record, then vacuums and prints free space before and after. Own timeout: a du, an rm and a vacuum over ~7 GB. Authorization: David's, given as the release of this car's boarding hold ('mutating ops verb: adversarial review before boarding', backlog d3c7eada, 2026-09-26) — the car does not board without it; admitted by name in infra/lint/a-verb-declares-the-hosts-it-serves.sh, the same explicit per-verb process as retire-second-stack, a precedent for the PROCESS, not a loosened default.",
+  "hosts": [
+    "boss-gcp"
+  ],
+  "argv": [
+    "infra/gcp/reclaim-gcp-root.sh",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "one_of": [
+        "--dry-run",
+        "--for-real"
+      ]
+    }
+  ],
+  "timeout": 600
+}
