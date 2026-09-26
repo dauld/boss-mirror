@@ -1,7 +1,8 @@
 //! The two report verbs a daily sweep files for itself — `disk-report`
 //! (`infra/forge/disk-report.sh`) and `conformance-report`
-//! (`infra/cluster/conformance-report.sh`) — end their output with ONE
-//! machine-readable verdict line, in one shape for both:
+//! (`infra/cluster/conformance-report.sh`) — carry ONE machine-readable
+//! verdict line, in one shape for both (conformance-report ends with it;
+//! disk-report prints it before its slow directory lists, 8fcd25c4):
 //!
 //!     verdict: clean
 //!     verdict: <finding>
@@ -166,6 +167,40 @@ fn an_unmeasured_disk_is_not_a_clean_one() {
     assert!(
         v.starts_with("verdict: disk_unmeasured"),
         "an unreadable df must read as unmeasured, never clean: {v}\n{all}"
+    );
+}
+
+/// The verdict is printed BEFORE the long per-directory lists, and only
+/// once (backlog 8fcd25c4, 2026-09-26). On boss-gcp the one-level-down
+/// scans outlasted the runner's 30 s default and the kill landed before
+/// a verdict printed LAST; a verdict read from `df -k /` first costs
+/// nothing, and the lists are what a kill may cut. Exactly one line, so
+/// the judge's "last `verdict:` line" read finds this one and no other.
+#[test]
+fn the_verdict_is_printed_once_and_before_the_directory_lists() {
+    let stubs = disk_report_stubs("disk-verdict-first", 228 * GIB_KB, 120 * GIB_KB);
+    let (rc, all) = run_disk_report(&stubs);
+    assert_eq!(rc, 0, "{all}");
+    let lines: Vec<&str> = all.lines().collect();
+    let verdicts: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.trim().starts_with("verdict: "))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        verdicts.len(),
+        1,
+        "exactly one verdict line, at lines {verdicts:?}:\n{all}"
+    );
+    let lists = lines
+        .iter()
+        .position(|l| l.starts_with("== directories, largest first"))
+        .unwrap_or_else(|| panic!("the directory list header is gone:\n{all}"));
+    assert!(
+        verdicts[0] < lists,
+        "the verdict (line {}) must come before the directory lists (line {lists}), so a kill mid-scan cannot lose it:\n{all}",
+        verdicts[0]
     );
 }
 

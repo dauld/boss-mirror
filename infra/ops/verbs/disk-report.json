@@ -1,5 +1,5 @@
 {
-  "about": "READ-ONLY: what is consuming this host's disk — df, BOTH docker daemons (system: the CI jobs; rootless: the converge builds), and a fixed list of directories largest-first. No arguments, nothing mutated; sudo -n is tried where root is needed and each line says when it was refused. Added 2026-09-05 after the locomotive refused #204 at 65GB and the bounded reclaim stopped at the floor with nobody able to say what held the rest (David: 'I want to understand what is consuming disk first').",
+  "about": "READ-ONLY: what is consuming this host's disk — df, BOTH docker daemons (system: the CI jobs; rootless: the converge builds), and a fixed list of directories largest-first. No arguments, nothing mutated; sudo -n is tried where root is needed and each line says when it was refused. Added 2026-09-05 after the locomotive refused #204 at 65GB and the bounded reclaim stopped at the floor with nobody able to say what held the rest (David: 'I want to understand what is consuming disk first'). Its own timeout, 120s: on boss-gcp the one-level-down scans outlasted the runner's 30s default and the verb was killed (exit 124, ops-request b21ddeb3, backlog 8fcd25c4, 2026-09-26); the disk-headroom sweep's judge reads its verdict, and a verb a rule judges declares how long it may take (a_judged_verb_declares_its_timeout.rs). The verdict is also printed before the directory lists, so a kill cuts the lists, not the verdict.",
   "hosts": [
     "boss-gcp",
     "forge"
@@ -7,5 +7,6 @@
   "argv": [
     "infra/forge/disk-report.sh"
   ],
-  "params": []
+  "params": [],
+  "timeout": 120
 }

@@ -54,6 +54,70 @@ if command -v xfs_info >/dev/null 2>&1 && [ "$(findmnt -no FSTYPE / 2>/dev/null)
     sudo -n xfs_info / 2>/dev/null | grep -o 'reflink=[01]' || xfs_info / 2>/dev/null | grep -o 'reflink=[01]' || say "xfs_info: not readable without sudo"
 fi
 
+hr "verdict"
+# THE READING CARRIES ITS VERDICT (backlog 970c0c94, measured
+# 2026-09-18). The disk-headroom sweep files this report for itself the
+# moment its Inspect step becomes ready (measure-disk-headroom-sweep-on-
+# inspect-ready) and the answer landed as free text: exit 0 at 68% root
+# exactly as it would at 99%, so nothing could complete the sweep's
+# Inspect step by rule and four of them sat assigned to the agent for a
+# day with a clean number on another packet. The report carries ONE
+# machine-readable verdict line — `verdict: clean` or `verdict:
+# <finding>` — that the dispatcher rule judge-disk-headroom-sweep-on-
+# report-answered reads (maintenance.sweep.judge, which takes the LAST
+# `verdict: ` line; there is only this one). The exit code stays 0
+# either way: a finding is an answer, not a failure.
+#
+# IT PRINTS FIRST, NOT LAST (backlog 8fcd25c4, measured 2026-09-26). It
+# used to close the report, after the per-directory lists; on boss-gcp
+# those lists, now read one level down, outlasted the ops-runner's 30s
+# default and the kill (exit 124, ops-request b21ddeb3) landed before
+# the verdict was written. The verdict needs only `df -k /`, so it is
+# read here, before anything slow: a kill now cuts the lists, never the
+# verdict. The verb also declares its own timeout (disk-report.json),
+# and the judge still reads a killed verb as unmeasured whatever its
+# output says — this ordering is so a human reading a killed report
+# still sees the number.
+#
+# THE FLOOR IS THE ESTATE'S, NOT A NEW NUMBER. It is the same rule the
+# estate comparator applies to every observed host —
+# max(DISK_TIGHT_FLOOR_GB, min(DISK_TIGHT_FLOOR_PCT of capacity,
+# DISK_TIGHT_HEADROOM_CEILING_GB)) — read from the same `df -k /` the
+# host observer takes (infra/estate/observe-host.sh, nearest GiB). A
+# shell script cannot read a Rust `const`, so the three numbers are
+# PINNED to crates/orchestrators/boss-dispatcher-handlers/src/handlers/
+# estate_compare.rs by `the_disk_report_judges_by_the_comparators_floor`,
+# which names whichever moved (CLAUDE.md §9a: a pin is what you write
+# when you cannot collapse today). If the floor ever lands in one
+# registry both readers should read it and the pin should go.
+DISK_TIGHT_FLOOR_GB=16
+DISK_TIGHT_FLOOR_PCT=35
+DISK_TIGHT_HEADROOM_CEILING_GB=200
+disk_kb=$(df -k / 2>/dev/null | awk 'NR==2 {print $2}')
+free_kb=$(df -k / 2>/dev/null | awk 'NR==2 {print $4}')
+case "${disk_kb:-empty}${free_kb:-empty}" in
+    *empty*|*[!0-9]*)
+        # An unmeasured disk is not a clean one (estate_compare.rs
+        # records it apart from a finding for the same reason).
+        say "verdict: disk_unmeasured (df -k / answered '${disk_kb:-}' '${free_kb:-}')"
+        ;;
+    *)
+        disk_gb=$(( (disk_kb + 524288) / 1048576 ))
+        free_gb=$(( (free_kb + 524288) / 1048576 ))
+        # The percentage floor, rounded UP so that `free < pct_floor`
+        # is exactly the comparator's `free * 100 < total * PCT`.
+        pct_floor=$(( (disk_gb * DISK_TIGHT_FLOOR_PCT + 99) / 100 ))
+        floor=$pct_floor
+        [ "$floor" -gt "$DISK_TIGHT_HEADROOM_CEILING_GB" ] && floor=$DISK_TIGHT_HEADROOM_CEILING_GB
+        [ "$floor" -lt "$DISK_TIGHT_FLOOR_GB" ] && floor=$DISK_TIGHT_FLOOR_GB
+        if [ "$disk_gb" -gt 0 ] && [ "$free_gb" -ge "$floor" ]; then
+            say "verdict: clean"
+        else
+            say "verdict: disk_tight free=${free_gb}g floor=${floor}g"
+        fi
+        ;;
+esac
+
 hr "CI runner volume policy (act_runner container.valid_volumes)"
 # Whether a CI job may mount a host path at all. The runner's config is
 # not in the tree; its policy decides whether a seed volume is even
@@ -138,54 +202,3 @@ for base in /var/backups /opt /home /var/lib; do
     done | sort -h -r | sed -n '1,15p'
 done
 
-hr "verdict"
-# THE READING CARRIES ITS VERDICT (backlog 970c0c94, measured
-# 2026-09-18). The disk-headroom sweep files this report for itself the
-# moment its Inspect step becomes ready (measure-disk-headroom-sweep-on-
-# inspect-ready) and the answer landed as free text: exit 0 at 68% root
-# exactly as it would at 99%, so nothing could complete the sweep's
-# Inspect step by rule and four of them sat assigned to the agent for a
-# day with a clean number on another packet. The last line is now ONE
-# machine-readable verdict — `verdict: clean` or `verdict: <finding>` —
-# that the dispatcher rule judge-disk-headroom-sweep-on-report-answered
-# reads (maintenance.sweep.judge). The exit code stays 0 either way: a
-# finding is an answer, not a failure.
-#
-# THE FLOOR IS THE ESTATE'S, NOT A NEW NUMBER. It is the same rule the
-# estate comparator applies to every observed host —
-# max(DISK_TIGHT_FLOOR_GB, min(DISK_TIGHT_FLOOR_PCT of capacity,
-# DISK_TIGHT_HEADROOM_CEILING_GB)) — read from the same `df -k /` the
-# host observer takes (infra/estate/observe-host.sh, nearest GiB). A
-# shell script cannot read a Rust `const`, so the three numbers are
-# PINNED to crates/orchestrators/boss-dispatcher-handlers/src/handlers/
-# estate_compare.rs by `the_disk_report_judges_by_the_comparators_floor`,
-# which names whichever moved (CLAUDE.md §9a: a pin is what you write
-# when you cannot collapse today). If the floor ever lands in one
-# registry both readers should read it and the pin should go.
-DISK_TIGHT_FLOOR_GB=16
-DISK_TIGHT_FLOOR_PCT=35
-DISK_TIGHT_HEADROOM_CEILING_GB=200
-disk_kb=$(df -k / 2>/dev/null | awk 'NR==2 {print $2}')
-free_kb=$(df -k / 2>/dev/null | awk 'NR==2 {print $4}')
-case "${disk_kb:-empty}${free_kb:-empty}" in
-    *empty*|*[!0-9]*)
-        # An unmeasured disk is not a clean one (estate_compare.rs
-        # records it apart from a finding for the same reason).
-        say "verdict: disk_unmeasured (df -k / answered '${disk_kb:-}' '${free_kb:-}')"
-        ;;
-    *)
-        disk_gb=$(( (disk_kb + 524288) / 1048576 ))
-        free_gb=$(( (free_kb + 524288) / 1048576 ))
-        # The percentage floor, rounded UP so that `free < pct_floor`
-        # is exactly the comparator's `free * 100 < total * PCT`.
-        pct_floor=$(( (disk_gb * DISK_TIGHT_FLOOR_PCT + 99) / 100 ))
-        floor=$pct_floor
-        [ "$floor" -gt "$DISK_TIGHT_HEADROOM_CEILING_GB" ] && floor=$DISK_TIGHT_HEADROOM_CEILING_GB
-        [ "$floor" -lt "$DISK_TIGHT_FLOOR_GB" ] && floor=$DISK_TIGHT_FLOOR_GB
-        if [ "$disk_gb" -gt 0 ] && [ "$free_gb" -ge "$floor" ]; then
-            say "verdict: clean"
-        else
-            say "verdict: disk_tight free=${free_gb}g floor=${floor}g"
-        fi
-        ;;
-esac

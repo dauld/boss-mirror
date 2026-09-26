@@ -2,8 +2,9 @@
 # rule (measure-disk-headroom-sweep-on-inspect-ready) files a
 # `disk-report` ops-request the moment the sweep's Inspect checklist
 # becomes ready, linked back as metadata.for_sweep; the forge's
-# ops-runner answers it, and disk-report.sh now ends its output with
-# ONE verdict line judged by the estate comparator's own floor —
+# ops-runner answers it, and disk-report.sh carries ONE verdict line
+# (printed before its slow directory lists, and the verb declares its
+# own timeout — backlog 8fcd25c4) judged by the estate comparator's floor —
 # `verdict: clean`, or `verdict: disk_tight free=63g floor=80g`. This
 # rule fires when that ops-request closes `answered`: the handler reads
 # the report, follows for_sweep, and — for a disk-headroom sweep whose
