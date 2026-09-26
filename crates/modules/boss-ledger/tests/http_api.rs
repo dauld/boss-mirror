@@ -91,8 +91,8 @@ async fn health_is_ok() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(r, "/api/ledger/health").await;
     assert_eq!(status, StatusCode::OK);
@@ -106,8 +106,8 @@ async fn list_accounts_returns_seeded_chart() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(r, "/api/ledger/accounts").await;
     assert_eq!(status, StatusCode::OK);
@@ -227,8 +227,8 @@ async fn trial_balance_reflects_posted_entries() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(r, "/api/ledger/trial-balance").await;
     assert_eq!(status, StatusCode::OK);
@@ -275,8 +275,8 @@ async fn trial_balance_as_of_filters_by_date() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     // As of end-of-March: only the $100 invoice is in scope.
     let (status, body) = get(r, "/api/ledger/trial-balance?as_of=2026-03-31").await;
@@ -302,8 +302,8 @@ async fn entries_lookup_by_account_code() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(r, "/api/ledger/entries?account_code=4100").await;
     assert_eq!(status, StatusCode::OK);
@@ -320,8 +320,8 @@ async fn entries_requires_account_or_fact_filter() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let resp = r
         .oneshot(
@@ -355,8 +355,8 @@ async fn entries_lookup_by_source_pair() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(
         r,
@@ -376,8 +376,8 @@ async fn entries_source_filter_requires_both_halves() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _) = get(r, "/api/ledger/entries?source_table=invoices").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -401,8 +401,8 @@ async fn get_entry_detail_returns_lines() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, list) = get(r, &format!("/api/ledger/entries?fact_id={fact_id}")).await;
     let entry_id = list[0]["id"].as_str().unwrap();
@@ -411,8 +411,8 @@ async fn get_entry_detail_returns_lines() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(r, &format!("/api/ledger/entries/{entry_id}")).await;
     assert_eq!(status, StatusCode::OK);
@@ -500,8 +500,8 @@ async fn post_manual_entry_happy_path() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(
         r,
@@ -558,8 +558,8 @@ async fn post_manual_entry_rejects_unbalanced() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _body) = post_json(
         r,
@@ -582,8 +582,8 @@ async fn post_manual_entry_rejects_unknown_account() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _body) = post_json(
         r,
@@ -627,8 +627,8 @@ async fn post_manual_entry_rejects_locked_period() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _body) = post_json(
         r,
@@ -675,8 +675,8 @@ async fn cash_flow_unpaid_invoice_produces_no_operating_cash() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(r, "/api/ledger/cash-flow?from=2026-03-01&to=2026-03-31").await;
     assert_eq!(status, StatusCode::OK);
@@ -717,8 +717,8 @@ async fn cash_flow_paid_invoice_shows_cash_delta() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(r, "/api/ledger/cash-flow?from=2026-03-01&to=2026-03-31").await;
     assert_eq!(status, StatusCode::OK);
@@ -815,8 +815,8 @@ async fn cash_flow_direct_sums_buckets_and_reconciles_against_cash_pool() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(
         r,
@@ -847,8 +847,8 @@ async fn cash_flow_direct_empty_period_returns_zeros() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(
         r,
@@ -905,8 +905,8 @@ async fn bank_settlement_create_and_settle_round_trip() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(
         r1,
@@ -932,8 +932,8 @@ async fn bank_settlement_create_and_settle_round_trip() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r2, "/api/ledger/trial-balance").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -952,8 +952,8 @@ async fn bank_settlement_create_and_settle_round_trip() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(
         r3,
@@ -970,8 +970,8 @@ async fn bank_settlement_create_and_settle_round_trip() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r4, "/api/ledger/trial-balance").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -1010,8 +1010,8 @@ async fn bank_settlement_sweep_settles_only_due_rows() {
             pool: db.pool.clone(),
             publisher: None,
             clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-            // No read gate in tests; production wires one.
-            policy: None,
+            // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+            policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
         });
         // set-today → expected_settle_on = 2026-03-20 (ach default = +1 day)
         // set-tomorrow → expected_settle_on = 2026-03-21
@@ -1042,8 +1042,8 @@ async fn bank_settlement_sweep_settles_only_due_rows() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(
         r,
@@ -1060,8 +1060,8 @@ async fn bank_settlement_sweep_settles_only_due_rows() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, list) = get(r, "/api/ledger/bank-settlements").await;
     let rows = list.as_array().unwrap();
@@ -1095,8 +1095,8 @@ async fn bank_settlement_create_is_idempotent_on_id() {
             pool: db.pool.clone(),
             publisher: None,
             clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-            // No read gate in tests; production wires one.
-            policy: None,
+            // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+            policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
         });
         let (status, _) = post_json(
             r,
@@ -1130,8 +1130,8 @@ async fn bank_settlement_create_is_idempotent_on_id() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r, "/api/ledger/trial-balance").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -1146,8 +1146,8 @@ async fn cash_flow_empty_period_returns_zeros() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(r, "/api/ledger/cash-flow?from=2026-01-01&to=2026-01-31").await;
     assert_eq!(status, StatusCode::OK);
@@ -1212,8 +1212,8 @@ async fn payroll_run_posts_compound_journal_entry() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(
         r,
@@ -1246,8 +1246,8 @@ async fn payroll_run_posts_compound_journal_entry() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r, "/api/ledger/trial-balance").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -1290,8 +1290,8 @@ async fn payroll_run_is_idempotent_on_id() {
             pool: db.pool.clone(),
             publisher: None,
             clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-            // No read gate in tests; production wires one.
-            policy: None,
+            // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+            policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
         });
         let (status, _) = post_json(r, "/api/ledger/payroll-runs", body.clone()).await;
         assert_eq!(status, StatusCode::OK);
@@ -1318,8 +1318,8 @@ async fn payroll_run_is_idempotent_on_id() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r, "/api/ledger/trial-balance").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -1337,8 +1337,8 @@ async fn payroll_run_detail_returns_header_plus_lines() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _) = post_json(
         r,
@@ -1362,8 +1362,8 @@ async fn payroll_run_detail_returns_header_plus_lines() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(r, "/api/ledger/payroll-runs/pr-det").await;
     assert_eq!(status, StatusCode::OK);
@@ -1384,8 +1384,8 @@ async fn payroll_run_rejects_line_arithmetic_mismatch() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _) = post_json(
         r,
@@ -1444,8 +1444,8 @@ async fn sales_tax_accrual_credits_2300() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r, "/api/ledger/trial-balance").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -1475,8 +1475,8 @@ async fn tax_filing_remit_posts_finance_tax_remitted_and_drains_2300() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _) = post_json(
         r,
@@ -1500,8 +1500,8 @@ async fn tax_filing_remit_posts_finance_tax_remitted_and_drains_2300() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(
         r,
@@ -1517,8 +1517,8 @@ async fn tax_filing_remit_posts_finance_tax_remitted_and_drains_2300() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r, "/api/ledger/trial-balance").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -1565,8 +1565,8 @@ async fn tax_filing_remit_is_idempotent() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _) = post_json(r, "/api/ledger/tax-filings", body).await;
     assert_eq!(status, StatusCode::OK);
@@ -1577,8 +1577,8 @@ async fn tax_filing_remit_is_idempotent() {
             pool: db.pool.clone(),
             publisher: None,
             clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-            // No read gate in tests; production wires one.
-            policy: None,
+            // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+            policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
         });
         let (status, _) = post_json(
             r,
@@ -1603,8 +1603,8 @@ async fn tax_filing_remit_is_idempotent() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r, "/api/ledger/trial-balance").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -1645,8 +1645,8 @@ async fn tax_filing_upsert_is_idempotent_on_period() {
             pool: db.pool.clone(),
             publisher: None,
             clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-            // No read gate in tests; production wires one.
-            policy: None,
+            // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+            policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
         });
         let (status, _) = post_json(r, "/api/ledger/tax-filings", b).await;
         assert_eq!(status, StatusCode::OK);
@@ -1676,8 +1676,8 @@ async fn income_tax_accrue_plus_remit_nets_2310_to_zero_and_lands_expense() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _) = post_json(
         r,
@@ -1703,8 +1703,8 @@ async fn income_tax_accrue_plus_remit_nets_2310_to_zero_and_lands_expense() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r, "/api/ledger/trial-balance").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -1722,8 +1722,8 @@ async fn income_tax_accrue_plus_remit_nets_2310_to_zero_and_lands_expense() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _) = post_json(
         r,
@@ -1737,8 +1737,8 @@ async fn income_tax_accrue_plus_remit_nets_2310_to_zero_and_lands_expense() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r, "/api/ledger/trial-balance").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -1757,8 +1757,8 @@ async fn tax_liability_summary_includes_accrued_and_next_due() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _) = post_json(
         r,
@@ -1781,8 +1781,8 @@ async fn tax_liability_summary_includes_accrued_and_next_due() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(r, "/api/ledger/tax-liability").await;
     assert_eq!(status, StatusCode::OK);
@@ -1882,8 +1882,8 @@ async fn deferred_revenue_runoff_projects_active_schedules() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = get(
         r,
@@ -1932,8 +1932,8 @@ async fn auditor_role_is_rejected_from_every_ledger_write() {
             pool: db.pool.clone(),
             publisher: None,
             clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-            // No read gate in tests; production wires one.
-            policy: None,
+            // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+            policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
         })
     };
 
@@ -2083,8 +2083,8 @@ async fn close_yearly_period_posts_closing_entries_and_locks() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(
         r,
@@ -2106,8 +2106,8 @@ async fn close_yearly_period_posts_closing_entries_and_locks() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(r, "/api/ledger/periods", json!({"year": 2026})).await;
     assert_eq!(status, StatusCode::OK, "create period body={body:?}");
@@ -2119,8 +2119,8 @@ async fn close_yearly_period_posts_closing_entries_and_locks() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let path = format!("/api/ledger/periods/{period_id}/close");
     let (status, body) = post_json(r, &path, json!({"closed_by": "emp-close-test"})).await;
@@ -2137,8 +2137,8 @@ async fn close_yearly_period_posts_closing_entries_and_locks() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r, "/api/ledger/trial-balance?as_of=2026-12-31").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -2158,8 +2158,8 @@ async fn close_yearly_period_posts_closing_entries_and_locks() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status2, body2) = post_json(r, &path, json!({})).await;
     assert_eq!(status2, StatusCode::OK);
@@ -2206,8 +2206,8 @@ async fn close_yearly_period_writes_off_wip_variance() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(
         r,
@@ -2230,8 +2230,8 @@ async fn close_yearly_period_writes_off_wip_variance() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(
         r,
@@ -2253,8 +2253,8 @@ async fn close_yearly_period_writes_off_wip_variance() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, body) = post_json(r, "/api/ledger/periods", json!({"year": 2026})).await;
     assert_eq!(status, StatusCode::OK, "create period body={body:?}");
@@ -2264,8 +2264,8 @@ async fn close_yearly_period_writes_off_wip_variance() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let path = format!("/api/ledger/periods/{period_id}/close");
     let (status, body) = post_json(r, &path, json!({"closed_by": "emp-wip-close"})).await;
@@ -2280,8 +2280,8 @@ async fn close_yearly_period_writes_off_wip_variance() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (_, tb) = get(r, "/api/ledger/trial-balance?as_of=2026-12-31").await;
     let rows = tb["rows"].as_array().unwrap();
@@ -2329,8 +2329,8 @@ async fn close_monthly_period_is_rejected() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let path = format!("/api/ledger/periods/{monthly_id}/close");
     let (status, _) = post_json(r, &path, json!({})).await;
@@ -2344,8 +2344,8 @@ async fn deferred_revenue_runoff_clamps_horizon_and_handles_empty_db() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     // months=0 should clamp up to 1; months=999 should clamp down to 60.
     let (status, body) = get(r, "/api/ledger/deferred-revenue-runoff?months=999").await;
@@ -2430,8 +2430,8 @@ async fn balance_sheet_holds_across_periods() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
 
     // Trial balance: every JE balances by construction (the
@@ -2477,8 +2477,8 @@ async fn bills_approve_routes_by_category_then_pay_run_drains_ap() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     };
 
     // Approve a rent bill (→ 6200) and a utilities bill (→ 6300). The free
@@ -2545,8 +2545,8 @@ async fn bills_approve_is_idempotent_on_id() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     };
     let body =
         json!({"id": "bill-x", "vendor": "V", "bill_category": "rent", "amount_cents": 50_000});
@@ -2569,8 +2569,8 @@ async fn bills_reject_auditor_writes() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _) = post_as_auditor(
         r,
@@ -2590,8 +2590,8 @@ async fn keg_deposit_settlement_books_both_legs_and_drains_the_liability() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     };
     let body = json!({
         "job_id": "job-keg-1",
@@ -2689,8 +2689,8 @@ async fn keg_deposit_settlement_rejects_non_conserving_counts_as_422() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     // 1 out, 1 returned AND 1 lost — the shape the free-field faker
     // used to produce (feedback 52f49cc7). Deterministic data error →
@@ -2726,8 +2726,8 @@ async fn keg_deposit_settlement_rejects_auditor_writes() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, _) = post_as_auditor(
         r,
@@ -2760,8 +2760,8 @@ async fn keg_deposit_same_day_settlement_survives_a_rebuild() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
     let (status, resp) = post_json(
         r,
@@ -2838,7 +2838,7 @@ fn chart_state(db: &TestDb) -> LedgerApiState {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        policy: None,
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     }
 }
 

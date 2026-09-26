@@ -77,8 +77,8 @@ async fn both_trigger_shapes_settle_and_converge_on_one_row() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
 
     // Shape 1: the counterparty chain.

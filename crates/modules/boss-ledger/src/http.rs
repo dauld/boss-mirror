@@ -91,10 +91,14 @@ pub struct LedgerApiState {
     /// clock-api. Services never inspect headers or env vars to
     /// learn whether time is sim or wall — the Clock decides.
     pub clock: Arc<dyn boss_clock_client::ClockClient>,
-    /// Policy engine for the read gate below. `None` leaves the
-    /// surface open, which is what tests want and what production
-    /// must never be — `boss-ledger-api` always wires one.
-    pub policy: Option<Arc<dyn boss_policy_client::PolicyClient>>,
+    /// Policy engine for the read gate below. Required: until backlog
+    /// 7048afa8 (2026-09-26) this was an `Option` and `None` let every
+    /// read through — fail-open by configuration, guarded only by a
+    /// comment. Now a surface cannot be built without a client, and a
+    /// test that wants the gate out of its way says so by wiring
+    /// `PermissivePolicyClient`. `boss-ledger-api` wires the real
+    /// engine, pinned by `tests/the_ledger_api_wires_policy.rs`.
+    pub policy: Arc<dyn boss_policy_client::PolicyClient>,
 }
 
 /// Router-wide gate on READING `/api/ledger/*`.
@@ -123,10 +127,8 @@ async fn require_ledger_read(
     if req.uri().path().ends_with("/health") {
         return next.run(req).await;
     }
-    let Some(policy) = state.policy.as_ref() else {
-        return next.run(req).await;
-    };
-    match policy
+    match state
+        .policy
         .check(
             &user,
             boss_policy_client::Action::Read,

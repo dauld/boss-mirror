@@ -27,7 +27,7 @@ fn make_router(db: &TestDb) -> axum::Router {
         pool: db.pool.clone(),
         publisher: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
-        policy: None,
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     })
 }
 

@@ -30,8 +30,9 @@ async fn manual_revenue_credit_flows_into_commerce_summary() {
         pool: db.pool.clone(),
         publisher: None,
         clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The ledger read gate is not this test's subject (boss-ledger's
+        // tests/the_ledger_read_gate.rs pins it).
+        policy: Arc::new(PermissivePolicyClient),
     });
 
     let posted_on = Utc::now().date_naive();

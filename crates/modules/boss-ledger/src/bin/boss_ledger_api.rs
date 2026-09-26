@@ -103,11 +103,12 @@ async fn main() -> Result<()> {
         // Read gate on the whole surface. Same wrapping the other
         // policy consumers use: on a sim instance a sim caller is
         // authorized at the boundary; everything else is enforced
-        // per-role (backlog 85e7f10f).
-        policy: Some(boss_policy_client::SimBypassPolicyClient::from_env(
-            Arc::new(boss_policy_client::ReqwestPolicyClient::new(
+        // per-role (backlog 85e7f10f). Required since backlog 7048afa8:
+        // the surface has no open configuration.
+        policy: boss_policy_client::SimBypassPolicyClient::from_env(Arc::new(
+            boss_policy_client::ReqwestPolicyClient::new(
                 std::env::var("BOSS_POLICY_URL").unwrap_or_else(|_| boss_ports::url("policy")),
-            )),
+            ),
         )),
     };
     let app = router(state);

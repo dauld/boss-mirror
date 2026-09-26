@@ -268,8 +268,8 @@ fn build_router(db: &TestDb) -> Router {
         pool: db.pool.clone(),
         publisher: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
-        // No read gate in tests; production wires one.
-        policy: None,
+        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
+        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     })
 }
 
