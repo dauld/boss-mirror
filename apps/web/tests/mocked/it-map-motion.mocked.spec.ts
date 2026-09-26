@@ -11,7 +11,8 @@
 // snapshots a pixel.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { BORDERS, TERRITORIES } from '../../src/it/yard/world';
+import { TERRITORIES } from '../../src/it/yard/world';
+import { BORDERS } from '../fixtures/yard';
 import { FRAME_BUDGET_MS } from '../../src/it/yard/world-motion';
 import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 

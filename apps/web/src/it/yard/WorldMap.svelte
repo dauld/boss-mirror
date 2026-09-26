@@ -63,7 +63,6 @@
     type Borders,
   } from './borders';
   import {
-    BORDERS,
     TERRITORIES,
     WORLD,
     labelChars,
@@ -97,8 +96,10 @@
   type Props = Readonly<{
     regions: Regions;
     /** The rails' readings, or null while unread or unreadable: the
-     *  rails still DRAW — the layout is the map — but every number on
-     *  them then reads unknown rather than zero (car 2). */
+     *  territories still draw, and no rail does — a rail is a border the
+     *  server answered (car R3 of design e765b3fc), and the page says
+     *  the read failed. A number the read carries unread is `?`, never
+     *  zero (car 2). */
     borders?: Borders | null;
     /** When (this page's clock, ms) the rails were last read WELL — the
      *  moving map's held clocks count on from it, and it greys past
@@ -144,24 +145,33 @@
 
   const key = (from: string, to: string): string => `${from}→${to}`;
   const byBorder = $derived(new Map((borders?.borders ?? []).map((b) => [key(b.from, b.to), b] as const)));
-  /** A border the server answered that the layout does not draw — said
-   *  at the foot of the map beside an unmapped region, never dropped. */
+  /** A border the server answered between regions the layout has no
+   *  territory for — said at the foot of the map beside an unmapped
+   *  region, never dropped. */
   const unmappedBorders = $derived(
     (borders?.borders ?? [])
-      .filter((b) => !BORDERS.some((d) => d.from === b.from && d.to === b.to))
+      .filter((b) => territoryOf(b.from) === undefined || territoryOf(b.to) === undefined)
       .map((b) => key(b.from, b.to)),
   );
 
-  /** The rail each declared border draws, derived from the two
-   *  territories it joins — never placed by hand. */
-  const rails = BORDERS.flatMap((b) => {
-    const from = territoryOf(b.from);
-    const to = territoryOf(b.to);
-    return from && to ? [{ key: key(b.from, b.to), from: b.from, to: b.to, at: from, rail: railOf(from, to) }] : [];
-  });
+  /** THE RAILS ARE THE SERVER'S BORDERS (design e765b3fc, car R3): one
+   *  per border the borders read answers, laid between the two
+   *  territories it joins by world.ts `railOf` — never a list of pairs
+   *  kept here (world.ts BORDERS was one of the three hand copies the
+   *  car deleted). While the read is out no rail is drawn and the page
+   *  says the borders cannot be read. The world map gets no new work
+   *  (design §6): the Department Map draws the derived routes in the
+   *  transit grammar, and this map retires when that flight is promoted. */
+  const rails = $derived(
+    (borders?.borders ?? []).flatMap((b) => {
+      const from = territoryOf(b.from);
+      const to = territoryOf(b.to);
+      return from && to ? [{ key: key(b.from, b.to), from: b.from, to: b.to, at: from, rail: railOf(from, to) }] : [];
+    }),
+  );
   /** The rails as the motion layer walks them: the path and the
    *  territory whose corner the pile stands in. */
-  const motionRails = rails.map((r) => ({ key: r.key, rail: r.rail, from: r.at }));
+  const motionRails = $derived(rails.map((r) => ({ key: r.key, rail: r.rail, from: r.at })));
 
   /** The crossing whose panel is open under the map, by its key; null
    *  when none is. A second click on the same rail closes it. */

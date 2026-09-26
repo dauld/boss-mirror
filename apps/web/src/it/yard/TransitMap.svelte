@@ -5,18 +5,27 @@
   // flight lists; for everyone else the world map stays the map until
   // the flight is promoted (Q2).
   //
-  // The same two reads the world map draws from, and no server change:
-  // each region is a STATION on a schematic line at fixed angles, each
-  // border a SECTION of track in its route's colour, the packets waiting
-  // to cross stand as blocks on the approach, a block moves at the
-  // section's real crossing rate replayed ×60, a section the server
-  // judges not flowing is drawn red on the track itself, and a station's
-  // ring is its state — pulsing when troubled. The verdicts the world map
-  // writes inside a territory stand on an ALARMS BOARD beside the map
-  // instead: every non-clear station with the server's own why, troubled
-  // first. The planned tenant branch (design fd8b5143) is drawn dashed. A
-  // station, and an alarm, selects that station — the same route a
-  // territory selects.
+  // Each region is a STATION on a schematic line at fixed angles, each
+  // route the server serves a SECTION of track in its line's colour, the
+  // packets waiting to cross stand as blocks on the approach, a block
+  // moves at the section's real crossing rate replayed ×60, a section the
+  // server judges not flowing is drawn red on the track itself, and a
+  // station's ring is its state — pulsing when troubled. The verdicts the
+  // world map writes inside a territory stand on an ALARMS BOARD beside
+  // the map instead: every non-clear station with the server's own why,
+  // troubled first. A station, and an alarm, selects that station — the
+  // same route a territory selects.
+  //
+  // ONLY SERVED ROUTES ARE DRAWN (design e765b3fc, car R3). The sections
+  // are `GET /api/yard/routes`, laid out by route-layout.ts and drawn by
+  // RouteLayer.svelte: the train's own line out of the dock, back to the
+  // gates and over to the track, the garage's sidings both ways, every
+  // packet's EXIT as an off-ramp ending at a buffer stop, every ENTRY as
+  // a stub into its station — and a route only the moves record
+  // supports, observed but declared by no protocol or hand-off, dashed
+  // red. While the routes are
+  // unread the stations still stand and no section is drawn: a guessed
+  // track would be the hand-drawn map this car deleted.
   //
   // THE DETAIL LEAVES THE MAP (design e765b3fc, car N2; David
   // 2026-09-25: "put more of that data behind a map selection for
@@ -39,37 +48,37 @@
   import { navigate } from '@boss/web-kit/nav';
   import { MediaQuery } from 'svelte/reactivity';
   import type { Border, Borders } from './borders';
-  import { countText, regionHref, sectionHref, type Region, type Regions } from './regions';
+  import { countText, regionHref, type Region, type Regions } from './regions';
+  import type { Routes } from './routes';
+  import { linesOf, sectionKey, sectionsOf } from './route-layout';
+  import RouteLayer from './RouteLayer.svelte';
   import {
     LINE_LABEL,
+    NAME_ABOVE,
     REPLAY_TEXT,
-    SECTIONS,
     STATIONS,
-    TENANT_BRANCH,
     TRANSIT_VIEW,
     alarmsOf,
     ringOf,
-    sectionGround,
-    sectionKey,
     stationCount,
     stationLabel,
-    trainsOf,
-    waitingBlocks,
-    type TransitLine,
   } from './transit';
 
   type Props = Readonly<{
     regions: Regions;
-    /** The borders read, or null while unread or unreadable: the track
-     *  still draws — the layout is the map — but every section then
-     *  reads "no reading" and nothing waits or moves on it. */
+    /** The routes read (design e765b3fc, car R3), or null while unread or
+     *  unreadable: the stations still stand, and no section is drawn —
+     *  the page says the read failed. */
+    routes?: Routes | null;
+    /** The borders read, or null while unread or unreadable: a section
+     *  then reads "no reading" and nothing waits or moves on it. */
     borders?: Borders | null;
     /** What the page has selected, in the map's own keys — a station's
      *  name or a section's `from→to` (selection.ts `markOf`); null for
      *  nothing. Marked, never re-read: the page decides what is selected. */
     selected?: string | null;
   }>;
-  let { regions, borders = null, selected = null }: Props = $props();
+  let { regions, routes = null, borders = null, selected = null }: Props = $props();
 
   const prefersReduced = new MediaQuery('(prefers-reduced-motion: reduce)');
   const reduced = $derived(prefersReduced.current);
@@ -78,11 +87,12 @@
   const byKey = $derived(new Map<string, Border>((borders?.borders ?? []).map((b) => [sectionKey(b.from, b.to), b])));
   const alarms = $derived(alarmsOf(regions));
 
-  const LINES: ReadonlyArray<TransitLine> = ['delivery', 'publish', 'siding', 'tenant'];
-
-  /** A section's name and nothing more: its rate, its queue and its
-   *  verdict are the panel's (car N2). */
-  const sectionTitle = (from: string, to: string): string => `the ${stationLabel(from)} → ${stationLabel(to)} section`;
+  /** The served routes, laid out — and any this layout has no station
+   *  for, said at the foot rather than dropped. */
+  const laid = $derived(routes === null ? { sections: [], unplaced: [] } : sectionsOf(routes));
+  const lines = $derived(linesOf(laid.sections));
+  const anyExit = $derived(laid.sections.some((s) => s.kind === 'exit'));
+  const anyUndeclared = $derived(laid.sections.some((s) => !s.declared));
 
   /** A station's name, its one number and its state — what the map
    *  carries. The why is the panel's. */
@@ -104,58 +114,10 @@
         viewBox="0 0 {TRANSIT_VIEW.width} {TRANSIT_VIEW.height}"
         role="group"
         aria-label="the IT network as a transit map: stations on their lines, the traffic on every section">
-        <!-- THE PLANNED TENANT BRANCH (design fd8b5143): dashed, and read
-             from nothing — a plan, not a reading. -->
-        <g class="tenant-branch" data-planned="tenant">
-          <path d={TENANT_BRANCH.d} class="branch line-tenant" />
-          {#each TENANT_BRANCH.stations as s (s.name)}
-            <circle cx={s.x} cy={s.y} r="9" class="branch-stop" class:owned={s.owner !== null}
-              data-owner={s.owner ?? undefined} />
-            <text x={s.x} y={s.y - 22} text-anchor="middle" class="stn">{s.name}</text>
-          {/each}
-          <text x={TENANT_BRANCH.note.x} y={TENANT_BRANCH.note.y} text-anchor="middle" class="sub">{TENANT_BRANCH.note.text}</text>
-        </g>
-
-        <!-- THE SECTIONS: a border each, in its route's colour — red where
-             the server says it is not flowing, dotted where it cannot
-             tell — with its waiting blocks and its trains. Each is a door
-             to its own panel: a wide unpainted stroke takes the click, so
-             an 8-unit line is not a needle to aim at. The selected one
-             stands in an ink casing. -->
-        {#each SECTIONS as s (s.key)}
-          {@const b = byKey.get(s.key)}
-          {@const ground = sectionGround(b)}
-          {@const waiting = waitingBlocks(s, b)}
-          {@const trains = trainsOf(b, reduced)}
-          {@const href = sectionHref(s.from, s.to)}
-          {@const isSelected = selected === s.key}
-          <a class="section-link" {href} data-section-link={s.key} data-selected={isSelected ? 'true' : undefined}
-            aria-current={isSelected ? 'true' : undefined} aria-label={sectionTitle(s.from, s.to)}
-            onclick={(e) => open(e, href)}>
-            {#if isSelected}
-              <path d={s.d} class="casing" data-selected-mark={s.key} />
-            {/if}
-            <path d={s.d} class="section line-{s.line}" class:held={ground === 'held'} class:unknown={ground === 'unknown'}
-              data-section={s.key} data-line={s.line} data-ground={ground}>
-              <title>{sectionTitle(s.from, s.to)}</title>
-            </path>
-            <path d={s.d} class="hit" aria-hidden="true" />
-          </a>
-          {#each waiting.blocks as p, i (i)}
-            <rect x={p.x - 4} y={p.y - 13} width="8" height="7" rx="1.5" class="waiting" data-waiting={s.key} />
-          {/each}
-          {#if waiting.more !== null}
-            <text x={waiting.more.at.x - 8} y={waiting.more.at.y - 7} text-anchor="end" class="more" data-more={s.key}>+{waiting.more.n}</text>
-          {/if}
-          {#if trains !== null}
-            {#each trains.begins as begin, i (i)}
-              <rect x="-7" y="-4" width="14" height="8" rx="2" class="train line-{s.line}" data-train={s.key}>
-                <animateMotion dur="{trains.dur.toFixed(3)}s" begin="{begin.toFixed(3)}s" repeatCount="indefinite"
-                  path={s.d} rotate="auto" />
-              </rect>
-            {/each}
-          {/if}
-        {/each}
+        <!-- THE ROUTES (design e765b3fc, car R3): every section, exit and
+             entry the routes read serves, drawn by RouteLayer.svelte from
+             route-layout.ts — the layer the moves of car M2 travel. -->
+        <RouteLayer sections={laid.sections} borders={byKey} {reduced} {selected} />
 
         <!-- THE STATIONS: a ring each in the region's state, pulsing when
              troubled, and a door to its panel. The selected one wears a
@@ -176,7 +138,7 @@
               <circle cx={st.x} cy={st.y} r="15" class="pulse" data-pulse={st.name} />
             {/if}
             <circle cx={st.x} cy={st.y} r="12" class="ring {state}" />
-            <text x={st.x} y={st.below ? st.y + 32 : st.y - 24} text-anchor="middle" class="stn">{stationLabel(st.name)}</text>
+            <text x={st.x} y={st.below ? st.y + 32 : st.y - NAME_ABOVE} text-anchor="middle" class="stn">{stationLabel(st.name)}</text>
             <text x={st.x} y={st.below ? st.y + 46 : st.y + 40} text-anchor="middle" class="sub">{stationCount(r)}</text>
           </a>
         {/each}
@@ -201,11 +163,20 @@
   </div>
 
   <div class="key" aria-label="the lines">
-    {#each LINES as l (l)}
-      <span class="key-item"><svg class="swatch" viewBox="0 0 20 4" aria-hidden="true"><line x1="0" y1="2" x2="20" y2="2" class="line-{l}" class:dashed={l === 'tenant'} /></svg>{LINE_LABEL[l]}</span>
+    {#each lines as l (l)}
+      <span class="key-item"><svg class="swatch" viewBox="0 0 20 4" aria-hidden="true"><line x1="0" y1="2" x2="20" y2="2" class="line-{l}" /></svg>{LINE_LABEL[l]}</span>
     {/each}
     <span class="key-item"><svg class="swatch" viewBox="0 0 20 4" aria-hidden="true"><line x1="0" y1="2" x2="20" y2="2" class="held" /></svg>a held section: the server judges nothing is crossing</span>
+    {#if anyExit}
+      <span class="key-item"><svg class="swatch tall" viewBox="0 0 20 12" aria-hidden="true"><line x1="10" y1="0" x2="10" y2="10" class="line-delivery" /><line x1="4" y1="10" x2="16" y2="10" class="line-delivery" /></svg>an exit: packets leave the map there, by the terminals it names</span>
+    {/if}
+    {#if anyUndeclared}
+      <span class="key-item" data-key-undeclared><svg class="swatch" viewBox="0 0 20 4" aria-hidden="true"><line x1="0" y1="2" x2="20" y2="2" class="undeclared" /></svg>dashed red: packets moved this way, and no protocol or hand-off declares it</span>
+    {/if}
   </div>
+  {#if laid.unplaced.length > 0}
+    <p class="unplaced" data-unplaced>served, with no station on this map to draw it at: {laid.unplaced.join(', ')}</p>
+  {/if}
   <p class="replay" data-replay>
     {REPLAY_TEXT}{reduced ? '. Reduced motion is on: nothing moves, and a section\'s panel carries its rate.' : ''}
   </p>
@@ -224,7 +195,6 @@
   .stn { font-size: 12px; font-weight: 600; }
   .sub { font-size: 10.5px; fill: var(--map-muted); }
   .board text.sub { fill: var(--map-muted); }
-  .board text.more { font-family: var(--font-mono); font-size: 9.5px; fill: var(--map-muted); font-variant-numeric: tabular-nums; }
 
   .line-delivery { stroke: var(--map-line-delivery); }
   .line-publish { stroke: var(--map-line-publish); }
@@ -232,26 +202,13 @@
   .line-tenant { stroke: var(--map-line-tenant); }
   .swatch line.held { stroke: var(--map-bad-edge); }
 
-  .section { fill: none; stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }
-  .section.held { stroke: var(--map-bad-edge); }
-  .section.unknown { stroke-dasharray: 2 6; opacity: 0.6; }
-  /* The section's door: a wide stroke nobody sees takes the click. */
-  .section-link { cursor: pointer; }
-  .section-link:focus-visible { outline: none; }
-  .hit { fill: none; stroke: transparent; stroke-width: 22; stroke-linecap: round; pointer-events: stroke; }
-  /* THE SELECTION'S MARK (car N2), in the map's ink: a casing under the
-     selected section, as a transit diagram draws an interchange, and a
-     ring outside the selected station's own. Neither is a state colour,
-     so the mark never reads as a verdict. */
-  .casing { fill: none; stroke: var(--map-ink); stroke-width: 16; stroke-linecap: round; stroke-linejoin: round; }
-  .section-link:focus-visible .section, .section-link:hover .section { stroke-width: 11; }
+  /* THE SELECTION'S MARK (car N2), in the map's ink: a ring outside the
+     selected station's own (a section's casing is RouteLayer's). Not a
+     state colour, so the mark never reads as a verdict. */
   .sel-ring { fill: none; stroke: var(--map-ink); stroke-width: 3; }
-  .branch { fill: none; stroke-width: 6; stroke-dasharray: 10 7; stroke-linecap: round; stroke-linejoin: round; }
-  .branch-stop { fill: var(--map-surface); stroke: var(--map-line-tenant); stroke-width: 3; }
-  .branch-stop.owned { stroke: var(--map-ink); stroke-width: 4; }
-
-  .waiting { fill: var(--map-ink); }
-  .train { fill: var(--map-surface); stroke-width: 2; }
+  /* The key's swatch for an observed, undeclared route — drawn as
+     RouteLayer draws the route itself. */
+  .swatch line.undeclared { stroke: var(--map-bad-edge); stroke-dasharray: 9 6; stroke-linecap: butt; }
 
   .station { cursor: pointer; }
   .station:focus-visible { outline: none; }
@@ -290,6 +247,7 @@
   .key-item { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 20px; height: 4px; }
   .swatch line { stroke-width: 4; }
-  .swatch line.dashed { stroke-dasharray: 5 3; }
+  .swatch.tall { height: 12px; }
+  .unplaced { margin: var(--s1) 0 0; font-size: 12px; color: var(--map-bad-ink); overflow-wrap: anywhere; }
   .replay { margin: var(--s1) 0 0; font-size: 12px; color: var(--map-muted); }
 </style>

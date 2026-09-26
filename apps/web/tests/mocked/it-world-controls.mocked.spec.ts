@@ -57,7 +57,8 @@ import { expect, test, type Page, type Request, type Route } from '@playwright/t
 import { FAILURE_MARKER } from './_routes';
 import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
-import { BORDERS, TERRITORIES } from '../../src/it/yard/world';
+import { TERRITORIES } from '../../src/it/yard/world';
+import { BORDERS } from '../fixtures/yard';
 
 const json = (r: Route, b: unknown, status = 200): Promise<void> =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(b) });
@@ -382,7 +383,7 @@ test('an empty backend paints every region at zero and every rail with nothing w
   await expect(hud.locator('[data-machines] [data-fig="unread"]').first()).toHaveAttribute('title', 'the server sends no machine count');
 });
 
-test('a server that answers no regions and no borders draws every territory and rail unread — never a clear world', async ({ page }) => {
+test('a server that answers no regions and no borders draws every territory unread and no rail — never a clear world', async ({ page }) => {
   await installSmokeMocks(page);
   await page.route(YARD_REGIONS, (r) => json(r, regions({ regions: [] })));
   await page.route(YARD_BORDERS, (r) => json(r, borders({ borders: [] })));
@@ -394,9 +395,9 @@ test('a server that answers no regions and no borders draws every territory and 
   const dock = page.locator(`${SVG} .territory[data-region="dock"]`);
   await expect(dock.locator('text.count')).toHaveText('no reading');
   await expect(dock.locator('title')).toHaveText('dock · troubled — the server answered no reading for this region');
-  await expect(page.locator(`${SVG} .crossing[data-waiting="unknown"]`)).toHaveCount(BORDERS.length);
-  await page.locator(`${SVG} .crossing[data-crossing="gates→dock"]`).click();
-  await expect(page.locator('.crossing-panel .crossing-why')).toHaveText('the borders read answered nothing for this rail');
+  // A rail is a border the server answered (car R3 of design e765b3fc):
+  // an answer with none draws none, rather than a rail the page made up.
+  await expect(page.locator(`${SVG} .crossing`)).toHaveCount(0);
 });
 
 test('a regions answer in the wrong shape is a failed read, said in the failure line — never an empty map', async ({ page }) => {
@@ -420,7 +421,7 @@ test('a borders answer in the wrong shape is said, and the territories still pai
   await page.goto('/it');
   await expect(page.locator(`.yard-empty${FAILURE_MARKER}`)).toContainText('The borders cannot be read — ');
   await expect(page.locator(`${SVG} .territory`)).toHaveCount(TERRITORIES.length);
-  await expect(page.locator(`${SVG} .crossing[data-waiting="unknown"]`)).toHaveCount(BORDERS.length);
+  await expect(page.locator(`${SVG} .crossing`)).toHaveCount(0);
 });
 
 test('a regions read that fails after a good one keeps none of its values, and the HUD names both times', async ({ page }) => {

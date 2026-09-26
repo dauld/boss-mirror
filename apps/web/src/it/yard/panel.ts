@@ -28,13 +28,15 @@
 import { crossedText, machineText, rateText, unlistedText, waitingText, type Border, type Borders, type HoldsByClass } from './borders';
 import { regionRails, type RegionRail } from './region-page';
 import { bandText, stateText, trendText, type Region, type RegionName } from './regions';
+import { sourceLines, type Route } from './routes';
 import { headwayText, stationLabel } from './transit';
 
-export type PanelField = 'crossing' | 'rate' | 'waiting' | 'stuck' | 'trend' | 'verdict' | 'machines' | 'crossings';
+export type PanelField = 'route' | 'crossing' | 'rate' | 'waiting' | 'stuck' | 'trend' | 'verdict' | 'machines' | 'crossings';
 
 export type PanelCell = Readonly<{ field: PanelField; label: string; lines: ReadonlyArray<string> }>;
 
 export const FIELD_LABEL: Readonly<Record<PanelField, string>> = {
+  route: 'What declares it',
   crossing: 'One crossing',
   rate: 'Rate',
   waiting: 'Waiting',
@@ -50,6 +52,12 @@ export const MOVES_NOT_KEPT =
   'each packet that crossed is listed here once the yard keeps a record of its moves — it does not yet';
 
 const NO_RAILS = 'no reading — the sections could not be read';
+
+/** A served route the borders read keeps no rate for yet — the train's
+ *  own line, the garage's returns (design e765b3fc §2c: "until then, a
+ *  new route answers no reading, never 0"). Its rate comes from the
+ *  moves record, car M3. */
+export const NO_RATE_YET = 'no reading yet — this route is served from the protocols, and its rate comes with the moves record';
 
 const cellOf = (field: PanelField, lines: ReadonlyArray<string>): PanelCell => ({ field, label: FIELD_LABEL[field], lines });
 
@@ -123,9 +131,21 @@ const SECTION_FIELDS: ReadonlyArray<PanelField> = ['crossing', 'rate', 'waiting'
 
 /** A section's panel — one border, every field its own. `null` is a
  *  section the page selected while the borders read had not answered. */
-export function sectionCells(b: Border | null, now: string): ReadonlyArray<PanelCell> {
-  if (b === null) return SECTION_FIELDS.map((f) => cellOf(f, [NO_RAILS]));
+export function sectionCells(
+  b: Border | null,
+  now: string,
+  served: Readonly<{ route: Route; windowHours: number; bordersRead: boolean }> | null = null,
+): ReadonlyArray<PanelCell> {
+  // WHAT DECLARES IT (car R3): the section is a route the server serves,
+  // and its sources say why it is on the map — the protocol step that
+  // makes the move, the hand-off, the moves the record counted.
+  const declared = served === null ? [] : [cellOf('route', sourceLines(served.route, served.windowHours))];
+  // No border: the borders read failed, or it answered and keeps no rate
+  // for this route yet — two different facts, each said as itself.
+  const none = served !== null && served.bordersRead ? NO_RATE_YET : NO_RAILS;
+  if (b === null) return [...declared, ...SECTION_FIELDS.map((f) => cellOf(f, [none]))];
   return [
+    ...declared,
     cellOf('crossing', [b.crossing]),
     cellOf('rate', [headwayText(b)]),
     cellOf('waiting', [queueText(b), ...holdLines(b)]),

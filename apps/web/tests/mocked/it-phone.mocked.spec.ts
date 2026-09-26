@@ -17,7 +17,7 @@
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
-import { BORDERS } from '../../src/it/yard/world';
+import { BORDERS } from '../fixtures/yard';
 const PHONE = { width: 390, height: 844 };
 
 const trend = { metric: 'm', unit: 'per day', current: 1, previous: 1, samples: 1, previous_samples: 1 };

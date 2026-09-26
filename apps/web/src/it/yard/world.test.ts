@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'bun:test';
 import { REGION_NAMES } from './regions';
-import { BORDERS, LINE, TERRITORIES, WORLD, railOf, railWriting, territoryOf, territoryText, wrapName, wrapWords, type Box } from './world';
+import { BORDERS } from '../../../tests/fixtures/yard';
+import { LINE, TERRITORIES, WORLD, railOf, railWriting, territoryOf, territoryText, wrapName, wrapWords, type Box } from './world';
 import { MACHINERY_STRIP_H } from './world-machines';
 
 // THE WORLD'S LAYOUT IS DATA (design d2154293, car 1): the
 // regions are territories in one coordinate space, laid out along the
-// packet flow, and the borders between them are declared, not drawn by
-// hand. These pin the layout to the server's map — every region the
-// server answers has a territory, every border joins two declared
-// territories — so a ninth region or a typo'd border is a failing test
-// and not a blank patch on the map.
+// packet flow. These pin the layout to the server's map — every region
+// the server answers has a territory — so a ninth region is a failing
+// test and not a blank patch on the map. Which borders the map draws is
+// the server's answer, not this file's (car R3 of design e765b3fc): the
+// rails below are laid for the borders the server answers today, from
+// the test fixture that stands in for it.
 
 const apart = (a: Box, b: Box): boolean =>
   a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y;
@@ -67,43 +69,6 @@ describe('the territories are the server\'s regions', () => {
     expect(publish.y).toBe(garage.y);
     expect(publish.x).toBe(arrivals.x);
     expect(publish.x + publish.w).toBe(shed.x + shed.w);
-  });
-});
-
-describe('the borders join declared territories', () => {
-  it('every border names two different declared territories, once', () => {
-    const names = new Set(TERRITORIES.map((t) => t.name));
-    const seen = new Set<string>();
-    for (const b of BORDERS) {
-      expect(names.has(b.from), `${b.from} → ${b.to}: ${b.from} is not a territory`).toBe(true);
-      expect(names.has(b.to), `${b.from} → ${b.to}: ${b.to} is not a territory`).toBe(true);
-      expect(b.from).not.toBe(b.to);
-      const key = `${b.from}→${b.to}`;
-      expect(seen.has(key), `${key} declared twice`).toBe(false);
-      seen.add(key);
-    }
-  });
-
-  it('carries the flow: each hop of the line is a border, and the sidings hang where a car leaves the line', () => {
-    expect(BORDERS.map((b) => `${b.from}→${b.to}`)).toEqual([
-      'receiving→marshalling',
-      // The shop floor split one hop in two (backlog 94c6ffd0): a run
-      // OPENS on a packet, and its branch takes a bay once it is built.
-      'marshalling→shop-floor',
-      // Decision 3 of design 62de32ae: a gate-run opened, parked on
-      // green, boarded.
-      'shop-floor→gates',
-      'gates→dock',
-      'dock→track',
-      'track→arrivals',
-      'arrivals→shed',
-      // The crossing OUT of the world (design cb38d806): what arrived
-      // on main is what a publish proposes to the public mirror.
-      'arrivals→publish',
-      // Judged red, and a red train's cars released.
-      'gates→garage',
-      'track→garage',
-    ]);
   });
 });
 

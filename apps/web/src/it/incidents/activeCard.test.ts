@@ -8,10 +8,8 @@
 
 import { describe, expect, test } from 'bun:test';
 import {
-  durationText,
   holderOf,
   openedAtMs,
-  parseStepWaits,
   severityOf,
   startedAt,
   type IncidentJob,
@@ -113,19 +111,6 @@ describe('openedAtMs — the instant time open is measured from', () => {
   });
 });
 
-describe('durationText', () => {
-  const m = 60_000;
-  test('scales from minutes to days, two units at most', () => {
-    expect(durationText(30_000)).toBe('<1m');
-    expect(durationText(12 * m)).toBe('12m');
-    expect(durationText(5 * 60 * m + 12 * m)).toBe('5h 12m');
-    expect(durationText(3 * 1440 * m + 4 * 60 * m + 9 * m)).toBe('3d 4h');
-  });
-  test('a negative span (clock skew) reads as zero, not a minus sign', () => {
-    expect(durationText(-5 * m)).toBe('<1m');
-  });
-});
-
 describe('holderOf — the step\'s real audience, never "(unassigned)" for a role queue', () => {
   test('a named assignee', () => {
     expect(holderOf(step({ assignee_id: 'claude@algedonic.dev' }))).toBe('claude@algedonic.dev');
@@ -145,27 +130,5 @@ describe('holderOf — the step\'s real audience, never "(unassigned)" for a rol
   });
   test('only a step declaring none of them is unassigned', () => {
     expect(holderOf(step({}))).toBe('unassigned');
-  });
-});
-
-describe('parseStepWaits — /api/jobs/queue-age keyed by step', () => {
-  test('keeps since and the exact flag, and the server clock', () => {
-    const w = parseStepWaits({
-      data: [
-        { step_id: 's-1', since: '2026-09-26T01:00:00Z', exact: true },
-        { step_id: 's-2', since: '2026-09-26T02:00:00Z', exact: false },
-        { step_id: null, since: '2026-09-26T02:00:00Z', exact: true },
-      ],
-      total: 3,
-      now: '2026-09-26T05:00:00Z',
-    });
-    expect(w.now).toBe(Date.parse('2026-09-26T05:00:00Z'));
-    expect(w.byStep.get('s-1')).toEqual({ sinceMs: Date.parse('2026-09-26T01:00:00Z'), exact: true });
-    expect(w.byStep.get('s-2')?.exact).toBe(false);
-    expect(w.byStep.size).toBe(2);
-  });
-  test('a body that is not the lens\'s shape is a throw, not an empty map', () => {
-    expect(() => parseStepWaits([])).toThrow();
-    expect(() => parseStepWaits({ total: 0 })).toThrow();
   });
 });

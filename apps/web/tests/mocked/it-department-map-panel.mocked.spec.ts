@@ -12,14 +12,15 @@
 //  - a station's panel carries every field — rate, waiting by class,
 //    stuck, trend, the verdict and its why, machines, crossings — and the
 //    floor's cards, which used to be the region's own page;
-//  - a SECTION is a selection (`?at=dock->track`), reached by a click on
+//  - a SECTION is a selection (`?at=gates->dock`), reached by a click on
 //    the track, with the same fields for that one border;
 //  - what is selected is MARKED on the map, and only that;
 //  - the map itself writes none of it.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { STATIONS } from '../../src/it/yard/transit';
-import { BORDERS, TERRITORIES } from '../../src/it/yard/world';
+import { TERRITORIES } from '../../src/it/yard/world';
+import { BORDERS } from '../fixtures/yard';
 import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 
 const FLIGHTS = /\/api\/flights\/mine(\?|$)/;
@@ -168,10 +169,10 @@ test('what is selected is marked on the map, and only that', async ({ page }) =>
   // The mark is apart from the state: the gates' own ring still reads its state.
   await expect(page.locator(`${SVG} [data-station="gates"]`)).toHaveAttribute('data-state', 'attention');
 
-  await page.goto('/it?at=dock-%3Etrack');
+  await page.goto('/it?at=gates-%3Edock');
   await expect(page.locator(`${SVG} [data-selected-mark]`)).toHaveCount(1);
-  await expect(page.locator(`${SVG} [data-selected-mark="dock→track"]`)).toHaveCount(1);
-  await expect(page.locator(`${SVG} [data-section-link="dock→track"]`)).toHaveAttribute('aria-current', 'true');
+  await expect(page.locator(`${SVG} [data-selected-mark="gates→dock"]`)).toHaveCount(1);
+  await expect(page.locator(`${SVG} [data-section-link="gates→dock"]`)).toHaveAttribute('aria-current', 'true');
   await expect(page.locator(`${SVG} [data-station] [data-selected-mark]`)).toHaveCount(0);
 
   // Nothing selected, nothing marked.
@@ -201,9 +202,13 @@ test('the map carries no hold, machine or headway text — that is the panel\'s'
 
 test('a section selected while the rails cannot be read says no reading, never that it does not exist', async ({ page }) => {
   await mocks(page, { borders: { status: 503, contentType: 'text/plain', body: 'down' } });
-  await page.goto('/it?at=dock-%3Etrack');
+  // A route the server serves (car R3): the rails read is out, so its
+  // rate is unread — said as the read's failure, not as a route with no
+  // rate yet — and what declares it still leads the panel.
+  await page.goto('/it?at=gates-%3Edock');
   const panel = page.locator(PANEL);
   await expect(panel).toHaveAttribute('data-kind', 'section');
   await expect(panel).not.toContainText('Nothing on this map is named');
   await expect(field(page, 'rate')).toHaveText(['no reading — the sections could not be read']);
+  await expect(field(page, 'route').first()).toHaveText('rule:auto-park-on-gate-green: rule:auto-park-on-gate-green hands the packet on');
 });

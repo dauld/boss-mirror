@@ -40,6 +40,7 @@
 
 import { fetchRemote, type Remote } from '../data/remote';
 import type { Job, Step } from '../jobs/types';
+import { lensNow, waitedText, type StepWaits } from '../jobs/queueAge';
 
 /** The OUT third is the last thirty days of departures. */
 export const OUT_WINDOW_DAYS = 30;
@@ -72,12 +73,46 @@ export function thirdOf(job: Pick<Job, 'status' | 'steps'>): Third {
  *  payout sat at `post` for 2.6 days and the finance page could not
  *  say so — a third says a packet is live; this says where. */
 export function waitingAt(job: Pick<Job, 'status' | 'steps'>): string {
-  if (job.status === 'closed' || job.status === 'cancelled') return '';
+  return openSteps(job)
+    .map((s) => s.title || s.kind)
+    .join(' · ');
+}
+
+/** The steps a live packet stands at (ready or active), in workflow
+ *  order — none for a terminal packet. `waitingAt` names them and
+ *  `waitedFor` ages them, so the two columns line up step for step. */
+function openSteps(job: Pick<Job, 'status' | 'steps'>): ReadonlyArray<Step> {
+  if (job.status === 'closed' || job.status === 'cancelled') return [];
   return (job.steps ?? [])
     .filter((s) => s.status === 'ready' || s.status === 'active')
     .slice()
-    .sort((a, b) => a.sort_order - b.sort_order)
-    .map((s) => s.title || s.kind)
+    .sort((a, b) => a.sort_order - b.sort_order);
+}
+
+/** Since when: how long each step `waitingAt` names has stood ready or
+ *  active, joined the same way. The instant is the queue-age lens's
+ *  (`jobs/queueAge.ts`), joined by step id, because the listing does
+ *  not carry it — boss-jobs port.rs keeps it "A LENS, NOT A FIELD"
+ *  (backlog 66a5d5be: the finance audit asked for "2.6 days at post"
+ *  and the page could say only "at post"). A fallback stamp prints as
+ *  `≥` — a floor; a step the lens has no row for says `unknown`; a
+ *  failed lens says `unreadable` in the cell as well as on the page's
+ *  own failure line. Never an age the lens did not give. */
+export function waitedFor(
+  job: Pick<Job, 'status' | 'steps'>,
+  waits: Remote<StepWaits>,
+  fallbackNowMs: number,
+): string {
+  const open = openSteps(job);
+  if (open.length === 0) return '';
+  if (waits.kind === 'loading') return '…';
+  if (waits.kind === 'failed') return 'unreadable';
+  const now = lensNow(waits.data, fallbackNowMs);
+  return open
+    .map((s) => {
+      const w = waits.data.byStep.get(s.id);
+      return w ? waitedText(w, now) : 'unknown';
+    })
     .join(' · ');
 }
 

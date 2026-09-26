@@ -1,0 +1,4 @@
+{
+  "remote": "https://github.com/dauld/boss-mirror.git",
+  "branches": ["main", "publish/*"]
+}

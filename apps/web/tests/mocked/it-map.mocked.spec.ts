@@ -19,7 +19,8 @@
 // it — so a tenth region is a fixture row here and nothing else.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { BORDERS, TERRITORIES } from '../../src/it/yard/world';
+import { TERRITORIES } from '../../src/it/yard/world';
+import { BORDERS } from '../fixtures/yard';
 import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 
 const trend = (metric: string, unit: string, current: number | null, previous: number | null) => ({
@@ -466,9 +467,10 @@ test('a borders read that fails is said, and the territories still paint', async
   );
   await page.goto('/it');
   await expect(page.locator('.load-failed')).toContainText('The borders cannot be read');
-  // The world is still a world: every territory, every rail, and every
-  // number on them unknown.
+  // The world is still a world: every territory stands. A rail is a
+  // border the server answered (car R3 of design e765b3fc), so with the
+  // read out none is drawn — the failure line says why, and no rail is
+  // guessed in its place.
   await expect(page.locator('section.yard svg .territory')).toHaveCount(TERRITORIES.length);
-  await expect(page.locator('section.yard svg .crossing')).toHaveCount(BORDERS.length);
-  await expect(page.locator('section.yard svg .crossing[data-waiting="unknown"]')).toHaveCount(BORDERS.length);
+  await expect(page.locator('section.yard svg .crossing')).toHaveCount(0);
 });
