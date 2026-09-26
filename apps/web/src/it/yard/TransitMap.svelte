@@ -17,12 +17,13 @@
   // same route a territory selects.
   //
   // ONLY SERVED ROUTES ARE DRAWN (design e765b3fc, car R3). The sections
-  // are `GET /api/yard/routes`, laid out by transit.ts `routePath`: the
-  // train's own line out of the dock, back to the gates and over to the
-  // track, the garage's sidings both ways, every packet's EXIT as an
-  // off-ramp ending at a buffer stop, every ENTRY as a stub into its
-  // station — and a route only the moves record supports, observed but
-  // declared by no protocol or hand-off, dashed red. While the routes are
+  // are `GET /api/yard/routes`, laid out by route-layout.ts and drawn by
+  // RouteLayer.svelte: the train's own line out of the dock, back to the
+  // gates and over to the track, the garage's sidings both ways, every
+  // packet's EXIT as an off-ramp ending at a buffer stop, every ENTRY as
+  // a stub into its station — and a route only the moves record
+  // supports, observed but declared by no protocol or hand-off, dashed
+  // red. While the routes are
   // unread the stations still stand and no section is drawn: a guessed
   // track would be the hand-drawn map this car deleted.
   //
@@ -47,8 +48,10 @@
   import { navigate } from '@boss/web-kit/nav';
   import { MediaQuery } from 'svelte/reactivity';
   import type { Border, Borders } from './borders';
-  import { countText, regionHref, sectionHref, type Region, type Regions } from './regions';
-  import { exitNames, type Routes } from './routes';
+  import { countText, regionHref, type Region, type Regions } from './regions';
+  import type { Routes } from './routes';
+  import { linesOf, sectionKey, sectionsOf } from './route-layout';
+  import RouteLayer from './RouteLayer.svelte';
   import {
     LINE_LABEL,
     NAME_ABOVE,
@@ -56,18 +59,10 @@
     STATIONS,
     TRANSIT_VIEW,
     alarmsOf,
-    linesOf,
     ringOf,
-    sectionGround,
-    sectionKey,
-    sectionsOf,
     stationCount,
     stationLabel,
-    trainsOf,
-    waitingBlocks,
-    type Section,
   } from './transit';
-  import { pointAt } from './world-motion';
 
   type Props = Readonly<{
     regions: Regions;
@@ -95,29 +90,9 @@
   /** The served routes, laid out — and any this layout has no station
    *  for, said at the foot rather than dropped. */
   const laid = $derived(routes === null ? { sections: [], unplaced: [] } : sectionsOf(routes));
-  const sections = $derived(laid.sections.filter((s) => s.kind === 'section'));
-  const ramps = $derived(laid.sections.filter((s) => s.kind !== 'section'));
   const lines = $derived(linesOf(laid.sections));
+  const anyExit = $derived(laid.sections.some((s) => s.kind === 'exit'));
   const anyUndeclared = $derived(laid.sections.some((s) => !s.declared));
-
-  /** A section's name and nothing more: its rate, its queue and its
-   *  verdict are the panel's (car N2). */
-  const sectionTitle = (from: string, to: string): string => `the ${stationLabel(from)} → ${stationLabel(to)} section`;
-
-  /** An exit names the terminals it carries; an entry, the steps that
-   *  put a packet on the map there. */
-  const rampTitle = (s: Section): string =>
-    s.kind === 'exit'
-      ? `leaves the map from ${stationLabel(s.from ?? '')}: ${exitNames(s.route).join(', ')}`
-      : `enters the map at ${stationLabel(s.to ?? '')}: ${exitNames(s.route).join(', ')}`;
-
-  /** The buffer stop across an exit's end: a short bar square to it. */
-  function bufferStop(s: Section): string {
-    const end = pointAt(s.walked, s.walked.length);
-    const back = pointAt(s.walked, s.walked.length - 1);
-    const vertical = Math.abs(end.x - back.x) < Math.abs(end.y - back.y);
-    return vertical ? `M${end.x - 6} ${end.y} H${end.x + 6}` : `M${end.x} ${end.y - 6} V${end.y + 6}`;
-  }
 
   /** A station's name, its one number and its state — what the map
    *  carries. The why is the panel's. */
@@ -139,68 +114,10 @@
         viewBox="0 0 {TRANSIT_VIEW.width} {TRANSIT_VIEW.height}"
         role="group"
         aria-label="the IT network as a transit map: stations on their lines, the traffic on every section">
-        <!-- THE EXITS AND ENTRIES (design e765b3fc, car R3; David,
-             added_2026_09_25_david_offramps: "every packet that leaves
-             the map must leave by a drawn route"): an off-ramp per
-             station a terminal closes packets at, ending at a buffer
-             stop, and a stub per station packets are admitted at. Each
-             names what it carries in its title. -->
-        {#each ramps as s (s.key)}
-          <g class="ramp" data-ramp={s.kind} data-section={s.key} data-from={s.from ?? undefined} data-to={s.to ?? undefined}
-            data-declared={s.declared ? 'true' : 'false'}>
-            <title>{rampTitle(s)}</title>
-            <path d={s.d} class="ramp-line line-{s.line}" class:undeclared={!s.declared} />
-            {#if s.kind === 'exit'}
-              <path d={bufferStop(s)} class="buffer line-{s.line}" class:undeclared={!s.declared} />
-            {/if}
-          </g>
-        {/each}
-
-        <!-- THE SECTIONS: a served route each, in its line's colour — red
-             where the server says it is not flowing, dotted where it
-             cannot tell, dashed red where only the moves record supports
-             it — with its waiting blocks and its trains. Each is a door
-             to its own panel: a wide unpainted stroke takes the click, so
-             an 8-unit line is not a needle to aim at. The selected one
-             stands in an ink casing. -->
-        {#each sections as s (s.key)}
-          {@const from = s.from ?? ''}
-          {@const to = s.to ?? ''}
-          {@const b = byKey.get(s.key)}
-          {@const ground = sectionGround(b)}
-          {@const waiting = waitingBlocks(s, b)}
-          {@const trains = trainsOf(b, reduced)}
-          {@const href = sectionHref(from, to)}
-          {@const isSelected = selected === s.key}
-          <a class="section-link" {href} data-section-link={s.key} data-selected={isSelected ? 'true' : undefined}
-            aria-current={isSelected ? 'true' : undefined} aria-label={sectionTitle(from, to)}
-            onclick={(e) => open(e, href)}>
-            {#if isSelected}
-              <path d={s.d} class="casing" data-selected-mark={s.key} />
-            {/if}
-            <path d={s.d} class="section line-{s.line}" class:held={ground === 'held'} class:unknown={ground === 'unknown'}
-              class:undeclared={!s.declared}
-              data-section={s.key} data-from={from} data-to={to} data-line={s.line} data-ground={ground}
-              data-declared={s.declared ? 'true' : 'false'}>
-              <title>{sectionTitle(from, to)}{s.declared ? '' : ' — observed, declared by no protocol or hand-off'}</title>
-            </path>
-            <path d={s.d} class="hit" aria-hidden="true" />
-          </a>
-          {#each waiting.blocks as p, i (i)}
-            <rect x={p.x - 4} y={p.y - 13} width="8" height="7" rx="1.5" class="waiting" data-waiting={s.key} />
-          {/each}
-          {#if waiting.more !== null}
-            <text x={waiting.more.at.x - 8} y={waiting.more.at.y - 7} text-anchor="end" class="more" data-more={s.key}>+{waiting.more.n}</text>
-          {/if}
-          {#if trains !== null}
-            {#each trains.begins as begin, i (i)}
-              <rect x="-7" y="-4" width="14" height="8" rx="2" class="train line-{s.line}" data-train={s.key}>
-                <animateMotion dur="{trains.dur.toFixed(3)}s" begin="{begin.toFixed(3)}s" repeatCount="indefinite"
-                  path={s.d} rotate="auto" />
-              </rect>
-            {/each}
-          {/if}
-        {/each}
+        <!-- THE ROUTES (design e765b3fc, car R3): every section, exit and
+             entry the routes read serves, drawn by RouteLayer.svelte from
+             route-layout.ts — the layer the moves of car M2 travel. -->
+        <RouteLayer sections={laid.sections} borders={byKey} {reduced} {selected} />
 
         <!-- THE STATIONS: a ring each in the region's state, pulsing when
              troubled, and a door to its panel. The selected one wears a
@@ -250,7 +167,7 @@
       <span class="key-item"><svg class="swatch" viewBox="0 0 20 4" aria-hidden="true"><line x1="0" y1="2" x2="20" y2="2" class="line-{l}" /></svg>{LINE_LABEL[l]}</span>
     {/each}
     <span class="key-item"><svg class="swatch" viewBox="0 0 20 4" aria-hidden="true"><line x1="0" y1="2" x2="20" y2="2" class="held" /></svg>a held section: the server judges nothing is crossing</span>
-    {#if ramps.some((s) => s.kind === 'exit')}
+    {#if anyExit}
       <span class="key-item"><svg class="swatch tall" viewBox="0 0 20 12" aria-hidden="true"><line x1="10" y1="0" x2="10" y2="10" class="line-delivery" /><line x1="4" y1="10" x2="16" y2="10" class="line-delivery" /></svg>an exit: packets leave the map there, by the terminals it names</span>
     {/if}
     {#if anyUndeclared}
@@ -278,7 +195,6 @@
   .stn { font-size: 12px; font-weight: 600; }
   .sub { font-size: 10.5px; fill: var(--map-muted); }
   .board text.sub { fill: var(--map-muted); }
-  .board text.more { font-family: var(--font-mono); font-size: 9.5px; fill: var(--map-muted); font-variant-numeric: tabular-nums; }
 
   .line-delivery { stroke: var(--map-line-delivery); }
   .line-publish { stroke: var(--map-line-publish); }
@@ -286,32 +202,13 @@
   .line-tenant { stroke: var(--map-line-tenant); }
   .swatch line.held { stroke: var(--map-bad-edge); }
 
-  .section { fill: none; stroke-width: 8; stroke-linecap: round; stroke-linejoin: round; }
-  .section.held { stroke: var(--map-bad-edge); }
-  .section.unknown { stroke-dasharray: 2 6; opacity: 0.6; }
-  /* The section's door: a wide stroke nobody sees takes the click. */
-  .section-link { cursor: pointer; }
-  .section-link:focus-visible { outline: none; }
-  .hit { fill: none; stroke: transparent; stroke-width: 22; stroke-linecap: round; pointer-events: stroke; }
-  /* THE SELECTION'S MARK (car N2), in the map's ink: a casing under the
-     selected section, as a transit diagram draws an interchange, and a
-     ring outside the selected station's own. Neither is a state colour,
-     so the mark never reads as a verdict. */
-  .casing { fill: none; stroke: var(--map-ink); stroke-width: 16; stroke-linecap: round; stroke-linejoin: round; }
-  .section-link:focus-visible .section, .section-link:hover .section { stroke-width: 11; }
+  /* THE SELECTION'S MARK (car N2), in the map's ink: a ring outside the
+     selected station's own (a section's casing is RouteLayer's). Not a
+     state colour, so the mark never reads as a verdict. */
   .sel-ring { fill: none; stroke: var(--map-ink); stroke-width: 3; }
-  /* OBSERVED, UNDECLARED (design e765b3fc §2b): packets moved this way
-     and no protocol or hand-off declares it — dashed in the map's own
-     trouble red, over its line, so the drawing says it is a finding. */
-  .section.undeclared, .ramp-line.undeclared, .buffer.undeclared, .swatch line.undeclared {
-    stroke: var(--map-bad-edge); stroke-dasharray: 9 6; stroke-linecap: butt; opacity: 1; }
-  /* An exit or an entry: thinner than a section, because nothing waits
-     on it — it is where the map begins or ends for a packet. */
-  .ramp-line { fill: none; stroke-width: 4; stroke-linecap: round; }
-  .buffer { fill: none; stroke-width: 4; stroke-linecap: square; }
-
-  .waiting { fill: var(--map-ink); }
-  .train { fill: var(--map-surface); stroke-width: 2; }
+  /* The key's swatch for an observed, undeclared route — drawn as
+     RouteLayer draws the route itself. */
+  .swatch line.undeclared { stroke: var(--map-bad-edge); stroke-dasharray: 9 6; stroke-linecap: butt; }
 
   .station { cursor: pointer; }
   .station:focus-visible { outline: none; }

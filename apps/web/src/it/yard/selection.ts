@@ -26,7 +26,7 @@ import type { Border, Borders } from './borders';
 import { regionTitle } from './region-page';
 import { REGION_NAMES, type Region, type Regions } from './regions';
 import type { Route, Routes } from './routes';
-import { sectionKey } from './transit';
+import { sectionKey } from './route-layout';
 
 export type MapSelection =
   | Readonly<{ kind: 'none' }>
