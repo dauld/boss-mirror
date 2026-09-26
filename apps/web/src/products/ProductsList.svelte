@@ -115,7 +115,7 @@
   <PageHeader title="Products" subtitle="Finished-product catalog with on-hand inventory across all locations." />
 
   <div class="toolbar">
-    <SearchInput bind:value={query} placeholder="Search SKU, name, or kind…" />
+    <SearchInput bind:value={query} placeholder="Search SKU, name, or kind…" label="Search products" />
   </div>
 
   {#if loading}

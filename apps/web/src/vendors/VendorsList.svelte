@@ -150,7 +150,7 @@
   <div class="catalog-layout">
     <aside class="catalog-filters">
       <FilterGroup label="Search">
-          <SearchInput bind:value={query} placeholder="Vendor, contact…" />
+          <SearchInput bind:value={query} placeholder="Vendor, contact…" label="Search vendors" />
       </FilterGroup>
       <FilterGroup label="Category">
           <FilterButton active={category === 'all'} onclick={() => (category = 'all')}>
