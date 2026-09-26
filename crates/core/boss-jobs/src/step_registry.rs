@@ -1267,6 +1267,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         }];
         let meta = serde_json::json!({"disposition": "ship"});
         let err = StepRegistry::validate_authored_fields(&fields, &meta).unwrap_err();
@@ -1361,6 +1362,7 @@ mod tests {
                 binds: None,
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             },
             StepField {
                 name: "resolutions".into(),
@@ -1372,6 +1374,7 @@ mod tests {
                 binds: None,
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             },
         ];
         let questions = serde_json::json!([
@@ -1457,6 +1460,7 @@ mod tests {
                 binds: Some("exhibits".into()),
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             },
             StepField {
                 name: "exhibits".into(),
@@ -1468,6 +1472,7 @@ mod tests {
                 binds: None,
                 item_value_max_bytes: Some(max),
                 item_one_of: vec!["html".into(), "file_ref".into()],
+                writer: None,
             },
         ]
     }
@@ -1802,6 +1807,7 @@ mod tests {
                 binds: None,
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             },
             StepField {
                 name: "notes".into(),
@@ -1813,6 +1819,7 @@ mod tests {
                 binds: None,
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             },
         ];
         // Missing required authored field → error naming it.

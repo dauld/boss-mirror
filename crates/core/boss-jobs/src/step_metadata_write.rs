@@ -248,6 +248,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         }];
         assert_eq!(
             reshaped_fields(&with_fields, &after),

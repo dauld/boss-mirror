@@ -367,6 +367,23 @@ pub struct StepField {
     /// what every field authored before this existed already meant.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub item_one_of: Vec<String>,
+    /// The ONE party that may write this key while the step is open
+    /// (design f623e425, David 2026-09-25; backlog 6c9183de). A key a
+    /// human signs — an ops-request approve step's `plan`, `verb`,
+    /// `host`, `args`, `rendered_plan_sha256` — was writable by anyone
+    /// with Update on the step, so the passkey could be asked to sign
+    /// content the runner never rendered. A declared writer is a
+    /// credential PRINCIPAL (`runner:ops`), and the step doors admit a
+    /// change to the key only from a caller the server resolved from a
+    /// presented credential for that principal — never from the
+    /// self-asserted `x-boss-user` id, which every machine-door caller
+    /// can type (`field_writer` holds the rule). Registry data, so a
+    /// protocol adopts it by writing a row, never by a branch in the
+    /// step handler. None (the default) means any caller the policy
+    /// admits, which is what every field authored before this existed
+    /// already meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writer: Option<String>,
 }
 
 /// Who supplies a step field's value — the enforcement point follows
@@ -1035,6 +1052,30 @@ mod tests {
         assert_eq!(FilledBy::default(), FilledBy::Executor);
     }
 
+    /// `writer` (design f623e425): absent reads as no declared writer —
+    /// every field authored before it keeps its meaning and its bytes —
+    /// and a declared one survives the round trip the registry row and
+    /// the STEP_CREATED payload both take.
+    #[test]
+    fn step_field_writer_is_absent_by_default_and_round_trips() {
+        let f: StepField = serde_json::from_value(serde_json::json!({
+            "name": "plan",
+            "field_type": "string",
+        }))
+        .unwrap();
+        assert_eq!(f.writer, None);
+        assert!(serde_json::to_value(&f).unwrap().get("writer").is_none());
+
+        let declared = StepField {
+            writer: Some("runner:ops".into()),
+            ..f
+        };
+        let json = serde_json::to_value(&declared).unwrap();
+        assert_eq!(json["writer"], serde_json::json!("runner:ops"));
+        let back: StepField = serde_json::from_value(json).unwrap();
+        assert_eq!(back, declared);
+    }
+
     #[test]
     fn step_field_filled_by_round_trips_kebab_case() {
         let f = StepField {
@@ -1047,6 +1088,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         };
         let json = serde_json::to_value(&f).unwrap();
         assert_eq!(json["filled_by"], serde_json::json!("filer"));

@@ -234,6 +234,7 @@ async fn executor_fields_stay_create_legal_and_required_at_done() {
                     binds: None,
                     item_value_max_bytes: None,
                     item_one_of: Vec::new(),
+                    writer: None,
                 }],
                 ..Default::default()
             },

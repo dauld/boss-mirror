@@ -603,6 +603,9 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // `judge_assurance` before it is believed, so this handler judges
     // the same way (backlog 148549c5; verification 72fe3640).
     headers: axum::http::HeaderMap,
+    // The caller as a server-side credential door resolved it — the only
+    // identity a declared field writer believes (design f623e425).
+    caller: Option<axum::Extension<crate::field_writer::CredentialedCaller>>,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
     let job_id = match parse_job_id(&id) {
@@ -892,6 +895,22 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             })),
         )
             .into_response();
+    }
+
+    // A KEY WITH ONE DECLARED WRITER (design f623e425; backlog
+    // 6c9183de): the merge door's rule, on the same stored row. A
+    // terminal row is refused by the freeze below, which says it better.
+    if !is_terminal
+        && let Some(refusal) = refuse_undeclared_writer(
+            &old,
+            &step.metadata,
+            parent_job.as_ref(),
+            caller.as_ref().map(|axum::Extension(c)| c),
+            &user.id,
+            &format!("PUT /api/jobs/{job_id}/steps/{step_id}"),
+        )
+    {
+        return refusal;
     }
 
     // AN ACTIVE STEP KEEPS ITS HOLDER (backlog 650ebd0c, the review of
@@ -2215,6 +2234,48 @@ fn close_not_written(job_id: &boss_core::job::JobId, e: &crate::port::JobsError)
         .into_response()
 }
 
+/// The one check both step doors run for a key its protocol reserves to
+/// one declared writer (design f623e425; backlog 6c9183de): the 409 when
+/// this write changes such a key and `caller` — the server-resolved
+/// credential, never the self-asserted id — is not that writer for this
+/// packet's host. `None` lets the write proceed. `asked_by` is reported
+/// in the refusal, never believed.
+fn refuse_undeclared_writer(
+    old: &Step,
+    new_metadata: &serde_json::Value,
+    job: Option<&Job>,
+    caller: Option<&crate::field_writer::CredentialedCaller>,
+    asked_by: &str,
+    door: &str,
+) -> Option<Response> {
+    use crate::field_writer;
+    let reserved = field_writer::reserved_keys_changed(&old.fields, &old.metadata, new_metadata);
+    if reserved.is_empty() {
+        return None;
+    }
+    let job_host = job
+        .and_then(|j| j.metadata.get(field_writer::HOST_KEY))
+        .and_then(|v| v.as_str());
+    let refused = field_writer::refused(&reserved, caller, job_host);
+    if refused.is_empty() {
+        return None;
+    }
+    Some(
+        (
+            StatusCode::CONFLICT,
+            Json(field_writer::refusal_body(
+                &old.id.to_string(),
+                &old.title,
+                door,
+                asked_by,
+                caller,
+                &refused,
+            )),
+        )
+            .into_response(),
+    )
+}
+
 /// `PATCH /api/jobs/{id}/steps/{step_id}/metadata` — merge top-level
 /// metadata keys into the Step, atomically, server-side. The step-side
 /// twin of `PATCH /api/jobs/{id}/metadata`, and the same contract: the
@@ -2247,6 +2308,9 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
     State(state): State<Arc<JobsApiState<R, B>>>,
     Path((id, step_id_str)): Path<(String, String)>,
     CurrentUser(user): CurrentUser,
+    // The caller as a server-side credential door resolved it — the only
+    // identity a declared field writer believes (design f623e425).
+    caller: Option<axum::Extension<crate::field_writer::CredentialedCaller>>,
     Json(patch): Json<serde_json::Value>,
 ) -> Response {
     let job_id = match parse_job_id(&id) {
@@ -2383,6 +2447,36 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
             })),
         )
             .into_response();
+    }
+    // A KEY WITH ONE DECLARED WRITER (design f623e425; backlog
+    // 6c9183de). The approve step's runner keys were writable here by
+    // anyone with Update on the step, so a passkey could be asked to sign
+    // a plan the runner never rendered. The packet is read only for a
+    // step that declares a writer, since only the host binding needs it;
+    // a read that fails is refused, not read as "no packet".
+    if !matches!(old.status, StepStatus::Completed | StepStatus::Skipped)
+        && old.fields.iter().any(|f| f.writer.is_some())
+    {
+        let job = match state.jobs.get_job(&job_id).await {
+            Ok(job) => job,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("reading packet {job_id} failed, so its step is not written: {e}"),
+                )
+                    .into_response();
+            }
+        };
+        if let Some(refusal) = refuse_undeclared_writer(
+            &old,
+            &merged_view,
+            job.as_ref(),
+            caller.as_ref().map(|axum::Extension(c)| c),
+            &user.id,
+            &format!("PATCH /api/jobs/{job_id}/steps/{step_id}/metadata"),
+        ) {
+            return refusal;
+        }
     }
     let refusals =
         crate::step_registry::StepRegistry::standing_refusals(&old.fields, &merged_view, |k| {

@@ -50,6 +50,7 @@ fn field(name: &str, required: bool) -> StepField {
         binds: None,
         item_value_max_bytes: None,
         item_one_of: Vec::new(),
+        writer: None,
     }
 }
 

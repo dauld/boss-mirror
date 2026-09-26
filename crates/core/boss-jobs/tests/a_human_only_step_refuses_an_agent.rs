@@ -139,6 +139,7 @@ fn field(name: &str, filled_by: boss_core::job::FilledBy) -> boss_core::job::Ste
         binds: None,
         item_value_max_bytes: None,
         item_one_of: Vec::new(),
+        writer: None,
     }
 }
 

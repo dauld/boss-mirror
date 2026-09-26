@@ -1963,8 +1963,15 @@ Stamp voiding after a reverted edit is `87329a13`'s decision, not this
 one; under (1) only a signer may write `decision`, which narrows that
 attacker without closing it. The surface display rides its own
 trust-boundary car (`fix/the-approval-surface-shows-every-key-the-passkey-signs`).
-Not yet built: the credential kind, its broker handler, the resolve
-step in the machine door, and the writer rules.
+The writer rule is built at the merge door and the step PUT
+(`StepField::writer`, `boss_jobs::field_writer`, 2026-09-26): a
+declared writer is satisfied only by a `CredentialedCaller` request
+extension, which no client can set, so until the resolve step inserts
+one nothing satisfies it — which is why no live protocol declares a
+writer yet; ops-request's row declares `runner:ops` in the same car
+that delivers the credential. Not yet built: the credential kind, its
+broker handler, the resolve step in the machine door, the `signer` and
+`executor` rules, and the declaration on ops-request.
 
 **Presence authorises a break-glass enrolment, and the bootstrap token
 retires** (design `03451237`, David 2026-09-22, all four questions

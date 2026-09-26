@@ -811,6 +811,7 @@ fn exhibit_fields() -> Vec<boss_core::job::StepField> {
             binds: Some("exhibits".into()),
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         },
         StepField {
             name: "exhibits".into(),
@@ -822,6 +823,7 @@ fn exhibit_fields() -> Vec<boss_core::job::StepField> {
             binds: None,
             item_value_max_bytes: Some(16),
             item_one_of: vec!["html".into(), "file_ref".into()],
+            writer: None,
         },
     ]
 }

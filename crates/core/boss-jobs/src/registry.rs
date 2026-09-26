@@ -410,6 +410,7 @@ fn workflow_design_spec() -> WorkflowSpec {
                 binds: None,
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             }],
             ..Default::default()
         },
@@ -458,6 +459,7 @@ fn workflow_design_spec() -> WorkflowSpec {
                 binds: None,
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             }],
             ..Default::default()
         },
@@ -592,6 +594,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                 binds: None,
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             }],
             ..Default::default()
         }
@@ -628,6 +631,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                     binds: None,
                     item_value_max_bytes: None,
                     item_one_of: Vec::new(),
+                    writer: None,
                 },
                 boss_core::job::StepField {
                     name: "destroying".into(),
@@ -639,6 +643,7 @@ fn regenerate_deployment_spec() -> WorkflowSpec {
                     binds: None,
                     item_value_max_bytes: None,
                     item_one_of: Vec::new(),
+                    writer: None,
                 },
             ],
             ..Default::default()
@@ -3690,6 +3695,7 @@ mod tests {
                 binds: None,
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             },
             StepField {
                 name: "markdown".into(),
@@ -3701,6 +3707,7 @@ mod tests {
                 binds: None,
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             },
             StepField {
                 name: "resolutions".into(),
@@ -3712,6 +3719,7 @@ mod tests {
                 binds: None,
                 item_value_max_bytes: None,
                 item_one_of: Vec::new(),
+                writer: None,
             },
         ];
         step.metadata = serde_json::json!({ "title": "Packet loss" });
@@ -3743,6 +3751,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         }];
 
         // An explicit null is not a value.
@@ -3786,6 +3795,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         }];
 
         // A title-less element is named by index and key.
@@ -3849,6 +3859,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: vec!["html".into(), "file_ref".into()],
+            writer: None,
         }];
         step.metadata = serde_json::json!({ "exhibits": [
             { "anchor": "E1", "html": "<p>x</p>" },
@@ -3878,6 +3889,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         }];
         assert!(
             missing_filer_fields(std::slice::from_ref(&step)).is_empty(),

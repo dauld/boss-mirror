@@ -1590,6 +1590,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         };
         let spec_with = |field_type: &str| {
             WorkflowSpec::platform_seed(
@@ -1683,6 +1684,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         };
         let spec_with = |fields: Vec<boss_core::job::StepField>| {
             WorkflowSpec::platform_seed(
@@ -1881,6 +1883,7 @@ mod tests {
                             binds: None,
                             item_value_max_bytes: None,
                             item_one_of: Vec::new(),
+                            writer: None,
                         }],
                         metadata_defaults: serde_json::json!({ "route": default }),
                         terminal: Some(Terminal {
@@ -2041,6 +2044,7 @@ mod tests {
                         binds: None,
                         item_value_max_bytes: None,
                         item_one_of: Vec::new(),
+                        writer: None,
                     }],
                     ..Default::default()
                 },
@@ -2058,6 +2062,7 @@ mod tests {
                         binds: None,
                         item_value_max_bytes: None,
                         item_one_of: Vec::new(),
+                        writer: None,
                     }],
                     // Stamped at materialization, so the step carries the
                     // key from the moment it exists — which is why the
@@ -2133,6 +2138,7 @@ mod tests {
                         binds: None,
                         item_value_max_bytes: None,
                         item_one_of: Vec::new(),
+                        writer: None,
                     }],
                     ..Default::default()
                 },
@@ -2150,6 +2156,7 @@ mod tests {
                         binds: None,
                         item_value_max_bytes: None,
                         item_one_of: Vec::new(),
+                        writer: None,
                     }],
                     ..Default::default()
                 },
@@ -2211,6 +2218,7 @@ mod tests {
                         binds: None,
                         item_value_max_bytes: None,
                         item_one_of: Vec::new(),
+                        writer: None,
                     }],
                     ..Default::default()
                 },
@@ -2267,6 +2275,7 @@ mod tests {
                         binds: None,
                         item_value_max_bytes: None,
                         item_one_of: Vec::new(),
+                        writer: None,
                     }],
                     ..Default::default()
                 },
@@ -2385,6 +2394,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         }
     }
 
@@ -2439,6 +2449,7 @@ mod tests {
             binds: None,
             item_value_max_bytes: None,
             item_one_of: Vec::new(),
+            writer: None,
         });
         assert!(
             validate_workflow(&spec, &reg)
