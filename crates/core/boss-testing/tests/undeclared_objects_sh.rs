@@ -877,7 +877,10 @@ impl LintCase {
         for rel in [LINT_REL, DERIVE_REL] {
             let dst = c.tree.join(rel);
             std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
-            std::fs::copy(repo_root().join(rel), &dst).unwrap();
+            // The lint execs the derivation by path (`"$DERIVE" --list`),
+            // so it is copied by the child writer, mode kept: a
+            // `std::fs::copy` holds it open in this process (eed361e0).
+            boss_testing::copy_exec(&repo_root().join(rel), &dst);
         }
 
         // A SEAM for the one case the real derivation cannot be driven
@@ -899,7 +902,9 @@ impl LintCase {
              echo \"undeclared-objects: cannot parse ${{STUB_LIST_REFUSES}} — refusing to sweep against a declaration set that is missing it\" >&2\n    \
              exit 4\nfi\n"
         );
-        std::fs::write(&derive, body.replacen(shebang, &guard, 1)).unwrap();
+        // write_file, not std::fs::write: the path is already executable,
+        // so it is rewritten in place by the child writer (eed361e0).
+        boss_testing::write_file(&derive, &body.replacen(shebang, &guard, 1));
 
         let run_git = |args: &[&str]| {
             let out = Command::new("git")

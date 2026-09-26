@@ -35,7 +35,6 @@
 // item, and are meant to be edited by the car that answers it, so the
 // answer shows up here as a changed expectation rather than a silently
 // passing one:
-//   gap 1  d1310776  200 rows, no offset, no notice when total is larger
 //   gap 3  3b1ec06e  a failed registry read leaves Kind looking valid
 //   gap 5  ce8f634a  a failed people read leaves Owner looking empty
 //   gap 6  6c9672c2  owner_id / kind_prefix narrow with no visible sign
@@ -44,7 +43,8 @@
 //   gap 11 75d1b902  no department filter, column or link
 // Answered on main before this spec, each pinned by its own spec named
 // above: gap 2 4af37dd8, gap 4 e98cabd0, gap 7 03e198e5, gap 8 45ca0f89,
-// gap 9 3c3dc8f3. This spec also found seven defects the audit did not
+// gap 9 3c3dc8f3. Answered here: gap 1 d1310776 (200 rows, no offset,
+// no notice when total was larger), pinned under "the pager". This spec also found seven defects the audit did not
 // list, pinned here as UNFILED when it landed; backlog d0b93b80 fixed
 // all seven, and each line that pinned one now pins the fix and names
 // that item: Cancel on a deep-linked form reopening it, a Subject link
@@ -205,6 +205,8 @@ const formError = (page: Page) => form(page).locator('p.form-error');
 const list = (page: Page) => page.locator('section.list-section');
 const listLine = (page: Page) => list(page).locator('p.empty');
 const bodyRows = (page: Page) => page.locator('table.data-table tbody tr');
+const pager = (page: Page) => list(page).locator('nav.job-pager');
+const pagerLine = (page: Page) => pager(page).locator('p');
 const button = (page: Page, name: string) => page.getByRole('button', { name, exact: true });
 const statusButton = (page: Page, name: string) =>
   page.locator('.catalog-filters').getByRole('button', { name, exact: true });
@@ -240,18 +242,22 @@ test.describe('/ux/jobs — the list', () => {
     const seen = await openList(page);
     await expect(bodyRows(page)).toHaveCount(3);
 
-    // Gap 1 (d1310776): the header counts 286 above three rows, the read
-    // asks for 200 with no offset, and nothing says the rest exist or
-    // offers a way to them.
+    // Gap 1 (d1310776), answered: the header counts 286 above three rows,
+    // and the list now says which of the 286 it shows and offers the
+    // rest. It said neither, so the 86 oldest open packets — the ones
+    // the standing order works first — could not be reached. The first
+    // page's read sends no offset.
     await expectHeader(page, 'All jobs', `${LIVE_TOTAL} open`);
     expect(lastRead(seen)).toEqual({ status: 'open', limit: '200' });
-    // The page's every button, in order: the two entry buttons and the
-    // three Status buttons — no pager, no "load more". (Clear ✕, Create
-    // Job and Cancel render only under a filter or an open form.)
+    await expect(pagerLine(page)).toHaveText(`Showing 1–3 of ${LIVE_TOTAL}, newest first`);
+    // The page's every button, in order: the two entry buttons, the
+    // three Status buttons and the pager's two. (Clear ✕, Create Job and
+    // Cancel render only under a filter or an open form.)
     await expect(page.locator('.catalog').getByRole('button')).toHaveText([
-      'Start a new Job', 'Create Ad Hoc Job', 'Open', 'Closed', 'All',
+      'Start a new Job', 'Create Ad Hoc Job', 'Open', 'Closed', 'All', 'Previous', 'Next',
     ]);
-    await expect(list(page)).not.toContainText(String(LIVE_TOTAL));
+    await expect(button(page, 'Previous')).toBeDisabled();
+    await expect(button(page, 'Next')).toBeEnabled();
 
     await expect(filterBar(page).locator('label.job-filter > span')).toHaveText(['Kind', 'Status', 'Subject id']);
     // d0b93b80: it named a brewery account id.
@@ -292,6 +298,8 @@ test.describe('/ux/jobs — the list', () => {
     release();
     await expect(bodyRows(page)).toHaveCount(3);
     await expectHeader(page, 'All jobs', '3 open');
+    // Every match is on the page, so there is nothing to page to.
+    await expect(pager(page)).toHaveCount(0);
   });
 
   // The false-empty pair: an empty answer and a refused one are never
@@ -311,6 +319,58 @@ test.describe('/ux/jobs — the list', () => {
     await expect(page.getByText('No jobs match.')).toHaveCount(0);
     await expectHeader(page, 'All jobs', 'Job count unknown — the read failed');
     await expect(page.locator('table.data-table')).toHaveCount(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The pager (d1310776)
+// ---------------------------------------------------------------------------
+
+/// Five open packets, three on the first page and two past it: a
+/// server that pages by `offset` the way GET /api/jobs does, so Next
+/// reaches rows the first read never returned.
+const J4 = '55555555-5555-4555-8555-00000000ee05';
+const J5 = '66666666-6666-4666-8666-00000000ff06';
+const OLDER = [
+  job(J4, 'page-audit', { subject_kind: 'custom', id: '/ux/sales' }, 'Page audit: /ux/sales', 'standard', '2026-09-17'),
+  job(J5, 'backlog-item', { subject_kind: 'custom', id: 'b-1' }, 'An old backlog item', 'urgent', '2026-09-17'),
+];
+const paged: Handler = (r) => {
+  const offset = Number(new URL(r.request().url()).searchParams.get('offset') ?? '0');
+  return json(r, { data: offset === 0 ? ROWS : offset === 3 ? OLDER : [], total: 5, limit: 200, offset });
+};
+
+test.describe('/ux/jobs — the pager', () => {
+  test('Next reads the rows past the first page by offset, says which it shows, and Previous comes back', async ({ page }) => {
+    const seen = await openList(page, { list: paged });
+    await expect(bodyRows(page)).toHaveCount(3);
+    await expect(pagerLine(page)).toHaveText('Showing 1–3 of 5, newest first');
+
+    await button(page, 'Next').click();
+    await expect.poll(() => lastRead(seen)).toEqual({ status: 'open', limit: '200', offset: '3' });
+    await expect(bodyRows(page)).toHaveCount(2);
+    await expect(list(page)).toContainText('An old backlog item');
+    await expect(pagerLine(page)).toHaveText('Showing 4–5 of 5, newest first');
+    await expect(button(page, 'Next')).toBeDisabled();
+    await expect(button(page, 'Previous')).toBeEnabled();
+    // The header's count is the filter's, not the page's.
+    await expectHeader(page, 'All jobs', '5 open');
+
+    await button(page, 'Previous').click();
+    await expect.poll(() => lastRead(seen)).toEqual({ status: 'open', limit: '200' });
+    await expect(pagerLine(page)).toHaveText('Showing 1–3 of 5, newest first');
+    await expect(button(page, 'Previous')).toBeDisabled();
+    expect(seen.writes).toHaveLength(0);
+  });
+
+  test('changing a filter goes back to the first page', async ({ page }) => {
+    const seen = await openList(page, { list: paged });
+    await button(page, 'Next').click();
+    await expect.poll(() => lastRead(seen)).toEqual({ status: 'open', limit: '200', offset: '3' });
+
+    await statusButton(page, 'Closed').click();
+    await expect.poll(() => lastRead(seen)).toEqual({ status: 'closed', limit: '200' });
+    await expect(pagerLine(page)).toHaveText('Showing 1–3 of 5, newest first');
   });
 });
 

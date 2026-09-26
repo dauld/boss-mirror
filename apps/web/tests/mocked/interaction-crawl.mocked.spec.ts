@@ -7,7 +7,9 @@
 // catalog by route-smoke's drift test; DEFERRED is shared with it):
 //
 //   (a) every in-app a[href] is a path the router serves — an href
-//       nothing serves is a red naming the page and the link;
+//       nothing serves is a red naming the page and the link; one that
+//       lands on / (/, /#) must name Home, and a bare # is a red too
+//       (backlog 7c69a45f: the Subject links that were all /#);
 //   (b) every button / [role=button] that is not destructive by label
 //       (DESTRUCTIVE below) is clicked, and the page must not throw
 //       and must answer observably — a navigation to a served route,
@@ -118,7 +120,7 @@
 import { test, expect, type Page, type Request } from '@playwright/test';
 import { DISPATCHER_RULES, OBJECT_ENDPOINTS, SHELL_ENDPOINTS, VIEW_RESULTS, installSmokeMocks } from './_smokeMocks';
 import { FAILURE_MARKER, NOT_FOUND_ROW, ROUTES } from './_routes';
-import { parseRoute } from '../../src/router';
+import { parseRoute, routable } from '../../src/router';
 import { pageRequests, readsSettled, recordPageRequests } from './_helpers';
 
 // ---------------------------------------------------------------------------
@@ -150,6 +152,22 @@ function servedBySpa(href: string): boolean {
   const [path = '', query = ''] = href.split('#')[0]!.split('?');
   return parseRoute(path, query ? `?${query}` : '').kind !== 'notFound';
 }
+
+/// Does this href land on / — My Day, the landing? `/`, `/#`, `/?x`
+/// and the /dashboard mount's `/dashboard/` all do, by the router's own
+/// normalisation (routable). / is SERVED, so servedBySpa alone passes
+/// every one of them: every live /ux/jobs Subject link rendered as /#
+/// for weeks (subjectPath answered '#', backlog 4af37dd8) and this
+/// crawl counted each as a link that lands (backlog 7c69a45f).
+function landsHome(href: string): boolean {
+  return routable(href.split('#')[0]!.split('?')[0]!) === '/';
+}
+
+/// A link or control that lands on / is honest only when it says it
+/// goes Home — its text or aria-label names Home, as the KB's
+/// "← Home" breadcrumb does. Anything else pointing at / is a link
+/// that lost its target and fell back to the landing.
+const HOME_LINK = /\bhome\b/i;
 
 // ---------------------------------------------------------------------------
 // (b)/(e) controls
@@ -439,14 +457,30 @@ async function clickLeg(
     if (errors.length) findings.push({ route, control: 'page (load)', what: `pageerror: ${errors.join(' | ')}` });
   }
 
-  // (a) every in-app href is served.
+  // (a) every in-app href is served — and one that lands on / says
+  // Home (HOME_LINK above).
   if (leg === 'main' && scope === 'page') {
-    const hrefs = await page.locator('a[href]').evaluateAll((els) => els.map((a) => a.getAttribute('href') ?? ''));
-    for (const href of new Set(hrefs)) {
+    const anchors = await page.locator('a[href]').evaluateAll((els) =>
+      els.map((a) => ({
+        href: a.getAttribute('href') ?? '',
+        label: (a.getAttribute('aria-label') ?? (a as HTMLElement).innerText ?? '').trim().replace(/\s+/g, ' ').slice(0, 60),
+      })),
+    );
+    for (const href of new Set(anchors.map((a) => a.href))) {
+      const labels = anchors.filter((a) => a.href === href).map((a) => a.label);
+      if (href === '#') {
+        tally.links += 1;
+        findings.push({ route, control: `link ${href}`, what: `a bare # goes nowhere (${labels.map((l) => JSON.stringify(l)).join(', ')})` });
+        continue;
+      }
       if (!href.startsWith('/') || href.startsWith('//')) continue;
       tally.links += 1;
       if (OFF_SPA.some((re) => re.test(href.split(/[?#]/)[0]!))) continue;
       if (!servedBySpa(href)) findings.push({ route, control: `link ${href}`, what: 'no route serves it (the router falls through to its landing)' });
+      else if (landsHome(href)) {
+        const unnamed = labels.filter((l) => !HOME_LINK.test(l));
+        if (unnamed.length) findings.push({ route, control: `link ${href}`, what: `lands on / (Home), and ${unnamed.map((l) => JSON.stringify(l)).join(', ')} does not name Home` });
+      }
     }
   }
 
@@ -613,6 +647,8 @@ async function clickLeg(
       if (process.env['CRAWL_VERBOSE']) console.log(`[click:${leg}] ${route} ${next.key} -> navigated ${landed}`);
       if (leg === 'main' && !OFF_SPA.some((re) => re.test(now)) && !servedBySpa(landed)) {
         findings.push({ route, control: next.label, what: `navigated to ${landed}, which no route serves` });
+      } else if (leg === 'main' && landsHome(landed) && !HOME_LINK.test(next.label)) {
+        findings.push({ route, control: next.label, what: `navigated to ${landed}, which is Home, and the control does not name Home` });
       }
       if (leg === 'refused' && writes.length) {
         findings.push({ route, control: next.label, what: `write refused (${writes.join(', ')}) and the page navigated to ${landed} as if it had succeeded` });
@@ -715,6 +751,10 @@ const RACE_EVENT_LATE_MS = 1_500;
 const SILENT_ROUTE = '/ux/manual';
 const SILENT_LABEL = 'crawl pin: an inert control';
 const SILENT_POLL_MS = 40;
+/// The Home pin (backlog 7c69a45f) plants its links and button on a
+/// quiet route too.
+const HOME_PIN_ROUTE = '/ux/manual';
+const HOME_PIN_BUTTON = 'crawl pin: a button that lands on /';
 
 const KNOWN_GAPS: ReadonlyArray<Gap> = [
 ];
@@ -879,6 +919,57 @@ test.describe('the interaction crawl — every rendered link lands, every contro
     expect(found.map((f) => `[${f.route}] ${f.control}: ${f.what}`)).toContain(
       `[${SILENT_ROUTE}] ${SILENT_LABEL}: no observable response (no navigation, dialog, alert, request, or change in what is painted)`,
     );
+  });
+
+  test('a link or click that lands on / is a finding unless it names Home', async ({ page }) => {
+    // Backlog 7c69a45f. Every live /ux/jobs Subject link rendered as
+    // /# for weeks (subjectPath answered '#', href('#') is '/#', which
+    // the router parses as / — My Day), and leg (a) counted each one as
+    // served, because / IS served. A link that lands on Home is honest
+    // only when it says so, so the pin plants both: a Subject-style
+    // anchor to /# and a bare #, which must red, beside a "← Home"
+    // anchor to / (the KB breadcrumb's shape), which must not; and a
+    // button that navigates to / without naming Home, for the click leg.
+    test.setTimeout(120_000);
+    const mode: Mode = { refuse: false, empty: false };
+    await installLegs(page, mode);
+    await page.addInitScript(([route, label]) => {
+      if (location.pathname !== route) return;
+      // Planted the moment the content slot exists, not on a timer, so
+      // leg (a) — which reads the links as soon as the route settles —
+      // cannot run before the plant.
+      const plant = new MutationObserver(() => {
+        const slot = document.querySelector('.shell-content');
+        if (!slot || document.getElementById('crawl-pin-home')) return;
+        const box = document.createElement('div');
+        box.id = 'crawl-pin-home';
+        const a = (h: string, text: string): HTMLAnchorElement => {
+          const el = document.createElement('a');
+          el.setAttribute('href', h);
+          el.textContent = text;
+          return el;
+        };
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        b.addEventListener('click', () => {
+          window.history.pushState({}, '', '/');
+          window.dispatchEvent(new PopStateEvent('popstate'));
+        });
+        box.append(a('/#', 'acct-7 (a Subject)'), a('#', 'a dead row link'), a('/', '← Home'), b);
+        slot.appendChild(box);
+        plant.disconnect();
+      });
+      plant.observe(document, { childList: true, subtree: true });
+    }, [HOME_PIN_ROUTE, HOME_PIN_BUTTON] as const);
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    const tally: Tally = { routes: 0, links: 0, clicks: 0, refusedClicks: 0, writes: 0 };
+    const found = (await clickLeg(page, HOME_PIN_ROUTE, 'main', 'page', tally, errors)).map((f) => `[${f.route}] ${f.control}: ${f.what}`);
+    expect(found).toContain(`[${HOME_PIN_ROUTE}] link /#: lands on / (Home), and "acct-7 (a Subject)" does not name Home`);
+    expect(found).toContain(`[${HOME_PIN_ROUTE}] link #: a bare # goes nowhere ("a dead row link")`);
+    expect(found).toContain(`[${HOME_PIN_ROUTE}] ${HOME_PIN_BUTTON}: navigated to /, which is Home, and the control does not name Home`);
+    expect(found.filter((f) => f.includes('link /:')), 'a link to / that says Home is honest').toEqual([]);
   });
 
   test('every crawled route is one the router serves', () => {

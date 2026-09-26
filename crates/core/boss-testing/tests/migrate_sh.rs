@@ -140,6 +140,7 @@ impl Synthetic {
             std::env::temp_dir().join(format!("boss-migrate-test-{}", Uuid::new_v4().simple()));
         fs::create_dir_all(dir.join("schema")).expect("mkdir schema");
         // fs::copy preserves the exec bit on unix.
+        // mode-bits-ok: run only as bash <path> (see run), opened read-only
         fs::copy(real_script(), dir.join("migrate.sh")).expect("copying migrate.sh");
         let s = Self { dir };
         for (name, sql) in files {

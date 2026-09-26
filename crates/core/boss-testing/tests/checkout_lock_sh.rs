@@ -473,6 +473,7 @@ fn the_runner_answers_its_request_through_the_exit_trap() {
         std::fs::copy(&from, work.join("infra/lib").join(name)).unwrap();
     }
     // …and the run-summary lib it stamps its stage timings through.
+    // mode-bits-ok: a lib the runner sources, never exec'd by path
     std::fs::copy(
         repo_root().join("infra/run-summary.sh"),
         work.join("infra/run-summary.sh"),

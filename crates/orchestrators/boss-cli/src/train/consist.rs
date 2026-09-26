@@ -544,6 +544,7 @@ mod tests {
         std::fs::create_dir_all(&schema).expect("mkdir schema");
         let real = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../../infra/lint/migration-numbers-unique.sh");
+        // mode-bits-ok: the consist runs every lint as bash <path>, read-only
         std::fs::copy(&real, lint.join("migration-numbers-unique.sh"))
             .unwrap_or_else(|e| panic!("copy {}: {e}", real.display()));
         // And what the lint sources: every lint reads infra/lint/lib/
@@ -834,6 +835,7 @@ mod tests {
     #[test]
     fn a_lint_that_declares_a_consist_skip_is_left_out_on_the_same_boarding() {
         let (_g, tree) = consist_fixture("declared-skip", &twelve_migrations());
+        // mode-bits-ok: a new file, created 0644, run as bash <path>
         std::fs::write(
             tree.join("infra/lint/needs-a-database.sh"),
             "#!/usr/bin/env bash\n\
@@ -868,6 +870,7 @@ mod tests {
     #[test]
     fn a_consist_skip_with_no_reason_warns_by_name_and_the_train_departs() {
         let (_g, tree) = consist_fixture("mute-skip", &twelve_migrations());
+        // mode-bits-ok: a new file, created 0644, run as bash <path>
         std::fs::write(
             tree.join("infra/lint/mute.sh"),
             "#!/usr/bin/env bash\n# consist: skip\nexit 0\n",
@@ -926,6 +929,7 @@ mod tests {
         // The real ran=0 tree — a skip declaration with no reason —
         // reads the same way, naming the lint.
         let (_g, tree) = consist_fixture("mute-skip-unchecked", &twelve_migrations());
+        // mode-bits-ok: a new file, created 0644, run as bash <path>
         std::fs::write(
             tree.join("infra/lint/mute.sh"),
             "#!/usr/bin/env bash\n# consist: skip\nexit 0\n",

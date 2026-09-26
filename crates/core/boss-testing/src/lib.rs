@@ -31,7 +31,7 @@ pub use assertions::*;
 pub use feed::feed_stdin;
 pub use recording_bus::RecordingEventBus;
 pub use request::{TestRequest, TestResponse};
-pub use scratch::{create_dir, scratch_dir, scratch_path, write_exec, write_file};
+pub use scratch::{copy_exec, create_dir, scratch_dir, scratch_path, write_exec, write_file};
 #[cfg(feature = "postgres")]
 pub use test_db::TestDb;
 pub use tree::{

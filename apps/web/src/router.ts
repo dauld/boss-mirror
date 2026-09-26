@@ -156,7 +156,10 @@ export type Route =
 
 /// The path as the router matches it: the /dashboard mount and a
 /// trailing slash dropped.
-function routable(pathname: string): string {
+/// Exported for the interaction crawl, which asks "does this link land
+/// on /?" of the router's own normalisation rather than a copy of it
+/// (backlog 7c69a45f).
+export function routable(pathname: string): string {
   return pathname.replace(/^\/dashboard/, '').replace(/\/$/, '') || '/';
 }
 

@@ -107,6 +107,21 @@
     void loadKinds();
   });
 
+  // The list is paged against the server's `total` (backlog d1310776).
+  // It read one page of 200, newest first, with no offset and no word
+  // that more existed: measured 2026-09-23, 286 open under a header
+  // saying so and 86 of them — the OLDEST, which the standing order
+  // works first — reachable from nowhere on /ux/jobs, /ux/service or
+  // /ux/sales. The page belongs to the filter it was turned under, so
+  // any filter change lands back on the first page without an effect
+  // of its own to reset it.
+  const PAGE_SIZE = 200;
+  const filterKey = $derived(
+    JSON.stringify([kind, initialKindPrefix, initialDepartment, status, initialOwnerId, subjectIdFilter]),
+  );
+  let turned = $state<{ key: string; offset: number }>({ key: '', offset: 0 });
+  const offset = $derived(turned.key === filterKey ? turned.offset : 0);
+
   $effect(() => {
     const k = kind;
     const kp = initialKindPrefix;
@@ -114,6 +129,7 @@
     const s = status;
     const o = initialOwnerId;
     const si = subjectIdFilter;
+    const at = offset;
     let cancelled = false;
     loading = true;
 
@@ -124,7 +140,8 @@
     if (s) params.set('status', s);
     if (o) params.set('owner_id', o);
     if (si) params.set('subject_id', si);
-    params.set('limit', '200');
+    params.set('limit', String(PAGE_SIZE));
+    if (at > 0) params.set('offset', String(at));
 
     (async () => {
       try {
@@ -801,6 +818,33 @@
           </tbody>
         </table>
       {/if}
+      {#if !loading && !error && (offset > 0 || offset + jobs.length < total)}
+        <!-- Only when the filter matches more than one page holds; a
+             list that fits says nothing more than its header does. -->
+        <nav class="job-pager" aria-label="Pages of jobs">
+          <p>
+            Showing {jobs.length > 0
+              ? `${(offset + 1).toLocaleString()}–${(offset + jobs.length).toLocaleString()}`
+              : 'none'} of {total.toLocaleString()}, newest first
+          </p>
+          <button
+            type="button"
+            class="btn"
+            disabled={offset === 0}
+            onclick={() => (turned = { key: filterKey, offset: Math.max(0, offset - PAGE_SIZE) })}
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            class="btn"
+            disabled={jobs.length === 0 || offset + jobs.length >= total}
+            onclick={() => (turned = { key: filterKey, offset: offset + jobs.length })}
+          >
+            Next
+          </button>
+        </nav>
+      {/if}
     </section>
   </div>
 </div>
@@ -851,6 +895,18 @@
   }
   .job-filter-clear:hover {
     background: var(--wash);
+  }
+  .job-pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    margin-top: 12px;
+  }
+  .job-pager p {
+    margin: 0;
+    color: var(--static);
+    font-size: 13px;
   }
   .job-actions {
     display: flex;

@@ -139,10 +139,9 @@ fn copy_dir(src: &Path, dst: &Path) {
         if from.is_dir() {
             copy_dir(&from, &to);
         } else {
-            std::fs::copy(&from, &to)
-                .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", from.display(), to.display()));
-            let mode = std::fs::metadata(&from).expect("metadata").permissions();
-            let _ = std::fs::set_permissions(&to, mode);
+            // infra/ops carries executables; copy_exec keeps their mode
+            // without this process holding them open (eed361e0).
+            boss_testing::copy_exec(&from, &to);
         }
     }
 }

@@ -1001,6 +1001,7 @@ fn auto_scope_of(label: &str, touch: &[&str]) -> (String, serde_json::Value) {
         ],
         &dir,
     );
+    // mode-bits-ok: run below as bash <path>, which opens it read-only
     std::fs::copy(root.join("infra/gate.sh"), tree.join("infra/gate.sh"))
         .expect("carry this tree's gate.sh into the scratch clone");
     git(
