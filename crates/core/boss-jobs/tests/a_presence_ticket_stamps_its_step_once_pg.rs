@@ -88,7 +88,7 @@ async fn a_nonce_already_on_a_voided_stamp_is_refused_under_the_lock() {
     .await
     .unwrap();
 
-    repo.append_sign_off(&step.id, &stamp(&step, "ceremony-nonce-7"), Utc::now(), &[])
+    repo.append_sign_off(&step.id, &stamp(&step, "ceremony-nonce-7"), &es(), &[])
         .await
         .unwrap();
 
@@ -106,7 +106,7 @@ async fn a_nonce_already_on_a_voided_stamp_is_refused_under_the_lock() {
 
     // The same nonce again, on the shape it was minted over.
     let replay = repo
-        .append_sign_off(&step.id, &stamp(&step, "ceremony-nonce-7"), Utc::now(), &[])
+        .append_sign_off(&step.id, &stamp(&step, "ceremony-nonce-7"), &es(), &[])
         .await;
     match replay {
         Err(JobsError::NonceSpent { nonce, .. }) => assert_eq!(nonce, "ceremony-nonce-7"),
@@ -115,7 +115,7 @@ async fn a_nonce_already_on_a_voided_stamp_is_refused_under_the_lock() {
     assert_eq!(stamps(&db.pool, &step).await, row, "nothing was written");
 
     // A fresh ceremony's nonce stamps.
-    repo.append_sign_off(&step.id, &stamp(&step, "ceremony-nonce-9"), Utc::now(), &[])
+    repo.append_sign_off(&step.id, &stamp(&step, "ceremony-nonce-9"), &es(), &[])
         .await
         .unwrap();
     let row = stamps(&db.pool, &step).await;

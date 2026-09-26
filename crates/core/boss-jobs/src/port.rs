@@ -1420,11 +1420,20 @@ pub trait JobsRepository: Send + Sync {
     /// step — live or voided — refuses with [`JobsError::NonceSpent`],
     /// judged under the same lock (backlog 3977b3d2): a ticket stamps its
     /// step once.
+    ///
+    /// THE LOG REPRODUCES THE STAMP (backlog f146a13a). The append
+    /// records a `jobs.step.updated` built from the row as its own
+    /// UPDATE left it, from `event_stamp`, in the same write and BEFORE
+    /// the caller's `events` — the rule `merge_step_metadata_at` and the
+    /// re-pin already follow. The signed-off marker the door passes is
+    /// the fact of the signing; the rebuild replays the state event, so
+    /// a stamp no later edit carried is no longer lost by a replay.
+    /// `event_stamp.timestamp` is the write's instant (`updated_at`).
     async fn append_sign_off(
         &self,
         step_id: &StepId,
         stamp: &boss_core::job::SignOffStamp,
-        now: DateTime<Utc>,
+        event_stamp: &boss_core::publisher::EventStamp,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError>;
 

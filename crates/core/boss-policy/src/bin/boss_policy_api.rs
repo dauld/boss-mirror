@@ -1,6 +1,6 @@
 //! boss-policy-api — row-level authorization service.
 //!
-//! Serves check / my-scope / admin endpoints over the PolicyRepository.
+//! Serves check / admin endpoints over the PolicyRepository.
 //! On startup, seeds DEFAULT_RULES (per D8) — idempotent, operator
 //! edits survive restarts.
 //!

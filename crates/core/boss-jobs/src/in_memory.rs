@@ -1305,10 +1305,10 @@ impl JobsRepository for InMemoryJobs {
         &self,
         step_id: &StepId,
         stamp: &boss_core::job::SignOffStamp,
-        now: chrono::DateTime<chrono::Utc>,
+        event_stamp: &boss_core::publisher::EventStamp,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
-        {
+        let written = {
             let mut state = self.inner.lock().expect("poisoned");
             let key = step_key(step_id);
             let Some(existing) = state.steps.get_mut(&key) else {
@@ -1333,9 +1333,17 @@ impl JobsRepository for InMemoryJobs {
                 });
             }
             existing.sign_offs.push(stamp.clone());
+            let written = existing.clone();
             // Mirrors the sign-off UPDATE's `updated_at = $3`.
-            touch_step(&mut state, key, now);
-        }
+            touch_step(&mut state, key, event_stamp.timestamp);
+            written
+        };
+        // The row as the append left it, recorded before the caller's
+        // marker — the Pg adapter's order (backlog f146a13a).
+        self.record_all(&[event_stamp.event(
+            crate::events::STEP_UPDATED,
+            crate::events::step_state_payload(&written),
+        )]);
         self.record_all(events);
         Ok(())
     }
@@ -2738,5 +2746,46 @@ mod tests {
             MINT_PIN.contains("fn birth_by_workflows_pass_gate_and_create_mints_identity"),
             "the Pg pin the port doc names must still hold the mint test"
         );
+    }
+
+    /// The in-memory half of backlog f146a13a: a sign-off records the
+    /// row it wrote as a STEP_UPDATED carrying the stamp, BEFORE the
+    /// caller's marker — the Pg adapter's order, pinned there by
+    /// `tests/a_sign_off_stamp_survives_a_rebuild_pg.rs`.
+    #[tokio::test]
+    async fn a_sign_off_records_the_row_it_wrote_before_the_marker() {
+        let repo = InMemoryJobs::default();
+        let job = make_job("ops-request");
+        repo.create_job(&job).await.unwrap();
+        let step =
+            Step::new(job.id, "sign-off", "Approve", 0).with_sign_offs_required(vec!["qa".into()]);
+        repo.add_step(&step).await.unwrap();
+        let stamp = boss_core::job::SignOffStamp {
+            authority_id: "emp-1".into(),
+            role: "qa".into(),
+            stamped_at: Utc::now(),
+            shape_hash: step.shape_hash(),
+            assurance: Default::default(),
+            presence_nonce: None,
+            voided_at: None,
+            voided_by_event: None,
+        };
+        let es = boss_core::publisher::EventStamp::new(
+            "jobs",
+            boss_core::actor::ActorId::human("emp-1"),
+        );
+        let marker = es.event(crate::events::STEP_SIGNED_OFF, serde_json::json!({}));
+        let before = repo.recorded_events().len();
+        repo.append_sign_off(&step.id, &stamp, &es, &[marker])
+            .await
+            .unwrap();
+        let recorded = repo.recorded_events();
+        let kinds: Vec<&str> = recorded[before..].iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            [crate::events::STEP_UPDATED, crate::events::STEP_SIGNED_OFF]
+        );
+        let written: Step = serde_json::from_value(recorded[before].payload.clone()).unwrap();
+        assert_eq!(written.sign_offs, vec![stamp]);
     }
 }

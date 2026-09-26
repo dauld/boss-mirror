@@ -391,7 +391,7 @@ async fn a_stamp_built_on_a_shape_the_row_has_left_is_refused_where_it_is_writte
     );
 
     let appended = jobs
-        .append_sign_off(&step.id, &stamp, chrono::Utc::now(), &[])
+        .append_sign_off(&step.id, &stamp, &claim_stamp(), &[])
         .await;
     match appended {
         Err(boss_jobs::port::JobsError::StampOffShape {

@@ -5,7 +5,10 @@
 //!
 //! Event topology — only the **state events** drive the rebuild;
 //! the **marker events** (`status_changed`, `closed`, `completed`,
-//! `signed_off`) are informational duplicates and are skipped.
+//! `signed_off`, `corrected`, `repinned`) are informational duplicates
+//! and are skipped. `signed_off` is checked, not applied: a marker whose
+//! stamp no state event carries is counted in
+//! [`RebuildReport::sign_offs_unreproduced`] (backlog f146a13a).
 //!
 //! State events:
 //! - `jobs.job.created`  — full Job row → INSERT
@@ -59,6 +62,42 @@ pub struct RebuildReport {
     pub steps_updated: u64,
     /// Stamps a `jobs.step.stamps_invalidated` event voided.
     pub stamps_voided: u64,
+    /// `jobs.step.signed_off` markers whose stamp no state event in the
+    /// log carries (backlog f146a13a). Every marker the sign-off door
+    /// wrote before the append recorded its own STEP_UPDATED lacks a
+    /// `stamped_at`, so a stamp only such a marker recorded — one no
+    /// later edit or completion carried — cannot be rebuilt exactly.
+    /// The rebuild does not invent it: it leaves it off the row and
+    /// counts it here, one warning per marker, so a replay that differs
+    /// from the live row says so.
+    pub sign_offs_unreproduced: u64,
+}
+
+/// What a `jobs.step.signed_off` marker says about the stamp it
+/// announces. No `stamped_at`: the door never wrote one, so this names
+/// a stamp but cannot rebuild it.
+#[derive(Debug, serde::Deserialize)]
+struct SignedOff {
+    step_id: String,
+    role: String,
+    authority_id: String,
+    shape_hash: String,
+    /// Absent on every marker written before presence existed.
+    #[serde(default)]
+    presence_nonce: Option<String>,
+    #[serde(skip)]
+    audit_id: i64,
+}
+
+impl SignedOff {
+    /// Whether `st` is the stamp this marker announced — as close to
+    /// `SignOffStamp::same_stamp` as a marker without its instant allows.
+    fn names(&self, st: &SignOffStamp) -> bool {
+        st.role == self.role
+            && st.authority_id == self.authority_id
+            && st.shape_hash == self.shape_hash
+            && (self.presence_nonce.is_none() || st.presence_nonce == self.presence_nonce)
+    }
 }
 
 /// Drop every row in `steps` and `jobs` and replay every
@@ -67,6 +106,13 @@ pub struct RebuildReport {
 /// duration — concurrent writes block briefly.
 pub async fn rebuild_jobs_and_steps(pool: &PgPool) -> Result<RebuildReport, RebuildError> {
     let mut report = RebuildReport::default();
+    // Sign-off markers whose stamp the replay has not yet seen carried
+    // by a state event, keyed by step id (backlog f146a13a). The append
+    // records its STEP_UPDATED BEFORE its marker, so a marker checks the
+    // row as it stands; before that car an edit's STEP_UPDATED came
+    // AFTER the marker, so a later state event clears one.
+    let mut uncarried: std::collections::HashMap<String, Vec<SignedOff>> =
+        std::collections::HashMap::new();
 
     // Steps cascade on jobs deletion (FK ON DELETE CASCADE), but we
     // delete steps first to make the order explicit and to make the
@@ -129,6 +175,9 @@ pub async fn rebuild_jobs_and_steps(pool: &PgPool) -> Result<RebuildReport, Rebu
                     let inserted_now = upsert_step(&mut *conn, &step, ev.ts)
                         .await
                         .map_err(|e| e.to_string())?;
+                    if let Some(waiting) = uncarried.get_mut(&step.id.to_string()) {
+                        waiting.retain(|m| !step.sign_offs.iter().any(|st| m.names(st)));
+                    }
                     if inserted_now {
                         report.steps_inserted += 1;
                     } else {
@@ -143,12 +192,46 @@ pub async fn rebuild_jobs_and_steps(pool: &PgPool) -> Result<RebuildReport, Rebu
                     report.stamps_voided += voided;
                     Ok(Applied::Yes)
                 }
+                // A marker, and the stamp it announces rides a state
+                // event: the append's own STEP_UPDATED, recorded first
+                // since backlog f146a13a, or an edit's after it. Nothing
+                // is applied from the marker — it carries no
+                // `stamped_at` — but one whose stamp no state event ever
+                // carries is counted at the end, never passed in silence.
+                crate::events::STEP_SIGNED_OFF => {
+                    let mut marker: SignedOff = match serde_json::from_value(ev.payload.clone()) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!(
+                                event_id = ev.audit_id,
+                                error = %e,
+                                "signed_off marker names no stamp; skipping"
+                            );
+                            return Ok(Applied::Skipped);
+                        }
+                    };
+                    marker.audit_id = ev.audit_id;
+                    let on_row = stored_stamps(&mut *conn, &marker.step_id)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .unwrap_or_default();
+                    if !on_row.iter().any(|st| marker.names(st)) {
+                        uncarried
+                            .entry(marker.step_id.clone())
+                            .or_default()
+                            .push(marker);
+                    }
+                    Ok(Applied::Skipped)
+                }
                 // Marker events — the sibling state event already carried
                 // full row state. Counted as skipped; not anomalous.
                 "jobs.job.status_changed"
                 | "jobs.job.closed"
                 | "jobs.step.completed"
-                | "jobs.step.signed_off"
+                // A correction's row rides its sibling JOB_UPDATED
+                // (design 4105b020); it fell to the unknown-kind arm and
+                // warned once per correction on every replay.
+                | "jobs.step.corrected"
                 // A re-pin's rows ride its sibling JOB_UPDATED /
                 // STEP_UPDATED / STEP_CREATED (design 7cf202a9).
                 | "jobs.job.repinned" => Ok(Applied::Skipped),
@@ -162,6 +245,16 @@ pub async fn rebuild_jobs_and_steps(pool: &PgPool) -> Result<RebuildReport, Rebu
     .await
     .map_err(RebuildError::Storage)?;
 
+    for marker in uncarried.values().flatten() {
+        warn!(
+            event_id = marker.audit_id,
+            step_id = %marker.step_id,
+            role = %marker.role,
+            authority_id = %marker.authority_id,
+            "a sign-off stamp no state event carries: its marker records no stamped_at, so the rebuilt row lacks it"
+        );
+        report.sign_offs_unreproduced += 1;
+    }
     report.events_processed = stats.processed;
     report.events_skipped = stats.skipped;
     Ok(report)
