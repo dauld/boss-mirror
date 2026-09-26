@@ -84,7 +84,7 @@
   <div class="catalog-layout">
     <aside class="catalog-filters">
       <FilterGroup label="Search">
-          <SearchInput bind:value={query} placeholder="Name or tagline…" />
+          <SearchInput bind:value={query} placeholder="Name or tagline…" label="Search the catalog" />
       </FilterGroup>
 
       <FilterGroup label="Category">

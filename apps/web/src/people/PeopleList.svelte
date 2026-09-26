@@ -191,7 +191,7 @@
       </FilterGroup>
 
       <FilterGroup label="Search">
-          <SearchInput bind:value={query} placeholder="Name, email, role…" />
+          <SearchInput bind:value={query} placeholder="Name, email, role…" label="Search people" />
       </FilterGroup>
 
       <FilterGroup label="Status">

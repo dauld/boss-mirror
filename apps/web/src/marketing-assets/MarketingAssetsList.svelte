@@ -120,7 +120,7 @@
   <div class="catalog-layout">
     <aside class="catalog-filters">
       <FilterGroup label="Search">
-          <SearchInput bind:value={query} placeholder="Title, tag, SKU, campaign…" />
+          <SearchInput bind:value={query} placeholder="Title, tag, SKU, campaign…" label="Search marketing assets" />
       </FilterGroup>
       <FilterGroup label="Kind">
           {#each kindOptions as k (k)}

@@ -146,7 +146,7 @@
 <div class="catalog-layout">
   <aside class="catalog-filters">
     <FilterGroup label="Search">
-        <SearchInput bind:value={query} placeholder="Invoice, account…" />
+        <SearchInput bind:value={query} placeholder="Invoice, account…" label="Search invoices" />
     </FilterGroup>
     <FilterGroup label="Status">
         <FilterButton active={statusFilter === 'all'} onclick={() => (statusFilter = 'all')}>

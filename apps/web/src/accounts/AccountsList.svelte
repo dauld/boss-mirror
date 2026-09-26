@@ -257,7 +257,7 @@
   <div class="catalog-layout">
     <aside class="catalog-filters">
       <FilterGroup label="Search">
-          <SearchInput bind:value={query} placeholder="Account, doctor, city…" />
+          <SearchInput bind:value={query} placeholder="Account, doctor, city…" label="Search accounts" />
       </FilterGroup>
 
       <FilterGroup label="Tier">

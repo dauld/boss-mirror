@@ -243,6 +243,7 @@
             <SearchInput
               bind:value={query}
               placeholder={directoryFailed ? 'Account, factor…' : 'Account, factor, city…'}
+              label="Search the watchlist"
             />
         </FilterGroup>
 
