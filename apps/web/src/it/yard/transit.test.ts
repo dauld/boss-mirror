@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'bun:test';
+import { ROUTES, routesPayload, type FixtureRoute } from '../../../tests/fixtures/yard';
 import type { Border } from './borders';
 import { regionHref, type Region, type Regions } from './regions';
-import { BORDERS, TERRITORIES } from './world';
-import { pointAt } from './world-motion';
+import { parseRoutes } from './routes';
+import { TERRITORIES } from './world';
+import { sectionsOf } from './route-layout';
 import {
   LINE_TOKEN,
   MAX_BLOCKS,
   MAX_PERIOD_S,
   MIN_TRAVEL_S,
-  SECTIONS,
   STATIONS,
-  TENANT_BRANCH,
   TRANSIT_VIEW,
   alarmsOf,
   gapText,
@@ -65,41 +65,18 @@ const read = (regions: ReadonlyArray<Region>): Regions => ({
   plant: [],
 });
 
-const key = (from: string, to: string) => `${from}→${to}`;
+/** The fixture's routes, as the page parses them off the wire. */
+const served = (routes: ReadonlyArray<FixtureRoute> = ROUTES) => parseRoutes(routesPayload(routes));
+const laid = (routes?: ReadonlyArray<FixtureRoute>) => sectionsOf(served(routes)).sections;
+const find = (key: string) => laid().find((s) => s.key === key)!;
 
-describe('the transit layout is the world layout, drawn as lines', () => {
+describe('the stations are the world layout, drawn as a line', () => {
   it('has one station per territory — a region the world draws is a station here', () => {
     expect(STATIONS.map((s) => s.name).sort()).toEqual(TERRITORIES.map((t) => t.name).sort());
   });
 
-  it('has one section per border, and none the world does not have', () => {
-    expect(SECTIONS.map((s) => s.key).sort()).toEqual(BORDERS.map((b) => key(b.from, b.to)).sort());
-  });
-
-  it('every section runs from its from-station to its to-station', () => {
-    for (const s of SECTIONS) {
-      const a = STATIONS.find((t) => t.name === s.from)!;
-      const b = STATIONS.find((t) => t.name === s.to)!;
-      const start = pointAt(s.walked, 0);
-      const end = pointAt(s.walked, s.walked.length);
-      expect([s.key, start.x, start.y]).toEqual([s.key, a.x, a.y]);
-      expect([s.key, end.x, end.y]).toEqual([s.key, b.x, b.y]);
-    }
-  });
-
-  it('draws at fixed angles only — every leg horizontal, vertical or 45°', () => {
-    const legs = [...SECTIONS.map((s) => s.walked.points), TENANT_BRANCH.walked.points];
-    for (const pts of legs) {
-      for (let i = 1; i < pts.length; i++) {
-        const dx = Math.abs(pts[i]!.x - pts[i - 1]!.x);
-        const dy = Math.abs(pts[i]!.y - pts[i - 1]!.y);
-        expect(dx === 0 || dy === 0 || dx === dy).toBe(true);
-      }
-    }
-  });
-
   it('keeps every station inside the view', () => {
-    for (const s of [...STATIONS, ...TENANT_BRANCH.stations]) {
+    for (const s of STATIONS) {
       expect(s.x).toBeGreaterThan(20);
       expect(s.x).toBeLessThan(TRANSIT_VIEW.width - 20);
       expect(s.y).toBeGreaterThan(40);
@@ -107,29 +84,8 @@ describe('the transit layout is the world layout, drawn as lines', () => {
     }
   });
 
-  it('puts the delivery line through the flow in order, and the publish and garage on their own lines', () => {
-    const line = (k: string) => SECTIONS.find((s) => s.key === k)?.line;
-    expect(line('receiving→marshalling')).toBe('delivery');
-    expect(line('arrivals→shed')).toBe('delivery');
-    expect(line('arrivals→publish')).toBe('publish');
-    expect(line('gates→garage')).toBe('siding');
-    expect(line('track→garage')).toBe('siding');
-  });
-
   it('names every line colour as a --map-line-* token, never a literal', () => {
     for (const t of Object.values(LINE_TOKEN)) expect(t).toMatch(/^--map-line-[a-z]+$/);
-  });
-
-  it('draws the planned tenant branch from the shop floor to the shed, with David\'s station on it', () => {
-    const pts = TENANT_BRANCH.walked.points;
-    const shop = STATIONS.find((s) => s.name === 'shop-floor')!;
-    const shed = STATIONS.find((s) => s.name === 'shed')!;
-    expect(pts[0]).toEqual({ x: shop.x, y: shop.y });
-    expect(pts[pts.length - 1]).toEqual({ x: shed.x, y: shed.y });
-    expect(TENANT_BRANCH.stations.map((s) => s.name)).toEqual(['tenant check', 'awaiting approval', 'tenant main']);
-    expect(TENANT_BRANCH.stations.filter((s) => s.owner !== null).map((s) => [s.name, s.owner])).toEqual([
-      ['awaiting approval', 'David'],
-    ]);
   });
 });
 
@@ -190,7 +146,7 @@ describe('a section', () => {
 });
 
 describe('waiting blocks stand on the approach to the station they wait to enter', () => {
-  const s = SECTIONS.find((x) => x.key === 'marshalling→shop-floor')!;
+  const s = find('marshalling→shop-floor');
 
   it('one block per waiting packet, up to the cap, nearest the destination first', () => {
     const w = waitingBlocks(s, border('marshalling', 'shop-floor', { waiting: 3 }));

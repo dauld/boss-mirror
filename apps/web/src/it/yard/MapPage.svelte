@@ -59,6 +59,7 @@
   import { hasInterior } from './region-contents';
   import { hasPlatforms } from './world-interior';
   import { fetchBorders, type Borders } from './borders';
+  import { fetchRoutes, type Routes } from './routes';
   import type { LastGood } from './hud';
   import HudFrame from './HudFrame.svelte';
   import WorldMap from './WorldMap.svelte';
@@ -98,6 +99,10 @@
 
   let regions = $state<Remote<Regions>>({ kind: 'loading' });
   let borders = $state<Remote<Borders>>({ kind: 'loading' });
+  /** The routes the map draws (design e765b3fc, car R3): every section,
+   *  exit and entry is one the server serves, derived from the
+   *  protocols — the page holds no edge of its own. */
+  let routes = $state<Remote<Routes>>({ kind: 'loading' });
   let readAt = $state<number | null>(null);
   /** When the rails were last read WELL — the moving map's held clocks
    *  count on from it, and it greys past three missed reads (design
@@ -111,12 +116,13 @@
   onMount(() => {
     let cancelled = false;
     async function tick() {
-      // Two reads, concurrently — they are independent, and the map
-      // draws its territories even while the rails are still coming.
-      const [r, b] = await Promise.all([fetchRegions(), fetchBorders()]);
+      // Three reads, concurrently — they are independent, and the map
+      // draws its stations even while the rails and routes are coming.
+      const [r, b, w] = await Promise.all([fetchRegions(), fetchBorders(), fetchRoutes()]);
       if (cancelled) return;
       regions = r;
       borders = b;
+      routes = w;
       readAt = Date.now();
       if (b.kind === 'ready') bordersAt = readAt;
       if (r.kind === 'ready') lastGood = { at: readAt, data: r.data };
@@ -136,7 +142,12 @@
    *  while the read is out. */
   const picked = $derived<MapSelection>(
     regions.kind === 'ready'
-      ? selectionOf(at, regions.data, borders.kind === 'ready' ? borders.data : null)
+      ? selectionOf(
+          at,
+          regions.data,
+          borders.kind === 'ready' ? borders.data : null,
+          routes.kind === 'ready' ? routes.data : null,
+        )
       : { kind: 'none' },
   );
   /** The panel's cells (design e765b3fc, car N2): every reading the map
@@ -145,7 +156,17 @@
     picked.kind === 'station'
       ? stationCells(picked.region, borders.kind === 'ready' ? borders.data : null, regions.kind === 'ready' ? regions.data.now : '')
       : picked.kind === 'section'
-        ? sectionCells(picked.border, borders.kind === 'ready' ? borders.data.now : '')
+        ? sectionCells(
+            picked.border,
+            borders.kind === 'ready' ? borders.data.now : '',
+            picked.route === null
+              ? null
+              : {
+                  route: picked.route,
+                  windowHours: routes.kind === 'ready' ? routes.data.window_hours : 24,
+                  bordersRead: borders.kind === 'ready',
+                },
+          )
         : [],
   );
 
@@ -270,6 +291,7 @@
              marked on it (design e765b3fc, car N2). -->
         <TransitMap
           regions={regions.data}
+          routes={routes.kind === 'ready' ? routes.data : null}
           borders={borders.kind === 'ready' ? borders.data : null}
           selected={markOf(picked)} />
       {:else}
@@ -346,6 +368,12 @@
          quiet one. -->
     {#if borders.kind === 'failed'}
       <div class="yard-empty load-failed">The borders cannot be read — {borders.error}</div>
+    {/if}
+    <!-- A failed routes read is said where the routes are drawn (car R3):
+         the transit map's stations still stand, and no section is guessed
+         in its place. -->
+    {#if routes.kind === 'failed' && transit && !phone.current}
+      <div class="yard-empty load-failed" data-routes-failed>The routes cannot be read — {routes.error}</div>
     {/if}
     <div class="yard-flow">
       window {regions.data.window_hours}h against the {regions.data.window_hours}h before{readAt !== null ? ` · read ${clock(readAt)}` : ''}
@@ -460,7 +488,7 @@
   .panel-cells { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); grid-auto-flow: dense;
     gap: var(--s2); margin: var(--s2) 0 var(--s3); }
   .panel-cell { background: var(--map-bg); border: 1px solid var(--map-rule); padding: var(--s2); min-width: 0; }
-  .panel-cell[data-field='waiting'], .panel-cell[data-field='crossings'] { grid-column: 1 / -1; }
+  .panel-cell[data-field='route'], .panel-cell[data-field='waiting'], .panel-cell[data-field='crossings'] { grid-column: 1 / -1; }
   .cell-label { margin: 0 0 4px; font-family: var(--font-mono); font-size: 11px; font-weight: 400;
     letter-spacing: 0.08em; text-transform: uppercase; color: var(--map-muted); }
   .cell-lines { margin: 0; padding: 0; list-style: none; font-size: 13px; line-height: 1.45; color: var(--map-ink);

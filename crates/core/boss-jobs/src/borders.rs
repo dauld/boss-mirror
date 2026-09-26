@@ -52,12 +52,15 @@
 //! arrival instant, and a rail with nothing waiting is never troubled
 //! however long it has been quiet.
 //!
-//! THE BORDER SET IS DATA, HELD EQUAL TO THE CLIENT'S. [`BORDERS`]
-//! below is the server's copy of the layout's borders; the client's is
-//! `apps/web/src/it/yard/world.ts::BORDERS`, and `borders.test.ts`
-//! parses this table out of this file and asserts the two are the same
-//! set, in the same order (CLAUDE.md §9a — a fact that lives twice gets
-//! an equality test).
+//! THE BORDER SET IS THE RATE TABLE, AND NOTHING DRAWS FROM A COPY OF
+//! IT. [`BORDERS`] below was one of three hand copies of the map's edges
+//! (with `world.ts` BORDERS and `transit.ts` PATHS in apps/web); car R3
+//! of design e765b3fc deleted the two web copies. The transit map draws
+//! the routes `GET /api/yard/routes` derives ([`crate::routes`]), the
+//! world map a rail per border this read answers, and `borders.test.ts`
+//! now holds only the web tests' fixture equal to this table. What is
+//! left here is each border's rate (`flow_of`), which car M3 moves onto
+//! the moves record and then deletes with this table.
 
 use std::collections::BTreeSet;
 
@@ -128,9 +131,9 @@ pub struct BorderSpec {
 }
 
 /// The ten borders of the world layout: the line in flow order, then
-/// the crossing out to the mirror and the garage's two feeders — the
-/// same set and order as `apps/web/src/it/yard/world.ts::BORDERS`,
-/// pinned equal by `borders.test.ts`.
+/// the crossing out to the mirror and the garage's two feeders. The web
+/// tests' fixture (`apps/web/tests/fixtures/yard.ts`) is pinned equal to
+/// it by `borders.test.ts`; no page draws from a copy of it (car R3).
 ///
 /// THE LINE IS THE ORDER A CAR WALKS IT (design 62de32ae decision 3,
 /// decided 2026-09-24): receiving -> marshalling -> shop-floor -> gates

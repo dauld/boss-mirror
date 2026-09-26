@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import type { Border } from './borders';
-import { BADGE_HALF, BORDERS, TERRITORIES, railOf, territoryOf } from './world';
+import { BORDERS } from '../../../tests/fixtures/yard';
+import { BADGE_HALF, TERRITORIES, railOf, territoryOf } from './world';
 import {
   COMPRESSIONS,
   DEFAULT_COMPRESSION,

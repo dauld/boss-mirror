@@ -8,6 +8,8 @@ import { sectionHref } from './regions';
 import type { Border, Borders } from './borders';
 import type { Region, Regions } from './regions';
 import { parseRoute } from '../../router';
+import { parseRoutes, type Routes } from './routes';
+import { routesPayload } from '../../../tests/fixtures/yard';
 
 const region = (name: string, over: Partial<Region> = {}): Region => ({
   name,
@@ -110,6 +112,25 @@ describe('selectionOf — a section of track', () => {
   it('a half-written section is a name the map does not carry', () => {
     expect(selectionOf('dock->', REGIONS, BORDERS)).toEqual({ kind: 'unknown', at: 'dock->' });
     expect(selectionOf('->track', REGIONS, BORDERS)).toEqual({ kind: 'unknown', at: '->track' });
+  });
+
+  // A SECTION IS A SERVED ROUTE (car R3): the map draws what the routes
+  // read serves, so a drawn section the borders read keeps no rate for
+  // yet — the train's gates → track — opens a section panel with its
+  // route, never "nothing on this map is named so".
+  const ROUTES: Routes = parseRoutes(routesPayload());
+
+  it('a route the server serves is a section, with its route, even where no border carries a rate for it', () => {
+    const s = selectionOf('gates->track', REGIONS, BORDERS, ROUTES);
+    expect(s.kind).toBe('section');
+    if (s.kind !== 'section') return;
+    expect(s.border).toBeNull();
+    expect(s.route?.sources.some((x) => x.source === 'workflow' && x.step === 'merged')).toBe(true);
+  });
+
+  it('a pair neither read answered is a name the map does not carry', () => {
+    expect(selectionOf('publish->receiving', REGIONS, BORDERS, ROUTES)).toEqual({ kind: 'unknown', at: 'publish->receiving' });
+    expect(selectionOf('publish->receiving', REGIONS, null, ROUTES)).toEqual({ kind: 'unknown', at: 'publish->receiving' });
   });
 });
 

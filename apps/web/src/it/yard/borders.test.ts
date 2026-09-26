@@ -15,7 +15,7 @@ import {
   type Border,
   type Machine,
 } from './borders';
-import { BORDERS } from './world';
+import { BORDERS } from '../../../tests/fixtures/yard';
 
 // THE WORLD MAP'S RAILS (design d2154293, car 2): every border read
 // from ONE endpoint, /api/yard/borders, carrying the crossing rate,
@@ -275,12 +275,13 @@ describe('the words a rail prints', () => {
   });
 });
 
-describe('the border set is the server\'s', () => {
+describe('the tests\' border fixture is the server\'s answer', () => {
   it('equals boss_jobs::borders::BORDERS (crates/core/boss-jobs/src/borders.rs), in order', () => {
-    // A fact that lives twice gets an equality test (CLAUDE.md §9a):
-    // the layout declares the borders the map DRAWS, the server
-    // declares the borders it ANSWERS, and a rail drawn for a border
-    // the server does not answer is a blank patch nobody would notice.
+    // The map draws no border list of its own since car R3 of design
+    // e765b3fc — the world map lays a rail for each border the server
+    // answers — so what this pins is the FIXTURE the unit tests and the
+    // mocked specs answer with (tests/fixtures/yard.ts): a test standing
+    // in for a server must answer what the server answers.
     const src = readFileSync(
       join(import.meta.dir, '..', '..', '..', '..', '..', 'crates', 'core', 'boss-jobs', 'src', 'borders.rs'),
       'utf8',

@@ -7,8 +7,9 @@
 //                                                  \-> garage (a siding under gates .. track)
 //                                                                          \-> publish (a siding off arrivals)
 //
-// — and the BORDERS between them are declared here, each a rail
-// WorldMap.svelte draws between two territories. Car 2 hangs the
+// — and WorldMap.svelte draws a rail between two territories for each
+// border the server answers (never a pair declared here; car R3 of
+// design e765b3fc). Car 2 hangs the
 // crossing rate, what waits to cross and the machinery that moves it on
 // those rails. The 4x2 card grid this replaced (0524fc95 car 2) had no
 // shared space, no adjacency and no flow — "a world map in a video game
@@ -35,8 +36,8 @@
 // NOTHING HERE IS A PIXEL SOMEONE PLACED BY HAND: the line is one rule
 // (a slot per hop), the heights are the bands stacked, the garage spans
 // the territories it hangs off, and a rail is a function of the two
-// territories it joins. A further region is a row in this file plus a
-// border, pinned by world.test.ts against the server's REGIONS.
+// territories it joins. A further region is a row in this file, pinned
+// by world.test.ts against the server's REGIONS.
 
 import type { RegionName } from './regions';
 import { MACHINERY_STRIP_H } from './world-machines';
@@ -51,9 +52,6 @@ export type Territory = Readonly<{
   w: number;
   h: number;
 }>;
-
-/** A hop of the flow: packets cross from `from` into `to`. */
-export type Border = Readonly<{ from: RegionName; to: RegionName }>;
 
 /** The line, in the order a car walks it. */
 export const LINE: ReadonlyArray<RegionName> = [
@@ -139,15 +137,13 @@ const publish = siding('publish', 'arrivals', 'shed');
 
 export const TERRITORIES: ReadonlyArray<Territory> = [...line, garage, publish];
 
-/** The line's hops, in flow order, then the crossing out to the mirror
- *  and the garage's two feeders — the same set and order as the
- *  server's `boss_jobs::borders::BORDERS`, pinned by borders.test.ts. */
-export const BORDERS: ReadonlyArray<Border> = [
-  ...LINE.slice(1).map((to, i): Border => ({ from: LINE[i]!, to })),
-  { from: 'arrivals', to: 'publish' },
-  { from: 'gates', to: 'garage' },
-  { from: 'track', to: 'garage' },
-];
+// THE BORDERS ARE NOT HERE (design e765b3fc, car R3). This file declared
+// the ten pairs WorldMap drew rails for, one of three hand copies (with
+// boss_jobs::borders::BORDERS and transit.ts PATHS) pinned equal to each
+// other and to nothing else. The world map now draws a rail for each
+// border the server's borders read answers, and the transit map the
+// routes the server derives from the protocols; the lint
+// `a-map-edge-is-served-not-drawn` refuses a pair written back in here.
 
 export function territoryOf(name: string): Territory | undefined {
   return TERRITORIES.find((t) => t.name === name);
