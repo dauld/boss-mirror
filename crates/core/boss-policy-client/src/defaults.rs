@@ -111,6 +111,18 @@ pub fn default_rules() -> Vec<Rule> {
         ));
     }
 
+    // Starting a step for someone else (design 611fbffd, Q1 answered
+    // 2026-09-26): the claim door installs a holder other than its
+    // caller only for the step's declared executor or a holder of this
+    // authority — platform-admin today. Not shipped, so the read-only
+    // roles do not inherit it.
+    rules.push(Rule::new(
+        "platform-admin",
+        Resource::step_assign(),
+        Update,
+        Scope::All,
+    ));
+
     // Pay (backlog c7484d0e, 2026-09-23). Not a shipped resource, so
     // none of the read-only roles below inherit it — the auditor role
     // is also what an anonymous visitor carries. The deploy superuser

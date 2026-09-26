@@ -24,10 +24,14 @@
 //! 781b9209): that the next holder arrives through the claim. Once a
 //! step is released it is Ready, and a PUT can still take a Ready step
 //! to Active naming anyone — the PUT-as-claim path the ten platform
-//! step surfaces' Start and the sim's workforce use to start work
-//! (the Scheduling surface's calendar reservation is made only on that
-//! path; the claim door does not run the hook). This module keeps
-//! an ACTIVE step's holder; it does not yet decide who may START one.
+//! step surfaces' Start and the sim's workforce use to start work.
+//! This module keeps an ACTIVE step's holder. Design 611fbffd
+//! (answered 2026-09-26) decided who may START one: the claim door now
+//! reserves as the PUT did (one function, `start_hold`, both doors),
+//! and a claim FOR someone else is admitted only for the executor the
+//! step declares or a holder of `step-assign` ([`nominee`],
+//! [`declared_executor`]). The PUT's refusal of Ready→Active waits for
+//! the surfaces to move to the claim door.
 //!
 //! `""` and a blank are the same clear as `null`: every reader of the
 //! holder here (and the dispatcher's assignee check) reads them as
@@ -93,6 +97,42 @@ pub fn refuses(
     }
 }
 
+/// The holder a claim names when it is NOT the caller (design
+/// 611fbffd): `claimed_for` read as a holder is read everywhere here —
+/// a blank names nobody — and the caller's own id is an ordinary claim
+/// for oneself, so neither is a claim on someone else's behalf.
+pub fn nominee<'a>(claimed_for: Option<&'a str>, caller: &str) -> Option<&'a str> {
+    named(claimed_for.map(str::trim)).filter(|n| *n != caller)
+}
+
+/// The executor a step's own audience names — `{individual = "…"}`,
+/// materialised from the Workflow row onto the step's metadata — the
+/// automation (`automation:boss-step`, `automation:train-conductor`)
+/// the protocol declares runs it. That actor may start the step for
+/// someone else without the `step-assign` authority (design 611fbffd,
+/// Q1 (a)); a role, station or department audience names no one.
+pub fn declared_executor(metadata: &Value) -> Option<String> {
+    let audience = metadata.get("audience")?;
+    match serde_json::from_value::<crate::audience::Audience>(audience.clone()).ok()? {
+        crate::audience::Audience::Individual(id) => named(Some(&id)).map(str::to_string),
+        _ => None,
+    }
+}
+
+/// The 403 a claim for someone else gets from anyone the rule does not
+/// admit, naming the rule and the two ways through it.
+pub fn claim_for_refusal_body(step_id: &str, caller: &str, nominee: &str) -> Value {
+    serde_json::json!({
+        "error": "a claim for someone else (claimed_for) is made only by the step's \
+                  declared executor or a holder of the step-assign authority",
+        "step_id": step_id,
+        "caller": caller,
+        "claimed_for": nominee,
+        "hint": "claim the step for yourself (omit claimed_for), or ask a holder of \
+                 Update on step-assign to start it for them",
+    })
+}
+
 /// The 409's body, in the terminal freeze's shape (`step_status` +
 /// `refused_fields`), naming who holds the step.
 pub fn refusal_body(step_id: &str, holder: &str) -> Value {
@@ -108,7 +148,38 @@ pub fn refusal_body(step_id: &str, holder: &str) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{refuses, stored};
+    use super::{declared_executor, nominee, refuses, stored};
+
+    #[test]
+    fn a_nominee_is_someone_other_than_the_caller() {
+        assert_eq!(nominee(None, "emp-a"), None);
+        assert_eq!(nominee(Some(""), "emp-a"), None);
+        assert_eq!(nominee(Some("  "), "emp-a"), None);
+        assert_eq!(nominee(Some("emp-a"), "emp-a"), None);
+        assert_eq!(nominee(Some(" emp-a "), "emp-a"), None);
+        assert_eq!(nominee(Some("emp-b"), "emp-a"), Some("emp-b"));
+    }
+
+    #[test]
+    fn only_an_individual_audience_declares_an_executor() {
+        let md = |a: serde_json::Value| serde_json::json!({ "audience": a });
+        assert_eq!(
+            declared_executor(&md(
+                serde_json::json!({"individual": "automation:boss-step"})
+            )),
+            Some("automation:boss-step".into())
+        );
+        assert_eq!(
+            declared_executor(&md(serde_json::json!({"role": "platform-admin"}))),
+            None
+        );
+        assert_eq!(
+            declared_executor(&md(serde_json::json!({"individual": " "}))),
+            None
+        );
+        assert_eq!(declared_executor(&serde_json::json!({})), None);
+        assert_eq!(declared_executor(&md(serde_json::json!("x"))), None);
+    }
 
     #[test]
     fn a_blank_holder_is_stored_as_nobody() {

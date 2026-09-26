@@ -1625,44 +1625,14 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         obj.insert("aborted_from".into(), serde_json::Value::Array(slugs));
     }
 
-    // Calendar reservation hook — runs BEFORE the persistence
-    // write so a hard-conflict 409 doesn't leave the step in the
-    // new in-progress state without a reservation. The hook is a
-    // no-op when calendar isn't configured or the step lacks the
-    // scheduling metadata. A reservation it makes is handed back, by
-    // its id, if the write below is refused (`reserved`, backlog
-    // 558396ff); the skip's release runs after the write lands. A hold
-    // it found already standing (`took_held`) is not this write's, so a
-    // write that lands on it re-asserts it (the round-2 review of car
-    // 983696b5).
-    let mut reserved = None;
-    let mut took_held = false;
-    match crate::calendar_hook::apply_step_transition(
-        state.calendar.as_ref(),
-        &old,
-        &step,
-        &user.id,
-    )
-    .await
-    {
-        Ok(crate::calendar_hook::HookOutcome::Reserved(id)) => reserved = Some(id),
-        Ok(crate::calendar_hook::HookOutcome::AlreadyHeld) => took_held = true,
-        Ok(crate::calendar_hook::HookOutcome::Conflict { existing_rows }) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(serde_json::json!({
-                    "error": "calendar conflict",
-                    "step_id": step.id.to_string(),
-                    "existing": existing_rows,
-                })),
-            )
-                .into_response();
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "calendar hook errored; proceeding with step update");
-        }
-    }
+    // Calendar reservation hook — runs BEFORE the persistence write so
+    // a hard-conflict 409 doesn't leave the step in the new in-progress
+    // state without a reservation. The same function the claim door
+    // calls (design 611fbffd); its outcome is settled after the write.
+    let hold = match start_hold(&state, &old, &step, &user.id).await {
+        Ok(hold) => hold,
+        Err(refused) => return refused,
+    };
 
     let now = boss_clock_client::now_from(&state.clock).await;
 
@@ -1939,51 +1909,12 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         .jobs
         .update_step_if_unchanged_at(&step, old_version, stamp.timestamp, &step_events)
         .await;
-    // "Nothing was written" must be true of the calendar too: a
-    // reservation made above for a write that did not land is handed
-    // back, or the re-send the 409 asks for collides with it (558396ff).
-    // That reservation and no other: a racing start that landed holds
-    // the same step's time, and its hold is not this refusal's to undo.
-    // And not even that one when the start that refused this write is
-    // Active on it — the row as stored decides (round-2 review, 983696b5).
-    if let (Err(_), Some(id)) = (&written, reserved) {
-        let jobs = &state.jobs;
-        let sid = step.id;
-        let reheld = crate::calendar_hook::release_after_refused_write(
-            state.calendar.as_ref(),
-            id,
-            &step,
-            &user.id,
-            move || async move { jobs.get_step(&sid).await.ok().flatten() },
-        )
-        .await;
-        record_lost_hold(&state, &stamp, reheld).await;
-    }
+    // Landed over the very row `old` was read as, so `step` is what is
+    // stored — or refused, and nothing was written, which must be true
+    // of the calendar too (558396ff). `settle_start_hold` says how.
+    settle_start_hold(&state, &stamp, hold, written.is_ok(), &old, &step, &user.id).await;
     match written {
-        // Landed over the very row `old` was read as, so `step` is what
-        // is stored: a skip releases the step's hold only now (558396ff).
-        // Before the write, a skip then refused — stale, or a completion
-        // landed under it — released the hold of a step it never moved.
-        // A start that landed on a hold it did not place re-asserts it:
-        // the racer that placed it may be refused and hand it back.
-        Ok(()) => {
-            if took_held {
-                let reheld = crate::calendar_hook::hold_for_landed_start(
-                    state.calendar.as_ref(),
-                    &step,
-                    &user.id,
-                )
-                .await;
-                record_lost_hold(&state, &stamp, reheld).await;
-            }
-            crate::calendar_hook::after_step_written(
-                state.calendar.as_ref(),
-                &old,
-                &step,
-                &user.id,
-            )
-            .await;
-        }
+        Ok(()) => {}
         Err(crate::port::JobsError::StepChanged { .. }) => {
             return (
                 StatusCode::CONFLICT,
@@ -2620,6 +2551,13 @@ pub(super) struct ClaimQuery {
     /// without a station keep today's behavior: the CAS plus the
     /// policy check above, no station capability consulted.
     station: Option<String>,
+    /// The holder a claim installs when it is not the caller (design
+    /// 611fbffd, Q1 answered 2026-09-26). Only the executor the step's
+    /// own audience names, or a holder of the `step-assign` authority,
+    /// may name someone else; the event is signed by the caller and the
+    /// assignment marker records both. Absent, blank, or the caller's
+    /// own id: an ordinary claim for oneself.
+    claimed_for: Option<String>,
 }
 
 pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'static>(
@@ -2658,12 +2596,63 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
         return (StatusCode::NOT_FOUND, "step not on this job").into_response();
     }
 
-    // A HUMAN-ONLY STEP REFUSES A NON-HUMAN CLAIMANT (c17871fe) — the
+    // WHO WILL HOLD IT (design 611fbffd, Q1 answered 2026-09-26). The
+    // claimant, unless the claim names someone else — which only the
+    // executor the step's own audience declares (the automation a
+    // Workflow row names, e.g. `automation:boss-step`) or a holder of
+    // the `step-assign` authority (platform-admin today) may do. The
+    // step PUT still installs a holder on a Ready step; this door is
+    // where that act is judged and recorded, so it is the one the
+    // surfaces' Start is moving to.
+    let nominee = crate::active_holder::nominee(q.claimed_for.as_deref(), &user.id);
+    if let Some(nominee) = nominee {
+        // A station's capability judges the CLAIMANT's roles; a claim
+        // for someone else would pass or fail on the wrong actor's.
+        if let Some(station) = q.station.as_deref() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "a claim for someone else names no station — a station's \
+                              capability judges the claimant, not the nominee",
+                    "station": station,
+                    "claimed_for": nominee,
+                })),
+            )
+                .into_response();
+        }
+        let is_executor = crate::active_holder::declared_executor(&old.metadata).as_deref()
+            == Some(user.id.as_str());
+        if !is_executor {
+            match state
+                .policy
+                .check(&user, Action::Update, Resource::step_assign())
+                .await
+            {
+                Ok(Decision::Deny { .. }) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(crate::active_holder::claim_for_refusal_body(
+                            &step_id.to_string(),
+                            &user.id,
+                            nominee,
+                        )),
+                    )
+                        .into_response();
+                }
+                Ok(_) => {}
+                Err(e) => return e.into_response(),
+            }
+        }
+    }
+    let holder: String = nominee.unwrap_or(user.id.as_str()).to_string();
+
+    // A HUMAN-ONLY STEP REFUSES A NON-HUMAN HOLDER (c17871fe) — the
     // same rule the PUT enforces, at the other door an actor takes a
-    // step through. Before the station gate and the CAS: a claim that
-    // is not allowed must not enter the race.
+    // step through. Judged on who will HOLD the step: the claimant, or
+    // the one it is claimed for. Before the station gate and the CAS: a
+    // claim that is not allowed must not enter the race.
     if crate::human_only::declared(&old.metadata)
-        && let Err(why) = crate::human_only::person_check(state.roster.as_deref(), &user.id).await
+        && let Err(why) = crate::human_only::person_check(state.roster.as_deref(), &holder).await
     {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -2671,7 +2660,7 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
                 &step_id.to_string(),
                 &old.title,
                 old.metadata.get("authority_role").and_then(|v| v.as_str()),
-                &user.id,
+                &holder,
                 &why,
             )),
         )
@@ -2702,18 +2691,20 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     };
     let resolved = crate::agent_spec::resolved(&old, active_row.as_ref());
 
-    // The claimant's agents row, read once for the two gates below:
-    // the station's model capability and the budget reservation.
-    // `None` is a person or an unregistered login — neither gate
-    // applies — and a registry that cannot answer is a 500, not a
-    // silent pass (no evidence is not a pass).
+    // The holder's agents row, read once for the two gates below: the
+    // station's model capability and the budget reservation. The holder
+    // is the claimant unless the claim names someone else — whose run
+    // it then is, and whose budget and concurrency it spends. `None` is
+    // a person or an unregistered login — neither gate applies — and a
+    // registry that cannot answer is a 500, not a silent pass (no
+    // evidence is not a pass).
     let agent_row = match state.agent_budget.as_ref() {
-        Some(door) => match door.agent_row(&user.id).await {
+        Some(door) => match door.agent_row(&holder).await {
             Ok(row) => row,
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("agents registry could not answer for {}: {e}", user.id),
+                    format!("agents registry could not answer for {holder}: {e}"),
                 )
                     .into_response();
             }
@@ -2948,17 +2939,17 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     // Optimistic post-state for the events; the CAS makes it the
     // real post-state on success, and on conflict nothing records.
     let mut claimed = old.clone();
-    claimed.assignee_id = Some(user.id.clone());
+    claimed.assignee_id = Some(holder.clone());
     claimed.status = StepStatus::Active;
     // The CAS drops the previous run's edge when the holder changes
     // (9562f6df); the event says so too, or the log would go on naming
-    // a run the row no longer names. The claimant's aliases come from
+    // a run the row no longer names. The holder's aliases come from
     // its agents row — the same holder the CAS reads as `me`.
     let aliases = agent_row
         .as_ref()
         .map(|r| r.aliases.as_slice())
         .unwrap_or_default();
-    if crate::agent_runs::claim_changes_holder(old.assignee_id.as_deref(), &user.id, aliases) {
+    if crate::agent_runs::claim_changes_holder(old.assignee_id.as_deref(), &holder, aliases) {
         claimed.metadata = crate::agent_runs::without_edge(&claimed.metadata);
     }
 
@@ -2980,12 +2971,20 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
     // the same alias-aware answer the run edge took above, so a re-claim
     // and a respelled holder announce nothing (735ddc03). Payload
     // mirrors step.ready for messages.notify.
-    if crate::agent_runs::assignment_marker_due(
-        old.assignee_id.as_deref(),
-        &user.id,
-        aliases,
-        &claimed.kind,
-    ) {
+    //
+    // AND ALWAYS FOR A CLAIM ON SOMEONE ELSE'S BEHALF (design 611fbffd):
+    // the record names both — the event is signed by the caller, and
+    // this marker carries `claimed_by` and `claimed_for` — even when the
+    // nominee was already the step's nominated holder, because starting
+    // someone's clock is an act of its own.
+    if nominee.is_some()
+        || crate::agent_runs::assignment_marker_due(
+            old.assignee_id.as_deref(),
+            &holder,
+            aliases,
+            &claimed.kind,
+        )
+    {
         let (subject_kind, subject_id) = if let Some(job) = &parent_job {
             (
                 boss_core::primitives::Subject::kind(&job.subject).to_string(),
@@ -2994,25 +2993,48 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
         } else {
             (String::new(), String::new())
         };
-        claim_events.push(stamp.event(
-            &format!("step.assigned.{}", claimed.kind),
-            serde_json::json!({
-                "job_id": job_id.to_string(),
-                "step_id": step_id.to_string(),
-                "kind": claimed.kind,
-                "subject_kind": subject_kind,
-                "subject_id": subject_id,
-                "assignee_id": claimed.assignee_id,
-                "metadata": claimed.metadata,
-            }),
-        ));
+        let mut marker = serde_json::json!({
+            "job_id": job_id.to_string(),
+            "step_id": step_id.to_string(),
+            "kind": claimed.kind,
+            "subject_kind": subject_kind,
+            "subject_id": subject_id,
+            "assignee_id": claimed.assignee_id,
+            "metadata": claimed.metadata,
+        });
+        if let (Some(nominee), Some(obj)) = (nominee, marker.as_object_mut()) {
+            obj.insert("claimed_by".into(), serde_json::json!(user.id));
+            obj.insert("claimed_for".into(), serde_json::json!(nominee));
+        }
+        claim_events.push(stamp.event(&format!("step.assigned.{}", claimed.kind), marker));
     }
 
-    match state
+    // THE CLAIM DOOR RESERVES (design 611fbffd): the same start the step
+    // PUT makes, through the same function, before the CAS — so moving a
+    // Start here does not silently stop holding the holder's time. A
+    // calendar conflict refuses the claim with nothing stored; a claim
+    // the CAS then refuses hands its reservation back.
+    let hold = match start_hold(&state, &old, &claimed, &user.id).await {
+        Ok(hold) => hold,
+        Err(refused) => return refused,
+    };
+
+    let claimed_row = state
         .jobs
-        .claim_step_at(&step_id, &user.id, &stamp, &claim_events)
-        .await
-    {
+        .claim_step_at(&step_id, &holder, &stamp, &claim_events)
+        .await;
+    let stored = claimed_row.as_ref().unwrap_or(&claimed);
+    settle_start_hold(
+        &state,
+        &stamp,
+        hold,
+        claimed_row.is_ok(),
+        &old,
+        stored,
+        &user.id,
+    )
+    .await;
+    match claimed_row {
         Ok(step) => Json(step).into_response(),
         Err(crate::port::JobsError::ClaimConflict { holder, status }) => (
             StatusCode::CONFLICT,
@@ -3264,6 +3286,110 @@ async fn skip_open_step<R: JobsRepository + 'static, B: EventBus + 'static>(
 ///
 /// Best-effort, like the hook it reports on: a failure to record is
 /// logged at ERROR, because it is the loss of the only record of a loss.
+/// What a step's start did on the calendar before its write: the
+/// reservation it made, which a refused write hands back by id
+/// (backlog 558396ff), or a hold it found already standing, which is
+/// not this write's and is re-asserted if the write lands (the round-2
+/// review of car 983696b5).
+#[derive(Default)]
+struct StartHold {
+    reserved: Option<boss_core::calendar::ReservationId>,
+    took_held: bool,
+}
+
+/// THE CALENDAR HALF OF A STEP'S START, before its write — the ONE
+/// function both doors call (design 611fbffd, answered 2026-09-26). It
+/// ran only inside `update_step`, so a Start moved to the claim door
+/// would silently have stopped reserving the holder's time; the pin
+/// `both_doors_start_a_step_through_one_function` holds both doors to
+/// it. `new` is the row the write would store (its holder is whose
+/// time is held); `actor` is recorded as the reservation's creator.
+///
+/// A hard conflict refuses the start with nothing stored — the 409 is
+/// the `Err`. A no-op when no calendar is configured, the transition is
+/// not a start, or the step lacks a complete schedule; a calendar that
+/// errors is logged and the start proceeds, as it always has.
+async fn start_hold<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    old: &Step,
+    new: &Step,
+    actor: &str,
+) -> Result<StartHold, Response> {
+    match crate::calendar_hook::apply_step_transition(state.calendar.as_ref(), old, new, actor)
+        .await
+    {
+        Ok(crate::calendar_hook::HookOutcome::Reserved(id)) => Ok(StartHold {
+            reserved: Some(id),
+            took_held: false,
+        }),
+        Ok(crate::calendar_hook::HookOutcome::AlreadyHeld) => Ok(StartHold {
+            reserved: None,
+            took_held: true,
+        }),
+        Ok(crate::calendar_hook::HookOutcome::Conflict { existing_rows }) => Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "calendar conflict",
+                "step_id": new.id.to_string(),
+                "existing": existing_rows,
+            })),
+        )
+            .into_response()),
+        Ok(_) => Ok(StartHold::default()),
+        Err(e) => {
+            tracing::warn!(error = %e, "calendar hook errored; proceeding with step write");
+            Ok(StartHold::default())
+        }
+    }
+}
+
+/// The calendar half of a step write, AFTER it — `landed` says whether
+/// the write stored `attempted` (both doors write only over the row as
+/// they read it, so a write that landed stored exactly that).
+///
+/// REFUSED: "nothing was written" must be true of the calendar too, so
+/// the reservation this attempt made is handed back — that one and no
+/// other, and not even that one when the start that refused this write
+/// is Active on it; the row as stored decides (558396ff, 983696b5).
+///
+/// LANDED: a start that landed on a hold it did not place re-asserts
+/// it (the racer that placed it may be refused and hand it back), and a
+/// skip releases the step's hold only now. A lost hold either way is
+/// recorded (`jobs.step.hold_lost`, 4bdb8150).
+async fn settle_start_hold<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    stamp: &boss_core::publisher::EventStamp,
+    hold: StartHold,
+    landed: bool,
+    old: &Step,
+    attempted: &Step,
+    actor: &str,
+) {
+    if !landed {
+        if let Some(id) = hold.reserved {
+            let jobs = &state.jobs;
+            let sid = attempted.id;
+            let reheld = crate::calendar_hook::release_after_refused_write(
+                state.calendar.as_ref(),
+                id,
+                attempted,
+                actor,
+                move || async move { jobs.get_step(&sid).await.ok().flatten() },
+            )
+            .await;
+            record_lost_hold(state, stamp, reheld).await;
+        }
+        return;
+    }
+    if hold.took_held {
+        let reheld =
+            crate::calendar_hook::hold_for_landed_start(state.calendar.as_ref(), attempted, actor)
+                .await;
+        record_lost_hold(state, stamp, reheld).await;
+    }
+    crate::calendar_hook::after_step_written(state.calendar.as_ref(), old, attempted, actor).await;
+}
+
 async fn record_lost_hold<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &Arc<JobsApiState<R, B>>,
     stamp: &boss_core::publisher::EventStamp,
