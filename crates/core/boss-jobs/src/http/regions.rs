@@ -149,11 +149,7 @@ pub(super) async fn read_map<R: JobsRepository + 'static, B: EventBus + 'static>
     let predicate = match state.policy.scope_predicate(user, Resource::job()).await {
         Ok(p) => p,
         Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response());
+            return Err(e.into_response());
         }
     };
     if matches!(predicate, boss_policy_client::Predicate::None) {

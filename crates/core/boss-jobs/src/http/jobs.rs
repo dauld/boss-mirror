@@ -195,11 +195,7 @@ pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static
     let predicate = match state.policy.scope_predicate(&user, Resource::job()).await {
         Ok(p) => p,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     };
 
@@ -1837,11 +1833,7 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     let decision = match state.policy.check(&user, action, Resource::job()).await {
         Ok(d) => d,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     };
     let scope = match decision {
@@ -2138,11 +2130,7 @@ pub(super) async fn patch_job_metadata<R: JobsRepository + 'static, B: EventBus 
     {
         Ok(d) => d,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     };
     let scope = match decision {
@@ -2302,13 +2290,7 @@ async fn judge_move<R: JobsRepository + 'static, B: EventBus + 'static>(
                 return Err(answer((StatusCode::FORBIDDEN, reason).into_response()));
             }
             Err(e) => {
-                return Err(answer(
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("policy check failed: {e}"),
-                    )
-                        .into_response(),
-                ));
+                return Err(answer(e.into_response()));
             }
         };
         let job_id = resolve_path_job_id(state, id).await.map_err(answer)?;

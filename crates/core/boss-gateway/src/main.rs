@@ -13,7 +13,6 @@ mod a_read_only_session_cannot_write;
 mod api;
 mod dot_segments;
 mod inquiries;
-mod perf;
 mod plugin_files;
 mod proxy;
 mod public_reads;
@@ -21,9 +20,11 @@ mod role_headers;
 mod site;
 mod sponsors;
 mod static_files;
-mod timing;
 mod visits;
 
+// perf + timing live in the library so a test can drive the real
+// request timer and read what it logs (backlog d9f64c4a).
+use boss_gateway::{perf, timing};
 use perf::PerfCollector;
 
 use boss_gateway::local_auth::{self, CredentialStore, GuestAccess, LocalAuthState};
@@ -230,7 +231,7 @@ async fn main() -> Result<()> {
 
     let app = app
         .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            state.perf.clone(),
             timing::request_timer,
         ))
         .layer(axum::middleware::from_fn_with_state(

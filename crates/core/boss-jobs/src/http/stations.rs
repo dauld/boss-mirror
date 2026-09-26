@@ -145,13 +145,7 @@ async fn readable_predicate<R: JobsRepository, B: EventBus>(
         .policy
         .scope_predicate(user, Resource::job())
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response()
-        })?;
+        .map_err(|e| e.into_response())?;
     match job_scope_from_predicate(user, &predicate) {
         JobScope::None => Err((
             StatusCode::FORBIDDEN,
@@ -177,11 +171,7 @@ async fn station_policy_check<R: JobsRepository, B: EventBus>(
     match state.policy.check(user, action, Resource::workflow()).await {
         Ok(Decision::Allow { .. }) => Ok(()),
         Ok(Decision::Deny { reason }) => Err((StatusCode::FORBIDDEN, reason).into_response()),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("policy check failed: {e}"),
-        )
-            .into_response()),
+        Err(e) => Err(e.into_response()),
     }
 }
 

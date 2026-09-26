@@ -67,6 +67,11 @@ base64 = "0.22"
 # streamed from disk by `Part::file` (backlog 7610dd2f) — the bytes go
 # from the file to the socket with nothing between them.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking", "multipart", "stream"] }
+# The roll wait reads a 403/503's body to tell a policy outage from an
+# answer, and hands an answer back rebuilt from those bytes through
+# reqwest's `From<http::Response>` (backlog f13c719e). Already in the
+# tree as reqwest's own dependency; this names it.
+http = "1"
 # `boss attach` states the file store's body limit from the constant the
 # content-api's route applies (UPLOAD_BODY_LIMIT_BYTES), not a copy of
 # it; its tests serve that REAL router over in-memory adapters.

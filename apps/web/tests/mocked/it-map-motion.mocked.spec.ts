@@ -147,13 +147,19 @@ test('past three missed reads the map greys and stops', async ({ page }) => {
   await installSmokeMocks(page);
   await page.route(FLIGHTS, (r) => json(r, { flights: ['it-map-motion'] }));
   await page.route(YARD_REGIONS, (r) => json(r, regions()));
-  let reads = 0;
-  // The first read answers; every later one never does.
-  await page.route(YARD_BORDERS, (r) => (reads++ === 0 ? json(r, borders()) : undefined));
+  // Every read answers until the map has been seen moving; from then on
+  // none does. The switch is the test's, not the wall clock's: an
+  // installed clock still runs on real time, so "the first read
+  // answers, no later one does" let a starved runner miss three reads
+  // before the first assert (45 real seconds held after goto: expected
+  // "moving", received "stale"; backlog 3027f808).
+  let answering = true;
+  await page.route(YARD_BORDERS, (r) => (answering ? json(r, borders()) : undefined));
   await page.goto('/it');
   const canvas = page.locator('canvas.motion-layer');
   await expect(canvas).toHaveAttribute('data-motion', 'moving');
   await expect(page.locator('.motion-stale')).toHaveCount(0);
+  answering = false;
   // Paused, so the fake clock does not have to run 45 s of frames;
   // stale outranks paused.
   await page.getByRole('button', { name: 'pause' }).click();

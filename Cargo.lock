@@ -753,6 +753,7 @@ dependencies = [
  "clap",
  "dirs",
  "hex",
+ "http",
  "percent-encoding",
  "regex",
  "reqwest 0.12.28",

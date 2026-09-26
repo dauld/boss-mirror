@@ -27,11 +27,7 @@ pub(super) async fn list_queue_age<R: JobsRepository + 'static, B: EventBus + 's
     let predicate = match state.policy.scope_predicate(&user, Resource::job()).await {
         Ok(p) => p,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     };
     if matches!(predicate, boss_policy_client::Predicate::None) {

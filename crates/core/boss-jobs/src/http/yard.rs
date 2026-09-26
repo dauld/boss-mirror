@@ -43,11 +43,7 @@ pub(super) async fn yard_status<R: JobsRepository + 'static, B: EventBus + 'stat
     let predicate = match state.policy.scope_predicate(&user, Resource::job()).await {
         Ok(p) => p,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     };
     if matches!(predicate, boss_policy_client::Predicate::None) {

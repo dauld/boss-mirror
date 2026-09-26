@@ -264,7 +264,17 @@ test.describe('/it/estate — the chrome, the loading line and the reads', () =>
     const seen = await install(page);
     await mountPage(page, PATH, TITLE);
     await expect(machines(page).locator('tbody tr')).toHaveCount(3);
-    expect(seen).toEqual({ nodes: 1, obs: 1, cmp: 1, host: 1 });
+    // Counted from what the mount left, never from one: an installed
+    // clock still runs on real time, so on a starved runner the page's
+    // own 60 s poll had already read again before the count was taken
+    // (61 real seconds held after mount: every count 2, not 1; backlog
+    // 3027f808). That the mount reads each exactly once is pinned by
+    // the no-clock test above, which counts every request the page sent.
+    // -1 while a tick's four reads are only partly in.
+    const sameEach = (s: typeof seen): number =>
+      s.nodes === s.obs && s.obs === s.cmp && s.cmp === s.host ? s.nodes : -1;
+    let before = -1;
+    await expect.poll(() => (before = sameEach(seen))).toBeGreaterThan(0);
 
     // The next answer declares one more machine; the page must show it.
     await page.route(NODES_READ, (r) => {
@@ -272,7 +282,8 @@ test.describe('/it/estate — the chrome, the loading line and the reads', () =>
       return json(r, [...NODES, { id: 'w-2', label: 'w-2', role: 'talos-worker', roles: [], retired: false }]);
     });
     await page.clock.runFor(60_000);
-    await expect.poll(() => ({ ...seen })).toEqual({ nodes: 2, obs: 2, cmp: 2, host: 2 });
+    // The four reads go out together, each once more per tick.
+    await expect.poll(() => sameEach(seen)).toBeGreaterThan(before);
     await expect(machines(page).locator('tbody tr')).toHaveCount(4);
     await expect(machines(page).locator('td.estate-id').last()).toHaveText('w-2');
   });

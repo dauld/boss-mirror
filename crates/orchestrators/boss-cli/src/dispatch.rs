@@ -1933,16 +1933,58 @@ pub(crate) fn run_outcome(run: &Value) -> Option<&'static str> {
 /// completes every other step in its row's declared shape, and a
 /// `--report --refused` spelling would be a second way to write it
 /// and a second thing to keep true.
+///
+/// `refused` names a stop at the operator's direction as well as the
+/// agent's own (backlog 73abfb3a, 2026-09-26): run d71ea876 was stopped
+/// at David's request, its reader did not see that case in "an agent
+/// that stopped", and filed for a `stopped` terminal. `refused` already
+/// records it truly — agent_runs `cancelled`, not `failed` — and the
+/// stop's reason is the --report summary this call just put on the
+/// packet, so a fifth terminal would be a second way to write one fact.
 pub(crate) fn no_terminal_line(short: &str) -> String {
     format!(
         "boss dispatch: run {short} has no terminal yet — `{BUILDING_SLUG}` carries no \
          `result`, so agent_runs would have to assert an outcome the packet does not hold. \
          The report is on the packet. End the run with the outcome it reached — `boss step \
-         complete {short} --step {BUILDING_SLUG} --field result=refused` for an agent that \
-         stopped without building, or `result=delivered` for work that ships no car; a green \
-         gate writes `gated` by itself and the hourly clock writes `died`. Then run --report \
+         complete {short} --step {BUILDING_SLUG} --field result=refused` for a run stopped \
+         without building, whether its agent stopped or it was stopped at the operator's \
+         direction (the report on the packet carries the reason), or `result=delivered` for \
+         work that ships no car; a run whose gate is still running needs nothing, its green \
+         writes `gated` by itself, and the hourly clock writes `died`. Then run --report \
          again and the cost is recorded with the outcome it reached"
     )
+}
+
+/// What `--report` says of a run whose `reported` step is neither open
+/// nor completed — read off the terminal `building` reached, because
+/// `reported` opens only on `gated` or `delivered` (backlog 73abfb3a,
+/// 2026-09-26).
+///
+/// It used to say "it opens on the gate's green" of EVERY such run.
+/// For a run with no terminal that line was untrue — a run stopped at
+/// the operator's direction never gates — and it was printed BEFORE
+/// [`no_terminal_line`], the one line that names the verb which ends
+/// the run. The reader of run d71ea876 acted on the first line and
+/// filed an item asking for a `stopped` terminal that `refused`
+/// already is. So a run with no result gets `None` here and the door
+/// alone; the green is named only where a green is what the run is at.
+pub(crate) fn reported_waiting_line(short: &str, status: &str, run: &Value) -> Option<String> {
+    match building_result(run)? {
+        "gated" => Some(format!(
+            "boss dispatch: run {short}'s `{REPORTED_SLUG}` is {status} — it opens on the gate's \
+             green; the report rides the packet, run --report again once the run is at reported"
+        )),
+        "delivered" => Some(format!(
+            "boss dispatch: run {short}'s `{REPORTED_SLUG}` is {status} — `{BUILDING_SLUG}` \
+             closed `delivered`, which opens it; the report rides the packet, run --report \
+             again once the run is at reported"
+        )),
+        ended => Some(format!(
+            "boss dispatch: run {short}'s `{REPORTED_SLUG}` is {status} and does not open — \
+             `{BUILDING_SLUG}` ended `{ended}`, and `{REPORTED_SLUG}` opens only on `gated` or \
+             `delivered`; the report rides the packet"
+        )),
+    }
 }
 
 /// The car the run produced, off the evidence the landing rule stamped
@@ -2534,12 +2576,8 @@ pub(crate) async fn report_with_receipt_at(
         eprintln!(
             "boss dispatch: run {short} already reported — `{REPORTED_SLUG}` is completed; the record was refreshed"
         );
-    } else {
-        eprintln!(
-            "boss dispatch: run {short}'s `{REPORTED_SLUG}` is {} — it opens on the gate's green; \
-             the report rides the packet, run --report again once the run is at reported",
-            line.status
-        );
+    } else if let Some(waiting) = reported_waiting_line(short, &line.status, &run) {
+        eprintln!("{waiting}");
     }
 
     // THE RUN'S SCRATCH TARGET (backlog 4e17c49d): a green run's
@@ -5660,6 +5698,62 @@ mod wire_tests {
             !calls.iter().any(|(m, _, _)| m == "POST"),
             "no row asserting an outcome the run has not reached: {calls:?}"
         );
+    }
+
+    /// A run with no terminal is told the verb that ends it, and ONLY
+    /// that (backlog 73abfb3a, 2026-09-26). Run d71ea876 was stopped at
+    /// David's direction before anything was built; its --report printed
+    /// "`reported` is pending — it opens on the gate's green" FIRST, and
+    /// the reader acted on that line and filed an item asking for a
+    /// terminal `refused` already is. A run that never gates never sees
+    /// that green, so the line was untrue of it, and it stood in front
+    /// of the one line that named the door. What the verb prints is
+    /// composed here exactly as `report_with_receipt_at` composes it.
+    #[test]
+    fn a_report_on_a_run_with_no_terminal_names_refused_and_never_the_gates_green() {
+        let mut run = run_packet("pending");
+        run["steps"][2] = json!({ "id": "run-building", "spec_slug": "building",
+                                  "status": "ready", "metadata": {} });
+        let short = &RUN[..8];
+        let printed: Vec<String> = reported_waiting_line(short, "pending", &run)
+            .into_iter()
+            .chain(run_outcome(&run).is_none().then(|| no_terminal_line(short)))
+            .collect();
+        let out = printed.join("\n");
+        assert!(
+            out.contains("result=refused"),
+            "the output must name the terminal that ends a stopped run: {out}"
+        );
+        assert!(
+            out.contains("operator's direction"),
+            "a stop at the operator's direction must see itself in the door: {out}"
+        );
+        assert!(
+            !out.contains("gate's green"),
+            "a run with no terminal is not waiting on a green: {out}"
+        );
+
+        // The gate-green line stays true where it is true: `building`
+        // closed `gated`, and `reported` has not opened yet.
+        let gated = run_packet("pending");
+        let line = reported_waiting_line(short, "pending", &gated).expect("a line for a gated run");
+        assert!(line.contains("gate's green"), "{line}");
+
+        // A run that ships no car has no gate: `delivered` is what opens it.
+        let mut delivered = run_packet("pending");
+        delivered["steps"][2]["metadata"]["result"] = json!("delivered");
+        let line = reported_waiting_line(short, "pending", &delivered)
+            .expect("a line for a delivered run");
+        assert!(!line.contains("gate's green"), "{line}");
+
+        // And a run that ended `refused` is not told to wait on a green
+        // either: `reported` never opens for it.
+        let mut refused = run_packet("pending");
+        refused["steps"][2]["metadata"]["result"] = json!("refused");
+        let line =
+            reported_waiting_line(short, "pending", &refused).expect("a line for a refused run");
+        assert!(!line.contains("gate's green"), "{line}");
+        assert!(line.contains("`refused`"), "{line}");
     }
 
     /// Before the green, `reported` is pending: the report rides the

@@ -361,12 +361,21 @@ test.describe('/ux/finance — the frame', () => {
     await page.clock.install();
     const sent = await install(page);
     await mountPage(page, PATH);
-    await expect.poll(() => reads(sent, ENDPOINTS.summary).length).toBe(1);
-    expect(reads(sent, ENDPOINTS.invoices)).toHaveLength(1);
+    // Counted from what the mount left, never from one: an installed
+    // clock still runs on real time, so on a starved runner the page's
+    // own 30 s poll had already read again before the count was taken
+    // (31 real seconds held after mount: expected 1, received 2;
+    // backlog 3027f808). -1 while a tick's two reads are only partly in.
+    const both = (): number => {
+      const n = reads(sent, ENDPOINTS.summary).length;
+      return n === reads(sent, ENDPOINTS.invoices).length ? n : -1;
+    };
+    let before = -1;
+    await expect.poll(() => (before = both())).toBeGreaterThan(0);
 
     await page.clock.runFor(30_000);
-    await expect.poll(() => reads(sent, ENDPOINTS.summary).length).toBe(2);
-    expect(reads(sent, ENDPOINTS.invoices)).toHaveLength(2);
+    await expect.poll(() => both()).toBeGreaterThan(before);
+    // However many ticks real time added, nothing else re-reads.
     expect(reads(sent, ENDPOINTS.apAging)).toHaveLength(1);
   });
 });

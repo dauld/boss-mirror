@@ -14,8 +14,14 @@
 //! `(user_id, action, resource)`. Invalidation is TTL-only; NATS-
 //! driven invalidation on top of the TTL is a planned addition (D4).
 //!
-//! Fail-closed: if the HTTP call fails and no cache entry is
-//! available, we return a Deny with reason="policy-unreachable" (D9).
+//! Fail-closed: if the HTTP call fails (no connection, a timeout, a
+//! 5xx) and no live cache entry is available, `check` and
+//! `scope_predicate` return `Err(PolicyClientError::Unreachable)` —
+//! never an Allow (D9), and never cached. It is an ERROR rather than a
+//! Deny so a door can answer it as what it is, a 503 with Retry-After
+//! (`impl IntoResponse for PolicyClientError`), instead of a 403 or an
+//! empty page (backlog 45553536). Only decisions the service made are
+//! cached.
 
 pub mod defaults;
 pub mod engine;
@@ -124,10 +130,47 @@ use tokio::sync::RwLock;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyClientError {
-    #[error("policy service unreachable: {0}")]
+    /// The policy service could not be ASKED: no connection, a timeout,
+    /// or a 5xx. Not a decision, so never cached and never a Deny — a
+    /// reader must be able to tell "not allowed" from "could not ask"
+    /// (backlog 45553536). Every caller still refuses on it. The
+    /// rendered text carries `policy-unreachable`, the word boss-cli's
+    /// `names_a_policy_outage` keys on.
+    #[error("policy-unreachable: {0}")]
     Unreachable(String),
     #[error("transport failure: {0}")]
     Transport(String),
+}
+
+/// Seconds a caller is told to wait after a policy outage. The outage
+/// this was measured on (the #689 rollout, 2026-09-25) was a policy pod
+/// rolling — seconds, not minutes.
+pub const POLICY_OUTAGE_RETRY_AFTER_SECS: u64 = 5;
+
+/// The ONE rendering of a failed policy check, so every door answers an
+/// outage the same way: 503 + `Retry-After` for
+/// [`PolicyClientError::Unreachable`], 500 for anything else. Both
+/// refuse; neither is a 403, because neither is a permission fact.
+impl axum::response::IntoResponse for PolicyClientError {
+    fn into_response(self) -> axum::response::Response {
+        use axum::http::{StatusCode, header};
+        match self {
+            PolicyClientError::Unreachable(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(
+                    header::RETRY_AFTER,
+                    POLICY_OUTAGE_RETRY_AFTER_SECS.to_string(),
+                )],
+                self.to_string(),
+            )
+                .into_response(),
+            PolicyClientError::Transport(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("policy check failed: {self}"),
+            )
+                .into_response(),
+        }
+    }
 }
 
 #[async_trait]
@@ -140,7 +183,9 @@ pub trait PolicyClient: Send + Sync {
     ) -> Result<Decision, PolicyClientError>;
 
     /// Read-scope Predicate for a list endpoint. Denied access yields
-    /// `Predicate::None`, which callers translate to "no rows."
+    /// `Predicate::None`, which callers translate to "no rows." A
+    /// policy service that could not be asked is an `Err`, NOT
+    /// `Predicate::None`: an outage must not read as an empty list.
     async fn scope_predicate(
         &self,
         user: &User,
@@ -398,30 +443,46 @@ impl PolicyClient for ReqwestPolicyClient {
             .send()
             .await;
 
-        let decision = match resp {
-            Ok(r) if r.status().is_success() => r
-                .json::<Decision>()
-                .await
-                .map_err(|e| PolicyClientError::Transport(e.to_string()))?,
+        // ONLY a decision the service made is cached. Until backlog
+        // 45553536 (2026-09-26) an outage became a Deny and was cached
+        // for the full TTL, so a policy pod rolling for seconds refused
+        // every key that asked during it for a minute after it was back
+        // — as 403s, a permission fact where the fact was an outage.
+        // Both failure arms still fail closed (D9): no caller gets an
+        // Allow out of either.
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let decision = r
+                    .json::<Decision>()
+                    .await
+                    .map_err(|e| PolicyClientError::Transport(e.to_string()))?;
+                self.cache_put(key, decision.clone()).await;
+                Ok(decision)
+            }
+            Ok(r) if r.status().is_server_error() => {
+                // The service failed to decide: an outage, not an answer.
+                let status = r.status();
+                tracing::warn!(%status, "policy service returned 5xx; refusing as unreachable");
+                Err(PolicyClientError::Unreachable(format!(
+                    "policy service returned {status}"
+                )))
+            }
             Ok(r) => {
-                // HTTP error from the server: fail closed.
+                // A 4xx: the service refused the QUESTION (this client
+                // asked it wrongly). Fail closed as a deny, since asking
+                // again asks wrongly again — but not cached, because it
+                // is not a decision about this caller either.
                 let status = r.status();
                 tracing::warn!(%status, "policy service returned non-2xx; deny");
-                Decision::Deny {
+                Ok(Decision::Deny {
                     reason: format!("policy service returned {status}"),
-                }
+                })
             }
             Err(e) => {
-                // Service unreachable and no warm cache: fail closed per D9.
-                tracing::warn!(error = %e, "policy service unreachable; deny");
-                Decision::Deny {
-                    reason: "policy-unreachable".to_string(),
-                }
+                tracing::warn!(error = %e, "policy service unreachable; refusing");
+                Err(PolicyClientError::Unreachable(e.to_string()))
             }
-        };
-
-        self.cache_put(key, decision.clone()).await;
-        Ok(decision)
+        }
     }
 
     async fn scope_predicate(
@@ -732,6 +793,148 @@ mod tests {
         assert!(
             !matches!(on_anon_scope.unwrap(), Predicate::Unrestricted),
             "a header alone reads nothing unrestricted"
+        );
+    }
+
+    // -- A policy outage is not a decision (backlog 45553536) ----------
+    //
+    // The #689 rollout, 2026-09-25: the policy service was dark for
+    // seconds and every packet read answered 403 for about a minute,
+    // because the outage became a Deny and the Deny was CACHED for the
+    // 60 s TTL like any decision. These stand up a real policy stub on
+    // loopback, so the reqwest adapter is exercised on the wire.
+
+    /// A policy service that answers `first` for its first `failures`
+    /// checks, then `Allow { All }`; and how many checks it has seen.
+    async fn policy_stub(
+        failures: usize,
+        first: axum::http::StatusCode,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use axum::response::IntoResponse;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let app = axum::Router::new().route(
+            "/api/policy/check",
+            axum::routing::post(move || {
+                let counter = counter.clone();
+                async move {
+                    if counter.fetch_add(1, Ordering::SeqCst) < failures {
+                        first.into_response()
+                    } else {
+                        axum::Json(Decision::Allow { scope: Scope::All }).into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (format!("http://{addr}"), seen)
+    }
+
+    /// A base URL nothing listens on: bound, read, and released.
+    async fn dark_policy_url() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("http://{addr}")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_policy_5xx_is_an_outage_and_the_next_check_asks_again() {
+        let (url, seen) = policy_stub(1, axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
+        let c = ReqwestPolicyClient::new(url);
+
+        let first = c.check(&user(), Action::Read, Resource::job()).await;
+        match &first {
+            Err(PolicyClientError::Unreachable(detail)) => {
+                assert!(detail.contains("503"), "names the status: {detail}")
+            }
+            other => panic!("a 5xx is an outage, never a decision: {other:?}"),
+        }
+        assert!(
+            first
+                .unwrap_err()
+                .to_string()
+                .contains("policy-unreachable"),
+            "the rendered error keeps the word every reader keys on"
+        );
+
+        // Recovered: the same key is ASKED again, not served a cached deny.
+        let second = c
+            .check(&user(), Action::Read, Resource::job())
+            .await
+            .unwrap();
+        assert!(second.is_allowed(), "{second:?}");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+        // A decision the service MADE is cached: a third ask stays local.
+        let third = c
+            .check(&user(), Action::Read, Resource::job())
+            .await
+            .unwrap();
+        assert!(third.is_allowed());
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dark_policy_service_is_an_error_on_check_and_on_scope() {
+        let c = ReqwestPolicyClient::new(dark_policy_url().await);
+        let check = c.check(&user(), Action::Read, Resource::job()).await;
+        assert!(
+            matches!(check, Err(PolicyClientError::Unreachable(_))),
+            "{check:?}"
+        );
+        // A list asks through scope_predicate: an outage is an ERROR
+        // there too, never Predicate::None — which a list renders as an
+        // empty page, total 0, the shape of data loss.
+        let scope = c.scope_predicate(&user(), Resource::job()).await;
+        assert!(
+            matches!(scope, Err(PolicyClientError::Unreachable(_))),
+            "{scope:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_policy_4xx_still_refuses_and_is_not_cached() {
+        let (url, seen) = policy_stub(1, axum::http::StatusCode::BAD_REQUEST).await;
+        let c = ReqwestPolicyClient::new(url);
+        let first = c
+            .check(&user(), Action::Read, Resource::job())
+            .await
+            .unwrap();
+        assert!(!first.is_allowed(), "a 4xx fails closed: {first:?}");
+        let second = c
+            .check(&user(), Action::Read, Resource::job())
+            .await
+            .unwrap();
+        assert!(second.is_allowed(), "not a decision the service made");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn an_outage_answers_503_with_retry_after_and_keeps_its_word() {
+        use axum::response::IntoResponse;
+        let resp = PolicyClientError::Unreachable("connection refused".into()).into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(POLICY_OUTAGE_RETRY_AFTER_SECS.to_string().as_str())
+        );
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("policy-unreachable"), "{body}");
+        assert!(body.contains("connection refused"), "{body}");
+
+        // Any other client failure stays a 500: not an outage we can
+        // promise will pass, and not a permission answer either.
+        let other = PolicyClientError::Transport("bad json".into()).into_response();
+        assert_eq!(
+            other.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 

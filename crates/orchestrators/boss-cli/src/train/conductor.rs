@@ -3338,9 +3338,13 @@ impl Conductor {
             if let Some(reason) = car_hold_reason(&j, self.policy.max_red_trains) {
                 log(format!("{}: {reason} — leaving behind", id8(&jid)));
                 left_behind.push(json!({"car_id_short": id8(&jid), "reason": reason.as_str()}));
-                if !self.cfg.dry {
-                    self.merge_job_metadata(&jid, vec![("skip_reason", json!(reason))])
-                        .await?;
+                // Written only when it CHANGES, like every hold on this
+                // walk (see the bay write below): the refresh walks the
+                // dock every two minutes, and a reason the car already
+                // carries is an audit event for nothing (df93994b).
+                let kv = vec![("skip_reason", json!(reason))];
+                if !self.cfg.dry && !metadata_already(&j, &kv) {
+                    self.merge_job_metadata(&jid, kv).await?;
                 }
                 continue;
             }
@@ -3358,9 +3362,9 @@ impl Conductor {
                     "reason": hold.reason.as_str(),
                     EDGE_HOLD: hold.kind,
                 }));
-                if !self.cfg.dry {
-                    self.merge_job_metadata(&jid, vec![("skip_reason", json!(hold.reason))])
-                        .await?;
+                let kv = vec![("skip_reason", json!(hold.reason))];
+                if !self.cfg.dry && !metadata_already(&j, &kv) {
+                    self.merge_job_metadata(&jid, kv).await?;
                 }
                 continue;
             }
@@ -3429,11 +3433,12 @@ impl Conductor {
                 let reason = skip_reason_branch_missing(&branch);
                 log(format!("{}: {reason} — leaving behind", id8(&jid)));
                 left_behind.push(json!({"car_id_short": id8(&jid), "reason": reason.as_str()}));
-                if !self.cfg.dry {
-                    // Loud on the Job, not just in the journal: the author
-                    // parked this at review believing it would board.
-                    self.merge_job_metadata(&jid, vec![("skip_reason", json!(reason))])
-                        .await?;
+                // Loud on the Job, not just in the journal: the author
+                // parked this at review believing it would board. Once is
+                // loud; the same reason again is not a new fact.
+                let kv = vec![("skip_reason", json!(reason))];
+                if !self.cfg.dry && !metadata_already(&j, &kv) {
+                    self.merge_job_metadata(&jid, kv).await?;
                 }
                 continue;
             }
@@ -5078,6 +5083,150 @@ mod tests {
             &json!({}),
             &[("skip_reason", json!("anything"))]
         ));
+    }
+
+    // -- every other dock hold is written when it CHANGES (df93994b) -------
+    //
+    // The bay path above was guarded in #690; the two-strike, ordering-edge
+    // and missing-branch holds still wrote their reason on every walk of
+    // the dock — measured, 13 no-op writes on the two-strike path in 50h,
+    // before the two-minute refresh drove the walk at all. Each test below
+    // walks a real dock (`candidates`, an in-process jobs API, a real
+    // clone) holding two cars on one path: one already saying the reason,
+    // which must not be written, and a control carrying none or an older
+    // one, which must — so a path the walk never reached cannot pass.
+
+    /// A car parked at review, ready to be judged by the dock.
+    fn parked_car(id: &str, md: Value) -> Value {
+        json!({
+            "id": id, "kind": "ship-a-change", "status": "open", "metadata": md,
+            "steps": [{"id": format!("{id}-rev"), "spec_slug": "review",
+                       "title": "Open for review", "status": "ready", "metadata": {}}]
+        })
+    }
+
+    /// Walk the dock once over `cars` (and `others`, readable by id but
+    /// not listed), and return every job-metadata merge it sent.
+    async fn walk_dock(cars: Vec<Value>, others: Vec<Value>) -> Vec<(String, Value)> {
+        use axum::extract::Path;
+        use axum::routing::{get, patch};
+        use axum::{Json, Router};
+        use std::sync::{Arc, Mutex};
+
+        let (_g, clone) = clone_fixture("dock-hold-unchanged");
+        let merges: Arc<Mutex<Vec<(String, Value)>>> = Arc::default();
+        let rec = merges.clone();
+        let listed = cars.clone();
+        let every: Vec<Value> = cars.into_iter().chain(others).collect();
+        let app = Router::new()
+            .route(
+                "/api/jobs",
+                get(move || {
+                    let listed = listed.clone();
+                    async move { Json(json!({"data": listed, "total": listed.len()})) }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(id): Path<String>| {
+                    let every = every.clone();
+                    async move {
+                        match every.into_iter().find(|c| c["id"] == json!(id)) {
+                            Some(c) => Ok(Json(c)),
+                            None => Err(axum::http::StatusCode::NOT_FOUND),
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                patch(move |Path(id): Path<String>, Json(b): Json<Value>| {
+                    let rec = rec.clone();
+                    async move {
+                        rec.lock().unwrap().push((id, b));
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut c = dock_conductor(&clone);
+        c.cfg.jobs = format!("http://{addr}");
+        let pass = c.candidates().await.expect("the walk completes");
+        assert!(pass.boardable.is_empty(), "every car here is held");
+        merges.lock().unwrap().clone()
+    }
+
+    /// The ids written, each with the `skip_reason` it was written with.
+    fn written(merges: &[(String, Value)]) -> Vec<(String, Value)> {
+        merges
+            .iter()
+            .map(|(id, b)| (id.clone(), b["skip_reason"].clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_two_strike_hold_that_has_not_changed_is_not_written_again() {
+        let reason = car_hold_reason(&json!({"metadata": {"red_trains": 2}}), 2)
+            .expect("two reds hold a car");
+        let cars = vec![
+            parked_car(
+                "same",
+                json!({"branch": "feat/same", "red_trains": 2, "skip_reason": reason}),
+            ),
+            parked_car("new", json!({"branch": "feat/new", "red_trains": 2})),
+        ];
+        assert_eq!(
+            written(&walk_dock(cars, vec![]).await),
+            vec![("new".to_string(), json!(reason))],
+            "the car already saying it is not written; the control is"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ordering_edge_hold_that_has_not_changed_is_not_written_again() {
+        let pred = json!({"id": "pred", "status": "open", "metadata": {"branch": "feat/pred"}});
+        let EdgeOutcome::Hold(hold) =
+            boards_after_outcome("pred", &Predecessor::Found(pred.clone()))
+        else {
+            panic!("an open predecessor holds the car");
+        };
+        let edge = |id: &str, skip: Value| {
+            parked_car(
+                id,
+                json!({"branch": format!("feat/{id}"), boss_jobs::car::BOARDS_AFTER: "pred", "skip_reason": skip}),
+            )
+        };
+        let cars = vec![
+            edge("same", json!(hold.reason)),
+            edge("new", json!("branch feat/new not on fork")),
+        ];
+        assert_eq!(
+            written(&walk_dock(cars, vec![pred]).await),
+            vec![("new".to_string(), json!(hold.reason))],
+            "the car already saying it is not written; the control is"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_branch_hold_that_has_not_changed_is_not_written_again() {
+        let reason = skip_reason_branch_missing("feat/same");
+        let cars = vec![
+            parked_car(
+                "same",
+                json!({"branch": "feat/same", "skip_reason": reason}),
+            ),
+            parked_car("new", json!({"branch": "feat/new"})),
+        ];
+        assert_eq!(
+            written(&walk_dock(cars, vec![]).await),
+            vec![(
+                "new".to_string(),
+                json!(skip_reason_branch_missing("feat/new"))
+            )],
+            "the car already saying it is not written; the control is"
+        );
     }
 
     // -- the dock's claim on a bay is withdrawn, not aged out --------------

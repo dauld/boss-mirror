@@ -426,18 +426,24 @@ test('a borders answer in the wrong shape is said, and the territories still pai
 test('a regions read that fails after a good one keeps none of its values, and the HUD names both times', async ({ page }) => {
   await page.clock.install({ time: new Date('2026-09-25T06:00:00Z') });
   await installSmokeMocks(page);
+  // The first regions read answers good; every later one is HELD until
+  // the test fails it, so the failure lands where the test says and
+  // nowhere else (backlog 3027f808). An installed clock still runs on
+  // real time, so on a starved runner the page's own 10 s poll fired
+  // before the good read was asserted and the map was already gone: ten
+  // real seconds held after goto failed it every time (.territory,
+  // expected 10, received 0).
   let n = 0;
-  await page.route(YARD_REGIONS, (r) => {
-    n += 1;
-    return n === 1 ? json(r, regions()) : json(r, 'the backend is down', 500);
-  });
+  const held: Route[] = [];
+  await page.route(YARD_REGIONS, (r) => (++n === 1 ? json(r, regions()) : void held.push(r)));
   await page.route(YARD_BORDERS, (r) => json(r, borders()));
   await page.goto('/it');
   await expect(page.locator(`${SVG} .territory`)).toHaveCount(TERRITORIES.length);
   await expect(page.locator(`${HUD} [data-fig="value"]`).first()).toBeVisible();
 
   await page.clock.runFor(10_000);
-  await expect.poll(() => n).toBeGreaterThanOrEqual(2);
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  await Promise.all(held.splice(0).map((r) => json(r, 'the backend is down', 500)));
   await expect(page.locator(`.yard-empty${FAILURE_MARKER}`)).toContainText('The regions cannot be read — /api/yard/regions: HTTP 500');
   await expect(page.locator(`${SVG}`)).toHaveCount(0);
   const hud = page.locator(HUD);
@@ -459,14 +465,20 @@ test('CURRENT, gap 6 (909adf3b): the 10 s poll fires again while the last read i
   });
   await page.route(YARD_BORDERS, (r) => json(r, borders()));
   await page.goto('/it');
-  await expect.poll(() => pending.length).toBe(1);
+  // Counted from what goto left, never from zero: an installed clock
+  // still runs on real time, so on a starved runner the page's own 10 s
+  // poll had already sent a second read before the count was taken (ten
+  // real seconds held after goto: expected 1, received 2), and the
+  // "exactly one more" below then saw three (backlog 3027f808).
+  await expect.poll(() => pending.length).toBeGreaterThan(0);
+  const before = pending.length;
   await expect(page.locator('.yard-empty')).toHaveText('Reading the regions…');
-  // Ten seconds on, the first answer has still not come: today a second
+  // Ten seconds on, the first answer has still not come: today another
   // read goes out beside it, and whichever lands LAST is drawn — an
   // older answer can overwrite a newer one. Gap 6 skips a tick while
-  // one is in flight; its car flips this to one.
+  // one is in flight; its car flips this to "stays at before".
   await page.clock.runFor(10_000);
-  await expect.poll(() => pending.length).toBe(2);
+  await expect.poll(() => pending.length).toBeGreaterThan(before);
   for (const r of pending) await json(r, regions()).catch(() => {});
 });
 

@@ -85,10 +85,7 @@ pub(crate) fn http_failure(status: u16, body: &str) -> Failure {
 ///     ambiguous — nothing was received — so anything may go again,
 ///     which is exactly the production case this exists for.
 pub(crate) fn retryable(method: &Method, failure: &Failure) -> bool {
-    let idempotent = matches!(
-        *method,
-        Method::GET | Method::PUT | Method::DELETE | Method::HEAD
-    );
+    let idempotent = idempotent(method);
     match failure {
         Failure::Connect => true,
         Failure::Ambiguous => idempotent,
@@ -100,6 +97,16 @@ pub(crate) fn retryable(method: &Method, failure: &Failure) -> bool {
         // classifier's to assume.
         Failure::PolicyOutage => idempotent,
     }
+}
+
+/// May this call be sent again when whether it landed is unknown? The
+/// one set both waits use — the conductor's [`retryable`] and the roll
+/// wait's policy-outage read (backlog f13c719e).
+fn idempotent(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::GET | Method::PUT | Method::DELETE | Method::HEAD
+    )
 }
 
 /// A reqwest error, classified. Connect / timeout / mid-flight body
@@ -247,6 +254,12 @@ where
 // here, and the price of a read surfaced once is a relaunch, the same
 // as before. The wait is visible (one line per retry, on stderr) and
 // bounded: past the window the verb fails naming how long it waited.
+//
+// It waits out ONE answer too (backlog f13c719e): on an idempotent
+// call, a 403 or 503 whose body names the policy service failing
+// closed. That status is the policy client refusing to decide while its
+// service rolls, not a decision, and a GET, PUT or DELETE asked again
+// lands nothing twice. A POST or PATCH that meets it is still answered.
 // ---------------------------------------------------------------------------
 
 /// How long an operator verb waits out a jobs API that refuses its
@@ -283,7 +296,8 @@ impl RollWait {
 /// `wait.window`. `what` names the call (`jobs api POST /api/jobs`) in
 /// every line `say` prints and in the failure. The ONE definition every
 /// operator verb's jobs-API call goes through — via [`send_through_a_roll`]
-/// — so the rule "only a refused connect is retried" lives once.
+/// — so the rule "only a refused connect, or a policy outage on an
+/// idempotent call, is retried" lives once.
 pub(crate) async fn waiting_out_a_roll<T, F, Fut>(
     wait: &RollWait,
     what: &str,
@@ -305,24 +319,45 @@ where
             Ok(v) => return Ok(v),
             Err(f) => f,
         };
-        if failure.kind != Failure::Connect {
-            return Err(failure.cause);
-        }
+        let refused = match failure.kind {
+            Failure::Connect => true,
+            // Only ever produced for an idempotent call — the send
+            // decides that before it gets here (backlog f13c719e).
+            Failure::PolicyOutage => false,
+            _ => return Err(failure.cause),
+        };
         let elapsed = started.elapsed();
         if elapsed >= wait.window {
             let cause = short_cause(&failure.cause, 120);
-            return Err(failure.cause.context(format!(
-                "{what}: the jobs API refused every connection for {:.0}s ({attempt} attempts, \
-                 waited out for up to {:.0}s in case it was a rollout) — nothing was sent, so \
-                 nothing landed and relaunching is safe. Last: {cause}",
-                elapsed.as_secs_f64(),
-                wait.window.as_secs_f64(),
-            )));
+            let over = if refused {
+                format!(
+                    "the jobs API refused every connection for {:.0}s ({attempt} attempts, \
+                     waited out for up to {:.0}s in case it was a rollout) — nothing was sent, \
+                     so nothing landed and relaunching is safe",
+                    elapsed.as_secs_f64(),
+                    wait.window.as_secs_f64(),
+                )
+            } else {
+                format!(
+                    "the jobs API's policy service was still failing closed after {:.0}s \
+                     ({attempt} attempts of an idempotent call, waited out for up to {:.0}s in \
+                     case it was a rollout) — look at the policy service, not the jobs API",
+                    elapsed.as_secs_f64(),
+                    wait.window.as_secs_f64(),
+                )
+            };
+            return Err(failure
+                .cause
+                .context(format!("{what}: {over}. Last: {cause}")));
         }
         let pause = wait.backoff(attempt).min(wait.window - elapsed);
+        let waiting_on = if refused {
+            "the jobs API is not answering"
+        } else {
+            "the jobs API's policy service is failing closed"
+        };
         say(&format!(
-            "the jobs API is not answering (a rollout?) — retrying {what} in {:.0}s \
-             ({:.0}s of {:.0}s): {}",
+            "{waiting_on} (a rollout?) — retrying {what} in {:.0}s ({:.0}s of {:.0}s): {}",
             pause.as_secs_f64(),
             elapsed.as_secs_f64(),
             wait.window.as_secs_f64(),
@@ -336,20 +371,77 @@ where
 /// Send the request `build` makes, waiting out a jobs-API roll
 /// ([`ROLL_WAIT`]) and saying so on stderr. `build` is called once per
 /// attempt because a request with a body cannot be re-sent. Every
-/// status comes back to the caller as the answer it is.
+/// status comes back to the caller as the answer it is — except, on an
+/// idempotent call, a 403 or 503 whose body names a policy outage,
+/// which is waited out inside the same window (backlog f13c719e).
 pub(crate) async fn send_through_a_roll(
     what: &str,
     build: impl Fn() -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response> {
-    waiting_out_a_roll(&ROLL_WAIT, what, &|m| eprintln!("boss: {m}"), || {
-        let req = build();
+    send_through(&ROLL_WAIT, what, &|m| eprintln!("boss: {m}"), build).await
+}
+
+/// [`send_through_a_roll`] with the wait and the voice chosen — the
+/// seam the wire tests go through, so a real socket can walk the
+/// window in milliseconds.
+async fn send_through(
+    wait: &RollWait,
+    what: &str,
+    say: &(dyn Fn(&str) + Sync),
+    build: impl Fn() -> reqwest::RequestBuilder,
+) -> Result<reqwest::Response> {
+    waiting_out_a_roll(wait, what, say, || {
+        let (client, req) = build().build_split();
         async move {
-            req.send()
-                .await
-                .map_err(|e| ApiFailure::transport(e, what.to_string()))
+            let transport = |e| ApiFailure::transport(e, what.to_string());
+            let req = req.map_err(transport)?;
+            let method = req.method().clone();
+            let resp = client.execute(req).await.map_err(transport)?;
+            unless_a_policy_outage(&method, resp, what).await
         }
     })
     .await
+}
+
+/// The answer as it is — unless it is the policy service failing on a
+/// call that may be asked again. Backlog f13c719e: after 5d4ad086 the
+/// conductor's classifier and `boss gate --wait` rode out the jobs
+/// API's fail-closed 403 `policy-unreachable`, but this wait returned
+/// it, so `boss rerail --finish` (the chain that broke at ~21:35Z on
+/// 2026-09-25), `boss job file` and `boss hold` still died on the first
+/// one. Read on a 403 — how the jobs API renders the deny today — and
+/// on a 503, which is how the server half (45553536) renders it once it
+/// lands, so each side works without the other. Idempotent calls only,
+/// the bound [`retryable`] keeps: a POST or PATCH that met it stays an
+/// answer. Any other status is never read here, and a 403/503 that is
+/// an answer goes back rebuilt from the bytes read to classify it.
+async fn unless_a_policy_outage(
+    method: &Method,
+    resp: reqwest::Response,
+    what: &str,
+) -> std::result::Result<reqwest::Response, ApiFailure> {
+    let status = resp.status();
+    if !idempotent(method) || !matches!(status.as_u16(), 403 | 503) {
+        return Ok(resp);
+    }
+    let version = resp.version();
+    let headers = resp.headers().clone();
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| ApiFailure::transport(e, what.to_string()))?;
+    let text = String::from_utf8_lossy(&body);
+    if names_a_policy_outage(&text) {
+        return Err(ApiFailure {
+            kind: Failure::PolicyOutage,
+            cause: anyhow!("{status}: {}", text.trim()).context(what.to_string()),
+        });
+    }
+    let mut answer = http::Response::new(body);
+    *answer.status_mut() = status;
+    *answer.version_mut() = version;
+    *answer.headers_mut() = headers;
+    Ok(reqwest::Response::from(answer))
 }
 
 // ---------------------------------------------------------------------------
@@ -2010,5 +2102,183 @@ mod tests {
             .expect_err("nothing serves port 1");
         let f = ApiFailure::transport(err, "GET /api/jobs".into());
         assert_eq!(f.kind, Failure::Connect);
+    }
+
+    // -- a policy outage inside the roll wait -------------------------------
+    //
+    // Backlog f13c719e: after 5d4ad086 the conductor's classifier and
+    // `boss gate --wait` rode out the fail-closed 403 a policy roll
+    // produces, but the roll wait every operator verb's `api()` goes
+    // through returned it as an answer, so `boss rerail --finish` — the
+    // chain that broke at ~21:35Z on 2026-09-25 — `boss job file` and
+    // `boss hold` still died on the first one. These drive the real wire
+    // (a loopback stub) so the rebuilt answer is proven, not assumed.
+
+    /// A loopback jobs API that answers `answers` in order, one per
+    /// connection, repeating the last for ever; the counter is how many
+    /// requests reached it.
+    async fn serving(
+        answers: Vec<(&'static str, &'static str)>,
+    ) -> (String, std::sync::Arc<AtomicU32>) {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(AtomicU32::new(0));
+        let count = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                crate::gate::stub::read_request(&mut sock).await;
+                let n = count.fetch_add(1, Ordering::SeqCst) as usize;
+                let (status, body) = answers[n.min(answers.len() - 1)];
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: text/plain\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://{addr}/api/jobs/x"), seen)
+    }
+
+    /// Today's rendering of the fail-closed deny, and the 503 the
+    /// server half (45553536) moves it to — the two sides meet here.
+    const OUTAGES: [(&str, &str); 2] = [
+        (
+            "403 Forbidden",
+            "reading packets is refused: policy-unreachable",
+        ),
+        ("503 Service Unavailable", "policy-unreachable"),
+    ];
+
+    #[tokio::test]
+    async fn a_policy_outage_is_waited_out_on_an_idempotent_call() {
+        for (status, body) in OUTAGES {
+            for method in [Method::GET, Method::PUT, Method::DELETE] {
+                let (url, seen) = serving(vec![(status, body), ("200 OK", "{\"ok\":true}")]).await;
+                let lines = std::sync::Mutex::new(Vec::new());
+                let client = reqwest::Client::new();
+                let resp = send_through(
+                    &QUICK_ROLL,
+                    &format!("jobs api {method} /api/jobs/x"),
+                    &keeping_journal(&lines),
+                    || client.request(method.clone(), &url),
+                )
+                .await
+                .unwrap_or_else(|e| panic!("{method} {status} is waited out: {e:#}"));
+                assert_eq!(resp.status(), 200, "{method} {status}");
+                assert_eq!(resp.text().await.unwrap(), "{\"ok\":true}");
+                assert_eq!(
+                    seen.load(Ordering::SeqCst),
+                    2,
+                    "{method} {status}: asked again"
+                );
+                let lines = lines.into_inner().unwrap();
+                assert_eq!(lines.len(), 1, "one visible line per wait: {lines:?}");
+                assert!(
+                    lines[0].contains("policy service") && lines[0].contains("retrying"),
+                    "the wait names the policy service, not a dark API: {}",
+                    lines[0]
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_policy_answer_is_returned_first_time_with_its_body() {
+        // A scope refusal is the same status and a real answer; a 503
+        // that does not name the policy service is the roll wait's old
+        // answer too (the wait retries a refused connect, not a 5xx).
+        for (status, body, code) in [
+            ("403 Forbidden", "job is outside your scope", 403),
+            ("503 Service Unavailable", "upstream busy", 503),
+        ] {
+            let (url, seen) = serving(vec![(status, body), ("200 OK", "{}")]).await;
+            let lines = std::sync::Mutex::new(Vec::new());
+            let client = reqwest::Client::new();
+            let resp = send_through(
+                &QUICK_ROLL,
+                "jobs api GET /api/jobs/x",
+                &keeping_journal(&lines),
+                || client.get(&url),
+            )
+            .await
+            .expect("an answer is not a failure of the send");
+            assert_eq!(resp.status(), code);
+            assert_eq!(
+                resp.headers()["content-type"],
+                "text/plain",
+                "the answer keeps its headers"
+            );
+            assert_eq!(
+                resp.text().await.unwrap(),
+                body,
+                "the body read to classify it reaches the caller intact"
+            );
+            assert_eq!(seen.load(Ordering::SeqCst), 1, "{status}: asked once");
+            assert!(lines.into_inner().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_write_that_meets_a_policy_outage_is_answered_not_resent() {
+        // POST and PATCH stay final: whether a handler checks policy
+        // before it writes is not this wait's to assume (the same bound
+        // `retryable` keeps).
+        for (status, body) in OUTAGES {
+            for method in [Method::POST, Method::PATCH] {
+                let (url, seen) = serving(vec![(status, body), ("200 OK", "{}")]).await;
+                let client = reqwest::Client::new();
+                let resp = send_through(
+                    &QUICK_ROLL,
+                    &format!("jobs api {method} /api/jobs"),
+                    &|_| {},
+                    || client.request(method.clone(), &url).body("{}"),
+                )
+                .await
+                .expect("the answer comes back as it is");
+                assert_ne!(resp.status(), 200, "{method} {status}");
+                assert_eq!(resp.text().await.unwrap(), body);
+                assert_eq!(
+                    seen.load(Ordering::SeqCst),
+                    1,
+                    "{method} {status}: sent once"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_policy_outage_that_outlasts_the_window_names_the_policy_service() {
+        let (url, seen) = serving(vec![OUTAGES[0]]).await;
+        let client = reqwest::Client::new();
+        let err = send_through(&QUICK_ROLL, "jobs api GET /api/jobs/x", &|_| {}, || {
+            client.get(&url)
+        })
+        .await
+        .expect_err("a policy service still failing after the window is an outage");
+        assert!(
+            seen.load(Ordering::SeqCst) > 1,
+            "it waited before giving up"
+        );
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("jobs api GET /api/jobs/x")
+                && said.contains("policy service")
+                && said.contains("403 Forbidden: reading packets is refused: policy-unreachable"),
+            "names the call, the service and the answer it kept getting: {said}"
+        );
+        assert!(
+            !said.contains("nothing was sent"),
+            "a request that reached the API must not claim it never left: {said}"
+        );
+        assert!(
+            crate::gate::is_transient(&said),
+            "boss gate --wait still reads it as a roll: {said}"
+        );
     }
 }

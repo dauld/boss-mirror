@@ -632,6 +632,12 @@ pub(super) fn job_scope_from_predicate(
 /// `guest`, which the platform grants only `workflow` Read — the same
 /// caller the list hands nothing. Whether a headerless sibling should
 /// be trusted instead is e84de48e's decision, not this door's.
+///
+/// A policy service that could not be ASKED is not a denial: it
+/// answers 503 + Retry-After through `PolicyClientError`'s one
+/// rendering, as every policy error arm in this crate does (backlog
+/// 45553536 — it was a 403 "reading packets is refused:
+/// policy-unreachable" for a minute of the #689 rollout).
 #[allow(
     clippy::result_large_err,
     reason = "idiomatic axum Response error; crate-wide Box<Response> cleanup tracked separately"
@@ -651,11 +657,7 @@ pub(super) async fn job_read_scope<R: JobsRepository, B: EventBus>(
             format!("reading packets is refused: {reason}"),
         )
             .into_response()),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("policy check failed: {e}"),
-        )
-            .into_response()),
+        Err(e) => Err(e.into_response()),
     }
 }
 

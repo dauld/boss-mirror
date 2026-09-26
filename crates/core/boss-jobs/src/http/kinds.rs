@@ -77,11 +77,7 @@ pub(super) async fn policy_check<R: JobsRepository, B: EventBus>(
     match state.policy.check(user, action, Resource::workflow()).await {
         Ok(Decision::Allow { .. }) => Ok(()),
         Ok(Decision::Deny { reason }) => Err((StatusCode::FORBIDDEN, reason).into_response()),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("policy check failed: {e}"),
-        )
-            .into_response()),
+        Err(e) => Err(e.into_response()),
     }
 }
 

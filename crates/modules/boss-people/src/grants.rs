@@ -36,11 +36,7 @@ pub(crate) async fn require(
     match policy.check(user, action, resource).await {
         Ok(Decision::Allow { scope }) => Ok(scope),
         Ok(Decision::Deny { reason }) => Err((StatusCode::FORBIDDEN, reason).into_response()),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("policy check failed: {e}"),
-        )
-            .into_response()),
+        Err(e) => Err(e.into_response()),
     }
 }
 

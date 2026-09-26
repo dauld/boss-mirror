@@ -79,11 +79,7 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
         }
         Ok(_) => {}
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     }
 
@@ -623,11 +619,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         }
         Ok(_) => {}
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     }
 
@@ -2243,11 +2235,7 @@ pub(super) async fn patch_step_metadata<R: JobsRepository + 'static, B: EventBus
         }
         Ok(_) => {}
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     }
 
@@ -2493,11 +2481,7 @@ pub(super) async fn post_step_correction<R: JobsRepository + 'static, B: EventBu
         Ok(Decision::Deny { reason }) => return (StatusCode::FORBIDDEN, reason).into_response(),
         Ok(Decision::Allow { scope }) => scope,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     };
     if !scope_matches(&user, &scope, &job) {
@@ -2622,11 +2606,7 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
         }
         Ok(_) => {}
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     }
     let old = match state.jobs.get_step(&step_id).await {
@@ -3049,11 +3029,7 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
     {
         Ok(d) => d,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {e}"),
-            )
-                .into_response();
+            return e.into_response();
         }
     };
     if let Decision::Deny { reason } = decision {

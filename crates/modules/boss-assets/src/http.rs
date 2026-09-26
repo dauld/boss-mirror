@@ -466,11 +466,7 @@ async fn post_event<R: AssetsRepository + 'static, B: EventBus + 'static>(
                 return (StatusCode::FORBIDDEN, reason).into_response();
             }
             Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("policy check failed: {e}"),
-                )
-                    .into_response();
+                return e.into_response();
             }
         }
     }
