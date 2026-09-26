@@ -51,7 +51,8 @@
 # ancestry arm (car 3 of the same design: a merged train whose merge_ref
 # main no longer carries ends on `merge-lost`) is the ONLY guard against
 # the internal writer. Removing the writer is the push mirror's own fix,
-# not this file's.
+# not this file's: infra/forge/offsite-push.sh (backlog 21d54f4a) replaces
+# the Forgejo push mirror with a plain push and deletes the mirror.
 #
 # WHY THE CONDUCTOR'S MERGE STILL PASSES
 # --------------------------------------
