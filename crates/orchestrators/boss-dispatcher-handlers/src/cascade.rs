@@ -320,7 +320,11 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
         // in-system emission is `jobs.step.completed`, same as the
         // other step-completing executors above. Deliberately NOT
         // `step.done.credential-rotation`: the steps it completes are
-        // `task` kind, so the loop cannot re-enter its own trigger.
+        // `task` kind, so the loop cannot re-enter its own trigger. Its
+        // second trigger, `step.done.credential-delivery` (an off-host
+        // credential's `delivered` step, design 1c90d183), is completed
+        // by the forge host's deposit, never by this handler — the same
+        // argument holds.
         ("credential.rotate.forgejo", vec!["jobs.step.completed"]),
         // Same shape, second issuer (04e5f833): completes `task`
         // steps of the rotation packet, never a credential-rotation
@@ -418,7 +422,9 @@ pub fn handler_emits() -> BTreeMap<&'static str, Vec<&'static str>> {
 /// largest trigger class among them, so no loop that closes through a
 /// packet's closure was drawn or lit as a cycle.
 pub fn system_edges() -> Vec<SystemEdge> {
-    use boss_jobs::events::{JOB_CLOSED, JOB_CREATED, JOB_UPDATED, STEP_COMPLETED};
+    use boss_jobs::events::{
+        JOB_CLOSED, JOB_CREATED, JOB_UPDATED, STEP_COMPLETED, STEP_HOLD_LOST, STEP_UPDATED,
+    };
     vec![
         SystemEdge {
             from: JOB_CREATED,
@@ -468,6 +474,17 @@ pub fn system_edges() -> Vec<SystemEdge> {
             to: "step.assigned.*",
             kind: "jobs-api",
             label: "the assignment loop places a ready step with an executor",
+        },
+        // A start re-asserts its step's calendar hold after a racing
+        // start, and when another reservation took that time in the gap
+        // the step write records the loss (boss-jobs http/steps.rs
+        // `record_lost_hold`, backlog 4bdb8150) — the event the rule
+        // `open-a-packet-when-a-step-loses-its-hold` listens on.
+        SystemEdge {
+            from: STEP_UPDATED,
+            to: STEP_HOLD_LOST,
+            kind: "jobs-api",
+            label: "a start whose re-held time another reservation took records the lost hold",
         },
         SystemEdge {
             from: "commerce.invoice.created",

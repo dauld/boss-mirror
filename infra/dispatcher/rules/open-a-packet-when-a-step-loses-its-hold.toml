@@ -1,0 +1,47 @@
+# A step lost its calendar hold, and a person hears about it (backlog
+# 4bdb8150, the round-3 review of car 983696b5).
+#
+# A start that landed on a hold it did not place, or a refused racer
+# that found the start it let through had landed, re-asserts the step's
+# hold (boss-jobs `calendar_hook::reassert_hold`). If a third party
+# reserved the assignee's time between the hand-back and the re-hold,
+# the re-assertion meets a conflict: the step is Active — or Completed —
+# and holds no time. Until this rule that was a `tracing::warn` and
+# nothing else, which CLAUDE.md §Diagnosis names exactly: "a check
+# nobody reads is a check that is not running". The step write now
+# records `jobs.step.hold_lost` naming the step, its window and the
+# reservation rows holding it (`held_by`), and this rule files the
+# backlog-item a person triages.
+#
+# WHY A backlog-item. The loss is a claim to measure and route, not an
+# operation this rule can perform: re-scheduling the step, cancelling
+# the other reservation or accepting the double booking are each a
+# person's call, and the item's `triage` step is where that call is made
+# and evidenced. Its subject is the area it touches, `calendar`, so what
+# is outstanding against the calendar answers from Subject history. The
+# event's own id rides on the item as `triggered_by_event_id`
+# (`jobs.spawn` stamps it), so the reservation rows are one read away,
+# copied rather than retyped here.
+#
+# NO DEDUP. Each event is one step losing one window, which is one fact;
+# two losses are two items. A rule that folded them would have to guess
+# which one a person already read.
+[[rule]]
+name = "open-a-packet-when-a-step-loses-its-hold"
+why = """
+EXTERNAL INGRESS, and a CROSS-PROTOCOL REACTOR. The cause lives in the
+calendar service: another reservation took an assignee's time between
+two writes of one step, and nothing in the step's own protocol moved —
+the step is Active or Completed exactly as before, so no Workflow `on`
+consequence can see it, and a protocol cannot open a packet of another
+kind. Measured 2026-09-26 on origin/main 53c7c626 (backlog 4bdb8150):
+`reassert_hold` answered the conflict with `tracing::warn` and both
+callers discarded the outcome, so a lost reservation reached no event,
+no packet and no step. No authority widened: the only write is one
+standard backlog-item on the queue the kind's owner_role already
+answers for.
+"""
+on_event = "jobs.step.hold_lost"
+[[rule.do]]
+handler = "jobs.spawn"
+args = { kind = "\"backlog-item\"", subject_kind = "\"custom\"", subject = "\"calendar\"", title = "\"A step lost its calendar hold to another reservation\"", "metadata.input_channel" = "\"telemetry/monitoring\"", "metadata.area" = "\"calendar\"", "metadata.job_id" = "job_id", "metadata.step_id" = "step_id", "metadata.assignee_id" = "assignee_id", "metadata.window_start" = "window_start", "metadata.window_end" = "window_end", "metadata.held_by_count" = "held_by_count", "metadata.description" = "\"A step that holds its assignee's time lost its calendar hold: re-asserting it after a racing start, the calendar answered that another reservation now holds that window. The step named in step_id (packet job_id) is Active or Completed and holds no time for assignee_id from window_start to window_end. The reservation rows holding it are on the jobs.step.hold_lost event named in triggered_by_event_id. Decide at triage: re-schedule the step, release the other reservation, or accept the overlap.\"" }

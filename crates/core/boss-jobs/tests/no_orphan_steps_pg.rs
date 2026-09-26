@@ -61,7 +61,14 @@ use boss_testing::TestDb;
 /// with the fold of the post-mortem questions into `incident`; the
 /// `actions` step that replaces it declares `platform-admin`, as does
 /// every other step the fold added.
-const ORPHANS_PINNED: usize = 29;
+///
+/// 29 -> 30 on 2026-09-26 (design 1c90d183, backlog c4cbc6b5):
+/// `rotate-a-credential/delivered` (kind `credential-delivery`), a
+/// MACHINE step — the forge host's credential-deposit.sh completes it
+/// through the API with the last eight it installed, and it goes ready
+/// only for an off-host credential. The same class and the same
+/// registry gap as the four broker phases beside it.
+const ORPHANS_PINNED: usize = 30;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_persons_step_no_station_holds_is_named_and_the_count_is_pinned() {

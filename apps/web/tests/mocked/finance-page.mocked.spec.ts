@@ -900,6 +900,9 @@ test.describe('/ux/finance — Trial Balance', () => {
     page.once('dialog', (d) => void d.accept());
     await detail.getByRole('button', { name: 'Reverse this entry' }).click();
     await expect(detail.locator('.tb-reverse-result')).toHaveText('Reversal posted: ent-0009');
+    // 2349285d: the reversal's id links to that entry on the Trial Balance.
+    const reversal = detail.locator('.tb-reverse-result').getByRole('link', { name: 'ent-0009' });
+    await expect(reversal).toHaveAttribute('href', /\/ux\/finance\?tab=trial-balance&entry=ent-0009$/);
     const [post] = writes(sent);
     expect([post!.method, new URL(post!.url).pathname]).toEqual(['POST', '/api/ledger/journal-entries']);
     const body = JSON.parse(post!.body!) as { posted_on: string; memo: string; created_by: string | null; lines: unknown[] };

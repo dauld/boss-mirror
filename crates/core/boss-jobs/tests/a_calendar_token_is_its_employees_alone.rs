@@ -289,6 +289,9 @@ fn app(tokens: Arc<Tokens>) -> Router {
         repo: tokens,
         publisher: None,
         clock: Arc::new(boss_clock_client::WallClockClient),
+        // The schedule reads' gate (a621d091) is not under test here:
+        // the token doors decide on the caller alone and ask no policy.
+        policy: Arc::new(boss_policy_client::PermissivePolicyClient),
     })
 }
 

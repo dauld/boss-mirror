@@ -126,6 +126,17 @@ pub fn default_rules() -> Vec<Rule> {
         Scope::All,
     ));
 
+    // Schedules (backlog a621d091, 2026-09-25) — not shipped, for the
+    // same reason as pay: every employee reads their own without a
+    // grant, the deploy superuser reads all of them here, and tenants
+    // grant their managers in their own seed.
+    rules.push(Rule::new(
+        "platform-admin",
+        Resource::schedule(),
+        Read,
+        Scope::All,
+    ));
+
     // ------------------------------------------------------------------
     // Audit-readonly — external auditors / OSS anonymous visitors /
     // the seeded `emp-audit` login. Read on every shipped resource;
@@ -435,5 +446,23 @@ mod tests {
             vec![("platform-admin".to_string(), Action::Read, Scope::All)]
         );
         assert!(!shipped_resources().contains(&Resource::compensation()));
+    }
+
+    /// Schedules the same way (backlog a621d091, 2026-09-25): the
+    /// guest session read every employee's week while the scheduling
+    /// reads asked no policy, and shipping the resource would hand it
+    /// straight back to the read-only roles it inherits to.
+    #[test]
+    fn only_platform_admin_reads_schedules_by_default() {
+        let holders: Vec<_> = default_rules()
+            .into_iter()
+            .filter(|r| r.resource == Resource::schedule())
+            .map(|r| (r.role, r.action, r.scope))
+            .collect();
+        assert_eq!(
+            holders,
+            vec![("platform-admin".to_string(), Action::Read, Scope::All)]
+        );
+        assert!(!shipped_resources().contains(&Resource::schedule()));
     }
 }

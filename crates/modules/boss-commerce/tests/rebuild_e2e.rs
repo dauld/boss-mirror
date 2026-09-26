@@ -129,7 +129,8 @@ async fn rebuild_reproduces_invoices_and_line_items() {
             &EventStamp::new("commerce", actor.clone()).with_timestamp(now),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .into_invoice();
 
     let now2 = Utc::now();
     commerce
@@ -139,7 +140,8 @@ async fn rebuild_reproduces_invoices_and_line_items() {
             &EventStamp::new("commerce", actor.clone()).with_timestamp(now2),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .into_invoice();
 
     // Mark INV-001 paid — the paid event records in the flip's tx.
     let now3 = Utc::now();

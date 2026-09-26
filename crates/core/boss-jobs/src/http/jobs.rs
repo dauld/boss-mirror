@@ -492,11 +492,32 @@ pub(super) struct JobsSummaryQuery {
 /// not O(jobs), and the caller uses it to light up per-phase
 /// counts on a company-map view without pulling 5k+ rows of
 /// Job JSON over the wire.
+///
+/// The counts are of the packets the CALLER may read (backlog
+/// 19f08bd6). This took no caller at all and counted every packet —
+/// closed totals included, through `?status=` — for anyone, a
+/// headerless guest among them, while every sibling packet read had
+/// gone through [`job_read_scope`] since 046832d3. Now it asks that
+/// door: a caller the policy denies is refused 403, an outage is 503,
+/// and an allowed caller's counts are taken under the scope the list
+/// takes its rows under (the same `scope_to_predicate` →
+/// [`job_scope_from_predicate`] translation), so they equal what
+/// `/api/jobs?status=` totals for that caller. The public landing's
+/// open counts are `/api/jobs/live`, which stays unscoped by design.
 pub(super) async fn jobs_summary<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<JobsSummaryQuery>,
 ) -> Response {
-    match state.jobs.count_jobs_by_kind(q.status).await {
+    let scope = match job_read_scope(&state, &user).await {
+        Ok(scope) => scope,
+        Err(refusal) => return refusal,
+    };
+    let scope = job_scope_from_predicate(
+        &user,
+        &boss_policy_client::scope_to_predicate(&scope, &user),
+    );
+    match state.jobs.count_jobs_by_kind(q.status, &scope).await {
         Ok(pairs) => {
             let total: i64 = pairs.iter().map(|(_, n)| *n).sum();
             let counts: serde_json::Map<String, serde_json::Value> = pairs
@@ -525,10 +546,11 @@ pub(super) async fn jobs_live<R: JobsRepository + 'static, B: EventBus + 'static
 ) -> Response {
     use crate::port::{JobFilter, JobScope};
     // Counts by kind (open only — closed Jobs are history; the
-    // landing wants in-flight).
+    // landing wants in-flight). Unscoped on purpose: this is the public
+    // window, and /api/jobs/summary is the scoped count (19f08bd6).
     let by_kind = match state
         .jobs
-        .count_jobs_by_kind(Some(boss_core::job::JobStatus::Open))
+        .count_jobs_by_kind(Some(boss_core::job::JobStatus::Open), &JobScope::All)
         .await
     {
         Ok(pairs) => pairs,
@@ -823,6 +845,38 @@ fn admission_differences(
     .collect()
 }
 
+/// The answer to a create whose id already names a packet: 200 and the
+/// id when the body describes that packet, 409 naming the fields that
+/// differ when it does not (558396ff). Given in two places — before
+/// anything is materialized, and after the adapter reports that
+/// another admission under the id won the race (backlog 9d2af748) —
+/// so a caller cannot tell which of the two it met.
+fn answer_the_packet_that_exists(existing: &Job, differing: Vec<&'static str>) -> Response {
+    if differing.is_empty() {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": existing.id.to_string(),
+                "already_admitted": true,
+            })),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::CONFLICT,
+            // The field NAMES only: what that packet holds is a
+            // read, and a read has its own policy; a create names
+            // nothing of another packet but where it collides.
+            Json(serde_json::json!({
+                "error": "this id already names a packet that differs from this body",
+                "id": existing.id.to_string(),
+                "differing_fields": differing,
+            })),
+        )
+            .into_response()
+    }
+}
+
 pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(user): CurrentUser,
@@ -944,35 +998,20 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // answered as though the packet that exists were the one it
     // described (the round-2 review of car 983696b5 found kind and
     // subject compared, and nothing else).
+    //
+    // The body as SENT is kept for the second place this answer is
+    // given — after the adapter, when this check was passed by two
+    // admissions at once (backlog 9d2af748) — because everything below
+    // stamps server-owned values onto `job` that a comparison must not
+    // read as the caller's.
+    let as_sent = job.clone();
     match state.jobs.get_job(&job.id).await {
         Ok(Some(existing)) => {
             let owner_kept_as_sent =
                 crate::owner_resolution::kept_as_sent(state.roster.as_deref(), &job.owner_id).await;
             let differing =
                 admission_differences(&job, !opened_by_clock, owner_kept_as_sent, &existing);
-            return if differing.is_empty() {
-                (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "id": existing.id.to_string(),
-                        "already_admitted": true,
-                    })),
-                )
-                    .into_response()
-            } else {
-                (
-                    StatusCode::CONFLICT,
-                    // The field NAMES only: what that packet holds is a
-                    // read, and a read has its own policy; a create names
-                    // nothing of another packet but where it collides.
-                    Json(serde_json::json!({
-                        "error": "this id already names a packet that differs from this body",
-                        "id": existing.id.to_string(),
-                        "differing_fields": differing,
-                    })),
-                )
-                    .into_response()
-            };
+            return answer_the_packet_that_exists(&existing, differing);
         }
         Ok(None) => {}
         Err(e) => return persist_error_response(e),
@@ -1329,7 +1368,7 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // audit_log.timestamp, so live and replay must read the same
     // instant. Business dates (opened_on, `{day}` tokens) keep the
     // authoritative clock's `now`.
-    if let Err(e) = state
+    match state
         .jobs
         .create_job_with_steps_at(
             &job,
@@ -1340,7 +1379,46 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         )
         .await
     {
-        return persist_error_response(e);
+        Ok(crate::port::Admission::Admitted) => {}
+        // Another admission under this id passed the existence check
+        // with this one and reached the adapter first (backlog
+        // 9d2af748). Nothing of this request was written, so no
+        // `step.ready` is recorded below for steps that do not exist;
+        // the packet that won is answered as the check would have
+        // answered it, against the body as it was sent.
+        Ok(crate::port::Admission::AlreadyAdmitted) => {
+            return match state.jobs.get_job(&job.id).await {
+                Ok(Some(existing)) => {
+                    // Judged exactly as the existence check judges it —
+                    // the keep rule for the owner (dc7c91cc) and the
+                    // delivery-scoped keys left out (4bdb8150) — so a
+                    // re-send is answered the same whichever of the two
+                    // places it meets.
+                    let owner_kept_as_sent = crate::owner_resolution::kept_as_sent(
+                        state.roster.as_deref(),
+                        &as_sent.owner_id,
+                    )
+                    .await;
+                    let differing = admission_differences(
+                        &as_sent,
+                        !opened_by_clock,
+                        owner_kept_as_sent,
+                        &existing,
+                    );
+                    answer_the_packet_that_exists(&existing, differing)
+                }
+                Ok(None) => (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({
+                        "error": "this id was admitted by another request that no read can see",
+                        "id": job.id.to_string(),
+                    })),
+                )
+                    .into_response(),
+                Err(e) => persist_error_response(e),
+            };
+        }
+        Err(e) => return persist_error_response(e),
     }
 
     if !steps.is_empty() {
@@ -2628,6 +2706,10 @@ pub(super) struct EstateEventsQuery {
     /// Exact-match filter on the payload's top-level `scope`, e.g.
     /// `codebase` or `kubernetes-nodes`. Absent reads every series.
     scope: Option<String>,
+    /// One host's series: the payload's `host` stamp, or, on a row with
+    /// none (every observation), its first node's `id` (backlog
+    /// 111996f5 — see [`crate::port::EventWindow`]).
+    host: Option<String>,
     /// Only rows with `timestamp >= since` (RFC 3339).
     since: Option<chrono::DateTime<chrono::Utc>>,
     /// Only rows with `timestamp < until` — the before-cursor: the
@@ -2695,6 +2777,12 @@ pub(super) const LATEST_PER_KEYS: &[&str] = &["host"];
 /// /it/estate had no boss-gcp line for about half of every day. Grouped,
 /// the answer is each host's newest row and `total` counts hosts, so
 /// one page is the whole answer whenever rows == total.
+///
+/// `?host=` reads ONE host's series (backlog 111996f5). One row per host
+/// was not enough for the estate alarm, which needs a host's last three
+/// comparisons: reading `scope=host&limit=20` it held twenty forge rows
+/// and none of boss-gcp's, so boss-gcp read below its disk floor three
+/// days running and nothing was filed.
 pub(super) async fn list_estate_observations<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(_user): CurrentUser,
@@ -2737,6 +2825,7 @@ async fn estate_events<R: JobsRepository + 'static, B: EventBus + 'static>(
     // daily host exactly as unreadable as they were.
     let window = crate::port::EventWindow {
         scope: q.scope.clone(),
+        host: q.host.clone(),
         since: q.since,
         until: q.until,
         latest_per: q.latest_per.clone(),

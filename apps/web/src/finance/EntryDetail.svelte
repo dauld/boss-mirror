@@ -11,6 +11,9 @@
     type LedgerEntryDetail,
   } from './ledger';
   import { shortId } from '../data/ids';
+  import Link from '@boss/web-kit/ui/Link.svelte';
+  import { href } from '../router';
+  import { entrySearch } from './financeQuery';
   import { session } from '@boss/web-kit/session/session.svelte';
 
   type Props = {
@@ -80,7 +83,9 @@
       {#if !readOnly}
         {#if reverseState.kind === 'posted'}
           <span class="tb-reverse-result">
-            Reversal posted: <span class="mono">{shortId(reverseState.reversalId)}</span>
+            Reversal posted: <Link
+              to={href(`/ux/finance${entrySearch(reverseState.reversalId)}`)}
+              className="mono">{shortId(reverseState.reversalId)}</Link>
           </span>
         {:else}
           <button

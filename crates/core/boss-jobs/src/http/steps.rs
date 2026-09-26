@@ -1924,7 +1924,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     if let (Err(_), Some(id)) = (&written, reserved) {
         let jobs = &state.jobs;
         let sid = step.id;
-        crate::calendar_hook::release_after_refused_write(
+        let reheld = crate::calendar_hook::release_after_refused_write(
             state.calendar.as_ref(),
             id,
             &step,
@@ -1932,6 +1932,7 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
             move || async move { jobs.get_step(&sid).await.ok().flatten() },
         )
         .await;
+        record_lost_hold(&state, &stamp, reheld).await;
     }
     match written {
         // Landed over the very row `old` was read as, so `step` is what
@@ -1942,12 +1943,13 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         // the racer that placed it may be refused and hand it back.
         Ok(()) => {
             if took_held {
-                crate::calendar_hook::hold_for_landed_start(
+                let reheld = crate::calendar_hook::hold_for_landed_start(
                     state.calendar.as_ref(),
                     &step,
                     &user.id,
                 )
                 .await;
+                record_lost_hold(&state, &stamp, reheld).await;
             }
             crate::calendar_hook::after_step_written(
                 state.calendar.as_ref(),
@@ -3209,6 +3211,38 @@ async fn skip_open_step<R: JobsRepository + 'static, B: EventBus + 'static>(
 /// (backlog 29a7ea09), and its failure is returned rather than logged,
 /// because the step write that called this has already committed and
 /// its caller would otherwise be told the completion landed whole.
+/// Record a hold a step lost, when the calendar hook reports one
+/// (backlog 4bdb8150, the round-3 review of car 983696b5). The step
+/// write already landed or was already refused, so there is no answer
+/// left to change — the event is the record, stamped by this write
+/// (its actor, instant and partition), and the dispatcher rule
+/// `open-a-packet-when-a-step-loses-its-hold` turns it into a packet a
+/// person reads. Until this, the loss was a `tracing::warn` and nothing
+/// else. Any other outcome records nothing.
+///
+/// Best-effort, like the hook it reports on: a failure to record is
+/// logged at ERROR, because it is the loss of the only record of a loss.
+async fn record_lost_hold<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    stamp: &boss_core::publisher::EventStamp,
+    outcome: crate::calendar_hook::HookOutcome,
+) {
+    let crate::calendar_hook::HookOutcome::HoldLost(lost) = outcome else {
+        return;
+    };
+    let event = stamp.event(
+        events::STEP_HOLD_LOST,
+        events::step_hold_lost_payload(&lost),
+    );
+    if let Err(e) = state.jobs.record_events(std::slice::from_ref(&event)).await {
+        tracing::error!(
+            error = %e,
+            step_id = %lost.step_id,
+            "calendar: a step lost its hold and the event recording it was not written"
+        );
+    }
+}
+
 async fn close_job_on_terminal<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: &Arc<JobsApiState<R, B>>,
     job_id: &boss_core::job::JobId,

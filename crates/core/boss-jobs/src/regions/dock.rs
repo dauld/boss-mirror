@@ -170,6 +170,11 @@ pub(super) fn dock(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                     ),
                 ));
             }
+            // A TRAIN BEING MADE UP stands here (design e765b3fc §2a, car
+            // R1): collected, assembled, its PR opening — and its own
+            // trouble is read where it stands.
+            let made_up = trains_in(inputs, "dock");
+            findings.extend(train_findings(inputs, &made_up));
             // A TRAIN DUE IS CLEAR (decision 1): the boarding depth met is
             // the designed state two minutes after any departure, and it
             // painted the dock amber on every read.
@@ -179,6 +184,12 @@ pub(super) fn dock(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
                 format!("{parked} — the boarding depth is met, a train is due")
             } else {
                 parked
+            };
+            let clear_why = if made_up.is_empty() {
+                clear_why
+            } else {
+                let titles: Vec<&str> = made_up.iter().map(|(j, _)| j.title.as_str()).collect();
+                format!("{clear_why} — {} being made up", titles.join(", "))
             };
             let settled = settle(findings, clear_why, inputs.now);
             // Unknown is not zero: an edge nobody could judge boards (the
@@ -200,9 +211,11 @@ pub(super) fn dock(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
             } else {
                 settled
             };
+            // What the partition places here: the parked cars and any
+            // train being made up.
             region(
                 "dock",
-                Some(depth),
+                Some(count_in(inputs, "dock").unwrap_or(depth)),
                 bound,
                 UNIT,
                 settled,

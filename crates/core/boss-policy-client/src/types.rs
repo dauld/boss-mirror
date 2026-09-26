@@ -164,6 +164,17 @@ impl Resource {
     pub fn compensation() -> Self {
         Self::new("compensation")
     }
+    /// An employee's schedule — their availability, assignments, shift
+    /// patterns and week-grid row (backlog a621d091, 2026-09-25: every
+    /// scheduling read answered any session and any headerless
+    /// caller). An employee reads their own without a grant; this
+    /// resource is what anyone else needs, in a scope that covers them.
+    /// Not a shipped resource, for the reason `compensation` is not:
+    /// the read-only roles would inherit it, and one of them is the
+    /// anonymous visitor. Granted per role as policy rows.
+    pub fn schedule() -> Self {
+        Self::new("schedule")
+    }
     pub fn invoice() -> Self {
         Self::new("invoice")
     }
@@ -450,7 +461,7 @@ fn default_tier() -> AccessTier {
     AccessTier::User
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AccessTier {
     User,

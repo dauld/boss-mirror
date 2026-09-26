@@ -57,7 +57,7 @@ async fn gateway() -> (axum::Router, super::a_read_only_session_cannot_write::Hi
     let (upstream, hits) = recording_upstream().await;
     let reads = public_reads::PublicReads::resolve(&[
         "/api/workflows".to_string(),
-        "/api/jobs/summary".to_string(),
+        "/api/jobs/live".to_string(),
     ])
     .expect("declarable reads");
     (
@@ -177,7 +177,7 @@ async fn names_with_dots_and_every_ordinary_path_still_pass() {
     let forwarded: [(&str, Option<String>); 7] = [
         ("/ics/0123abcd.ics", None),
         ("/api/workflows/some-kind", None),
-        ("/api/jobs/summary", None),
+        ("/api/jobs/live", None),
         ("/api/jobs/v1.2", Some(admin())),
         ("/api/files/report.final.pdf", Some(admin())),
         ("/api/files/..hidden", Some(admin())),

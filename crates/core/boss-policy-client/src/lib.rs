@@ -11,7 +11,8 @@
 //! `boss-policy`'s sqlx + axum service-side dep tree.
 //!
 //! Caching: `ReqwestPolicyClient` keeps a 60s TTL cache keyed on
-//! `(user_id, action, resource)`. Invalidation is TTL-only; NATS-
+//! `(user_id, role, access_tier, action, resource)` — every input the
+//! decision reads (backlog 8878f85f; see `CacheKey`). Invalidation is TTL-only; NATS-
 //! driven invalidation on top of the TTL is a planned addition (D4).
 //!
 //! Fail-closed: if the HTTP call fails (no connection, a timeout, a
@@ -348,9 +349,32 @@ impl PolicyClient for SimBypassPolicyClient {
 // Reqwest adapter — the prod client
 // ---------------------------------------------------------------------------
 
+/// Every input the decision is a function of — so a cached decision is
+/// served only to a caller who would have been given the same one.
+///
+/// The engine reads the caller's `id` (its user overrides) and `role`
+/// (the rule id). Until backlog 8878f85f (2026-09-26) the key held a
+/// hash of the id ALONE, while the role arrives with the caller in
+/// `x-boss-user` — asserted, on the LAN machine door — so for the TTL a
+/// decision made for one role was served to the same id presenting
+/// another: a narrower session got a wider cached Allow, or the reverse.
+/// boss-sim's `put_as` is an in-tree shape of it: the simulated
+/// employee's id with role `system-sim`. `access_tier` is keyed too: the
+/// service receives it, and keying it is free.
+///
+/// NOT keyed, deliberately: territory, direct reports and department.
+/// The decision does not read them — the cache holds the `Scope`, and
+/// [`scope_to_predicate`] turns it into rows from the LIVE caller on
+/// every request, after the cache. Key one of them only if the engine
+/// ever starts deciding on it.
+///
+/// The id and role are held as written, not hashed: a key that decides
+/// authorization must not be able to collide.
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 struct CacheKey {
-    user_id_hash: u64,
+    user_id: String,
+    role: String,
+    access_tier: AccessTier,
     action: Action,
     resource: Resource,
 }
@@ -369,10 +393,18 @@ pub struct ReqwestPolicyClient {
 
 impl ReqwestPolicyClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::with_timeout(base_url, std::time::Duration::from_secs(5))
+    }
+
+    /// `new` with the whole-request timeout named. Private: production
+    /// takes 5 s through `new`; the loopback tests take a wider one,
+    /// because a host too starved to answer in 5 s turned their status
+    /// assertions into transport errors (train 40256c45, 2026-09-26).
+    fn with_timeout(base_url: impl Into<String>, timeout: std::time::Duration) -> Self {
         Self {
             base_url: base_url.into(),
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
+                .timeout(timeout)
                 .build()
                 .expect("reqwest client"),
             cache: RwLock::new(HashMap::new()),
@@ -380,12 +412,11 @@ impl ReqwestPolicyClient {
         }
     }
 
-    fn cache_key(user_id: &str, action: Action, resource: Resource) -> CacheKey {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        user_id.hash(&mut h);
+    fn cache_key(user: &User, action: Action, resource: Resource) -> CacheKey {
         CacheKey {
-            user_id_hash: h.finish(),
+            user_id: user.id.clone(),
+            role: user.role.clone(),
+            access_tier: user.access_tier,
             action,
             resource,
         }
@@ -426,7 +457,7 @@ impl PolicyClient for ReqwestPolicyClient {
         action: Action,
         resource: Resource,
     ) -> Result<Decision, PolicyClientError> {
-        let key = Self::cache_key(&user.id, action, resource.clone());
+        let key = Self::cache_key(user, action, resource.clone());
         if let Some(d) = self.cached(&key).await {
             return Ok(d);
         }
@@ -833,6 +864,22 @@ mod tests {
         (format!("http://{addr}"), seen)
     }
 
+    /// The client every loopback-stub test asks through: the production
+    /// adapter with a 60 s timeout in place of `new`'s 5 s.
+    ///
+    /// These tests judge how the client maps an ANSWER (a 5xx, a 4xx, a
+    /// decision per role), so the transport must not be what decides
+    /// them. Train 40256c45's gate, 2026-09-26: the lib binary took
+    /// 19.25 s (0.02 s on the dev pod), pure tests finished after the
+    /// HTTP ones had failed, and the two outage tests red on
+    /// "error sending request" — the 5 s timeout firing on a starved
+    /// host before the stub answered. The same tree was green on the
+    /// car's own gate. A stub made to answer after 6 s reproduces both
+    /// failures verbatim through `new`, and passes through this.
+    fn loopback_client(url: String) -> ReqwestPolicyClient {
+        ReqwestPolicyClient::with_timeout(url, std::time::Duration::from_secs(60))
+    }
+
     /// A base URL nothing listens on: bound, read, and released.
     async fn dark_policy_url() -> String {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -844,7 +891,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_policy_5xx_is_an_outage_and_the_next_check_asks_again() {
         let (url, seen) = policy_stub(1, axum::http::StatusCode::SERVICE_UNAVAILABLE).await;
-        let c = ReqwestPolicyClient::new(url);
+        let c = loopback_client(url);
 
         let first = c.check(&user(), Action::Read, Resource::job()).await;
         match &first {
@@ -899,7 +946,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_policy_4xx_still_refuses_and_is_not_cached() {
         let (url, seen) = policy_stub(1, axum::http::StatusCode::BAD_REQUEST).await;
-        let c = ReqwestPolicyClient::new(url);
+        let c = loopback_client(url);
         let first = c
             .check(&user(), Action::Read, Resource::job())
             .await
@@ -911,6 +958,104 @@ mod tests {
             .unwrap();
         assert!(second.is_allowed(), "not a decision the service made");
         assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    // -- The cache is keyed on what the decision reads (backlog 8878f85f)
+    //
+    // The engine decides on the caller's id (its overrides) AND its role
+    // (the rule id), and the role arrives with the caller in x-boss-user.
+    // Until 2026-09-26 the cache was keyed on the id alone, so for 60 s
+    // one role's decision was served to the same id presenting another:
+    // a narrower session got a wider cached Allow, or the reverse.
+
+    /// A policy service that decides by the caller's ROLE, as the real
+    /// engine's rule lookup does: `platform-admin` is allowed everything,
+    /// every other role is denied. And how many checks it has seen.
+    async fn role_policy_stub() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let app = axum::Router::new().route(
+            "/api/policy/check",
+            axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let role = body["user"]["role"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string();
+                    axum::Json(if role == "platform-admin" {
+                        Decision::Allow { scope: Scope::All }
+                    } else {
+                        Decision::Deny {
+                            reason: format!("no active rule for role {role}"),
+                        }
+                    })
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (format!("http://{addr}"), seen)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_same_id_with_two_roles_gets_two_decisions() {
+        use std::sync::atomic::Ordering;
+        let (url, seen) = role_policy_stub().await;
+        let c = loopback_client(url);
+        let admin = caller("emp-042", "platform-admin");
+        let clerk = caller("emp-042", "clerk");
+
+        // Wider first: the admin's Allow must not reach the clerk.
+        let wide = c.check(&admin, Action::Update, Resource::step()).await;
+        assert!(wide.unwrap().is_allowed(), "platform-admin is allowed");
+        let narrow = c.check(&clerk, Action::Update, Resource::step()).await;
+        assert!(
+            !narrow.unwrap().is_allowed(),
+            "the same id as a clerk inside the TTL is served the admin's Allow"
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "each role is asked");
+
+        // And the reverse: a fresh client, narrower first.
+        let (url, seen) = role_policy_stub().await;
+        let c = loopback_client(url);
+        assert!(
+            !c.check(&clerk, Action::Update, Resource::step())
+                .await
+                .unwrap()
+                .is_allowed()
+        );
+        assert!(
+            c.check(&admin, Action::Update, Resource::step())
+                .await
+                .unwrap()
+                .is_allowed(),
+            "the admin is not served the clerk's cached Deny"
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), 2);
+
+        // The same id, role and tier inside the TTL is still one ask.
+        assert!(
+            c.check(&admin, Action::Update, Resource::step())
+                .await
+                .unwrap()
+                .is_allowed()
+        );
+        assert_eq!(seen.load(Ordering::SeqCst), 2, "a repeat stays cached");
+
+        // The access tier is part of the key too: the service receives
+        // it, so a caller presenting another tier is asked again.
+        let operator = User {
+            access_tier: crate::AccessTier::Operator,
+            ..admin.clone()
+        };
+        c.check(&operator, Action::Update, Resource::step())
+            .await
+            .unwrap();
+        assert_eq!(seen.load(Ordering::SeqCst), 3, "another tier is asked");
     }
 
     #[tokio::test]

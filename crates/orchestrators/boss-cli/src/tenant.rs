@@ -283,7 +283,7 @@ pub const CONTRACT: &[Entry] = &[
                 `equipment`, `exec`, `finance`, `marketing-assets`, `parts`, `qa`, \
                 `shipping`, `shop`, `sim`, `support`, `warehouse`; `[labels] <dotted.key> = str`; \
                 `[gateway] public_reads = [path, ...]` — the API reads the instance answers WITHOUT \
-                a session, from the four the gateway can offer (`/api/workflows`, `/api/jobs/summary`, \
+                a session, from the three the gateway can offer (`/api/workflows`, \
                 `/api/jobs/live`, `/api/events/public-tail`); absent is none (design 11e60367). \
                 A manifest that EXISTS but does not parse refuses the gateway's boot naming the \
                 file and toml's line (backlog 4f1ba1f9); only an absent file is an empty manifest",
@@ -1540,10 +1540,10 @@ edit_level = \"data\"\n\
 # The API reads the instance answers WITHOUT a session. Absent is\n\
 # none — every /api read needs a session — which is what a company\n\
 # wants; a public demo lists the reads its landing page makes, from\n\
-# the four the gateway can offer (docs/tenant-contract.md, the\n\
+# the three the gateway can offer (docs/tenant-contract.md, the\n\
 # tenant.toml row). A path outside them refuses the gateway's boot.\n\
 [gateway]\n\
-# public_reads = [\"/api/workflows\", \"/api/jobs/summary\", \"/api/jobs/live\", \"/api/events/public-tail\"]\n",
+# public_reads = [\"/api/workflows\", \"/api/jobs/live\", \"/api/events/public-tail\"]\n",
         display = s.display_name,
         name = s.name,
     )

@@ -41,6 +41,75 @@ async fn post_invoice_emits_commerce_invoice_created_event() {
     );
 }
 
+/// Backlog 9d2af748: a second POST under one id — a retried click, a
+/// redelivered issue — writes nothing, records no second
+/// `commerce.invoice.created` (the event that drives the finished-goods
+/// consume), and answers 200 saying so rather than 201.
+#[tokio::test]
+async fn post_invoice_twice_answers_the_invoice_once_and_records_one_event() {
+    let app = CommerceTestApp::new();
+    let inv = invoice_fixture("inv-twice-1");
+
+    TestRequest::post("/api/commerce/invoices/create")
+        .json(&inv)
+        .send(&app.router)
+        .await
+        .assert_status(StatusCode::CREATED);
+    let again = TestRequest::post("/api/commerce/invoices/create")
+        .json(&inv)
+        .send(&app.router)
+        .await;
+    again.assert_status(StatusCode::OK);
+    let body: serde_json::Value = again.assert_json();
+    assert_eq!(body["already_created"], true, "{body}");
+    assert_eq!(app.recorded_of_kind("commerce.invoice.created").len(), 1);
+
+    // A different invoice under the same id is refused, naming why.
+    let mut other = inv.clone();
+    other.amount_cents = 1;
+    other.line_items[0].amount_cents = 1;
+    let refused = TestRequest::post("/api/commerce/invoices/create")
+        .json(&other)
+        .send(&app.router)
+        .await;
+    refused.assert_status(StatusCode::CONFLICT);
+    assert_eq!(app.recorded_of_kind("commerce.invoice.created").len(), 1);
+}
+
+/// The batch the dispatcher's `commerce.invoice.issue` posts: a
+/// redelivered issue writes nothing, so `inserted` reads 0, and
+/// `already_created` names the invoice that was answered rather than
+/// written — the handler converges on it instead of NAKing.
+#[tokio::test]
+async fn a_redelivered_batch_names_the_invoice_it_did_not_write() {
+    let app = CommerceTestApp::new();
+    let inv = invoice_fixture("inv-batch-twice-1");
+
+    let first = TestRequest::post("/api/commerce/invoices/batch")
+        .json(&vec![inv.clone()])
+        .send(&app.router)
+        .await;
+    first.assert_status(StatusCode::OK);
+    let first: serde_json::Value = first.assert_json();
+    assert_eq!(first["inserted"], 1, "{first}");
+    assert_eq!(first["already_created"], serde_json::json!([]), "{first}");
+
+    let again = TestRequest::post("/api/commerce/invoices/batch")
+        .json(&vec![inv])
+        .send(&app.router)
+        .await;
+    again.assert_status(StatusCode::OK);
+    let again: serde_json::Value = again.assert_json();
+    assert_eq!(again["inserted"], 0, "nothing was written: {again}");
+    assert_eq!(
+        again["already_created"],
+        serde_json::json!(["inv-batch-twice-1"]),
+        "{again}"
+    );
+    assert_eq!(again["skipped"], serde_json::json!([]), "{again}");
+    assert_eq!(app.recorded_of_kind("commerce.invoice.created").len(), 1);
+}
+
 #[tokio::test]
 async fn post_invoice_with_invalid_json_returns_4xx() {
     let app = CommerceTestApp::new();

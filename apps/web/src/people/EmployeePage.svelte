@@ -14,7 +14,7 @@
   import { calendarFeedAccess } from './calendarFeedAccess';
   import { session } from '@boss/web-kit/session/session.svelte';
   import { classLabel, employeeRecordRead, employmentTone, type Employee } from './types';
-  import { directReports, tenureYears } from './utils';
+  import { directReports, reportingChain, tenureYears, type ChainEnd } from './utils';
   import { href } from '../router';
   import { classesFor } from '@boss/web-kit/session/classes.svelte';
   import { loadingRead, readStateOfResponse, type ReadState } from '../data/readState';
@@ -96,20 +96,19 @@
   );
   let tenure = $derived(employee ? tenureYears(employee) : 0);
 
-  let chain = $derived.by(() => {
-    if (!employee) return [] as Employee[];
-    const list: Employee[] = [];
-    let current = employee.manager_id
-      ? employeeById.get(employee.manager_id)
-      : undefined;
-    while (current) {
-      list.push(current);
-      current = current.manager_id
-        ? employeeById.get(current.manager_id)
-        : undefined;
-    }
-    return list;
-  });
+  // The walk says where it stopped: only a last manager with no
+  // manager_id is "the board". A manager_id the answered roster does not
+  // hold used to end the walk the same way and print "reports to board"
+  // for someone whose record names a manager (backlog 1a83fe98).
+  let walk = $derived(
+    employee ? reportingChain(employee, employeeById) : { chain: [] as Employee[], end: { kind: 'board' } as ChainEnd },
+  );
+  let chain = $derived(walk.chain);
+  let chainEnd = $derived(walk.end);
+  function nameOf(id: string): string {
+    const who = employee?.id === id ? employee : employeeById.get(id);
+    return who?.name ?? id;
+  }
 
   type CertState = 'ok' | 'expiring' | 'critical';
   function certState(expiresOn: string): CertState {
@@ -204,7 +203,7 @@
             <p class="empty load-failed" role="alert">
               Couldn't load the reporting chain — {rosterRead.error}
             </p>
-          {:else if chain.length === 0}
+          {:else if chain.length === 0 && chainEnd.kind === 'board'}
             <p class="empty">No manager — reports to board.</p>
           {:else}
             <ol class="checklist" style="padding-left:0; list-style:none">
@@ -217,6 +216,15 @@
                   <span style="color:var(--static)"> · {classLabel(m.role, roleClasses)}</span>
                 </li>
               {/each}
+              {#if chainEnd.kind === 'unresolved'}
+                <li class="chain-gap">
+                  → <code>{chainEnd.managerId}</code> — the manager of {nameOf(chainEnd.of)}, not in the roster this page read
+                </li>
+              {:else if chainEnd.kind === 'cycle'}
+                <li class="chain-gap">
+                  → <code>{chainEnd.managerId}</code> — the manager of {nameOf(chainEnd.of)}, already in this chain: the manager records loop
+                </li>
+              {/if}
             </ol>
           {/if}
       </Section>

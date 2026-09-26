@@ -257,21 +257,25 @@ pub async fn recent_by_kind(
     window: &KindWindow<'_>,
     limit: i64,
 ) -> Result<KindPage, String> {
+    // `$5` is the host (backlog 111996f5): a row's `host` stamp, or, on
+    // a row with none — every estate observation — its first node's id.
     const WHERE: &str = "WHERE kind = $1 \
          AND ($2::text IS NULL OR payload->>'scope' = $2) \
          AND ($3::timestamptz IS NULL OR timestamp >= $3) \
-         AND ($4::timestamptz IS NULL OR timestamp < $4)";
+         AND ($4::timestamptz IS NULL OR timestamp < $4) \
+         AND ($5::text IS NULL OR COALESCE(payload->>'host', payload->'nodes'->0->>'id') = $5)";
     if let Some(key) = window.latest_per {
         return newest_per_key(pool, kind, window, key, WHERE, limit).await;
     }
     let rows = sqlx::query_as::<_, AuditEntry>(&format!(
         "SELECT event_id, timestamp, source, kind, payload FROM audit_log {WHERE} \
-         ORDER BY timestamp DESC LIMIT $5"
+         ORDER BY timestamp DESC LIMIT $6"
     ))
     .bind(kind)
     .bind(window.scope)
     .bind(window.since)
     .bind(window.until)
+    .bind(window.host)
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -282,6 +286,7 @@ pub async fn recent_by_kind(
             .bind(window.scope)
             .bind(window.since)
             .bind(window.until)
+            .bind(window.host)
             .fetch_one(pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -313,27 +318,29 @@ async fn newest_per_key(
 ) -> Result<KindPage, String> {
     let rows = sqlx::query_as::<_, AuditEntry>(&format!(
         "SELECT event_id, timestamp, source, kind, payload FROM ( \
-           SELECT DISTINCT ON (payload->>$6::text) event_id, timestamp, source, kind, payload \
+           SELECT DISTINCT ON (payload->>$7::text) event_id, timestamp, source, kind, payload \
            FROM audit_log {filter} \
-           ORDER BY payload->>$6::text, timestamp DESC, event_id DESC \
-         ) newest ORDER BY timestamp DESC, event_id DESC LIMIT $5"
+           ORDER BY payload->>$7::text, timestamp DESC, event_id DESC \
+         ) newest ORDER BY timestamp DESC, event_id DESC LIMIT $6"
     ))
     .bind(kind)
     .bind(window.scope)
     .bind(window.since)
     .bind(window.until)
+    .bind(window.host)
     .bind(limit)
     .bind(key)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
     let (total,): (i64,) = sqlx::query_as(&format!(
-        "SELECT COUNT(*)::BIGINT FROM (SELECT DISTINCT payload->>$5::text FROM audit_log {filter}) groups"
+        "SELECT COUNT(*)::BIGINT FROM (SELECT DISTINCT payload->>$6::text FROM audit_log {filter}) groups"
     ))
     .bind(kind)
     .bind(window.scope)
     .bind(window.since)
     .bind(window.until)
+    .bind(window.host)
     .bind(key)
     .fetch_one(pool)
     .await
@@ -345,10 +352,13 @@ async fn newest_per_key(
 /// `scope`, and a half-open `[since, until)` window on `timestamp`.
 /// Every field absent reads the whole kind. `latest_per`, a top-level
 /// payload key, reduces the window to the newest row per distinct
-/// value of that key (backlog 725532ab).
+/// value of that key (backlog 725532ab). `host` selects one host's
+/// series — the payload's `host`, or its first node's `id` on a row
+/// with no `host` stamp, as every estate observation is (111996f5).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct KindWindow<'a> {
     pub scope: Option<&'a str>,
+    pub host: Option<&'a str>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
     pub latest_per: Option<&'a str>,
@@ -425,6 +435,59 @@ pub async fn step_flow_cube(
          GROUP BY 1, 2, 3, 4",
     )
     .bind(since)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// The log's head: its highest id, 0 on an empty log. The one read the
+/// yard's mover (boss-jobs `moves`, design e765b3fc §3) takes on a quiet
+/// second — the primary key's own maximum, constant-time.
+pub async fn log_head(pool: &PgPool) -> Result<i64, String> {
+    sqlx::query_scalar("SELECT COALESCE(MAX(id), 0)::BIGINT FROM audit_log")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// One log row that names a packet, as the mover cites it.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct PacketEventRow {
+    pub id: i64,
+    pub event_id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub kind: String,
+    /// `payload.job_id` (a step's events), else `payload.id` (the job's
+    /// own lifecycle events).
+    pub packet: String,
+}
+
+/// The rows after `after` up to and including `upto` that name a
+/// packet — the job and step state events (`jobs.job.*`, `jobs.step.*`)
+/// and the step markers (`step.*`) — oldest first, at most `limit`.
+/// Bounded on the primary key, so a tick reads exactly its slice of the
+/// log however long the log is. `created_at`, never `timestamp`: event
+/// time is sim-authoritative on a demo deployment (see
+/// [`step_flow_cube`]), and a move is stamped with the wall instant it
+/// was written.
+pub async fn packet_events(
+    pool: &PgPool,
+    after: i64,
+    upto: i64,
+    limit: i64,
+) -> Result<Vec<PacketEventRow>, String> {
+    sqlx::query_as::<_, PacketEventRow>(
+        "SELECT id, event_id, created_at, kind, \
+                COALESCE(payload->>'job_id', payload->>'id') AS packet \
+         FROM audit_log \
+         WHERE id > $1 AND id <= $2 \
+           AND (kind LIKE 'jobs.job.%' OR kind LIKE 'jobs.step.%' OR kind LIKE 'step.%') \
+           AND COALESCE(payload->>'job_id', payload->>'id') IS NOT NULL \
+         ORDER BY id LIMIT $3",
+    )
+    .bind(after)
+    .bind(upto)
+    .bind(limit)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())

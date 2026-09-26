@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------
+# The broker revokes the forge host checkout's OLD token once the host
+# has recorded delivery of the new one (design 1c90d183, D1).
+#
+# THE GAP THIS CLOSES. For a mount-delivered credential the revoke
+# follows the verify in one firing, because the consumers read the
+# Secret itself. The forge host's checkout reads a FILE its converge
+# fills from the Secret on its next pass, up to ten minutes later;
+# revoking in that gap breaks the forge fetch, the GitHub publish's
+# forge push and the tenant-source check until the pass runs. So
+# `broker-rotates-the-forge-host-checkout-token` stops after verify,
+# and the host's deposit (infra/forge/credential-deposit.sh) completes
+# the packet's `delivered` step — a dedicated kind,
+# `credential-delivery`, so this fires on nothing else — carrying the
+# last eight of the value it installed. The handler then re-plans (the
+# Secret already holds this packet's token; a delivery firing never
+# mints), compares the host's last eight with the Secret's, and only
+# then revokes the token the scope step named.
+#
+# THE ARGS ARE THE ROTATION RULE'S, verbatim: one declaration, two
+# triggers. crates/core/boss-dispatcher/tests/
+# forge_host_checkout_token_rules.rs pins them equal (CLAUDE.md §9a).
+[[rule]]
+name = "broker-revokes-the-forge-host-checkout-token-on-delivery"
+why = """
+EXTERNAL GLUE, the same class as the rotation rule it completes: the
+effect is a DELETE on the forge's admin API, which no Workflow
+definition can address, and the condition is a fact only the host can
+observe — that it now holds the new value — which it records as the
+packet's `delivered` step. It adds no routing: it advances the very
+packet that fired it and spawns nothing. Design 1c90d183 (2026-09-26).
+"""
+on_event = "step.done.credential-delivery"
+when = 'subject_id = "forge-host-checkout-token"'
+[[rule.do]]
+handler = "credential.rotate.forgejo"
+args = { forge_user = "\"david\"", secret_namespace = "\"boss\"", secret_name = "\"forge-host-checkout-token\"", secret_key = "\"token\"", scopes = "\"write:repository\"", verify_repo = "\"david/boss\"", delivery = "\"off-host\"", spare = "\"boss-gcp,boss-dev-forge-token-*\"" }

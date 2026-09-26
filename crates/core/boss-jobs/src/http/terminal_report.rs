@@ -41,7 +41,8 @@ pub(super) struct TerminalReportQuery {
 /// a 200 — absence of packets is a fact the report states, not an
 /// error. Policy is the same read gate as every sibling GET under
 /// /api/workflows (`Action::Read` on `Resource::workflow`), refused
-/// with 403 — deliberately not the ungated shape of /api/jobs/summary.
+/// with 403 — deliberately not the ungated shape /api/jobs/summary had
+/// until 19f08bd6 gated it too.
 pub(super) async fn workflow_terminal_report<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(user): CurrentUser,

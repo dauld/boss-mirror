@@ -44,6 +44,9 @@ fn build_app(pool: PgPool) -> Router {
         repo: Arc::new(PgScheduling::new(pool)),
         publisher: Some(publisher),
         clock: Arc::new(boss_clock_client::WallClockClient),
+        // The schedule reads' gate (a621d091) is not under test here:
+        // the token doors decide on the caller alone and ask no policy.
+        policy: Arc::new(boss_policy_client::PermissivePolicyClient),
     })
 }
 

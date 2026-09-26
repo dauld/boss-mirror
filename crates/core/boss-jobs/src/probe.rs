@@ -579,10 +579,22 @@ pub fn rewrites_its_exit_status(probe: &str) -> Option<i32> {
 /// already errored). Any one of them counting would have exempted the
 /// probes this exists to catch.
 ///
+/// A VARIABLE THE SHELL COUNTED NEEDS NO GUARD, and is not reported:
+/// one whose every assignment is `n=$(… | grep -c …)` or
+/// `n=$(… | wc -l)` (`counted_by_the_shell`). This used to be
+/// reported "though it cannot be `null`", at a cost this comment called
+/// one line a builder reads and ignores — and that was the cost: car
+/// 59c8ea8a's four `grep -c` counts drew it, the fixtures of 8ac42ee5
+/// drew it, and a warning that is usually wrong teaches every builder
+/// to read past the one that is right (backlog 0e4e8c73). The `${n:-0}`
+/// those probes also carry is still NOT a guard on its own; the count
+/// is what makes them safe, and a jq-read number behind the same
+/// default is still reported.
+///
 /// DELIBERATELY COARSE, like its two siblings, and a warning because of
 /// it: a `case` anywhere in the text counts for every test in it, and a
-/// `[ "$n" -lt 3 ]` on a variable the probe set from `wc -l` is
-/// reported though it cannot be `null`. The cost when it is wrong is one
+/// count read any way but the last stage of a pipeline (`wc -l < f`,
+/// `grep -c x file`) is still reported. The cost when it is wrong is one
 /// line a builder reads and ignores; the cost of the alternative is a
 /// shell parser, or a car unproven for a day.
 pub fn compares_an_unguarded_number(probe: &str) -> Option<&str> {
@@ -599,8 +611,166 @@ pub fn compares_an_unguarded_number(probe: &str) -> Option<&str> {
                 let after = probe[i + op.len()..].chars().next();
                 before.is_some_and(char::is_whitespace) && after.is_none_or(char::is_whitespace)
             })
-            .find_map(|(i, _)| tested_variable(&probe[..i]))
+            .find_map(|(i, _)| {
+                tested_variable(&probe[..i]).filter(|name| !counted_by_the_shell(probe, name))
+            })
     })
+}
+
+/// Is every assignment of `name` in the text a count the shell prints —
+/// `name=$(… | grep -c …)` or `name=$(… | wc -l)`, optionally followed
+/// by `|| true` or `|| :` — and is there at least one? Such a variable
+/// holds digits whatever happened upstream: the count reads stdin, so a
+/// failed `git show` in front of it yields `0`, never `null` or nothing
+/// (backlog 0e4e8c73). The count must be the LAST stage of a pipeline
+/// of two or more: a `grep -c pat file` prints nothing at all when the
+/// file is missing, and anything after the count (a `jq`, an `echo`)
+/// prints what it likes. Quotes are respected, so an `echo "n=$n"` is
+/// not an assignment and a `(` in a grep pattern does not end the
+/// substitution early; a `$(` opens a fresh quoting context, as it does
+/// in the shell, so `n="$(… | wc -l)"` reads the same as the bare form.
+fn counted_by_the_shell(probe: &str, name: &str) -> bool {
+    let bare = unquoted_bytes(probe);
+    let assignments: Vec<usize> = probe
+        .match_indices(&format!("{name}="))
+        .map(|(i, _)| i)
+        .filter(|&i| bare[i] && at_command_position(probe, &bare, i))
+        .collect();
+    !assignments.is_empty()
+        && assignments.iter().all(|&i| {
+            let value = &probe[i + name.len() + 1..];
+            value
+                .strip_prefix("$(")
+                .or_else(|| value.strip_prefix("\"$("))
+                .and_then(substitution_body)
+                .is_some_and(is_a_piped_count)
+        })
+}
+
+/// One flag per byte: is it outside every quote and not escaped? A
+/// quote character itself is not bare. Coarse, like the scans around
+/// it: a `"` nested inside a `$(…)` inside double quotes closes the
+/// outer quote here, which leaves the variable reported, not excused.
+fn unquoted_bytes(text: &str) -> Vec<bool> {
+    let mut bare = vec![false; text.len()];
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    for (i, c) in text.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if single {
+            single = c != '\'';
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == '\'' && !double {
+            single = true;
+        } else if c == '"' {
+            double = !double;
+        } else if !double {
+            bare[i] = true;
+        }
+    }
+    bare
+}
+
+/// Does an assignment at `i` start a command — at the start of the
+/// text, after an unquoted separator, or after a keyword that takes one?
+fn at_command_position(text: &str, bare: &[bool], i: usize) -> bool {
+    let head = text[..i].trim_end_matches([' ', '\t']);
+    match head.char_indices().next_back() {
+        None => true,
+        Some((j, c)) if ";\n&|({".contains(c) => bare[j],
+        Some(_) => ["then", "do", "else", "local", "export", "readonly"]
+            .iter()
+            .any(|kw| {
+                head.strip_suffix(kw).is_some_and(|rest| {
+                    rest.chars()
+                        .next_back()
+                        .is_none_or(|c| c.is_whitespace() || c == ';')
+                })
+            }),
+    }
+}
+
+/// The text of a `$(…)` up to its closing `)`, given everything after
+/// the `$(`. The inside is its own quoting context, as in the shell.
+fn substitution_body(after_open: &str) -> Option<&str> {
+    let bare = unquoted_bytes(after_open);
+    let mut depth = 0usize;
+    after_open
+        .char_indices()
+        .filter(|(i, _)| bare[*i])
+        .find_map(|(i, c)| match c {
+            '(' => {
+                depth += 1;
+                None
+            }
+            ')' if depth == 0 => Some(&after_open[..i]),
+            ')' => {
+                depth -= 1;
+                None
+            }
+            _ => None,
+        })
+}
+
+/// Is `body` a pipeline of two or more stages ending in `grep -c` /
+/// `grep --count` or exactly `wc -l`, with nothing after it but an
+/// optional `|| true` or `|| :`?
+fn is_a_piped_count(body: &str) -> bool {
+    let bare = unquoted_bytes(body);
+    let bytes = body.as_bytes();
+    // Where the pipeline ends: the first unquoted `||`, `&&`, `&`, `;`
+    // or newline outside a nested `(…)`, or the end of the body.
+    let mut depth = 0usize;
+    let mut pipes = Vec::new();
+    let mut stop = None;
+    for (i, &b) in bytes.iter().enumerate() {
+        if !bare[i] {
+            continue;
+        }
+        match b {
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            b'|' if depth == 0 && bytes.get(i + 1) != Some(&b'|') => pipes.push(i),
+            b'|' | b'&' | b';' | b'\n' if depth == 0 => {
+                stop = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let pipeline_end = stop.unwrap_or(body.len());
+    let tail_is_harmless = stop.is_none_or(|s| {
+        body[s..]
+            .strip_prefix("||")
+            .is_some_and(|rest| matches!(rest.trim(), "true" | ":"))
+    });
+    let Some(&last_pipe) = pipes.last() else {
+        return false;
+    };
+    if !tail_is_harmless {
+        return false;
+    }
+    let last_stage = &body[last_pipe + 1..pipeline_end];
+    // A word counts as a flag only if it begins outside quotes: a `-c`
+    // inside a quoted pattern is text, not an option.
+    let start = last_pipe + 1;
+    let words: Vec<(&str, bool)> = last_stage
+        .split_whitespace()
+        .map(|w| {
+            let at = start + (w.as_ptr() as usize - last_stage.as_ptr() as usize);
+            (w, bare[at])
+        })
+        .collect();
+    match words.first() {
+        Some(&("grep" | "egrep" | "fgrep", true)) => words[1..].iter().any(|&(w, unquoted)| {
+            unquoted
+                && (w == "--count"
+                    || (w.starts_with('-') && !w.starts_with("--") && w.contains('c')))
+        }),
+        Some(&("wc", true)) => words[1..].iter().map(|&(w, _)| w).eq(["-l"]),
+        _ => false,
+    }
 }
 
 /// The shell's six integer comparisons — the operators `[` and `[[`
@@ -635,7 +805,9 @@ fn tested_variable(head: &str) -> Option<&str> {
 /// Does the text, anywhere, stop a non-number before it reaches a
 /// test? Whitespace is dropped first so `select(. != null)` and
 /// `select(.!=null)` read the same; `select(.field != null)` does not,
-/// and must not (see [`compares_an_unguarded_number`]).
+/// and must not (see [`compares_an_unguarded_number`]). This judges the
+/// TEXT; a variable that needs no guard because of what produced it is
+/// judged per variable, by [`counted_by_the_shell`].
 fn guards_against_a_non_number(probe: &str) -> bool {
     let packed: String = probe.split_whitespace().collect();
     packed.contains("//empty")
@@ -1993,6 +2165,85 @@ echo "ONE-HOME-FOR-A-DISPATCHER-RULE""#;
                 compares_an_unguarded_number(probe),
                 None,
                 "not the shape: {probe}"
+            );
+        }
+    }
+
+    /// Car 59c8ea8a's `park_probe`, VERBATIM off the gate-run (read
+    /// 2026-09-26): four counts, each the last stage of a pipeline, each
+    /// compared with `-ge` behind a `${x:-0}`. The pattern of the fourth
+    /// carries an unbalanced `(` inside single quotes, so a reader that
+    /// counts parentheses without quotes cannot find where its
+    /// substitution ends.
+    const THE_FINANCE_PROBE_OF_COUNTS: &str = r##"cat_=$(git show HEAD:apps/web/src/shell/nav-catalog.ts | grep -c "path: '/ux/finance'.*department: 'finance'"); page=$(git show HEAD:apps/web/src/finance/FinancePage.svelte | grep -c '<DepartmentThirds code={department} />'); app=$(git show HEAD:apps/web/src/App.svelte | grep -c 'department={ROUTE_CATALOG.finance.department'); fn=$(git show HEAD:apps/web/src/departments/department.ts | grep -c '^export function waitingAt('); if [ "${cat_:-0}" -ge 1 ] && [ "${page:-0}" -ge 1 ] && [ "${app:-0}" -ge 1 ] && [ "${fn:-0}" -ge 1 ]; then echo 'finance page mounts the finance department thirds'; exit 0; fi; echo "judged false: catalog=$cat_ page=$page app=$app waitingAt=$fn"; exit 1"##;
+
+    /// A COUNT THE SHELL PRINTS CANNOT BE `null` (backlog 0e4e8c73). A
+    /// `grep -c` or `wc -l` at the end of a pipeline reads stdin, so it
+    /// prints a number even when the stage in front of it failed — and
+    /// the warning on every such probe was the one a builder learns to
+    /// read past. Car 59c8ea8a's probe, the two 8ac42ee5 probes (a
+    /// trailing `|| true` included) and the minimal shapes are silent.
+    #[test]
+    fn a_variable_set_by_a_piped_count_is_not_reported() {
+        for probe in [
+            THE_FINANCE_PROBE_OF_COUNTS,
+            REGION_PROBE,
+            CLAIMS_PROBE,
+            "n=$(git show HEAD:a.ts | grep -c zoom); [ \"${n:-0}\" -ge 1 ] && echo claim:ok",
+            "n=$(git show HEAD:a.ts | grep -c zoom); [ \"$n\" -ge 1 ] && echo claim:ok",
+            "n=$(git show HEAD:a.ts | grep -ic 'zoom|pan'); [ \"$n\" -ge 1 ] && echo claim:ok",
+            "n=$(git show HEAD:a.ts | grep --count zoom || :); [ \"$n\" -ge 1 ] && echo claim:ok",
+            "n=\"$(git ls-files crates | wc -l)\"\nif [ \"$n\" -lt 3 ]; then exit 1; fi; echo claim:ok",
+        ] {
+            assert_eq!(
+                compares_an_unguarded_number(probe),
+                None,
+                "a count: {probe}"
+            );
+        }
+    }
+
+    /// WHAT IS NOT A COUNT, and still reported. A count that jq reads
+    /// afterwards is jq's output again; a `grep -c` given a file of its
+    /// own prints nothing when the file is missing; a variable set
+    /// once by a count and once by jq is only as safe as the jq; `wc`
+    /// with more than `-l` prints a name beside the number; and a
+    /// `name=$name` inside an echo is not an assignment. A counted
+    /// variable does not excuse an unguarded jq one beside it.
+    #[test]
+    fn a_count_read_again_or_given_a_file_or_reassigned_is_still_reported() {
+        for (probe, var) in [
+            (
+                "x=$(git show HEAD:a | grep -c . | jq -r '.n'); [ \"${x:-0}\" -ge 1 ] && echo claim:ok",
+                "x",
+            ),
+            (
+                "x=$(grep -c zoom a.ts); [ \"${x:-0}\" -ge 1 ] && echo claim:ok",
+                "x",
+            ),
+            (
+                "x=$(git show HEAD:a | grep -c zoom); x=$(boss-sor-read /api/x | jq -r '.n'); [ \"$x\" -ge 1 ] && echo claim:ok",
+                "x",
+            ),
+            (
+                "x=$(git ls-files | wc -l -c); [ \"$x\" -ge 1 ] && echo claim:ok",
+                "x",
+            ),
+            (
+                "x=$(git show HEAD:a | grep -c zoom; echo more); [ \"$x\" -ge 1 ] && echo claim:ok",
+                "x",
+            ),
+            (
+                "n=$(git show HEAD:a | grep -c zoom); b=$(boss-sor-read /api/x | jq -r '.n'); \
+                 [ \"$n\" -ge 1 ] && [ \"${b:-0}\" -lt 200 ] && echo claim:ok",
+                "b",
+            ),
+            ("echo \"b=$b\"; [ \"$b\" -lt 200 ] && echo claim:ok", "b"),
+        ] {
+            assert_eq!(
+                compares_an_unguarded_number(probe),
+                Some(var),
+                "not a count: {probe}"
             );
         }
     }

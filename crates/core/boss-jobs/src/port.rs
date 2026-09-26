@@ -135,6 +135,29 @@ pub fn terminal_write_moves_frozen(row: &Step, write: &Step) -> bool {
         || row.notes != write.notes
 }
 
+/// What [`JobsRepository::create_job_with_steps_at`] did with the id it
+/// was handed (backlog 9d2af748).
+///
+/// The admission handler checks for an existing packet before it
+/// materializes anything (558396ff), but a read is a moment: two first
+/// admissions under one id can both read "none" and both reach the
+/// adapter. The job row's `ON CONFLICT (id) DO NOTHING` let only one
+/// in, while the loser still inserted its steps — materialized with
+/// fresh ids, so their own guard never fired — hung them on the
+/// winner's packet, and the handler recorded a `step.ready` for each
+/// and answered 201. The adapter is the only place that knows which
+/// admission won, so it says: the handler records nothing more and
+/// answers the packet that exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use]
+pub enum Admission {
+    /// The job row was inserted, and every step and event with it.
+    Admitted,
+    /// The id already named a packet: no job, no step and no event was
+    /// written.
+    AlreadyAdmitted,
+}
+
 /// Optional filters for listing jobs.
 #[derive(Debug, Clone, Default)]
 pub struct JobFilter {
@@ -724,9 +747,18 @@ pub struct EstateBatchOutcome {
 /// the whole page, so boss-gcp's daily comparison was unreadable about
 /// half of every day; "the newest word from each host" is a question
 /// about hosts, and only a read that groups by host answers it whole.
+///
+/// `host` selects ONE host's series: a row whose payload `host` is it,
+/// or — for a row with no `host` stamp, which every observation is
+/// (4579f9b5) — whose first node's `id` is it, the identity
+/// compare_host stamps a comparison from. Backlog 111996f5: the estate
+/// alarm needs a daily host's last THREE comparisons, which neither the
+/// scope (forge's fifteen-minute rows spend the page) nor `latest_per`
+/// (one row per host) can answer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventWindow {
     pub scope: Option<String>,
+    pub host: Option<String>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
     pub latest_per: Option<String>,
@@ -813,6 +845,7 @@ pub trait JobsRepository: Send + Sync {
     ) -> Result<(), JobsError> {
         self.create_job_with_steps_at(job, &[], now, events, &[])
             .await
+            .map(|_| ())
     }
 
     /// Admit a job WITH its materialized steps: the job row, every
@@ -836,10 +869,21 @@ pub trait JobsRepository: Send + Sync {
     /// each, the event the rebuilder (`rebuild.rs`) reproduces the
     /// row from. A length mismatch is refused before any write: a
     /// short zip would record fewer events than rows and the replayed
-    /// projection would hold fewer steps than the live one. The
-    /// replay guard is per row, as before: a job or step whose id
-    /// already exists inserts nothing and records nothing. Each step
-    /// row is stamped with its plugin version by the rule
+    /// projection would hold fewer steps than the live one.
+    ///
+    /// THE JOB ROW DECIDES FOR THE WHOLE GRAPH (backlog 9d2af748). A job
+    /// id that already names a packet inserts nothing — not the job,
+    /// not one step, not one event — and answers
+    /// [`Admission::AlreadyAdmitted`]. The guard was per row until then,
+    /// and steps are materialized with fresh ids on every admission, so
+    /// a second admission under one id hung a second copy of every step
+    /// on the packet that existed. Two first admissions racing past the
+    /// handler's existence check are ordered by the job row's unique
+    /// index; the one that loses writes nothing. Pinned on both
+    /// adapters: `a_packet_admitted_twice_under_one_id_exists_once`
+    /// (in-memory, and the handler's answer) and
+    /// `a_packet_is_created_whole_or_not_at_all_pg` (the race itself).
+    /// Each step row is stamped with its plugin version by the rule
     /// [`JobsRepository::add_step_at`] states.
     ///
     /// A BIRTH-BY-JOB SUBJECT IS MINTED HERE, AND THAT IS
@@ -865,7 +909,7 @@ pub trait JobsRepository: Send + Sync {
         now: DateTime<Utc>,
         job_events: &[boss_core::event::Event],
         step_events: &[boss_core::event::Event],
-    ) -> Result<(), JobsError>;
+    ) -> Result<Admission, JobsError>;
 
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError>;
 
@@ -1610,9 +1654,17 @@ pub trait JobsRepository: Send + Sync {
     /// job list over the wire. Returns every kind present in the
     /// table (no zero-fills) — callers map the list into their own
     /// `{kind: count}` shape.
+    ///
+    /// `scope` is the caller's read scope, applied exactly as
+    /// `list_jobs` applies `JobFilter::scope`, so a caller's counts are
+    /// the totals the list hands that caller (backlog 19f08bd6 — the
+    /// summary counted every packet for any caller, a guest included).
+    /// `JobScope::All` is the unscoped count the public landing window
+    /// (`/api/jobs/live`) asks for by design.
     async fn count_jobs_by_kind(
         &self,
         status: Option<JobStatus>,
+        scope: &JobScope,
     ) -> Result<Vec<(String, i64)>, JobsError>;
 
     // ----- Cross-job dependency resolution (D10) -----

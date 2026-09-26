@@ -267,11 +267,16 @@ async fn replay_is_idempotent() {
 async fn mark_paid_then_replayed_create_does_not_duplicate() {
     // Replay of a paid-state create after an earlier mark_paid.
     // mark_invoice_paid no longer emits a fact (see the
-    // mark_invoice_paid_emits_no_paid_fact test for the why), but
-    // the create-already-paid path still emits one when the
-    // status arrives as 'paid' and payment_method is unset (the
-    // legacy single-shot tenant path). On replay we get exactly
-    // one of each fact kind from the two operations.
+    // mark_invoice_paid_emits_no_paid_fact test for the why). The
+    // create-already-paid path emits one when the status arrives as
+    // 'paid' and payment_method is unset (the legacy single-shot
+    // tenant path) — but only on the create that WRITES the invoice.
+    // A create under an id that already names the invoice writes
+    // nothing (backlog 9d2af748): until then this replay posted a
+    // finance.invoice.paid for a payment the verb had deliberately
+    // left to the settlement chain — the A/R credit that verb's own
+    // test says a two-phase tenant then takes twice. One issued fact,
+    // no paid fact.
     let db = TestDb::new().await;
     let commerce = PgCommerce::new(db.pool.clone());
 
@@ -299,10 +304,10 @@ async fn mark_paid_then_replayed_create_does_not_duplicate() {
         fact_count(&db, "finance.invoice.issued", "inv-ff-5").await,
         1
     );
-    // Exactly one — from the paid-state create path. The
-    // mark_invoice_paid call between the two creates emits no
-    // finance.invoice.paid fact.
-    assert_eq!(fact_count(&db, "finance.invoice.paid", "inv-ff-5").await, 1);
+    // None: the mark_invoice_paid call between the two creates emits
+    // no finance.invoice.paid fact, and the replayed create writes
+    // nothing at all.
+    assert_eq!(fact_count(&db, "finance.invoice.paid", "inv-ff-5").await, 0);
 }
 
 #[tokio::test(flavor = "multi_thread")]

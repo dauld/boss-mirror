@@ -13,6 +13,7 @@
 //! surface at `/service/schedule` and the tech-picker plugin both
 //! consume the same query API.
 
+mod access;
 pub mod events;
 pub mod feed_token;
 pub mod http;

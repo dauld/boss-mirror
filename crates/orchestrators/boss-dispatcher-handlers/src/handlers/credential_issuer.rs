@@ -49,14 +49,19 @@ pub struct MintedToken {
 
 /// The Forgejo token API, verified against the live forge
 /// (16.0.2+gitea-1.22.0 at the time of writing):
-///   GET    /api/v1/admin/users/{u}/tokens          — list
-///   POST   /api/v1/admin/users/{u}/tokens          — mint (201 → {id, sha1})
-///   DELETE /api/v1/admin/users/{u}/tokens/{ref}    — revoke by id, or name
+///   GET    /api/v1/admin/users/{u}/tokens?page=&limit=  — list, paged
+///   POST   /api/v1/admin/users/{u}/tokens               — mint (201 → {id, sha1})
+///   DELETE /api/v1/admin/users/{u}/tokens/{id}          — revoke
 /// All three accept admin token auth (`Authorization: token …`),
 /// unlike the non-admin `/users/{u}/tokens` route, which wants
 /// BasicAuth. Errors are plain strings so fakes stay trivial.
 #[async_trait]
 pub trait ForgeTokenIssuer: Send + Sync {
+    /// The user's WHOLE ledger, or an error — never a page of it. Every
+    /// judgement the broker makes (which token a last eight names, whether
+    /// a named token is already gone, whether a DELETE took) reads absence
+    /// off this list, so a truncated one reads a live token as revoked
+    /// (round-3 review of car 85b7b55f, F1c).
     async fn list_tokens(&self, user: &str) -> Result<Vec<TokenInfo>, String>;
     async fn create_token(
         &self,
@@ -64,9 +69,16 @@ pub trait ForgeTokenIssuer: Send + Sync {
         name: &str,
         scopes: &[String],
     ) -> Result<MintedToken, String>;
-    /// Delete by id-or-name. `Ok(false)` = already absent, which a
-    /// re-run treats as success (the point of revoking is absence).
-    async fn delete_token(&self, user: &str, token_ref: &str) -> Result<bool, String>;
+    /// Delete by the NUMERIC id a ledger row carries — never by a name or
+    /// any other string. The forge's route takes either, and a string
+    /// reaches the URL path: `../../../../repos/david/boss` there is
+    /// resolved by the client to `/api/v1/repos/david/boss` and sent with
+    /// the broker's admin root token (round-3 review of car 85b7b55f,
+    /// F1d). An `i64` has no spelling but digits and a sign, and the only
+    /// ids the broker holds are the ones the ledger listed. `Ok(false)` =
+    /// already absent, which a re-run treats as success (the point of
+    /// revoking is absence).
+    async fn delete_token(&self, user: &str, token_id: i64) -> Result<bool, String>;
     /// Verify by effect: authenticate a repo read with `token`.
     async fn repo_readable_with(&self, token: &str, repo: &str) -> Result<bool, String>;
 }
@@ -123,39 +135,94 @@ impl ForgejoAdmin {
     }
 }
 
+/// Tokens asked for per page. Forgejo clamps a `limit` above its
+/// MAX_RESPONSE_ITEMS (50 by default, lower if configured) down to it, so
+/// a page may come back SHORTER than this with more to follow: a short
+/// page is never read as the end, only an empty one is.
+const TOKEN_PAGE: usize = 50;
+
+/// Pages read before a listing is refused as unbounded — ten thousand
+/// tokens at the default page, far past any user this estate holds.
+const TOKEN_PAGES_MAX: usize = 200;
+
+/// One listed row, or `None` when the row lacks an id or a name.
+fn token_row(r: &JsonValue) -> Option<TokenInfo> {
+    Some(TokenInfo {
+        id: r.get("id")?.as_i64()?,
+        name: r.get("name")?.as_str()?.to_string(),
+        token_last_eight: r
+            .get("token_last_eight")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
 #[async_trait]
 impl ForgeTokenIssuer for ForgejoAdmin {
+    /// Read page after page until the forge answers an empty one (round-3
+    /// review of car 85b7b55f, F1c: `?limit=50`, never paged, dropped the
+    /// sixty-first token — the oldest, which a leaked one usually is — out
+    /// of every judgement). Each way the result could be partial is
+    /// refused rather than returned: a page repeating an id already read (a
+    /// forge ignoring `page`), a row with no id or name, a total that
+    /// disagrees with the forge's own `X-Total-Count`, or more pages than
+    /// any real ledger has.
     async fn list_tokens(&self, user: &str) -> Result<Vec<TokenInfo>, String> {
-        let url = format!(
-            "{}/api/v1/admin/users/{user}/tokens?limit=50",
+        let base = format!(
+            "{}/api/v1/admin/users/{user}/tokens",
             self.base.trim_end_matches('/')
         );
-        let resp = self
-            .client
-            .get(&url)
-            .header("Authorization", self.auth())
-            .send()
-            .await
-            .map_err(|e| format!("GET {url}: {e}"))?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(format!("GET {url} returned {status}"));
+        let mut all: Vec<TokenInfo> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for page in 1..=TOKEN_PAGES_MAX {
+            let url = format!("{base}?page={page}&limit={TOKEN_PAGE}");
+            let resp = self
+                .client
+                .get(&url)
+                .header("Authorization", self.auth())
+                .send()
+                .await
+                .map_err(|e| format!("GET {url}: {e}"))?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(format!("GET {url} returned {status}"));
+            }
+            let total = resp
+                .headers()
+                .get("x-total-count")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<usize>().ok());
+            let rows: Vec<JsonValue> = resp.json().await.map_err(|e| format!("{url}: {e}"))?;
+            if rows.is_empty() {
+                return match total {
+                    Some(t) if t != all.len() => Err(format!(
+                        "GET {base}: read {} tokens to an empty page, but the forge counts \
+                         {t}; refusing a ledger that moved or was cut short while it was read",
+                        all.len()
+                    )),
+                    _ => Ok(all),
+                };
+            }
+            for r in &rows {
+                let t = token_row(r).ok_or_else(|| {
+                    format!("GET {url}: a listed token carries no id or name; refusing a ledger with a row it cannot read")
+                })?;
+                if !seen.insert(t.id) {
+                    return Err(format!(
+                        "GET {url}: page {page} repeats token id {}, already read on an earlier \
+                         page — the forge is not paging this listing; refusing a ledger that may \
+                         be partial",
+                        t.id
+                    ));
+                }
+                all.push(t);
+            }
         }
-        let rows: Vec<JsonValue> = resp.json().await.map_err(|e| format!("{url}: {e}"))?;
-        Ok(rows
-            .iter()
-            .filter_map(|r| {
-                Some(TokenInfo {
-                    id: r.get("id")?.as_i64()?,
-                    name: r.get("name")?.as_str()?.to_string(),
-                    token_last_eight: r
-                        .get("token_last_eight")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                })
-            })
-            .collect())
+        Err(format!(
+            "GET {base}: still listing after {TOKEN_PAGES_MAX} pages of {TOKEN_PAGE}; refusing an \
+             unbounded ledger"
+        ))
     }
 
     async fn create_token(
@@ -195,9 +262,9 @@ impl ForgeTokenIssuer for ForgejoAdmin {
         Ok(MintedToken { id, sha1 })
     }
 
-    async fn delete_token(&self, user: &str, token_ref: &str) -> Result<bool, String> {
+    async fn delete_token(&self, user: &str, token_id: i64) -> Result<bool, String> {
         let url = format!(
-            "{}/api/v1/admin/users/{user}/tokens/{token_ref}",
+            "{}/api/v1/admin/users/{user}/tokens/{token_id}",
             self.base.trim_end_matches('/')
         );
         let resp = self
@@ -368,7 +435,7 @@ impl ForgeTokenIssuer for Unconfigured {
     async fn create_token(&self, _u: &str, _n: &str, _s: &[String]) -> Result<MintedToken, String> {
         Err(self.0.clone())
     }
-    async fn delete_token(&self, _u: &str, _t: &str) -> Result<bool, String> {
+    async fn delete_token(&self, _u: &str, _t: i64) -> Result<bool, String> {
         Err(self.0.clone())
     }
     async fn repo_readable_with(&self, _t: &str, _r: &str) -> Result<bool, String> {
@@ -1393,6 +1460,100 @@ impl WorkloadRestarter for Unconfigured {
     }
     async fn restart_deployment(&self, _n: &str, _d: &str, _r: &str) -> Result<bool, String> {
         Err(self.0.clone())
+    }
+}
+
+#[cfg(test)]
+mod forgejo_tests {
+    use super::*;
+    use crate::handlers::forge_stub::{self, StubToken};
+
+    fn leak() -> StubToken {
+        StubToken::new(7, "push-20260818", "old-value-1eaked01")
+    }
+
+    /// Round-3 review of car 85b7b55f, F1c: the listing asked for one page
+    /// of fifty and never paged, so the sixty-first token — the oldest,
+    /// which a leaked one usually is — was simply not in the ledger every
+    /// judgement read.
+    #[tokio::test]
+    async fn a_ledger_longer_than_one_page_is_read_to_its_end() {
+        let mut tokens = vec![leak()];
+        tokens.extend(forge_stub::newer_tokens(60));
+        let forge = forge_stub::serve(tokens, 50).await;
+        let all = ForgejoAdmin::new(forge.url.clone(), "root")
+            .list_tokens("david")
+            .await
+            .expect("listed");
+        assert_eq!(all.len(), 61);
+        assert!(
+            all.iter()
+                .any(|t| t.id == 7 && t.token_last_eight == "1eaked01"),
+            "the oldest token is in the ledger"
+        );
+    }
+
+    /// A forge whose MAX_RESPONSE_ITEMS is below the page asked for answers
+    /// SHORT pages with more to follow — so a short page is not the end;
+    /// only an empty one is.
+    #[tokio::test]
+    async fn a_forge_that_clamps_the_page_below_the_ask_is_still_read_to_its_end() {
+        let mut tokens = vec![leak()];
+        tokens.extend(forge_stub::newer_tokens(60));
+        let forge = forge_stub::serve(tokens, 30).await;
+        let all = ForgejoAdmin::new(forge.url.clone(), "root")
+            .list_tokens("david")
+            .await
+            .expect("listed");
+        assert_eq!(all.len(), 61);
+        assert!(all.iter().any(|t| t.id == 7));
+    }
+
+    /// A forge that answers every page with page one would otherwise be
+    /// read forever, or — stopped early — as a whole ledger it is not.
+    #[tokio::test]
+    async fn a_forge_that_ignores_the_page_is_refused() {
+        let mut tokens = vec![leak()];
+        tokens.extend(forge_stub::newer_tokens(60));
+        let forge = forge_stub::serve(tokens, 50).await;
+        forge.state.lock().unwrap().ignores_page = true;
+        let err = ForgejoAdmin::new(forge.url.clone(), "root")
+            .list_tokens("david")
+            .await
+            .expect_err("a ledger that may be partial is refused");
+        assert!(err.contains("repeats token id"), "{err}");
+    }
+
+    /// The forge's own count of the ledger disagrees with what the pages
+    /// held: a token was added or revoked mid-read, or a page was lost.
+    #[tokio::test]
+    async fn a_ledger_that_disagrees_with_the_forges_count_is_refused() {
+        let mut tokens = vec![leak()];
+        tokens.extend(forge_stub::newer_tokens(60));
+        let forge = forge_stub::serve(tokens, 50).await;
+        forge.state.lock().unwrap().claims_total = Some(62);
+        let err = ForgejoAdmin::new(forge.url.clone(), "root")
+            .list_tokens("david")
+            .await
+            .expect_err("61 read, 62 counted");
+        assert!(err.contains("counts 62"), "{err}");
+    }
+
+    /// Round-3 review, F1d: the DELETE path carries a NUMBER, never a
+    /// string — the id is the only reference the adapter accepts.
+    #[tokio::test]
+    async fn a_delete_names_the_token_by_its_number() {
+        let forge = forge_stub::serve(vec![leak()], 50).await;
+        let admin = ForgejoAdmin::new(forge.url.clone(), "root");
+        assert!(admin.delete_token("david", 7).await.expect("deleted"));
+        assert!(!admin.delete_token("david", 7).await.expect("absent"));
+        assert_eq!(
+            forge.deletes(),
+            vec![
+                "/api/v1/admin/users/david/tokens/7".to_string(),
+                "/api/v1/admin/users/david/tokens/7".to_string(),
+            ]
+        );
     }
 }
 

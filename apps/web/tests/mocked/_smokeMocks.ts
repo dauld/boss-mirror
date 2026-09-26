@@ -191,6 +191,10 @@ export const GATEWAY_PERF = /\/api\/gateway\/perf$/;
 export const MARKETING_ASSET_DETAIL = /\/api\/catalog\/marketing-assets\/[^/]+$/;
 export const VIEW_RESULTS = /\/api\/views\/[^/]+\/results/;
 export const SHIPMENT_DETAIL = /\/api\/shipping\/shipments\/[^/]+$/;
+/// The persona's own employee record, the one detail row the crawls open
+/// at /ux/people/emp-001 (backlog 1a83fe98). Spelled with the id rather
+/// than `[^/]+`, because /api/people/accounts is a list, not a person.
+export const EMPLOYEE_DETAIL = /\/api\/people\/emp-001$/;
 /// The audit log's size-and-growth read (boss-events AuditStats). The
 /// fixture /it/operate/audit sat in DEFERRED waiting for ("snapshot .length
 /// needs a faithful fixture"; page audit 65a273d5, gap 0398c4d0): a `[]`
@@ -287,7 +291,7 @@ export const AUDIT_STATS = {
 } as const;
 export const OBJECT_ENDPOINTS: ReadonlyArray<RegExp> = [
   JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, YARD_REGIONS, YARD_BORDERS, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
-  MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL, EVENTS_STATS, RISK_SCORES, EVENTS_STREAM,
+  MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL, EMPLOYEE_DETAIL, EVENTS_STATS, RISK_SCORES, EVENTS_STREAM,
   COMMERCE_SUMMARY, AP_AGING, LEDGER_STATEMENTS,
   STATIONS_LOAD, STATIONS_FLOW, QUEUE_AGE, DESIGN_STATION_QUEUES,
   // `{data, total}`, not a list: a bare `[]` here is the shape a wrong
@@ -447,6 +451,7 @@ export async function installSmokeMocks(page: Page): Promise<void> {
 
   // Identity / session: a persona, so `/api/auth/me` is someone.
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await page.route(EMPLOYEE_DETAIL, (r) => json(r, EMP));
   await page.route(/\/api\/session$/, (r) => json(r, {}));
   await page.route(/\/api\/auth\/me$/, (r) => json(r, {}));
 

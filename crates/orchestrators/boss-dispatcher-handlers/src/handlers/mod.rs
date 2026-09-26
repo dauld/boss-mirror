@@ -26,6 +26,8 @@ pub mod dns_observe;
 pub mod estate_alarm;
 pub mod estate_compare;
 pub mod estate_recover;
+#[cfg(test)]
+mod forge_stub;
 pub mod gate_resolve;
 pub mod inventory_bill_approve;
 pub mod inventory_overhead_absorb;

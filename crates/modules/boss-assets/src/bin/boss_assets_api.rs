@@ -182,7 +182,17 @@ async fn run_server<R: AssetsRepository + 'static>(
         people_client,
         classes_client: Some(classes_client),
         hub,
-        policy: None,
+        // Asset-event gate (Update on asset). Until 2026-09-26 this was
+        // `policy: None`, so the gate in http.rs skipped and any caller
+        // reaching the port could append asset events (backlog
+        // 54bf2e1e). Same wrapping as people and ledger: on a sim
+        // instance a sim caller is authorized at the boundary;
+        // everything else is enforced per-role (backlog 85e7f10f).
+        policy: Some(boss_policy_client::SimBypassPolicyClient::from_env(
+            Arc::new(boss_policy_client::ReqwestPolicyClient::new(
+                std::env::var("BOSS_POLICY_URL").unwrap_or_else(|_| boss_ports::url("policy")),
+            )),
+        )),
         insights_clients: Some(insights_clients),
         clock,
     };

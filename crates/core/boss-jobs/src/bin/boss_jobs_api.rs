@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use boss_jobs::http::{JobsApiState, router};
+use boss_jobs::http::{JobsApiState, router_shared, run_mover};
 use boss_jobs::jobs_config::JobsApiConfig;
 use boss_jobs::port::JobsRepository;
 use boss_nats::NatsEventBus;
@@ -243,6 +243,12 @@ async fn main() -> Result<()> {
         // to THIS build (design a5323701, backlog 7c298c34).
         let schema_ledger: Arc<dyn boss_jobs::schema_level::SchemaLedger> =
             Arc::new(boss_jobs::schema_level::PgSchemaLedger::new(pool.clone()));
+        // The yard's moves record (design e765b3fc §3, car M1): the log
+        // read and the record written by this replica's mover loop,
+        // served at /api/yard/moves and its stream.
+        let yard_moves = Arc::new(boss_jobs::moves::MovesFeed::new(Arc::new(
+            boss_jobs::moves::PgMoves::new(pool.clone()),
+        )));
         return run_server(
             Some(
                 std::sync::Arc::new(boss_jobs::job_edges::PgJobEdges::new(pool.clone()))
@@ -264,6 +270,7 @@ async fn main() -> Result<()> {
             Some(sensors),
             Some(departments),
             Some(schema_ledger),
+            Some(yard_moves),
             agents,
             calendar,
             subject_kinds,
@@ -307,6 +314,7 @@ async fn run_server<R: JobsRepository + 'static>(
     sensors: Option<Arc<dyn boss_jobs::sensors::Sensors>>,
     departments: Option<Arc<dyn boss_jobs::department::registry::DepartmentRegistry>>,
     schema_ledger: Option<Arc<dyn boss_jobs::schema_level::SchemaLedger>>,
+    yard_moves: Option<Arc<boss_jobs::moves::MovesFeed>>,
     agents: Arc<dyn boss_jobs::agents::AgentsRegistry>,
     calendar: Option<Arc<dyn boss_calendar_client::CalendarClient>>,
     subject_kinds: Option<Arc<dyn boss_subject_kinds_client::SubjectKindsClient>>,
@@ -348,6 +356,8 @@ async fn run_server<R: JobsRepository + 'static>(
     // The cadence door's publish / retire ask the same client the
     // workflow routes do; clone before the state takes it.
     let cadence_policy = policy.clone();
+    // The scheduling reads ask it too (backlog a621d091).
+    let scheduling_policy = policy.clone();
 
     // Wire the sim-mode probe into the publisher so every stamp
     // injects `_simulated: bool` into the audit_log payload without
@@ -403,8 +413,15 @@ async fn run_server<R: JobsRepository + 'static>(
                 runs: log.clone(),
             })
         }),
+        yard_moves,
     };
-    let mut app = router(state);
+    let state = Arc::new(state);
+    // The mover loop beside the routes: one per replica, reading the
+    // audit log's head once a second (design e765b3fc §3). It stops when
+    // the server does.
+    tokio::spawn(run_mover(state.clone(), cancel_rx.clone()));
+    info!("yard mover started: /api/yard/moves and /api/yard/moves/stream");
+    let mut app = router_shared(state);
     if let Some(repo) = scheduling {
         info!("scheduling routes mounted at /api/scheduling/*");
         app = app.merge(boss_jobs::scheduling::http::router(
@@ -412,6 +429,7 @@ async fn run_server<R: JobsRepository + 'static>(
                 repo,
                 publisher: Some(scheduling_publisher),
                 clock: clock.clone(),
+                policy: scheduling_policy,
             },
         ));
     }

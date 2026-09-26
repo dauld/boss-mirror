@@ -39,14 +39,6 @@ type EntryLineRow = (String, String, i64, i64, Option<String>, i16);
 pub(super) struct EntriesQuery {
     account_code: Option<String>,
     fact_id: Option<Uuid>,
-    /// Filter by the projection that generated the fact. Used by the
-    /// IT panel's activity tabs to look up the one journal entry a
-    /// given `bank_settlements` / `payroll_runs` / `tax_filings` row
-    /// produced, without first round-tripping to fetch the fact_id.
-    /// Both fields must be supplied together; supplying only one is
-    /// a 400.
-    source_table: Option<String>,
-    source_id: Option<String>,
     #[serde(default = "default_limit")]
     limit: i64,
 }
@@ -71,17 +63,10 @@ pub(super) async fn list_entries(
     State(state): State<Arc<LedgerApiState>>,
     Query(q): Query<EntriesQuery>,
 ) -> Response {
-    if q.account_code.is_none() && q.fact_id.is_none() && q.source_table.is_none() {
+    if q.account_code.is_none() && q.fact_id.is_none() {
         return (
             StatusCode::BAD_REQUEST,
-            "one of account_code, fact_id, or source_table+source_id is required",
-        )
-            .into_response();
-    }
-    if q.source_table.is_some() != q.source_id.is_some() {
-        return (
-            StatusCode::BAD_REQUEST,
-            "source_table and source_id must be provided together",
+            "one of account_code or fact_id is required",
         )
             .into_response();
     }
@@ -115,15 +100,11 @@ pub(super) async fn list_entries(
          LEFT JOIN gl_journal_lines l ON l.journal_entry_id = e.id \
          WHERE ($1::uuid IS NULL OR l.account_id = $1) \
            AND ($2::uuid IS NULL OR e.fact_id = $2) \
-           AND ($3::text IS NULL OR f.source_table = $3) \
-           AND ($4::text IS NULL OR f.source_id = $4) \
          ORDER BY e.posted_on DESC, e.id \
-         LIMIT $5",
+         LIMIT $3",
     )
     .bind(account_id)
     .bind(q.fact_id)
-    .bind(q.source_table.as_deref())
-    .bind(q.source_id.as_deref())
     .bind(q.limit)
     .fetch_all(&state.pool)
     .await;

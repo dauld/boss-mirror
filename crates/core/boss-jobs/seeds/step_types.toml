@@ -1415,6 +1415,42 @@ required_roles = ["platform-admin"]
   required = false
   description = "The OLD token's name or numeric id at the issuer — the identifier the broker revokes after the replacement verifies. Absent = the broker leaves the revoke step to its assignee. Never the value."
 
+  [[step_type.fields]]
+  name = "old_token_last_eight"
+  field_type = "string"
+  required = false
+  description = "The OLD token named by its last eight characters — the identifier the forge shows beside each token's name, computed on the host that holds the value so nobody has to hold the name or the value (design 1c90d183, D3). The broker resolves it against the issuer's ledger and refuses when it matches no token, several, this rotation's own replacement, or a token the rule declares to another consumer. With old_token as well, both must name the same token. Never the value."
+
+[[step_type]]
+kind = "credential-delivery"
+label = "Credential delivered"
+category = "admin"
+ux = "inline"
+version = 1
+description = "The `delivered` step of a rotate-a-credential packet whose credential is delivered OFF the cluster (the broker rule's delivery = \"off-host\"; design 1c90d183): the host that consumes the credential took the new value from its Secret, installed it, proved it by effect, and records here the last eight characters of what it installed. A DEDICATED kind (the `gate-verdict` and `credential-rotation` precedent) so the broker's second rule can target `step.done.credential-delivery` — that firing is what lets the revoke run, because until the host holds the new value the old one is what every consumer on it reads. Completed by the host's deposit through the API (infra/forge/credential-deposit.sh), never assigned to a person. NO FIELD EVER CARRIES A CREDENTIAL VALUE."
+decision_shaped = false
+# `typical_duration_hours` deliberately UNSET, for gate-verdict's reason:
+# the dispatcher auto-completes a kind with no roles and a duration of
+# zero the moment it goes ready, and an empty `delivered` completed that
+# way would fire the broker's revoke on a delivery nobody made. The
+# handler refuses a delivery without delivered_last_eight, but the kind
+# should not invite the attempt. Pinned by step_registry's
+# a_delivery_record_is_the_hosts_to_make_and_nobody_elses test.
+typical_duration_jitter = 0.0
+required_roles = []
+
+  [[step_type.fields]]
+  name = "delivered_last_eight"
+  field_type = "string"
+  required = true
+  description = "The last eight characters of the value the host installed, read off its own file after the install verified by effect. The broker compares it with the Secret's before it revokes: equal, the old token goes; different, nothing is revoked and the refusal names both. An identifier, never the value."
+
+  [[step_type.fields]]
+  name = "delivered_to"
+  field_type = "string"
+  required = false
+  description = "Where the host installed it — host and path, e.g. forge:/home/david/.config/boss/forge-checkout.token."
+
 [[step_type]]
 kind = "acknowledgment"
 label = "Acknowledgment"

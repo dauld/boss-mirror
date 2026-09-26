@@ -60,6 +60,55 @@ fn the_rotation_protocol_keeps_its_decided_shape() {
         );
     }
 
+    // Design 1c90d183 (David, 2026-09-26): the scoper may name the old
+    // token by its LAST EIGHT, computed on the host that holds it — also
+    // optional, for the same reason as old_token.
+    let by_last8 = scope
+        .fields
+        .iter()
+        .find(|f| f.name == "old_token_last_eight")
+        .expect("the scope step surfaces old_token_last_eight inline");
+    assert!(!by_last8.required, "old_token_last_eight is optional");
+
+    // An OFF-HOST credential is delivered by its host after the install,
+    // and the revoke waits for that record. The `delivered` step is its
+    // own kind so the broker's second rule targets exactly it; it goes
+    // ready only for a rotation whose install said `off-host` (the
+    // handler writes `delivery` on every install), so a mount-delivered
+    // rotation never shows a step nobody will complete.
+    let delivered = rot
+        .steps
+        .iter()
+        .find(|s| s.title == "delivered")
+        .expect("a delivered step for off-host credentials");
+    assert_eq!(delivered.kind, "credential-delivery");
+    assert!(
+        delivered.ready_when.contains("steps.install.done")
+            && delivered
+                .ready_when
+                .contains("steps.install.metadata.delivery = \"off-host\""),
+        "delivered goes ready after an off-host install and only then: {}",
+        delivered.ready_when
+    );
+    let evidence = delivered
+        .fields
+        .iter()
+        .find(|f| f.name == "delivered_last_eight")
+        .expect("the host records the last eight it installed");
+    assert!(
+        evidence.required,
+        "a delivery without its evidence is a claim, not a record"
+    );
+    let revoke = rot.steps.iter().find(|s| s.title == "revoke").unwrap();
+    assert!(
+        revoke.ready_when.contains("steps.delivered.done")
+            && revoke
+                .ready_when
+                .contains("steps.install.metadata.delivery != \"off-host\""),
+        "an off-host revoke waits for delivery; a mount one keeps today's order: {}",
+        revoke.ready_when
+    );
+
     // v3's revoke runbook: the human path when no old_token was named.
     let revoke = rot.steps.iter().find(|s| s.title == "revoke").unwrap();
     let procedure = revoke

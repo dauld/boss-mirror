@@ -103,9 +103,11 @@ async fn a_new_step_is_stamped_with_the_version_that_serves_its_kind<R: JobsRepo
         .iter()
         .map(|s| stamp.event(STEP_CREATED, step_state_payload(s)))
         .collect();
-    repo.create_job_with_steps_at(&job(job_id), &steps, Utc::now(), &[], &step_events)
+    let admission = repo
+        .create_job_with_steps_at(&job(job_id), &steps, Utc::now(), &[], &step_events)
         .await
         .expect("admit the packet");
+    assert_eq!(admission, boss_jobs::Admission::Admitted);
 
     assert_eq!(
         stored_version(repo, &admitted).await,

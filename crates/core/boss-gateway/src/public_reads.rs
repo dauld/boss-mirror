@@ -13,6 +13,13 @@
 //! tenant.toml (`[gateway] public_reads`), the company's manifest says
 //! nothing, and nothing is what it gets.
 //!
+//! THREE NOW, NOT FOUR (backlog 19f08bd6, 2026-09-26). `/api/jobs/summary`
+//! left the table: the demo landing never read it (only
+//! `/api/jobs/live`), and it is a packet read scoped to the caller —
+//! a guest is refused 403 — so a sessionless door onto it opens onto a
+//! refusal. Undeclarable, it meets the session gate through
+//! `/api/jobs/{*rest}` like every other packet read.
+//!
 //! WHERE THE DECLARATION LIVES — the tenant contract, not
 //! infra/cluster/instances.toml. instances.toml renders the FIVE
 //! deployment parameters (namespace, tenant source, sim, hostname,
@@ -27,11 +34,11 @@
 //! what the tenant chose to show, the way `[modules]` is.
 //!
 //! WHAT A DECLARATION CANNOT DO. [`PUBLISHABLE`] is the closed table
-//! of reads that CAN be public — the four known handlers, GET only.
+//! of reads that CAN be public — the three known handlers, GET only.
 //! A declared path outside it is refused at boot with the path named
 //! ([`PublicReads::resolve`]): the manifest chooses among the doors
 //! the gateway offers; it cannot open a new one, and it cannot make a
-//! write public. Undeclared, each of the four is routed through the
+//! write public. Undeclared, each of the three is routed through the
 //! session-gated proxy exactly like every other `/api` route and
 //! answers 401 to a sessionless caller.
 //!
@@ -85,11 +92,6 @@ pub static PUBLISHABLE: &[PublicRead] = &[
     PublicRead {
         path: "/api/workflows",
         matchers: &["/api/workflows", "/api/workflows/{*rest}"],
-        upstream: &proxy::JOBS,
-    },
-    PublicRead {
-        path: "/api/jobs/summary",
-        matchers: &["/api/jobs/summary"],
         upstream: &proxy::JOBS,
     },
     PublicRead {
@@ -225,7 +227,7 @@ impl PublicReads {
 
 /// Register every sessionless read in the route table. The by-design
 /// rows first, GET only, on every instance — proxied to the row's
-/// upstream, or answered here from the row's own constant. Then the four, each by
+/// upstream, or answered here from the row's own constant. Then the three, each by
 /// what this instance declared: declared → GET through the sessionless
 /// proxy, every other method through the gated one (the same
 /// MethodRouter, or a POST to `/api/workflows` would answer 405 — the
@@ -289,12 +291,11 @@ mod tests {
         }
     }
 
-    /// The demo tenant's four — exactly those, no more.
+    /// The demo tenant's three — exactly those, no more.
     #[test]
-    fn the_demo_tenants_four_resolve_to_exactly_those() {
+    fn the_demo_tenants_three_resolve_to_exactly_those() {
         let r = PublicReads::resolve(&strings(&[
             "/api/workflows",
-            "/api/jobs/summary",
             "/api/jobs/live",
             "/api/events/public-tail",
         ]))
@@ -303,7 +304,6 @@ mod tests {
             r.paths(),
             vec![
                 "/api/workflows",
-                "/api/jobs/summary",
                 "/api/jobs/live",
                 "/api/events/public-tail"
             ]
@@ -313,7 +313,28 @@ mod tests {
         }
     }
 
-    /// A subset is a subset: declaring one leaves the other three
+    /// THE PACKET SUMMARY IS NOT A DOOR A DECLARATION CAN OPEN (backlog
+    /// 19f08bd6, 2026-09-26). It was one of the four, on the reasoning
+    /// that the demo landing renders from it — but the landing reads
+    /// only `/api/jobs/live`, and the summary now counts the packets
+    /// the CALLER may read, refusing a guest 403. A sessionless door
+    /// onto a read that refuses everyone without a session is a dead
+    /// door, and one that would count every packet for a stranger was
+    /// the defect. The public open counts are `/api/jobs/live`.
+    #[test]
+    fn the_jobs_summary_is_not_declarable() {
+        assert!(
+            PUBLISHABLE.iter().all(
+                |p| p.path != "/api/jobs/summary" && !p.matchers.contains(&"/api/jobs/summary")
+            ),
+            "/api/jobs/summary is a scoped packet read; it cannot be public"
+        );
+        let err = PublicReads::resolve(&strings(&["/api/jobs/summary"]))
+            .expect_err("declaring the summary public must refuse at boot");
+        assert!(err.contains("/api/jobs/summary"), "{err}");
+    }
+
+    /// A subset is a subset: declaring one leaves the other two
     /// gated.
     #[test]
     fn a_partial_declaration_leaves_the_rest_gated() {

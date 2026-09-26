@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------
+# The credential broker rotates the forge host checkout's forge token
+# (design 1c90d183, David 2026-09-26; backlog c4cbc6b5). The token in
+# the userinfo of the checkout's `forgejo` remote (/home/david/boss)
+# leaked into the forge-converge journal through a git error message,
+# and no registry row named it. THIS RULE IS ITS DECLARATION, the same
+# convention as `broker-rotates-the-boss-dev-forge-token`: Subject id
+# `forge-host-checkout-token`, Secret boss/forge-host-checkout-token key
+# `token` (D5), issuer user david, scope write:repository (D4 — widened
+# only on a measured 403), proven by reading david/boss.
+#
+# OFF-HOST DELIVERY (D1). The consumer is not a mount: forge-converge's
+# first act each pass is infra/forge/credential-deposit.sh, which reads
+# this Secret through the forge's admin kubeconfig (Q1, David: yes),
+# installs the value into ~david/.config/boss/forge-checkout.token
+# behind a git credential helper, proves it by effect, and completes
+# the rotation packet's `delivered` step with the last eight it
+# installed. `delivery = "off-host"` tells the handler to stop after
+# verify on THIS firing; the revoke runs on the second rule,
+# `broker-revokes-the-forge-host-checkout-token-on-delivery`, which
+# hands the handler this same declaration (pinned equal by
+# crates/core/boss-dispatcher/tests/forge_host_checkout_token_rules.rs).
+#
+# THE OLD TOKEN (D3). Nobody holds its name. The deposit records the
+# last eight of the value the host holds on the forge-converge packet
+# (`checkout_token_last_eight`); the scoper puts those eight characters
+# in the scope step's `old_token_last_eight`, and the handler resolves
+# them against the issuer's ledger, refusing zero matches, several, its
+# own replacement, and anything `spare` names — the tokens another
+# consumer is DECLARED to hold (Q2, David: a leaked token no declared
+# holder matches is revoked; one declared elsewhere gets its own
+# rotation first). `spare` is pinned to infra/platform/forge-tokens.toml
+# and the other forgejo broker rules by the same test.
+#
+# The Secret is created EMPTY by the cluster converge from this file's
+# secret_namespace/secret_name (cluster-deploy-lib.sh
+# ensure_declared_secrets); the broker's name-scoped grant on it is
+# `credential-broker-forge-host-checkout-token` in
+# infra/cluster/manifests/boss-credential-broker.yaml.
+[[rule]]
+name = "broker-rotates-the-forge-host-checkout-token"
+why = """
+EXTERNAL GLUE, the census class for reactions whose effect lives
+outside the system: the broker speaks to the FORGE's admin API and the
+k8s Secret store, neither of which a Workflow definition can address.
+The rotate-a-credential protocol row declares the ORDER (issue ->
+install -> verify -> delivered -> revoke); this rule is the machine
+executor for ONE credential, and its args are that credential's
+declaration. It adds no routing: it advances the very packet that
+fired it and spawns nothing. Design 1c90d183 (2026-09-26).
+"""
+on_event = "step.done.credential-rotation"
+when = 'subject_id = "forge-host-checkout-token"'
+[[rule.do]]
+handler = "credential.rotate.forgejo"
+args = { forge_user = "\"david\"", secret_namespace = "\"boss\"", secret_name = "\"forge-host-checkout-token\"", secret_key = "\"token\"", scopes = "\"write:repository\"", verify_repo = "\"david/boss\"", delivery = "\"off-host\"", spare = "\"boss-gcp,boss-dev-forge-token-*\"" }

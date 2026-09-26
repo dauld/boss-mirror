@@ -407,7 +407,7 @@ fn build_router(
             "/api/dispatcher/{*rest}",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::DISPATCHER)),
         )
-        // `/api/workflows[/*]`, `/api/jobs/summary` and `/api/jobs/live`
+        // `/api/workflows[/*]` and `/api/jobs/live`
         // are registered by `public_reads::mount` below — the reads
         // an instance MAY answer without a session, each routed by
         // the tenant's `[gateway] public_reads` declaration (design
@@ -1069,7 +1069,6 @@ mod routing_tests {
     const DEMO_PUBLIC: &[&str] = &[
         "/api/workflows",
         "/api/workflows/some-kind",
-        "/api/jobs/summary",
         "/api/jobs/live",
         "/api/events/public-tail",
     ];
@@ -1077,11 +1076,10 @@ mod routing_tests {
     fn demo() -> public_reads::PublicReads {
         public_reads::PublicReads::resolve(&[
             "/api/workflows".to_string(),
-            "/api/jobs/summary".to_string(),
             "/api/jobs/live".to_string(),
             "/api/events/public-tail".to_string(),
         ])
-        .expect("the demo tenant's four are declarable")
+        .expect("the demo tenant's three are declarable")
     }
 
     async fn get(app: axum::Router, path: &str) -> (StatusCode, String) {
@@ -1356,7 +1354,7 @@ mod routing_tests {
         );
     }
 
-    /// The four former landing-page pins, on an instance whose manifest
+    /// The declarable landing-page reads, on an instance whose manifest
     /// declares none of them (design 11e60367 Q1, backlog b4afd7b9):
     /// each answers 401 like any other /api route — the session gate
     /// refuses before anything is forwarded — and none has fallen
@@ -1393,6 +1391,27 @@ mod routing_tests {
                 status,
                 StatusCode::UNAUTHORIZED,
                 "`{path}` is declared public by the demo tenant and must not be session-gated: {body}"
+            );
+            assert!(
+                !body.contains(MISS),
+                "`{path}` reached the /api catch-all: {body}"
+            );
+        }
+    }
+
+    /// The packet summary is session-gated EVEN on the demo tenant
+    /// (backlog 19f08bd6): it left the publishable table because it
+    /// counts what the caller may read, so a sessionless GET meets the
+    /// gate through `/api/jobs/{*rest}` like every other packet read —
+    /// 401 before anything is forwarded — and never the catch-all.
+    #[tokio::test]
+    async fn the_jobs_summary_is_session_gated_on_the_demo_tenant() {
+        for path in ["/api/jobs/summary", "/api/jobs/summary?status=closed"] {
+            let (status, body) = get(app_declaring(None, &demo()), path).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "`{path}` must meet the session gate: {body}"
             );
             assert!(
                 !body.contains(MISS),

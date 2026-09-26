@@ -212,6 +212,9 @@ async fn a_list_answers_503_not_an_empty_page() {
         "/api/jobs",
         "/api/jobs?kind=brew-day",
         "/api/jobs/queue-age",
+        // Scoped to the caller since 19f08bd6: a count it could not
+        // ask about is an outage, not a table of zeroes.
+        "/api/jobs/summary?status=closed",
     ] {
         let a = send(&app, "GET", uri, None).await;
         assert_outage(uri, &a);

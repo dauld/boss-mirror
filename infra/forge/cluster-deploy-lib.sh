@@ -622,12 +622,23 @@ skipped_tenant_entry() {
 #
 # ONE CREDENTIAL: the checkout's own. The runner fetches forge main
 # through its `forgejo` remote, and the tenant is read with exactly
-# that URL's scheme, host and credential — the repo path replaced,
-# nothing else — so the first converge MEASURES whether the runner's
-# token can read the tenant repo, and an unreadable one names itself
-# on the packet instead of a person guessing at scopes. No URL ever
-# reaches the journal: a forge remote may carry its token in the
-# userinfo, and every git message is redacted before it is printed.
+# that URL's scheme and host — the repo path replaced, nothing else —
+# so the first converge MEASURES whether the checkout's token can read
+# the tenant repo, and an unreadable one names itself on the packet
+# instead of a person guessing at scopes. The token is not IN that URL
+# any more (design 1c90d183, backlog c4cbc6b5): it is a 0600 file of
+# the owner's behind a git credential helper in the owner's GLOBAL
+# config, scoped to the forge's URL, and forge-converge's deposit
+# (credential-deposit.sh) strips the remote's userinfo once that helper
+# authenticates. The runner runs as that owner (User= in its unit), so
+# a derived URL for any repo on the forge authenticates through the same
+# file. The URL is derived as the remote holds it rather than stripped
+# here: the runner's first tick after the change lands precedes the
+# deposit's first pass, and a URL stripped before the helper exists
+# would record a false "tenant source unreadable". No URL ever reaches
+# the journal regardless — a remote the deposit has not converted still
+# carries its token in the userinfo — and every git message is redacted
+# before it is printed.
 
 # _tenant_url_from_remote URL TENANT_REPO — pure string work: the
 #   remote's URL with its trailing owner/name[.git] replaced by

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::port::{CommerceError, CommerceRepository};
+use crate::port::{CommerceError, CommerceRepository, InvoiceCreate};
 use crate::types::*;
 
 pub struct PgCommerce {
@@ -199,7 +199,7 @@ impl CommerceRepository for PgCommerce {
         inv: &Invoice,
         now: chrono::DateTime<chrono::Utc>,
         stamp: &boss_core::publisher::EventStamp,
-    ) -> Result<Invoice, CommerceError> {
+    ) -> Result<InvoiceCreate, CommerceError> {
         // Invariant: line-item revenue + sales tax must equal the
         // header rollup. Enforce in the adapter so a buggy caller
         // can't persist a document whose total lies about its
@@ -257,22 +257,24 @@ impl CommerceRepository for PgCommerce {
             .await
             .map_err(CommerceError::Storage)?;
 
-        sqlx::query(
+        // ONCE PER ID (backlog 9d2af748). This was `ON CONFLICT (id) DO
+        // UPDATE`: a repeat create overwrote the header — a redelivered
+        // issue carrying `outstanding` turned a PAID invoice owed again
+        // — rewrote the lines, and recorded `commerce.invoice.created`
+        // a second time, which is the event that drives the
+        // finished-goods consume. Now the first create's row stands: a
+        // conflicting insert writes nothing, the transaction is rolled
+        // back (the identity row above included), and the stored
+        // invoice answers — or refuses a body that is not it. A
+        // concurrent first create waits on the unique index here and
+        // then sees the other's committed row, so two racing creates
+        // record one event between them.
+        let inserted = sqlx::query(
             "INSERT INTO invoices (id, account_id, issued_on, due_on, paid_on, status, \
                                    amount_cents, currency, tax_cents, tax_jurisdiction, \
                                    payment_method, created_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
-             ON CONFLICT (id) DO UPDATE SET \
-                account_id = EXCLUDED.account_id, \
-                issued_on = EXCLUDED.issued_on, \
-                due_on = EXCLUDED.due_on, \
-                status = EXCLUDED.status, \
-                paid_on = EXCLUDED.paid_on, \
-                amount_cents = EXCLUDED.amount_cents, \
-                currency = EXCLUDED.currency, \
-                tax_cents = EXCLUDED.tax_cents, \
-                tax_jurisdiction = EXCLUDED.tax_jurisdiction, \
-                payment_method = EXCLUDED.payment_method",
+             ON CONFLICT (id) DO NOTHING",
         )
         .bind(&inv.id)
         .bind(&inv.account_id)
@@ -288,17 +290,25 @@ impl CommerceRepository for PgCommerce {
         .bind(now)
         .execute(&mut *tx)
         .await
-        .map_err(|e| CommerceError::Storage(e.to_string()))?;
-
-        // On re-emission of an existing invoice, wipe its old line
-        // items before re-inserting so the document stays consistent.
-        // Cheaper than diffing and replay is the only path that
-        // re-emits today.
-        sqlx::query("DELETE FROM invoice_line_items WHERE invoice_id = $1")
-            .bind(&inv.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| CommerceError::Storage(e.to_string()))?;
+        .map_err(|e| CommerceError::Storage(e.to_string()))?
+        .rows_affected();
+        if inserted == 0 {
+            tx.rollback()
+                .await
+                .map_err(|e| CommerceError::Storage(e.to_string()))?;
+            let stored = self
+                .invoice_by_id(&inv.id)
+                .await?
+                .ok_or_else(|| CommerceError::NotFound(format!("invoice {}", inv.id)))?;
+            let differing = inv.issuance_differences(&stored);
+            return if differing.is_empty() {
+                Ok(InvoiceCreate::AlreadyCreated(stored))
+            } else {
+                Err(CommerceError::another_invoice_under_this_id(
+                    &inv.id, &differing,
+                ))
+            };
+        }
 
         // The FG drawdown + COGS moved OUT of the invoice tx (Q2,
         // docs/architecture-decisions.md §Finance & ledger, 6b): the
@@ -412,7 +422,7 @@ impl CommerceRepository for PgCommerce {
         // event — the same shape the finance.invoice.issued fact persists,
         // so audit_log replay reconstructs the identical fact (incl. COGS
         // legs).
-        Ok(enriched_invoice)
+        Ok(InvoiceCreate::Created(enriched_invoice))
     }
 
     async fn mark_invoice_paid_at(

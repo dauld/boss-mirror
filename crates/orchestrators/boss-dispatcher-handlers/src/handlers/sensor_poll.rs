@@ -203,8 +203,10 @@ fn sensor_actor_header(sensor_id: &str) -> String {
     .to_string()
 }
 
-/// The dedup read's page. Open backlog-items number in the tens; a
-/// truncated page HOLDS the raise (never twins blind).
+/// The dedup read's page. Open backlog-items carrying `estate_finding`
+/// number in the tens (all open backlog-items were 370 on 2026-09-26,
+/// which is why the read asks only for those, c5ac71de); a truncated
+/// page HOLDS the raise (never twins blind).
 const DEDUP_PAGE: usize = 1000;
 
 // ---------------------------------------------------------------------------
@@ -746,10 +748,13 @@ impl SensorPoll {
         Ok(())
     }
 
+    /// Only the packets carrying `estate_finding`, the one key
+    /// [`open_alarm`] compares (backlog c5ac71de): unfiltered, every open
+    /// backlog-item counted toward the page, and past it the raise held.
     async fn open_alarm_for(&self, key: &str) -> Result<Option<OpenAlarm>, HandlerError> {
         let listing = self
             .get(&format!(
-                "/api/jobs?kind=backlog-item&status=open&limit={DEDUP_PAGE}"
+                "/api/jobs?kind=backlog-item&status=open&metadata_has=estate_finding&limit={DEDUP_PAGE}"
             ))
             .await?;
         open_alarm(&listing, key).map_err(HandlerError::Downstream)
@@ -1367,8 +1372,14 @@ mod tests {
                     async move {
                         assert_eq!(q.get("kind").map(String::as_str), Some("backlog-item"));
                         assert_eq!(q.get("status").map(String::as_str), Some("open"));
+                        // Answered as the jobs API answers it, behind more
+                        // unrelated open items than one page (c5ac71de).
                         let rows = alarms.lock().unwrap().clone();
-                        AxJson(json!({ "data": rows, "total": rows.len() }))
+                        AxJson(crate::handlers::listing_stub::backlog_listing(
+                            &rows,
+                            q.get("metadata_has").map(String::as_str),
+                            q.get("limit").and_then(|l| l.parse().ok()),
+                        ))
                     }
                 })
                 .post(
@@ -1680,6 +1691,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stub.packets().len(), 1);
+    }
+
+    /// THE DEDUP READS ONLY ESTATE PACKETS (backlog c5ac71de). Unfiltered,
+    /// the open-alarm read counted every open backlog-item, and past one
+    /// page it was TRUNCATED: the raise held, so a sensor that stopped
+    /// reading went unannounced. The stub answers as the jobs API does,
+    /// behind more unrelated open items than the page holds; the new
+    /// alarm must file, and the next pass must still find it and not
+    /// twin it.
+    #[tokio::test]
+    async fn a_backlog_past_one_page_does_not_hold_a_new_sensor_alarm() {
+        use crate::handlers::listing_stub::UNRELATED_BACKLOG;
+        const {
+            assert!(
+                UNRELATED_BACKLOG > DEDUP_PAGE,
+                "the fixture outgrows a page"
+            )
+        };
+        let stub = stub_jobs_api(vec![]).await;
+        declare(&stub).await;
+        let source = InMemorySource::answering(vec![obs("ch_1", "2026-09-17T09:00:00Z", 1)]);
+        let h = handler(&stub, source, None);
+
+        h.invoke(&[], &ctx())
+            .await
+            .expect("a new finding must raise, not be held");
+        let packets = stub.packets();
+        assert_eq!(packets.len(), 1, "{packets:#?}");
+        assert_eq!(
+            packets[0]["metadata"]["estate_finding"],
+            "sensor_unreadable:stripe-sponsorships"
+        );
+        h.invoke(&[], &ctx_at("2026-09-17T10:20:00+00:00"))
+            .await
+            .expect("the standing alarm is found, not held");
+        assert_eq!(
+            stub.packets().len(),
+            1,
+            "found past the page, never twinned"
+        );
     }
 
     /// An unset key files the alarm NAMING the env var, marks the poll

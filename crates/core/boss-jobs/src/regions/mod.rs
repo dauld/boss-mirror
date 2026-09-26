@@ -97,8 +97,12 @@ pub use self::machinery::{
 };
 use self::machinery::{host_runner_machines, machines_of, unjudged};
 use self::marshalling::marshalling;
-pub use self::partition::{Ids, TRIGGER_STEP_KIND, members, taken_in};
-pub(crate) use self::partition::{marshalling_view, receiving_standing, taken_in_at};
+pub use self::partition::{
+    Ids, Lookups, Placed, TRIGGER_STEP_KIND, members, place, taken_in, train_region,
+};
+pub(crate) use self::partition::{
+    count_in, marshalling_view, receiving_standing, taken_in_at, trains_in,
+};
 use self::publish::publish;
 pub use self::publish::{PUBLISH_KIND, PublishPr, STALLED_PUBLISH_HOURS, publish_prs};
 use self::receiving::receiving;
@@ -112,8 +116,8 @@ pub use self::stale_proof::{NOT_YET_STARVED_HOURS, PROOF_STALE_HOURS};
 pub(crate) use self::stale_proof::{StaleProof, stale_proof};
 pub(crate) use self::stuck::stuck_ids;
 pub use self::stuck::{THIRDS, ThirdStuck, stuck};
-use self::track::track;
 pub use self::track::{TRAIN_GATE_FALLBACK, TRAIN_GATE_WAIT_REASON, train_gate_troubled};
+use self::track::{track, train_findings};
 
 /// The ten regions, in map order. The count and the order are the
 /// decision (0524fc95 Q2); a reader that finds an eleventh name has an
@@ -201,7 +205,7 @@ pub enum RegionState {
 }
 
 /// What a region's bound IS (design 62de32ae, decision 5): the most a
-/// place can hold (`capacity` — three gate bays, one track, the run
+/// place can hold (`capacity` — three gate bays, the run
 /// cap), or the depth at which something is due (`threshold` — the
 /// dock's boarding depth). The review read "DOCK 6 / 1" as six cars in
 /// a space for one; the same `n / bound` meant capacity on the gates
@@ -340,7 +344,7 @@ pub struct Region {
     /// state is then `troubled` and `why` names the read.
     pub count: Option<usize>,
     /// The bound the count is read against, where the region has one:
-    /// the gate concurrency, the boarding depth, the single track.
+    /// the gate concurrency, the boarding depth, the run cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound: Option<usize>,
     /// What the bound is — a capacity or a threshold. Present exactly
@@ -391,6 +395,15 @@ pub struct Region {
     /// and on an older payload.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub places: Vec<Place>,
+    /// THE OBSERVED-UNDECLARED READING (design e765b3fc §2b, car M1):
+    /// each route the map does not draw that a move INTO this region
+    /// took in the window, with how many did — from the moves record
+    /// (`crate::moves`). Empty when every move in took a drawn route;
+    /// `null` when the record could not be read or is not wired, and on
+    /// an older payload. A reading beside the state, not yet a
+    /// judgement of it: see [`crate::region_states::MOVES_UNDECLARED`].
+    #[serde(default)]
+    pub undeclared: Option<Vec<crate::moves::RouteCount>>,
 }
 
 /// One place inside a region and the region's members standing there.
@@ -589,7 +602,7 @@ pub fn regions(inputs: &RegionInputs<'_>) -> Regions {
     let regions = [
         dock(inputs, &w),
         gates(inputs, &w, &out("gates")),
-        track(inputs, &w, &out("track")),
+        track(inputs, &w),
         shed(inputs, &w),
         arrivals(inputs, &w),
         garage(inputs, &w),

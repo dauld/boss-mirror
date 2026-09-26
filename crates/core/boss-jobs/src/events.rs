@@ -106,6 +106,17 @@ pub const STEP_CORRECTED: &str = "jobs.step.corrected";
 /// ignores this marker.
 pub const JOB_REPINNED: &str = "jobs.job.repinned";
 pub const JOB_CLOSED: &str = "jobs.job.closed";
+/// A step that holds its time lost its calendar hold (backlog 4bdb8150,
+/// the round-3 review of car 983696b5): the re-assertion after a racing
+/// start found another reservation holding the assignee's time. Payload
+/// `{job_id, step_id, assignee_id, window_start, window_end,
+/// held_by_count, held_by}` — the scalars for a rule to bind, `held_by`
+/// the reservation rows the calendar answered with. The only record of
+/// the loss: nothing was refused, and the step row does not change, so
+/// no state event carries it. The rule
+/// `open-a-packet-when-a-step-loses-its-hold` opens the packet a person
+/// reads. Rebuild ignores it.
+pub const STEP_HOLD_LOST: &str = "jobs.step.hold_lost";
 /// A quarantine pass found an ACTIVE Workflow that fails the viability
 /// lint and retired it. Boot no longer emits this: it checks and logs
 /// but never retires (`workflow_quarantine`).
@@ -312,6 +323,23 @@ pub fn estate_compared_event(
         payload,
         boss_clock_client::wall_now(),
     )
+}
+
+/// The [`STEP_HOLD_LOST`] payload for `lost`, stamped by the step write
+/// that found it (its actor, instant and partition). The scalars sit at
+/// the top level because a rule binds only scalars (an array resolves
+/// to `Absent` in the DSL); the rows the calendar answered with ride
+/// whole in `held_by`, copied, not summarised.
+pub fn step_hold_lost_payload(lost: &crate::calendar_hook::LostHold) -> serde_json::Value {
+    serde_json::json!({
+        "job_id": lost.job_id.to_string(),
+        "step_id": lost.step_id.to_string(),
+        "assignee_id": lost.subject.id,
+        "window_start": lost.window.start.to_rfc3339(),
+        "window_end": lost.window.end.to_rfc3339(),
+        "held_by_count": lost.held_by.len(),
+        "held_by": lost.held_by,
+    })
 }
 
 /// A step-plugin registry event — same contract as

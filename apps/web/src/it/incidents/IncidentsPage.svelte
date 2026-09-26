@@ -26,15 +26,37 @@
   import { onMount } from 'svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { href } from '../../router';
-  import type { Job, Step } from '../../jobs/types';
-  import { closedOutcome, incidentAt, postMortemSections } from './postMortemDoc';
+  import type { Step } from '../../jobs/types';
+  import {
+    closedOutcome,
+    durationText,
+    holderOf,
+    incidentAt,
+    openedAtMs,
+    parseStepWaits,
+    postMortemSections,
+    severityOf,
+    startedAt,
+    type IncidentJob,
+    type StepWaits,
+  } from './postMortemDoc';
 
   type LoadState =
     | { kind: 'loading' }
     | { kind: 'failed'; message: string }
-    | { kind: 'ready'; jobs: ReadonlyArray<Job> };
+    | { kind: 'ready'; jobs: ReadonlyArray<IncidentJob> };
+
+  /// Time at the current step comes from the queue-age lens, a second
+  /// read (the Job read carries no `became_ready_at`). Its failure is
+  /// said on the card — "time at step unreadable" — and never fails the
+  /// queue itself, which the first read alone answers (1a242883).
+  type WaitsState =
+    | { kind: 'loading' }
+    | { kind: 'failed' }
+    | { kind: 'ready'; waits: StepWaits };
 
   let load = $state<LoadState>({ kind: 'loading' });
+  let waits = $state<WaitsState>({ kind: 'loading' });
 
   async function fetchIncidents(): Promise<void> {
     load = { kind: 'loading' };
@@ -42,13 +64,49 @@
       const res = await fetch('/api/jobs?kind=incident&limit=200');
       if (!res.ok) throw new Error(`incident jobs: HTTP ${res.status}`);
       const body = await res.json();
-      const jobs = (Array.isArray(body) ? body : (body.data ?? [])) as Job[];
+      const jobs = (Array.isArray(body) ? body : (body.data ?? [])) as IncidentJob[];
       load = { kind: 'ready', jobs };
     } catch (e) {
       load = { kind: 'failed', message: e instanceof Error ? e.message : String(e) };
     }
   }
-  onMount(fetchIncidents);
+
+  async function fetchWaits(): Promise<void> {
+    waits = { kind: 'loading' };
+    try {
+      const res = await fetch('/api/jobs/queue-age');
+      if (!res.ok) throw new Error(`queue-age: HTTP ${res.status}`);
+      waits = { kind: 'ready', waits: parseStepWaits(await res.json()) };
+    } catch {
+      waits = { kind: 'failed' };
+    }
+  }
+
+  function refresh(): void {
+    void fetchIncidents();
+    void fetchWaits();
+  }
+  onMount(refresh);
+
+  /// Ages are measured against the server's clock when the lens sent
+  /// one (the stack may run a simulated clock), else the browser's.
+  const now = $derived(
+    waits.kind === 'ready' && waits.waits.now !== null ? waits.waits.now : Date.now(),
+  );
+
+  const timeOpen = (j: IncidentJob): string | null => {
+    const at = openedAtMs(j);
+    return at === null ? null : durationText(now - at);
+  };
+
+  /// "at step 2h", "at step ≥2h" for a lower-bound stamp, or why not.
+  const timeAtStep = (s: Step): string => {
+    if (waits.kind === 'loading') return 'at step …';
+    if (waits.kind === 'failed') return 'time at step unreadable';
+    const w = waits.waits.byStep.get(s.id);
+    if (!w) return 'time at step unknown';
+    return `at step ${w.exact ? '' : '≥'}${durationText(now - w.sinceMs)}`;
+  };
 
   const jobs = $derived(load.kind === 'ready' ? load.jobs : []);
 
@@ -66,14 +124,14 @@
     ),
   );
 
-  const stepsOf = (j: Job): ReadonlyArray<Step> =>
+  const stepsOf = (j: IncidentJob): ReadonlyArray<Step> =>
     [...(j.steps ?? [])].sort((a, b) => a.sort_order - b.sort_order);
 
   /// The steps a responder can act on right now, with their holders.
-  const workable = (j: Job): ReadonlyArray<Step> =>
+  const workable = (j: IncidentJob): ReadonlyArray<Step> =>
     stepsOf(j).filter((s) => s.status === 'ready' || s.status === 'active');
 
-  const doneCount = (j: Job): number =>
+  const doneCount = (j: IncidentJob): number =>
     stepsOf(j).filter((s) => s.status === 'completed' || s.status === 'skipped').length;
 
   /// Header keys the document body must not repeat.
@@ -93,7 +151,7 @@
       Could not load the incident queue — {load.message}. This page will not guess:
       an unreadable queue is not an empty one.
     </p>
-    <button class="inc-btn" type="button" onclick={fetchIncidents}>Retry</button>
+    <button class="inc-btn" type="button" onclick={refresh}>Retry</button>
   </div>
 {:else}
   <section class="inc-active" aria-label="Active incidents">
@@ -105,11 +163,23 @@
         <article class="inc-card">
           <header class="inc-card-head">
             <h3 class="inc-card-title">{j.title}</h3>
-            {#if incidentAt(j.metadata)}
-              <span class="inc-when">{incidentAt(j.metadata)}</span>
-            {/if}
             <a class="inc-open" href={href(`/jobs/${j.id}`)}>Open packet →</a>
           </header>
+
+          <!-- The facts that make a troubled packet look troubled
+               (1a242883): how bad, since when, and for how long. -->
+          <dl class="inc-facts">
+            <div><dt>priority</dt><dd class="inc-priority">{j.priority}</dd></div>
+            {#if severityOf(j)}
+              <div><dt>severity</dt><dd class="inc-severity">{severityOf(j)}</dd></div>
+            {/if}
+            {#if startedAt(j)}
+              <div><dt>started</dt><dd class="inc-when">{startedAt(j)}</dd></div>
+            {/if}
+            {#if timeOpen(j)}
+              <div><dt>open</dt><dd class="inc-age">{timeOpen(j)}</dd></div>
+            {/if}
+          </dl>
 
           <!-- The compact step-state strip: one segment per step, in
                workflow order, coloured by its status. Hover a segment
@@ -118,7 +188,7 @@
             {#each stepsOf(j) as s (s.id)}
               <span
                 class="inc-strip-step inc-strip-{s.status}"
-                title="{s.title} — {s.status}{s.assignee_id ? ` · ${s.assignee_id}` : ''}"
+                title="{s.title} — {s.status} · {holderOf(s)}"
               ></span>
             {/each}
             <span class="inc-strip-count">{doneCount(j)}/{stepsOf(j).length} steps done</span>
@@ -129,7 +199,8 @@
               Now:
               {#each workable(j) as s, i (s.id)}
                 {i > 0 ? ' · ' : ''}<strong>{s.title}</strong>
-                {s.assignee_id ? `(${s.assignee_id})` : '(unassigned)'}
+                <span class="inc-holder">({holderOf(s)})</span>
+                <span class="inc-at-step">{timeAtStep(s)}</span>
               {/each}
             </p>
           {/if}
@@ -252,6 +323,36 @@
   }
   .inc-when {
     font: 400 11px var(--font-mono);
+    color: var(--static);
+  }
+  .inc-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s1) var(--s4);
+    margin: 0;
+    font-size: 12px;
+  }
+  .inc-facts div {
+    display: flex;
+    gap: var(--s1);
+    align-items: baseline;
+  }
+  .inc-facts dt {
+    font: 400 11px var(--font-mono);
+    color: var(--static);
+  }
+  .inc-facts dd {
+    margin: 0;
+  }
+  .inc-severity {
+    color: var(--warn);
+    font-weight: 600;
+  }
+  .inc-age,
+  .inc-at-step {
+    font: 400 11px var(--font-mono);
+  }
+  .inc-at-step {
     color: var(--static);
   }
   .inc-open {

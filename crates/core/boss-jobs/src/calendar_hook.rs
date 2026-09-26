@@ -73,6 +73,36 @@ pub enum HookOutcome {
     },
     /// One or more reservations were cancelled by reason.
     Cancelled { count: usize },
+    /// A step that holds its time as stored — Active, or Completed over
+    /// the time a refused racer reserved — asked for that time again and
+    /// found another reservation holding it (backlog 4bdb8150). Unlike
+    /// [`HookOutcome::Conflict`], nothing is refused: the step already
+    /// moved. The hold is simply gone, and this is the record of it.
+    HoldLost(LostHold),
+}
+
+/// A reservation a step owed and no longer has (backlog 4bdb8150, the
+/// round-3 review of car 983696b5): the step, the time it holds as
+/// stored, whose time it is, and the rows the calendar says hold that
+/// time now.
+///
+/// The re-assertion that finds it runs after a step write that already
+/// landed or was already refused, so there is no request left to refuse
+/// and no caller waiting on it. It was a `tracing::warn` — a lost
+/// reservation recorded only in a log line, which is a check nobody
+/// reads. The handler records it as a `jobs.step.hold_lost` event
+/// ([`crate::events::step_hold_lost_payload`]), and a dispatcher rule
+/// (`infra/dispatcher/rules/`) opens the packet a person reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LostHold {
+    pub job_id: boss_core::job::JobId,
+    pub step_id: boss_core::job::StepId,
+    /// The assignee whose time the step holds.
+    pub subject: Subject,
+    pub window: TimeWindow,
+    /// The reservations holding that time now, as the calendar
+    /// answered the re-assertion.
+    pub held_by: Vec<Reservation>,
 }
 
 /// Apply the calendar hook for a single step transition, BEFORE the
@@ -257,18 +287,22 @@ pub async fn after_step_written(
 /// Best-effort like the skip's release: the refusal is already the
 /// answer, and a hold this misses is the step's own — its re-send takes
 /// it as [`HookOutcome::AlreadyHeld`] rather than refusing against it.
+/// What the re-hold found is returned, so a hold another reservation
+/// took in the gap reaches the caller as [`HookOutcome::HoldLost`] to
+/// record (backlog 4bdb8150).
 pub async fn release_after_refused_write<F, Fut>(
     calendar: Option<&Arc<dyn CalendarClient>>,
     reservation: ReservationId,
     attempted: &Step,
     actor: &str,
     read_stored: F,
-) where
+) -> HookOutcome
+where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Option<Step>>,
 {
     let Some(calendar) = calendar else {
-        return;
+        return HookOutcome::NoOp;
     };
     let holds_this_time = |stored: &Step| {
         matches!(stored.status, StepStatus::Active | StepStatus::Completed)
@@ -276,7 +310,7 @@ pub async fn release_after_refused_write<F, Fut>(
             && scheduling_fields(stored) == scheduling_fields(attempted)
     };
     if read_stored().await.is_some_and(|s| holds_this_time(&s)) {
-        return;
+        return HookOutcome::NoOp;
     }
     if let Err(e) = calendar.cancel(reservation, actor).await {
         tracing::warn!(
@@ -286,13 +320,9 @@ pub async fn release_after_refused_write<F, Fut>(
         );
     }
     match read_stored().await {
-        Some(stored) if holds_this_time(&stored) => {
-            reassert_hold(calendar, &stored, actor).await;
-        }
-        Some(stored) => {
-            hold_for_landed_start(Some(calendar), &stored, actor).await;
-        }
-        None => {}
+        Some(stored) if holds_this_time(&stored) => reassert_hold(calendar, &stored, actor).await,
+        Some(stored) => hold_for_landed_start(Some(calendar), &stored, actor).await,
+        None => HookOutcome::NoOp,
     }
 }
 
@@ -306,8 +336,11 @@ pub async fn release_after_refused_write<F, Fut>(
 /// review of car 983696b5). Either way the step is Active and the hold
 /// it counted on belonged to an attempt that may have released it.
 ///
-/// Best-effort: the step has already moved; a failure is logged. A
-/// step not Active, or without a complete schedule, holds nothing.
+/// Best-effort: the step has already moved; a failure is logged, and a
+/// time another reservation holds is returned as
+/// [`HookOutcome::HoldLost`] for the caller to record (backlog
+/// 4bdb8150). A step not Active, or without a complete schedule, holds
+/// nothing.
 pub async fn hold_for_landed_start(
     calendar: Option<&Arc<dyn CalendarClient>>,
     stored: &Step,
@@ -323,25 +356,41 @@ pub async fn hold_for_landed_start(
 }
 
 /// Reserve `stored`'s scheduled time as its hold, whatever its status —
-/// the caller has decided the step holds that time. Best-effort, logged.
+/// the caller has decided the step holds that time. Best-effort, logged;
+/// a time another reservation holds is [`HookOutcome::HoldLost`], which
+/// the caller records (backlog 4bdb8150).
 async fn reassert_hold(
     calendar: &Arc<dyn CalendarClient>,
     stored: &Step,
     actor: &str,
 ) -> HookOutcome {
-    let outcome = match start_request(stored, actor) {
-        Ok(Some(req)) => reserve_as_the_step(calendar, req).await,
+    let req = match start_request(stored, actor) {
+        Ok(Some(req)) => req,
         Ok(None) => return HookOutcome::NoOp,
-        Err(e) => Err(e),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                step_id = %stored.id,
+                "calendar: could not re-assert the hold of a step"
+            );
+            return HookOutcome::NoOp;
+        }
     };
-    match outcome {
+    let (subject, window) = (req.subject.clone(), req.window);
+    match reserve_as_the_step(calendar, req).await {
         Ok(HookOutcome::Conflict { existing_rows }) => {
             tracing::warn!(
                 step_id = %stored.id,
                 existing = existing_rows.len(),
-                "calendar: a held step's time is held by another reservation"
+                "calendar: a held step's time is held by another reservation; recording the lost hold"
             );
-            HookOutcome::Conflict { existing_rows }
+            HookOutcome::HoldLost(LostHold {
+                job_id: stored.job_id,
+                step_id: stored.id,
+                subject,
+                window,
+                held_by: existing_rows,
+            })
         }
         Ok(held) => held,
         Err(e) => {
@@ -928,6 +977,69 @@ mod tests {
         assert_eq!(
             hold_for_landed_start(Some(&cal), &new, "emp-1").await,
             HookOutcome::AlreadyHeld
+        );
+    }
+
+    /// The hold a step whose time another reservation took has lost —
+    /// what the re-assertion must report, naming the step, its window
+    /// and the row now holding that time.
+    fn lost_to(step: &Step, holder: &Reservation) -> HookOutcome {
+        HookOutcome::HoldLost(LostHold {
+            job_id: step.job_id,
+            step_id: step.id,
+            subject: Subject::new("employee", "emp-1"),
+            window: holder.window,
+            held_by: vec![holder.clone()],
+        })
+    }
+
+    #[tokio::test]
+    async fn a_landed_start_whose_time_another_took_reports_the_hold_lost() {
+        // Backlog 4bdb8150 (the round-3 review of car 983696b5). The
+        // start landed on a hold it did not place, the racer that placed
+        // it handed it back, and before the re-assertion a third party
+        // reserved the assignee's time. The step is Active and holds
+        // nothing. That was a `tracing::warn` nobody reads; it is now an
+        // outcome the handler records.
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let (_, new, anothers) = a_start_and_its_hold(Some("another-step"));
+        fake.stage_conflict(vec![anothers.clone()]);
+        assert_eq!(
+            hold_for_landed_start(Some(&cal), &new, "emp-1").await,
+            lost_to(&new, &anothers)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_start_whose_re_hold_finds_the_time_taken_reports_the_hold_lost() {
+        // The refused racer handed its reservation back, found the start
+        // it let through landed, and re-held — but the time was taken in
+        // between. Reported, never only logged.
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let (old, new, anothers) = a_start_and_its_hold(Some("another-step"));
+        fake.stage_conflict(vec![anothers.clone()]);
+        let reads = stored_reads([Some(old), Some(new.clone())]);
+        let out =
+            release_after_refused_write(Some(&cal), ReservationId::new(), &new, "emp-1", reads)
+                .await;
+        assert_eq!(out, lost_to(&new, &anothers));
+    }
+
+    #[tokio::test]
+    async fn a_refused_write_that_hands_back_its_hold_reports_nothing_lost() {
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let (old, new, _) = a_start_and_its_hold(None);
+        let reads = stored_reads([Some(old.clone()), Some(old)]);
+        let out =
+            release_after_refused_write(Some(&cal), ReservationId::new(), &new, "emp-1", reads)
+                .await;
+        assert_eq!(
+            out,
+            HookOutcome::NoOp,
+            "the step never started: no hold owed"
         );
     }
 

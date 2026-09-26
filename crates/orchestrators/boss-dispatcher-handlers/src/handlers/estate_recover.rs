@@ -89,7 +89,7 @@ use super::common::{
     RECOVERED_AT, Retraction, api_client, complete_step, get_json, recovery_note, relapse_patch,
     retraction, rows_or_refuse, write_json,
 };
-use super::estate_alarm::{DEDUP_PAGE, PERSIST_N, unrecovered_keys};
+use super::estate_alarm::{DEDUP_PAGE, PERSIST_N, query_safe, unrecovered_keys};
 
 /// Stamped on the triage completion this handler writes, so
 /// `estate_alarm::settled_recently` can tell a machine clear from a
@@ -338,10 +338,15 @@ impl Handler for EstateRecover {
         // A failed read is the one condition that fails the whole pass
         // — there is nothing to judge without it — and the redelivery
         // repeats a read, not a write.
+        //
+        // Only the packets carrying `estate_finding`, the key every
+        // series alarm has (backlog c5ac71de). Unfiltered, an alarm behind
+        // a page of unrelated open items "waited for the next firing",
+        // which reads the same page, so it waited for good.
         let listing = get_json(
             &self.client,
             &format!(
-                "{}/api/jobs?kind=backlog-item&status=open&limit={DEDUP_PAGE}",
+                "{}/api/jobs?kind=backlog-item&status=open&metadata_has=estate_finding&limit={DEDUP_PAGE}",
                 self.base()
             ),
             &ctx.rule_name,
@@ -411,13 +416,22 @@ impl Handler for EstateRecover {
         }
 
         // The recorded series IS the state, read exactly as the raiser
-        // reads it: scoped, newest first, twenty rows.
+        // reads it: scoped, the host's own series when it has one
+        // (111996f5 — a page of the host scope is forge's alone, so a
+        // daily host's alarm never held three rows to recover on),
+        // newest first, twenty rows.
+        let series = match host {
+            Some(h) if query_safe(h) => format!("scope={scope}&host={h}"),
+            Some(h) => {
+                return Err(HandlerError::Downstream(format!(
+                    "estate.recover: host {h:?} cannot ride a query unescaped; its series was not read"
+                )));
+            }
+            None => format!("scope={scope}"),
+        };
         let recent = get_json(
             &self.client,
-            &format!(
-                "{}/api/estate/comparisons?scope={scope}&limit=20",
-                self.base()
-            ),
+            &format!("{}/api/estate/comparisons?{series}&limit=20", self.base()),
             &ctx.rule_name,
         )
         .await?;
@@ -962,7 +976,6 @@ mod tests {
     async fn stub(open: Vec<Value>, rows: Vec<Value>) -> (String, Writes, Writes) {
         let puts: Writes = Arc::new(Mutex::new(Vec::new()));
         let patches: Writes = Arc::new(Mutex::new(Vec::new()));
-        let total = open.len();
         let open_for_puts = open.clone();
         let open = Arc::new(open);
         let rows = Arc::new(rows);
@@ -977,7 +990,15 @@ mod tests {
                             Some("open"),
                             "recovery reads OPEN packets only"
                         );
-                        Json(json!({"data": *open, "total": total}))
+                        // Answered as the jobs API answers it, behind more
+                        // unrelated open items than one page (c5ac71de).
+                        Json(crate::handlers::listing_stub::backlog_listing(
+                            &open,
+                            q.get("metadata_has").and_then(Value::as_str),
+                            q.get("limit")
+                                .and_then(Value::as_str)
+                                .and_then(|l| l.parse().ok()),
+                        ))
                     }
                 }),
             )
@@ -1100,6 +1121,39 @@ mod tests {
         assert_eq!(patches.len(), 1, "one recovery, one packet annotation");
         assert_eq!(patches[0].0, "fdd10ec8");
         assert_eq!(patches[0].1["recovered_at"], at(45).to_rfc3339());
+    }
+
+    /// THE OPEN-ALARM READ ASKS ONLY FOR ESTATE PACKETS (backlog
+    /// c5ac71de). Unfiltered, it counted every open backlog-item, and an
+    /// alarm past the first page "waited for the next firing" — which
+    /// reads the same page, so it waited for good. The stub answers as
+    /// the jobs API does, the alarm behind more unrelated open items than
+    /// the page holds; a recovered series must still close it.
+    #[tokio::test]
+    async fn a_backlog_past_one_page_does_not_hide_a_recovered_alarm() {
+        use crate::handlers::listing_stub::UNRELATED_BACKLOG;
+        const {
+            assert!(
+                UNRELATED_BACKLOG > DEDUP_PAGE,
+                "the fixture outgrows a page"
+            )
+        };
+        let (clean, rows) = clean_series();
+        let open = vec![alarm(
+            "fdd10ec8",
+            KEY,
+            "host-units",
+            Some("boss-gcp"),
+            "open",
+        )];
+        let (base, puts, _) = stub(open, rows).await;
+        EstateRecover::new(&base)
+            .invoke(&[], &firing(payload(&clean).clone()))
+            .await
+            .expect("both writes answered");
+        let puts = puts.lock().unwrap();
+        assert_eq!(puts.len(), 2, "found past the page and closed: {puts:?}");
+        assert_eq!(puts[1].0, "fdd10ec8-triage");
     }
 
     /// The alarm after a person triaged it: `triage` completed with
@@ -1252,7 +1306,11 @@ mod tests {
     async fn an_open_alarm_read_with_no_data_array_refuses_and_writes_nothing() {
         use crate::handlers::listing_stub::{assert_refused_by_name, no_data_array, serve};
         let (clean, _) = clean_series();
-        let stub = serve(vec![("/api/jobs", no_data_array())]).await;
+        let stub = serve(vec![(
+            "/api/jobs?metadata_has=estate_finding",
+            no_data_array(),
+        )])
+        .await;
         let res = EstateRecover::new(&stub.base)
             .invoke(&[], &firing(payload(&clean).clone()))
             .await;
@@ -1269,7 +1327,10 @@ mod tests {
         let (clean, _) = clean_series();
         let open = alarm("fdd10ec8", KEY, "host-units", Some("boss-gcp"), "open");
         let stub = serve(vec![
-            ("/api/jobs", json!({ "data": [open], "total": 1 })),
+            (
+                "/api/jobs?metadata_has=estate_finding",
+                json!({ "data": [open], "total": 1 }),
+            ),
             ("/api/estate/comparisons", no_data_array()),
         ])
         .await;
@@ -1278,6 +1339,63 @@ mod tests {
             .await;
         assert_eq!(stub.writes(), Vec::<String>::new());
         assert_refused_by_name(res, "the comparisons read");
+    }
+
+    /// Recovery reads the host's OWN series, as the raiser now does
+    /// (backlog 111996f5). A disk_tight alarm on boss-gcp, whose
+    /// comparisons come once a day, recovers on its three clean days —
+    /// but a page of the host SCOPE is twenty rows of forge's
+    /// fifteen-minute series, so read that way it never held three of
+    /// boss-gcp's rows and the alarm could only ever be closed by hand.
+    #[tokio::test]
+    async fn a_daily_hosts_alarm_recovers_behind_a_busy_neighbour() {
+        use crate::handlers::listing_stub::serve;
+        let row = |host: &str, observed: DateTime<Utc>| {
+            json!({
+                "event_id": "e", "timestamp": observed.to_rfc3339(), "source": "jobs",
+                "kind": "jobs.estate.compared",
+                "payload": {"scope": "host", "host": host, "observed_at": observed.to_rfc3339(),
+                            "findings": {"disk_tight": [], "not_ready": []}},
+            })
+        };
+        // Three clean days of boss-gcp after the raise, newest first,
+        // and the day after them forge's fifteen-minute rows.
+        let gcp: Vec<Value> = (1..=3)
+            .rev()
+            .map(|d| row("boss-gcp", at(d * 1440)))
+            .collect();
+        let forge: Vec<Value> = (0..20)
+            .map(|i| row("forge", at(3 * 1440 + 300 - 15 * i)))
+            .collect();
+        let open = alarm(
+            "b0550c9e",
+            "disk_tight:boss-gcp",
+            "host",
+            Some("boss-gcp"),
+            "open",
+        );
+        let stub = serve(vec![
+            ("/api/jobs", json!({ "data": [open], "total": 1 })),
+            (
+                "/api/estate/comparisons?scope=host&host=boss-gcp",
+                json!({ "data": gcp, "total": 3 }),
+            ),
+            (
+                "/api/estate/comparisons?scope=host",
+                json!({ "data": forge, "total": 400 }),
+            ),
+        ])
+        .await;
+        EstateRecover::new(&stub.base)
+            .invoke(&[], &firing(payload(&gcp[0]).clone()))
+            .await
+            .expect("the pass completes");
+        assert!(
+            stub.writes()
+                .contains(&"PUT /api/jobs/b0550c9e/steps/b0550c9e-triage".to_string()),
+            "the recovered alarm is closed: {:?}",
+            stub.writes()
+        );
     }
 
     /// The stub answers a close aimed at a step a person already

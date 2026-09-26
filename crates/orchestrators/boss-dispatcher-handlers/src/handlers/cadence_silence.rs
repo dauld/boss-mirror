@@ -1347,10 +1347,19 @@ impl Handler for CadenceSilenceSweep {
         // are open (update, don't twin), which were settled by a human
         // inside the window (stay quiet), and which standing alarms
         // belong to a kind that came back (close them).
+        //
+        // `metadata_has=cadence_silence` narrows it to the only packets
+        // all three questions read (backlog c5ac71de, the sibling of the
+        // estate alarm's dde64482). Without it every backlog-item of the
+        // week counted toward the page: on 2026-09-26 that was 1054 rows,
+        // 3 of them cadence alarms, so the HOLD below engaged on every
+        // pass and no CADENCE SILENT or SUPPRESSED alarm could be filed.
+        // The HOLD stays as the fail-safe; it now needs a thousand
+        // cadence alarms in a week to engage.
         let listing = get_json(
             &self.client,
             &format!(
-                "{}/api/jobs?kind=backlog-item&closed_within={SETTLED_DAYS}&limit={DEDUP_PAGE}",
+                "{}/api/jobs?kind=backlog-item&closed_within={SETTLED_DAYS}&metadata_has=cadence_silence&limit={DEDUP_PAGE}",
                 self.base()
             ),
             &ctx.rule_name,
@@ -2479,7 +2488,10 @@ mod tests {
             assert_refused_by_name, empty_listing, no_data_array, serve,
         };
         let stub = serve(vec![
-            ("/api/jobs?kind=backlog-item", empty_listing()),
+            (
+                "/api/jobs?kind=backlog-item&metadata_has=cadence_silence",
+                empty_listing(),
+            ),
             ("/api/jobs?kind=maintenance-k", no_data_array()),
         ])
         .await;
@@ -2497,7 +2509,10 @@ mod tests {
     async fn a_dedup_read_with_no_data_array_refuses_by_name() {
         use crate::handlers::listing_stub::{assert_refused_by_name, no_data_array, serve};
         let stub = serve(vec![
-            ("/api/jobs?kind=backlog-item", no_data_array()),
+            (
+                "/api/jobs?kind=backlog-item&metadata_has=cadence_silence",
+                no_data_array(),
+            ),
             (
                 "/api/jobs?kind=maintenance-k",
                 json!({ "data": [packet("2026-09-23T11:30:00Z")], "total": 1 }),
@@ -2531,7 +2546,7 @@ mod tests {
         });
         let stub = serve(vec![
             (
-                "/api/jobs?kind=backlog-item",
+                "/api/jobs?kind=backlog-item&metadata_has=cadence_silence",
                 json!({ "data": [alarm], "total": 1 }),
             ),
             (
@@ -2557,6 +2572,78 @@ mod tests {
             sent[1].1,
             json!({"status": "completed"}),
             "the flip carries the status alone (e39a9d2a)"
+        );
+    }
+
+    /// THE DEDUP READS ONLY CADENCE ALARMS (backlog c5ac71de). Unfiltered,
+    /// the read counted every backlog-item open or closed this week; on
+    /// 2026-09-26 that was 1054 against a 1000-row page, so the
+    /// truncation HOLD engaged on every pass and no CADENCE SILENT or
+    /// SUPPRESSED alarm could be filed — the estate alarm's defect
+    /// (dde64482) in its sibling. The stub answers as the jobs API does:
+    /// the `metadata_has` read returns only the packets carrying the key,
+    /// the unfiltered one a truncated page of unrelated items. The sweep
+    /// must still see the alarm it holds, and raise the silence no packet
+    /// carries.
+    #[tokio::test]
+    async fn a_backlog_past_one_page_does_not_hold_a_new_cadence_alarm() {
+        use crate::handlers::listing_stub::{UNRELATED_BACKLOG, backlog_listing, serve};
+        const {
+            assert!(
+                UNRELATED_BACKLOG > DEDUP_PAGE,
+                "the fixture outgrows a page"
+            )
+        };
+        let standing = json!({
+            "id": "b7c1d2e3",
+            "status": "open",
+            "metadata": {"cadence_silence": silence_key("maintenance-other")},
+        });
+        let stub = serve(vec![
+            (
+                "/api/jobs?kind=backlog-item&metadata_has=cadence_silence",
+                json!({ "data": [standing], "total": 1 }),
+            ),
+            (
+                "/api/jobs?kind=backlog-item",
+                backlog_listing(&[], None, Some(DEDUP_PAGE)),
+            ),
+            (
+                "/api/jobs?kind=maintenance-k",
+                json!({ "data": [packet("2026-09-20T11:30:00Z")], "total": 1 }),
+            ),
+            (
+                "/api/jobs?kind=maintenance-other",
+                json!({ "data": [packet("2026-09-20T11:30:00Z")], "total": 1 }),
+            ),
+        ])
+        .await;
+        let mut args = hourly("maintenance-k");
+        args.extend(hourly("maintenance-other"));
+        let res = sweep_at(&stub.base, NOW).invoke(&args, &sweep_ctx()).await;
+        assert!(
+            res.is_ok(),
+            "a new silence must raise, not be held: {res:?}"
+        );
+        let posts: Vec<(String, Value)> = stub
+            .sent()
+            .into_iter()
+            .filter(|(w, _)| w == "POST /api/jobs")
+            .collect();
+        assert_eq!(posts.len(), 1, "{posts:?}");
+        assert_eq!(
+            posts[0].1["metadata"]["cadence_silence"],
+            json!(silence_key("maintenance-k")),
+            "the standing alarm is refreshed; only the new silence files"
+        );
+        assert_eq!(
+            stub.writes()
+                .iter()
+                .filter(|w| w.as_str() == "PATCH /api/jobs/b7c1d2e3/metadata")
+                .count(),
+            1,
+            "{:?}",
+            stub.writes()
         );
     }
 }

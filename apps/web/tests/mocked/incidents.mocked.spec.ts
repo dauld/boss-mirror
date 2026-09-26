@@ -170,6 +170,75 @@ test('a failed fetch renders as a failure with Retry — never as an empty page'
   await expect(page.locator('.inc-failed')).toHaveCount(0);
 });
 
+/// An open packet in the LIVE shape (a65ba21e, read 2026-09-26): no
+/// started_at on the job or the raised step, metadata.opened_at and
+/// metadata.severity present, the current step held by a ROLE.
+const LIVE_SHAPE = {
+  id: 'inc-live-1',
+  kind: 'incident',
+  workflow_version: 3,
+  subject: { subject_kind: 'custom', id: 'incident-2026-09-26' },
+  title: 'Incident: gate bay stalled',
+  owner_id: 'emp-david',
+  status: 'open',
+  priority: 'urgent',
+  opened_on: '2026-09-26',
+  due_on: null,
+  closed_on: null,
+  tags: [],
+  metadata: {
+    opened_at: '2026-09-26T02:32:07Z',
+    severity: 'degradation (no service outage)',
+  },
+  steps: [
+    { id: 's-live-0', job_id: 'inc-live-1', kind: 'trigger', title: 'Incident raised', assignee_id: null, status: 'completed', sort_order: 0, blocked_by: [], completed_on: '2026-09-26', metadata: { symptom: 'gates stuck' } },
+    { id: 's-live-1', job_id: 'inc-live-1', kind: 'task', title: 'Establish the timeline from evidence', assignee_id: null, status: 'ready', sort_order: 2, blocked_by: ['s-live-0'], completed_on: null, metadata: { authority_role: 'platform-admin' } },
+  ],
+};
+
+const QUEUE_AGE = /\/api\/jobs\/queue-age$/;
+
+test('the active card shows severity, when it started, time open, time at step and the real audience', async ({ page }) => {
+  await mocks(page);
+  await page.route(LIST, (r) => json(r, { data: [LIVE_SHAPE], total: 1 }));
+  await page.route(QUEUE_AGE, (r) =>
+    json(r, {
+      data: [{ job_id: 'inc-live-1', step_id: 's-live-1', since: '2026-09-26T04:00:00Z', exact: true }],
+      total: 1,
+      now: '2026-09-26T05:10:00Z',
+    }));
+
+  await page.goto('/it/operate');
+
+  const card = page.locator('.inc-active .inc-card');
+  await expect(card).toHaveCount(1);
+  // Severity beside priority (1a242883 b).
+  await expect(card.locator('.inc-priority')).toHaveText('urgent');
+  await expect(card.locator('.inc-severity')).toHaveText('degradation (no service outage)');
+  // When: no started_at anywhere on the live shape, so metadata.opened_at (a).
+  await expect(card.locator('.inc-when')).toHaveText('2026-09-26T02:32:07Z');
+  // Time open, against the server clock the lens sent (c).
+  await expect(card.locator('.inc-age')).toHaveText('2h 37m');
+  // Time at the current step, from became_ready_at (c).
+  await expect(card.locator('.inc-at-step')).toHaveText('at step 1h 10m');
+  // The role that holds it, not "(unassigned)" (d).
+  await expect(card.locator('.inc-holder')).toHaveText('(role platform-admin)');
+  await expect(card.getByText('(unassigned)')).toHaveCount(0);
+});
+
+test('an unreadable queue-age says so on the card and does not fail the queue', async ({ page }) => {
+  await mocks(page);
+  await page.route(LIST, (r) => json(r, { data: [LIVE_SHAPE], total: 1 }));
+  await page.route(QUEUE_AGE, (r) => json(r, 'down', 500));
+
+  await page.goto('/it/operate');
+
+  const card = page.locator('.inc-active .inc-card');
+  await expect(card.locator('.inc-at-step')).toHaveText('time at step unreadable');
+  await expect(card.locator('.inc-severity')).toBeVisible();
+  await expect(page.locator('.inc-failed')).toHaveCount(0);
+});
+
 test('a truly empty queue reads as empty — each panel says so distinctly', async ({ page }) => {
   await mocks(page);
   await page.route(LIST, (r) => json(r, { data: [], total: 0 }));

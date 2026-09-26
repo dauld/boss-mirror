@@ -666,3 +666,39 @@ roles = ["ceo", "cfo", "controller", "head-of-people"]
 resource = "compensation"
 action = "read"
 scope = "all"
+
+# ------------------------------------------------------------------
+# Schedules.
+#
+# Availability, assignments, shift patterns and the week grid answered
+# any session and any headerless caller (backlog a621d091,
+# 2026-09-25). Every employee reads their own without a grant; the
+# `schedule` grant is what reading anyone else's takes, in its scope.
+# The people who staff the whole brewery read all of it; a manager
+# reads their team (themself and their direct reports). audit-readonly
+# does NOT hold it, for the reason it does not hold pay.
+#
+# The `team` list is every role some employee in employees.json reports
+# to, and nothing else — the leads run the crews whose weeks these
+# reads are for, and a role that manages nobody needs no grant to read
+# itself. Pinned by boss-brewery-engine
+# tests/every_manager_reads_their_teams_schedule.rs.
+# ------------------------------------------------------------------
+
+[[grants]]
+roles = ["ceo", "coo", "head-of-people"]
+resource = "schedule"
+action = "read"
+scope = "all"
+
+[[grants]]
+roles = [
+    "cfo", "cto", "controller", "it-director", "head-brewer",
+    "head-of-distribution", "head-of-sales", "head-of-marketing",
+    "packaging-mgr", "warehouse-mgr", "maintenance-mgr", "qa-supervisor",
+    "shift-lead", "packaging-lead", "warehouse-lead", "sales-lead",
+    "taproom-shift-lead", "distribution-lead",
+]
+resource = "schedule"
+action = "read"
+scope = "team"

@@ -98,8 +98,15 @@ const SILENT: ReadonlyMap<string, string> = new Map([
 /// failure (loadSession falls through on an empty roster), and the
 /// crawl's mocked session is unauthenticated anyway, so the shell still
 /// paints.
+///
+/// /ux/people/emp-001 (backlog 1a83fe98) reads its own record AND the
+/// roster, which feeds its reporting chain and team; both are its own
+/// data, so both fail there. It was crawled by nothing before, and only
+/// employee-page-roster-read.mocked.spec.ts said what it shows when a
+/// read fails.
 const ALSO_BROKEN: ReadonlyMap<string, ReadonlyArray<RegExp>> = new Map([
   ['/ux/people', [/\/api\/people$/]],
+  ['/ux/people/emp-001', [/\/api\/people$/]],
 ]);
 
 /// How late a route's OWN read is issued — the manual-page fix's figure

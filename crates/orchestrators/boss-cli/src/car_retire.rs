@@ -29,6 +29,16 @@
 //! a resolution kept the work is a judgement, and it goes on the record
 //! as one. A commit matching neither is refused by name.
 //!
+//! UNLESS THE WHOLE TREE PROVES IT (backlog 2b198cac). A carrier built on
+//! top of the car and squashed holds the car's diff inside a commit of
+//! its own, so no commit of the car can match — car 8df80582 was refused
+//! NOT CARRIED on 2026-09-25 with every line it added on main. For a
+//! commit nothing matches, the verb merges the car's head into main
+//! (`git merge-tree --write-tree`): when that writes main's own tree, the
+//! car's net work is on main and the machine says so. When it does not,
+//! the conflicting and differing files are named and only
+//! `--accept-net-diff` retires the car, recorded as a judgement.
+//!
 //! THE CARRIER MUST HAVE LANDED, OBSERVED. A branch resolves to its
 //! landed car; a merge sha to the landed cars that record it as their
 //! `merge_ref`. Either way the merge is checked to be an ancestor of
@@ -83,13 +93,74 @@ pub(crate) enum Carried {
         carrier: String,
         differing: Vec<String>,
     },
-    /// Neither.
+    /// No carrier commit holds it, but merging the car's head into main
+    /// writes main's OWN tree: the car's net work is on main, in whatever
+    /// commit carried it. Proven by the machine (backlog 2b198cac).
+    InMainTree { twin: Commit, tree: String },
+    /// No carrier commit holds it, and merging the car's head into main
+    /// does NOT write main's tree — `files` name where it conflicts or
+    /// differs. Accepted only with `--accept-net-diff`.
+    NetDiffers { twin: Commit, files: Vec<String> },
+    /// Neither, and the whole tree was not read.
     Missing(Commit),
 }
 
+/// What merging the car's head into the forge's main writes — `git
+/// merge-tree --write-tree main head` — against main's own tree. The
+/// whole-tree reading (backlog 2b198cac).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WholeTree {
+    pub main_tree: String,
+    pub merged_tree: String,
+    /// The paths merge-tree could not merge.
+    pub conflicted: Vec<String>,
+    /// The paths whose merged content is not main's.
+    pub differing: Vec<String>,
+}
+
+impl WholeTree {
+    /// Merging the car into main changes nothing: every file either the
+    /// car left alone, or main already holds the car's change to it.
+    pub(crate) fn on_main(&self) -> bool {
+        self.conflicted.is_empty() && self.merged_tree == self.main_tree
+    }
+
+    /// Every path that stops the proof, a conflict marked as one.
+    fn files(&self) -> Vec<String> {
+        let all: BTreeSet<&String> = self.conflicted.iter().chain(&self.differing).collect();
+        all.into_iter()
+            .map(|f| {
+                if self.conflicted.contains(f) {
+                    format!("{f} (conflict)")
+                } else {
+                    f.clone()
+                }
+            })
+            .collect()
+    }
+}
+
 /// PURE: how each of `twin` is carried by `carrier`. Patch-id first —
-/// the strong match — then the authored identity.
-pub(crate) fn judge(twin: &[Commit], carrier: &[Commit]) -> Vec<Carried> {
+/// the strong match — then the authored identity, then, for a commit
+/// neither finds, the whole tree when it was read.
+///
+/// THE WHOLE-TREE ARM (backlog 2b198cac). A carrier built ON TOP of a car
+/// and squashed carries the car's diff inside the carrier's own commit,
+/// with its own patch and its own authorship, so no per-commit match can
+/// exist — car 8df80582 sat on the dock as CONFLICTS WITH MAIN with its
+/// every added line on main. What does prove it is main itself: when the
+/// three-way merge of the car's head into main writes main's own tree,
+/// the car holds nothing main lacks. A reverse-apply of the car's diff
+/// was measured and REJECTED as the proof: main had moved around two of
+/// the car's hunks, and `git apply --check -R` failed on work that was
+/// there. When the merge is not main's tree, the machine cannot tell a
+/// rewrap from an unlanded line, so it names the files and the operator
+/// judges — the `--accept-replay` shape.
+pub(crate) fn judge(
+    twin: &[Commit],
+    carrier: &[Commit],
+    whole: Option<&WholeTree>,
+) -> Vec<Carried> {
     twin.iter()
         .map(|t| {
             if let Some(c) = carrier
@@ -110,16 +181,32 @@ pub(crate) fn judge(twin: &[Commit], carrier: &[Commit]) -> Vec<Carried> {
                     carrier: c.sha.clone(),
                     differing: Vec::new(),
                 },
-                None => Carried::Missing(t.clone()),
+                None => match whole {
+                    Some(w) if w.on_main() => Carried::InMainTree {
+                        twin: t.clone(),
+                        tree: w.main_tree.clone(),
+                    },
+                    Some(w) => Carried::NetDiffers {
+                        twin: t.clone(),
+                        files: w.files(),
+                    },
+                    None => Carried::Missing(t.clone()),
+                },
             }
         })
         .collect()
 }
 
 /// PURE: accept the judgement, or refuse naming every commit that is
-/// not carried — and every replay, with the files whose patch differs,
-/// unless the operator has accepted replays.
-pub(crate) fn verdict(judged: &[Carried], accept_replay: bool) -> Result<(), String> {
+/// not carried — every replay, with the files whose patch differs,
+/// unless the operator has accepted replays — and every commit whose
+/// net work the whole tree could not prove, with the files, unless the
+/// operator has accepted the net diff.
+pub(crate) fn verdict(
+    judged: &[Carried],
+    accept_replay: bool,
+    accept_net_diff: bool,
+) -> Result<(), String> {
     if judged.is_empty() {
         return Err("the car has no commits to prove carried".into());
     }
@@ -171,11 +258,48 @@ pub(crate) fn verdict(judged: &[Carried], accept_replay: bool) -> Result<(), Str
             replays.join("\n")
         ));
     }
+    let unproven: Vec<(String, &[String])> = judged
+        .iter()
+        .filter_map(|c| match c {
+            Carried::NetDiffers { twin, files } => Some((
+                format!("  {} {}", twin.short(), twin.subject),
+                files.as_slice(),
+            )),
+            _ => None,
+        })
+        .collect();
+    if let Some((_, files)) = unproven.first()
+        && !accept_net_diff
+    {
+        let commits: Vec<&str> = unproven.iter().map(|(c, _)| c.as_str()).collect();
+        return Err(format!(
+            "{} of the car's {} commit(s) match no carrier commit, by patch or by authored \
+             commit:\n{}\nand merging the car's head into main does NOT write main's own tree — \
+             it {} in: {}\nThe machine cannot tell a line main rewrote from a line that never \
+             landed. Compare those files against main; if the car's work is there, re-run \
+             with --accept-net-diff and the acceptance is recorded with the evidence.",
+            unproven.len(),
+            judged.len(),
+            commits.join("\n"),
+            if files.iter().any(|f| f.ends_with("(conflict)")) {
+                "conflicts or differs"
+            } else {
+                "differs"
+            },
+            if files.is_empty() {
+                "(no file named)".to_string()
+            } else {
+                files.join(", ")
+            }
+        ));
+    }
     Ok(())
 }
 
 /// PURE: one commit's match, as the evidence and the terminal print it.
-fn match_line(c: &Carried, accepted_by: Option<&str>) -> String {
+/// `replay_by` and `net_by` are who accepted each judgement, kept apart
+/// so one acceptance never reads as the other.
+fn match_line(c: &Carried, replay_by: Option<&str>, net_by: Option<&str>) -> String {
     match c {
         Carried::Identical { twin, carrier } => format!(
             "{} = {} (patch-id {})",
@@ -199,8 +323,22 @@ fn match_line(c: &Carried, accepted_by: Option<&str>) -> String {
             } else {
                 differing.join(", ")
             },
-            accepted_by
+            replay_by
                 .map(|a| format!("; accepted by {a}"))
+                .unwrap_or_default()
+        ),
+        Carried::InMainTree { twin, tree } => format!(
+            "{} in main's tree {} (no carrier commit holds its patch; merging the car's head \
+             into main writes main's own tree)",
+            twin.short(),
+            &tree[..8.min(tree.len())]
+        ),
+        Carried::NetDiffers { twin, files } => format!(
+            "{} matches no carrier commit, and merging the car's head into main differs in {}{}",
+            twin.short(),
+            files.join(", "),
+            net_by
+                .map(|a| format!("; net work judged on main and accepted by {a}"))
                 .unwrap_or_default()
         ),
         Carried::Missing(t) => format!("{} NOT CARRIED {}", t.short(), t.subject),
@@ -209,8 +347,16 @@ fn match_line(c: &Carried, accepted_by: Option<&str>) -> String {
 
 /// PURE: the evidence the terminal records — the carrier, where it
 /// landed, and every commit's match.
-pub(crate) fn evidence(carrier: &str, judged: &[Carried], accepted_by: Option<&str>) -> String {
-    let lines: Vec<String> = judged.iter().map(|c| match_line(c, accepted_by)).collect();
+pub(crate) fn evidence(
+    carrier: &str,
+    judged: &[Carried],
+    replay_by: Option<&str>,
+    net_by: Option<&str>,
+) -> String {
+    let lines: Vec<String> = judged
+        .iter()
+        .map(|c| match_line(c, replay_by, net_by))
+        .collect();
     format!(
         "{} commit(s) carried by {carrier}: {}",
         judged.len(),
@@ -469,6 +615,54 @@ pub(crate) fn differing_files(repo: &Path, a: &str, b: &str) -> Result<Vec<Strin
     Ok(out)
 }
 
+/// Merge the car's `head` into `main` in memory — `git merge-tree
+/// --write-tree`, no checkout — and read the tree it writes against
+/// main's own. Exit 0 is clean; exit 1 WITH a tree is a conflict; exit
+/// 1 without one (a ref not there) and anything else is an error, never
+/// a verdict — the dock preview's reading of the same command.
+pub(crate) fn whole_tree(repo: &Path, main: &str, head: &str) -> Result<WholeTree, String> {
+    let out = crate::git_auth::command()
+        .arg("-C")
+        .arg(repo)
+        .args(["merge-tree", "--write-tree", "--name-only", main, head])
+        .output()
+        .map_err(|e| format!("git merge-tree {main} {head}: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let merged = stdout
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|l| l.len() >= 40 && l.chars().all(|c| c.is_ascii_hexdigit()));
+    let (merged_tree, conflicted) = match (out.status.code(), merged) {
+        (Some(0), Some(tree)) => (tree.to_string(), Vec::new()),
+        (Some(1), Some(tree)) => (
+            tree.to_string(),
+            crate::dock_preview::parse_conflicted_files(&stdout),
+        ),
+        _ => {
+            return Err(format!(
+                "git merge-tree {main} {head} errored (not a merge verdict): {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+    };
+    let main_tree = git(repo, &["rev-parse", &format!("{main}^{{tree}}")])?;
+    let differing = git(
+        repo,
+        &["diff-tree", "-r", "--name-only", &main_tree, &merged_tree],
+    )?
+    .lines()
+    .filter(|l| !l.is_empty())
+    .map(str::to_string)
+    .collect();
+    Ok(WholeTree {
+        main_tree,
+        merged_tree,
+        conflicted,
+        differing,
+    })
+}
+
 /// Fill each replay's differing files.
 fn with_differences(repo: &Path, judged: Vec<Carried>) -> Result<Vec<Carried>, String> {
     judged
@@ -539,6 +733,7 @@ fn prove_carried(
     branch: &str,
     given: &str,
     accept_replay: bool,
+    accept_net_diff: bool,
     actor: &str,
 ) -> Result<String> {
     let main = forge_main(repo)?;
@@ -606,13 +801,42 @@ fn prove_carried(
             "its head {head} is an ancestor of the forge's main {main}; carrier named: {carrier}"
         ));
     }
-    let judged = with_differences(repo, judge(&mine, &carrier_commits)).map_err(|e| anyhow!(e))?;
+    // The whole tree is read only when a commit matches nothing per
+    // commit: an identical or replayed car proves itself as it always did.
+    let whole = if judge(&mine, &carrier_commits, None)
+        .iter()
+        .any(|c| matches!(c, Carried::Missing(_)))
+    {
+        let w = whole_tree(repo, &main, &head).map_err(|e| anyhow!(e))?;
+        println!(
+            "  whole tree: merging {} into main {} writes {} ({})",
+            &head[..8.min(head.len())],
+            &main[..8.min(main.len())],
+            &w.merged_tree[..8.min(w.merged_tree.len())],
+            if w.on_main() {
+                "main's own tree".to_string()
+            } else {
+                format!("not main's {}", &w.main_tree[..8.min(w.main_tree.len())])
+            }
+        );
+        Some(w)
+    } else {
+        None
+    };
+    let judged = with_differences(repo, judge(&mine, &carrier_commits, whole.as_ref()))
+        .map_err(|e| anyhow!(e))?;
     println!("  carrier: {carrier}");
     for c in &judged {
-        println!("  {}", match_line(c, None));
+        println!("  {}", match_line(c, None, None));
     }
-    verdict(&judged, accept_replay).map_err(|e| anyhow!("boss car retire: REFUSED — {e}"))?;
-    Ok(evidence(&carrier, &judged, accept_replay.then_some(actor)))
+    verdict(&judged, accept_replay, accept_net_diff)
+        .map_err(|e| anyhow!("boss car retire: REFUSED — {e}"))?;
+    Ok(evidence(
+        &carrier,
+        &judged,
+        accept_replay.then_some(actor),
+        accept_net_diff.then_some(actor),
+    ))
 }
 
 /// `boss car retire`.
@@ -621,6 +845,7 @@ pub(crate) async fn retire(
     carried_by: Option<&str>,
     superseded_by: Option<&str>,
     accept_replay: bool,
+    accept_net_diff: bool,
     dry_run: bool,
 ) -> Result<()> {
     let http = reqwest::Client::new();
@@ -649,6 +874,7 @@ pub(crate) async fn retire(
                 &branch,
                 by,
                 accept_replay,
+                accept_net_diff,
                 &actor,
             )?;
             Retirement::CarriedBy {
@@ -955,7 +1181,7 @@ mod tests {
                 "Give each IT region its own page",
             ),
         ];
-        let judged = judge(&twin, &carrier);
+        let judged = judge(&twin, &carrier, None);
         assert!(matches!(&judged[0], Carried::Identical { carrier, .. } if carrier == "91e5d92e"));
         assert!(matches!(&judged[1], Carried::Replayed { carrier, .. } if carrier == "2213c8f7"));
         assert!(matches!(&judged[2], Carried::Missing(c) if c.sha == "deadbeef"));
@@ -980,12 +1206,18 @@ mod tests {
                 "Fix the thing",
             ),
         ] {
-            assert!(matches!(judge(&twin, &[other])[0], Carried::Missing(_)));
+            assert!(matches!(
+                judge(&twin, &[other], None)[0],
+                Carried::Missing(_)
+            ));
         }
         // No patch at all never matches by patch-id.
         let empty = [commit("aaaa0002", None, DAVID, "Empty")];
         let other = [commit("bbbb0003", None, "X <x@x> 1", "Other")];
-        assert!(matches!(judge(&empty, &other)[0], Carried::Missing(_)));
+        assert!(matches!(
+            judge(&empty, &other, None)[0],
+            Carried::Missing(_)
+        ));
     }
 
     /// NO EVIDENCE IS NOT A PASS: a missing commit refuses, by name; a
@@ -995,7 +1227,7 @@ mod tests {
     fn the_verdict_refuses_a_missing_commit_and_an_unaccepted_replay() {
         let t = commit("697951cd11", Some("p"), DAVID, "Give each region a page");
         let missing = [Carried::Missing(t.clone())];
-        let e = verdict(&missing, true).unwrap_err();
+        let e = verdict(&missing, true, false).unwrap_err();
         assert!(e.contains("697951cd Give each region a page"), "{e}");
         assert!(e.contains("NOT carried"), "{e}");
 
@@ -1004,17 +1236,17 @@ mod tests {
             carrier: "2213c8f7aa".into(),
             differing: vec!["apps/web/src/it/yard/MapPage.svelte".into()],
         }];
-        let e = verdict(&replay, false).unwrap_err();
+        let e = verdict(&replay, false, false).unwrap_err();
         assert!(e.contains("MapPage.svelte"), "{e}");
         assert!(e.contains("--accept-replay"), "{e}");
-        assert!(verdict(&replay, true).is_ok());
+        assert!(verdict(&replay, true, false).is_ok());
 
         let identical = [Carried::Identical {
             twin: t,
             carrier: "91e5d92e".into(),
         }];
-        assert!(verdict(&identical, false).is_ok());
-        assert!(verdict(&[], true).is_err());
+        assert!(verdict(&identical, false, false).is_ok());
+        assert!(verdict(&[], true, false).is_err());
     }
 
     /// The evidence names the carrier and every commit's match — and
@@ -1036,6 +1268,7 @@ mod tests {
                 },
             ],
             Some("claude@algedonic.dev"),
+            None,
         );
         assert!(e.starts_with("2 commit(s) carried by car 6a113231"), "{e}");
         assert!(e.contains("697951cd = 91e5d92e (patch-id p-abcdef)"), "{e}");
@@ -1216,7 +1449,7 @@ mod tests {
         let theirs = read_commits(repo, &carrier_head, &format!("{main}^1")).unwrap();
         assert_eq!(theirs.len(), 3, "{theirs:?}");
 
-        let judged = with_differences(repo, judge(&mine, &theirs)).unwrap();
+        let judged = with_differences(repo, judge(&mine, &theirs, None)).unwrap();
         assert!(
             matches!(&judged[0], Carried::Identical { .. }),
             "{judged:?}"
@@ -1228,11 +1461,268 @@ mod tests {
             other => panic!("the conflicted pick is a replay: {other:?}"),
         }
         assert!(matches!(&judged[2], Carried::Missing(c) if c.sha == orphan_head));
-        let e = verdict(&judged, true).unwrap_err();
+        let e = verdict(&judged, true, false).unwrap_err();
         assert!(e.contains("twin: nobody carried this"), "{e}");
         // Without the orphan, the replay alone asks for acceptance.
-        let e = verdict(&judged[..2], false).unwrap_err();
+        let e = verdict(&judged[..2], false, false).unwrap_err();
         assert!(e.contains("map.svelte"), "{e}");
-        assert!(verdict(&judged[..2], true).is_ok());
+        assert!(verdict(&judged[..2], true, false).is_ok());
+    }
+
+    fn whole(on_main: bool, conflicted: &[&str], differing: &[&str]) -> WholeTree {
+        WholeTree {
+            main_tree: "9c5066b4aaaa".into(),
+            merged_tree: if on_main {
+                "9c5066b4aaaa".into()
+            } else {
+                "1234abcd0000".into()
+            },
+            conflicted: conflicted.iter().map(|s| s.to_string()).collect(),
+            differing: differing.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// CAR 8df80582's SHAPE, MEASURED 2026-09-25 (backlog 2b198cac): the
+    /// carrier squashed the car's diff into its OWN commit, so no carrier
+    /// commit holds either car commit's patch or authored identity. When
+    /// merging the car's head into main writes main's own tree, the car's
+    /// net work is on main — the machine proves it, no flag asked.
+    #[test]
+    fn a_commit_no_carrier_commit_holds_is_carried_when_merging_the_car_writes_mains_tree() {
+        let twin = [
+            commit(
+                "270b19fb",
+                Some("p-freeze"),
+                DAVID,
+                "A terminal step freezes",
+            ),
+            commit(
+                "52bcb1a9",
+                Some("p-actor"),
+                DAVID,
+                "A completion names its actor",
+            ),
+        ];
+        let carrier = [commit(
+            "e341f7cd",
+            Some("p-cas"),
+            DAVID,
+            "A stale step write is refused by row version",
+        )];
+        // Without the whole tree, nothing matches — the refusal that
+        // stranded the car.
+        assert!(
+            judge(&twin, &carrier, None)
+                .iter()
+                .all(|c| matches!(c, Carried::Missing(_)))
+        );
+        let on_main = whole(true, &[], &[]);
+        let judged = judge(&twin, &carrier, Some(&on_main));
+        assert!(
+            judged
+                .iter()
+                .all(|c| matches!(c, Carried::InMainTree { tree, .. } if tree == "9c5066b4aaaa")),
+            "{judged:?}"
+        );
+        assert!(verdict(&judged, false, false).is_ok());
+        let e = evidence("car 6ec22d71", &judged, None, None);
+        assert!(e.contains("270b19fb in main's tree 9c5066b4"), "{e}");
+        assert!(e.contains("writes main's own tree"), "{e}");
+
+        // The per-commit proof still wins where it exists: a commit the
+        // carrier holds by patch stays Identical.
+        let mixed = judge(
+            &twin,
+            &[commit("91e5d92e", Some("p-freeze"), DAVID, "x")],
+            Some(&on_main),
+        );
+        assert!(matches!(&mixed[0], Carried::Identical { .. }), "{mixed:?}");
+        assert!(matches!(&mixed[1], Carried::InMainTree { .. }), "{mixed:?}");
+    }
+
+    /// NO EVIDENCE IS NOT A PASS: when the merge conflicts, or is clean
+    /// but writes a tree that is not main's, the machine cannot prove the
+    /// net work landed. The refusal names every file and the flag; the
+    /// flag's acceptance goes on the record with who gave it.
+    #[test]
+    fn a_car_whose_merge_into_main_differs_is_refused_until_the_operator_accepts_the_files() {
+        let twin = [commit(
+            "52bcb1a9",
+            Some("p"),
+            DAVID,
+            "A completion names its actor",
+        )];
+        let differs = whole(
+            false,
+            &["crates/core/boss-dispatcher/src/dispatcher.rs"],
+            &["crates/core/boss-dispatcher/src/dispatcher.rs", "orphan.rs"],
+        );
+        let judged = judge(&twin, &[], Some(&differs));
+        match &judged[0] {
+            Carried::NetDiffers { files, .. } => assert_eq!(
+                files,
+                &vec![
+                    "crates/core/boss-dispatcher/src/dispatcher.rs (conflict)".to_string(),
+                    "orphan.rs".to_string()
+                ]
+            ),
+            other => panic!("a differing merge is NetDiffers: {other:?}"),
+        }
+        let e = verdict(&judged, true, false).unwrap_err();
+        assert!(e.contains("dispatcher.rs (conflict)"), "{e}");
+        assert!(e.contains("orphan.rs"), "{e}");
+        assert!(e.contains("--accept-net-diff"), "{e}");
+        assert!(e.contains("52bcb1a9 A completion names its actor"), "{e}");
+        // --accept-replay is a different judgement and does not stand in.
+        assert!(verdict(&judged, true, false).is_err());
+        assert!(verdict(&judged, false, true).is_ok());
+
+        let ev = evidence("car 6ec22d71", &judged, None, Some("claude@algedonic.dev"));
+        assert!(ev.contains("orphan.rs"), "{ev}");
+        assert!(ev.contains("accepted by claude@algedonic.dev"), "{ev}");
+        // Accepting a replay does not read as accepting the net diff.
+        let ev = evidence("car 6ec22d71", &judged, Some("claude@algedonic.dev"), None);
+        assert!(!ev.contains("accepted by"), "{ev}");
+    }
+
+    fn fixture(name: &str) -> (std::path::PathBuf, impl Fn(&[&str]) -> String) {
+        let root = boss_testing::scratch::scratch_dir(name);
+        let at = root.clone();
+        let g = move |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&at)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .expect("git runs");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        (root, g)
+    }
+
+    /// A REAL REPOSITORY, the squashed-carrier shape of car 8df80582: a
+    /// twin of two commits, the second rewriting part of the first; a
+    /// carrier cut from main that holds the twin's NET content inside its
+    /// own single commit; a train that squash-merged the carrier; then
+    /// main moving on. No commit matches, and the whole tree proves it.
+    /// Two controls, each a shape the arm must NOT bless: work nobody
+    /// carried (a clean merge whose tree is not main's), and main having
+    /// rewritten a line the twin added (a conflict) — each named by file.
+    #[test]
+    fn a_squashed_carrier_is_proven_by_the_whole_tree_and_unlanded_work_is_named() {
+        let (root, g) = fixture("car-retire-squashed");
+        let w = |rel: &str, body: &str| boss_testing::scratch::write_file(&root.join(rel), body);
+        g(&["init", "-q", "-b", "main"]);
+        w("steps.rs", "fn a() {}\n");
+        w("dispatcher.rs", "use super::{a};\n\nfn d() {}\n");
+        g(&["add", "."]);
+        g(&["commit", "-qm", "base"]);
+
+        g(&["checkout", "-q", "-b", "twin"]);
+        w("steps.rs", "fn a() {}\nfn freeze() { 1 }\n");
+        w("steps_test.rs", "#[test] fn frozen() {}\n");
+        g(&["add", "."]);
+        g(&["commit", "-qm", "twin: a terminal step freezes"]);
+        w("steps.rs", "fn a() {}\nfn freeze() { 2 }\n");
+        w("dispatcher.rs", "use super::{a, finished};\n\nfn d() {}\n");
+        g(&["add", "."]);
+        g(&["commit", "-qm", "twin: a completion names its actor"]);
+        let twin_head = g(&["rev-parse", "HEAD"]);
+
+        // The carrier: cut from main, the twin's net content plus its own
+        // change, ONE commit — what a squash onto the twin leaves.
+        g(&["checkout", "-q", "-b", "carrier", "main"]);
+        w("steps.rs", "fn a() {}\nfn freeze() { 2 }\n");
+        w("steps_test.rs", "#[test] fn frozen() {}\n");
+        w("dispatcher.rs", "use super::{a, finished};\n\nfn d() {}\n");
+        w("postgres.rs", "fn cas() {}\n");
+        g(&["add", "."]);
+        g(&["commit", "-qm", "carrier: a stale step write is refused"]);
+        let carrier_head = g(&["rev-parse", "HEAD"]);
+        g(&["checkout", "-q", "main"]);
+        g(&["merge", "-q", "--squash", "carrier"]);
+        g(&["commit", "-qm", "train: carrier lands"]);
+        let merge = g(&["rev-parse", "HEAD"]);
+        w("other.rs", "later\n");
+        g(&["add", "."]);
+        g(&["commit", "-qm", "train: main moves on"]);
+        let main = g(&["rev-parse", "HEAD"]);
+
+        let repo = root.as_path();
+        let mine = read_commits(repo, &twin_head, &main).unwrap();
+        assert_eq!(mine.len(), 2, "{mine:?}");
+        let theirs = read_commits(repo, &carrier_head, &format!("{merge}^1")).unwrap();
+        assert_eq!(theirs.len(), 1, "{theirs:?}");
+        assert!(
+            judge(&mine, &theirs, None)
+                .iter()
+                .all(|c| matches!(c, Carried::Missing(_))),
+            "per commit, nothing matches — the refusal that stranded the car"
+        );
+
+        let t = whole_tree(repo, &main, &twin_head).unwrap();
+        assert!(t.on_main(), "{t:?}");
+        assert_eq!(
+            t.merged_tree,
+            g(&["rev-parse", &format!("{main}^{{tree}}")])
+        );
+        let judged = judge(&mine, &theirs, Some(&t));
+        assert!(
+            judged
+                .iter()
+                .all(|c| matches!(c, Carried::InMainTree { .. })),
+            "{judged:?}"
+        );
+        assert!(verdict(&judged, false, false).is_ok());
+
+        // Control 1: a commit nobody carried. The merge is clean, and its
+        // tree is not main's — the file is named, the flag is asked for.
+        g(&["checkout", "-q", "twin"]);
+        w("orphan.rs", "only here\n");
+        g(&["add", "."]);
+        g(&["commit", "-qm", "twin: nobody carried this"]);
+        let orphan_head = g(&["rev-parse", "HEAD"]);
+        let t = whole_tree(repo, &main, &orphan_head).unwrap();
+        assert!(!t.on_main(), "{t:?}");
+        assert!(t.conflicted.is_empty(), "{t:?}");
+        assert_eq!(t.differing, vec!["orphan.rs".to_string()], "{t:?}");
+        let mine = read_commits(repo, &orphan_head, &main).unwrap();
+        let e = verdict(&judge(&mine, &theirs, Some(&t)), false, false).unwrap_err();
+        assert!(e.contains("orphan.rs"), "{e}");
+        assert!(e.contains("--accept-net-diff"), "{e}");
+
+        // Control 2: main rewrapped the import the twin added (the
+        // measured dispatcher.rs shape). The merge conflicts, by name.
+        g(&["checkout", "-q", "main"]);
+        w(
+            "dispatcher.rs",
+            "use super::{\n    a, finished, held,\n};\n\nfn d() {}\n",
+        );
+        g(&["commit", "-qam", "train: main rewraps the import"]);
+        let main2 = g(&["rev-parse", "HEAD"]);
+        let t = whole_tree(repo, &main2, &twin_head).unwrap();
+        assert_eq!(t.conflicted, vec!["dispatcher.rs".to_string()], "{t:?}");
+        let judged = judge(
+            &read_commits(repo, &twin_head, &main2).unwrap(),
+            &theirs,
+            Some(&t),
+        );
+        let e = verdict(&judged, false, false).unwrap_err();
+        assert!(e.contains("dispatcher.rs (conflict)"), "{e}");
+        assert!(verdict(&judged, false, true).is_ok());
+
+        // A ref that is not there is an error, never a verdict.
+        assert!(whole_tree(repo, &main, "0000000000000000000000000000000000000000").is_err());
     }
 }

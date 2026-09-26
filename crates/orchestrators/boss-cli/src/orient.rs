@@ -3829,6 +3829,7 @@ mod tests {
                     // drawing, so this reader takes none of it.
                     machines: Vec::new(),
                     places: Vec::new(),
+                    undeclared: None,
                 }
             };
         let map = Regions {

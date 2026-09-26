@@ -220,17 +220,18 @@ it          = true   # IT integrations panel (Chase / Stripe / ADP / DOR)
 # The API reads this instance answers WITHOUT a session (design
 # 11e60367 Q1, decided 2026-09-18; backlog b4afd7b9). The public
 # landing page at `/` — the live window into the brewery — is served
-# to anyone, and it renders from these four: the workflow list and
-# each kind's step graph, the open-job summary, the live feed, and
-# the curated event tail. A tenant that says nothing here answers
-# nothing without a session, which is what a real company's instance
-# wants; the brewery is the public demo and opts in. The gateway
-# refuses to boot on a path outside the four it can offer
+# to anyone, and it renders from these three: the workflow list and
+# each kind's step graph, the live feed (with its open counts by
+# kind), and the curated event tail. A tenant that says nothing here
+# answers nothing without a session, which is what a real company's
+# instance wants; the brewery is the public demo and opts in. The
+# gateway refuses to boot on a path outside the three it can offer
 # (boss-gateway public_reads.rs) — a declaration cannot make a write
-# public.
+# public. `/api/jobs/summary` left this list and that table (backlog
+# 19f08bd6): the landing never read it, and it counts only what the
+# caller may read, so a guest is refused.
 public_reads = [
     "/api/workflows",           # + /api/workflows/{kind}
-    "/api/jobs/summary",
     "/api/jobs/live",
     "/api/events/public-tail",
 ]

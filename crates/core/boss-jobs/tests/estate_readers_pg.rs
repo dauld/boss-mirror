@@ -308,3 +308,98 @@ async fn latest_per_host_groups_before_the_limit_and_counts_hosts() {
     );
     assert_eq!(before.total, 1);
 }
+
+/// The SQL half of `host` (backlog 111996f5), pinned against the numbers
+/// `estate_readers_http.rs` asserts of the in-memory reader: one host's
+/// own series, selected in the WHERE clause before the limit — on a
+/// comparison by its `host` stamp, on an observation (which carries
+/// none, 4579f9b5) by its first node's id — and `total` counting that
+/// host's rows. The load-bearing leg is the daily host behind a page's
+/// worth of the fast one: the estate alarm read `scope=host&limit=20`,
+/// held twenty forge rows, and never saw boss-gcp's three below-floor
+/// days.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_selects_one_hosts_series_before_the_limit() {
+    let db = TestDb::new().await;
+    let repo = PgJobs::new(db.pool.clone());
+
+    let t0: chrono::DateTime<chrono::Utc> = "2026-09-22T00:00:00Z".parse().unwrap();
+    let reading = |host: &str, i: i64, at: chrono::DateTime<chrono::Utc>| {
+        [
+            Event::new(
+                "jobs",
+                "jobs.estate.compared",
+                serde_json::json!({"scope": "host", "host": host, "marker": format!("{host}-{i}")}),
+                at,
+            ),
+            Event::new(
+                "jobs",
+                "jobs.estate.observed",
+                serde_json::json!({"scope": "host", "marker": format!("{host}-{i}"),
+                                   "nodes": [{"id": host}]}),
+                at,
+            ),
+        ]
+    };
+    let mut events = Vec::new();
+    for day in 0..3 {
+        events.extend(reading("boss-gcp", day, t0 + chrono::Duration::days(day)));
+        for i in 0..8 {
+            let n = day * 8 + i;
+            events.extend(reading(
+                "forge",
+                n,
+                t0 + chrono::Duration::days(day) + chrono::Duration::minutes(15 * (i + 1)),
+            ));
+        }
+    }
+    repo.record_events(&events).await.expect("events record");
+    drain_outbox(&db.pool).await;
+
+    let markers = |rows: &[serde_json::Value]| -> Vec<String> {
+        rows.iter()
+            .map(|r| r["payload"]["marker"].as_str().unwrap_or("?").to_string())
+            .collect()
+    };
+    let of = |host: &str| EventWindow {
+        host: Some(host.to_string()),
+        ..in_scope("host")
+    };
+
+    for kind in ["jobs.estate.compared", "jobs.estate.observed"] {
+        // Precondition: a plain scoped page of the same size has none.
+        let plain = repo
+            .recent_events_by_kind(kind, &in_scope("host"), 5)
+            .await
+            .expect("read back");
+        assert!(
+            !markers(&plain.rows)
+                .iter()
+                .any(|m| m.starts_with("boss-gcp"))
+        );
+
+        let gcp = repo
+            .recent_events_by_kind(kind, &of("boss-gcp"), 5)
+            .await
+            .expect("read back");
+        assert_eq!(
+            markers(&gcp.rows),
+            vec!["boss-gcp-2", "boss-gcp-1", "boss-gcp-0"],
+            "{kind}"
+        );
+        assert_eq!(gcp.total, 3, "{kind}: total counts the host's rows");
+
+        let forge = repo
+            .recent_events_by_kind(kind, &of("forge"), 2)
+            .await
+            .expect("read back");
+        assert_eq!(markers(&forge.rows), vec!["forge-23", "forge-22"], "{kind}");
+        assert_eq!(forge.total, 24, "{kind}");
+
+        let none = repo
+            .recent_events_by_kind(kind, &of("nonesuch"), 5)
+            .await
+            .expect("read back");
+        assert_eq!(none.total, 0, "{kind}: an unknown host matches nothing");
+    }
+}

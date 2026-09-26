@@ -515,14 +515,20 @@ async fn the_read_answers_every_region_each_with_count_state_and_trend() {
     assert_eq!(v["window_hours"], 24);
     assert_eq!(v["now"], NOW);
 
-    // The track: the yard's own block reading, surfaced as trouble.
-    let track = region(&v, "track");
-    assert_eq!(track["count"], 1);
-    assert_eq!(track["state"], "troubled");
+    // The red-PR train is under its gate, not yet merged — so it stands
+    // at the GATES (design e765b3fc §2a, car R1), and the yard's own
+    // block reading troubles the gates, where it is drawn. The track,
+    // which holds merged trains, is empty.
+    let gates = region(&v, "gates");
+    assert_eq!(gates["count"], 1, "{gates}");
+    assert_eq!(gates["state"], "troubled");
     assert!(
-        track["why"].as_str().unwrap().contains("train #470"),
-        "{track}"
+        gates["why"].as_str().unwrap().contains("train #470"),
+        "{gates}"
     );
+    let track = region(&v, "track");
+    assert_eq!(track["count"], 0, "{track}");
+    assert_eq!(track["state"], "clear");
     // The dock: the station row read, one car parked, below the depth.
     let dock = region(&v, "dock");
     assert_eq!(dock["count"], 1);

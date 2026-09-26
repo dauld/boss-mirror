@@ -32,6 +32,7 @@ mod census;
 mod flights;
 mod jobs;
 mod kinds;
+mod moves;
 mod plugins;
 mod presence;
 mod queue_age;
@@ -50,6 +51,7 @@ use census::*;
 use flights::*;
 use jobs::*;
 use kinds::*;
+use moves::*;
 use plugins::*;
 use queue_age::*;
 use refusals::*;
@@ -61,6 +63,7 @@ use steps::*;
 use terminal_report::*;
 use yard::*;
 
+pub use moves::{MOVER_ACTOR, run_mover};
 pub use presence::PresenceKey;
 
 const DEFAULT_LIMIT: i64 = 100;
@@ -157,6 +160,12 @@ pub struct JobsApiState<R: JobsRepository, B: EventBus> {
     /// then refused, never read on trust, because the machine door lets
     /// any token holder write one by hand.
     pub presence_key: Option<Arc<PresenceKey>>,
+    /// THE MOVES RECORD (design e765b3fc §3, car M1): every packet whose
+    /// place on the IT map changed, and the event that moved it — the
+    /// store, the frames this replica's mover publishes to open streams,
+    /// and the mover's status. `None` → 503 on `/api/yard/moves` and its
+    /// stream, and the regions read's `undeclared` stays null.
+    pub yard_moves: Option<Arc<crate::moves::MovesFeed>>,
 }
 
 impl<R: JobsRepository, B: EventBus> JobsApiState<R, B> {
@@ -213,6 +222,7 @@ impl<R: JobsRepository, B: EventBus> JobsApiState<R, B> {
             agent_budget: None,
             schema_ledger: None,
             presence_key: None,
+            yard_moves: None,
         }
     }
 }
@@ -240,7 +250,14 @@ async fn list_job_edges<R: JobsRepository, B: EventBus>(
 pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
     state: JobsApiState<R, B>,
 ) -> Router {
-    let shared = Arc::new(state);
+    router_shared(Arc::new(state))
+}
+
+/// The router over state already shared — so the binary can hand the
+/// same state to the loops that run beside the routes ([`run_mover`]).
+pub fn router_shared<R: JobsRepository + 'static, B: EventBus + 'static>(
+    shared: Arc<JobsApiState<R, B>>,
+) -> Router {
     // One layer over the whole router rather than a call at each of
     // `steps.rs`'s ~15 refusal sites, so a refusal added later cannot
     // silently go uncounted. It passes everything that is not a step
@@ -296,6 +313,11 @@ pub fn router<R: JobsRepository + 'static, B: EventBus + 'static>(
         // read, so a stalled rule no longer paints like an idle one
         // (backlog 43c4451a).
         .route("/api/yard/rule-firings", get(yard_rule_firings::<R, B>))
+        // THE MOVES RECORD (design e765b3fc §3, car M1): every packet
+        // whose place on the map changed and the event that moved it,
+        // as a page after a seq and as a stream that resumes from one.
+        .route("/api/yard/moves", get(yard_moves::<R, B>))
+        .route("/api/yard/moves/stream", get(yard_moves_stream::<R, B>))
         .route("/api/jobs", get(list_jobs::<R, B>))
         .route("/api/jobs", post(create_job::<R, B>))
         .route("/api/jobs/{id}", get(get_job::<R, B>))

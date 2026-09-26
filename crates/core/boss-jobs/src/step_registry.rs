@@ -855,9 +855,42 @@ mod tests {
         // 47 since `marketing-launch` retired with the launch calendar
         // (design 2ea444f5, backlog a8991c86). 45 since
         // `marketing-brief` and `marketing-attribution` followed it: no
-        // active Workflow and no in-flight step used either (car 8).
+        // active Workflow and no in-flight step used either (car 8). 46
+        // since `credential-delivery` (design 1c90d183: an off-host
+        // credential's host records delivery before the broker revokes).
         let reg = StepRegistry::v1();
-        assert_eq!(reg.all().len(), 45);
+        assert_eq!(reg.all().len(), 46);
+    }
+
+    /// The reason `credential-delivery` is shaped the way it is (design
+    /// 1c90d183). The forge host's deposit completes it through the API
+    /// with the last eight it installed, and the broker's second rule
+    /// fires on `step.done.credential-delivery` to revoke. Three
+    /// properties keep that true, and a count cannot see any of them:
+    /// registered and NOT decision-shaped (an unknown or decision kind
+    /// is nominated to a human queue), no roles (never assigned to a
+    /// person), and no duration — the dispatcher auto-completes a kind
+    /// with no roles and a duration of zero the moment it goes ready,
+    /// which would record a delivery nobody made and fire the revoke
+    /// on it (the `gate-verdict` note in step_types.toml).
+    #[test]
+    fn a_delivery_record_is_the_hosts_to_make_and_nobody_elses() {
+        let reg = StepRegistry::v1();
+        let d = reg
+            .get("credential-delivery")
+            .expect("credential-delivery registered");
+        assert!(!d.decision_shaped, "a host's record, not a verdict");
+        assert!(d.required_roles.is_empty(), "never assigned to a person");
+        assert_eq!(
+            d.typical_duration_hours, None,
+            "a zero duration would let the dispatcher complete it empty"
+        );
+        let evidence = d
+            .fields
+            .iter()
+            .find(|f| f.name == "delivered_last_eight")
+            .expect("the evidence field");
+        assert!(evidence.required, "required at done");
     }
 
     /// The reason `scope-declaration` is registered at all.
@@ -1257,8 +1290,8 @@ mod tests {
         let v = all_v1_types();
         assert_eq!(
             v.len(),
-            45,
-            "step_types.toml should have 45 [[step_type]] blocks"
+            46,
+            "step_types.toml should have 46 [[step_type]] blocks"
         );
     }
 

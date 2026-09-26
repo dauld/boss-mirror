@@ -102,6 +102,40 @@ export function directReports(
   return employees.filter((e) => e.manager_id === managerId);
 }
 
+/// Where a reporting chain stops, and why. `board` is the only end that
+/// states "reports to the board": the last person reached has no
+/// manager_id. `unresolved` is a manager_id the roster read does not hold
+/// (a dangling id, or a row outside the caller's scope) — the record
+/// NAMES a manager, so saying "no manager" would be false (backlog
+/// 1a83fe98). `cycle` is a manager_id already on the walk.
+export type ChainEnd =
+  | { kind: 'board' }
+  | { kind: 'unresolved'; managerId: EmployeeId; of: EmployeeId }
+  | { kind: 'cycle'; managerId: EmployeeId; of: EmployeeId };
+
+/// Walk manager_id upward through the roster. Before 1a83fe98 the walk
+/// read an id the map did not hold as `undefined`, the same answer a null
+/// manager_id gives, so the two collapsed into "reports to board"; and it
+/// had no guard, so a manager_id cycle looped forever.
+export function reportingChain(
+  employee: Employee,
+  byId: ReadonlyMap<EmployeeId, Employee>,
+): { chain: Employee[]; end: ChainEnd } {
+  const chain: Employee[] = [];
+  const seen = new Set<EmployeeId>([employee.id]);
+  let from = employee;
+  while (from.manager_id) {
+    const managerId = from.manager_id;
+    if (seen.has(managerId)) return { chain, end: { kind: 'cycle', managerId, of: from.id } };
+    const manager = byId.get(managerId);
+    if (!manager) return { chain, end: { kind: 'unresolved', managerId, of: from.id } };
+    chain.push(manager);
+    seen.add(managerId);
+    from = manager;
+  }
+  return { chain, end: { kind: 'board' } };
+}
+
 export function expiringCerts(
   daysAhead: number,
   employees: ReadonlyArray<Employee>,

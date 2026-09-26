@@ -6,7 +6,9 @@ use boss_core::partition::Partition;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::port::{AssignmentRow, JobFilter, JobScope, JobsError, JobsRepository, StepVersion};
+use crate::port::{
+    Admission, AssignmentRow, JobFilter, JobScope, JobsError, JobsRepository, StepVersion,
+};
 
 pub struct PgJobs {
     pool: PgPool,
@@ -666,7 +668,7 @@ impl JobsRepository for PgJobs {
         now: chrono::DateTime<chrono::Utc>,
         job_events: &[boss_core::event::Event],
         step_events: &[boss_core::event::Event],
-    ) -> Result<(), JobsError> {
+    ) -> Result<Admission, JobsError> {
         // Refused before BEGIN: a short zip would commit rows the log
         // does not hold (the port doc says why that is a rebuild
         // divergence, not an inconvenience).
@@ -757,12 +759,26 @@ impl JobsRepository for PgJobs {
         // with the row — and only when the INSERT actually inserted.
         // The ON CONFLICT replay guard doubles as the event gate: a
         // re-emitted Job (deterministic sim runs) records nothing.
-        if result.rows_affected() > 0 {
-            for event in job_events {
-                boss_events::outbox::record_event_in_tx(&mut tx, event)
-                    .await
-                    .map_err(JobsError::Storage)?;
-            }
+        //
+        // AND THE JOB ROW DECIDES FOR THE WHOLE GRAPH (backlog
+        // 9d2af748). The steps below carry ids minted fresh by every
+        // materialization, so their own guard cannot see a second
+        // admission; a job row that did not insert means another
+        // admission under this id holds the packet — committed before
+        // this INSERT, or committed while it waited on the unique
+        // index — and this one writes nothing more. The transaction
+        // is rolled back, not committed: the birth-subject row above is
+        // the winner's to have written.
+        if result.rows_affected() == 0 {
+            tx.rollback()
+                .await
+                .map_err(|e| JobsError::Storage(e.to_string()))?;
+            return Ok(Admission::AlreadyAdmitted);
+        }
+        for event in job_events {
+            boss_events::outbox::record_event_in_tx(&mut tx, event)
+                .await
+                .map_err(JobsError::Storage)?;
         }
         // The materialized graph rides the SAME transaction (backlog
         // f2ba226e): every step row and its STEP_CREATED, or nothing.
@@ -781,7 +797,7 @@ impl JobsRepository for PgJobs {
         tx.commit()
             .await
             .map_err(|e| JobsError::Storage(e.to_string()))?;
-        Ok(())
+        Ok(Admission::Admitted)
     }
 
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError> {
@@ -1269,6 +1285,7 @@ impl JobsRepository for PgJobs {
             kind,
             &boss_events::tail_http::KindWindow {
                 scope: window.scope.as_deref(),
+                host: window.host.as_deref(),
                 since: window.since,
                 until: window.until,
                 latest_per: window.latest_per.as_deref(),
@@ -2521,13 +2538,44 @@ impl JobsRepository for PgJobs {
     async fn count_jobs_by_kind(
         &self,
         status: Option<JobStatus>,
+        scope: &JobScope,
     ) -> Result<Vec<(String, i64)>, JobsError> {
+        // Same short-circuit as `list_jobs`: policy said "nothing".
+        if matches!(scope, JobScope::None) {
+            return Ok(Vec::new());
+        }
+        // The three scope binds are `list_jobs`'s $7..$9, verbatim, so
+        // a caller's counts are the totals the list hands it (backlog
+        // 19f08bd6 — this counted every packet for any caller).
+        let (scope_owner, scope_owners, scope_accounts): (
+            Option<&str>,
+            Option<Vec<String>>,
+            Option<Vec<String>>,
+        ) = match scope {
+            JobScope::All => (None, None, None),
+            JobScope::None => unreachable!("short-circuited above"),
+            JobScope::OwnerIs(u) => (Some(u.as_str()), None, None),
+            JobScope::OwnerIn(us) => (None, Some(us.clone()), None),
+            JobScope::AccountIn(ps) => (None, None, Some(ps.clone())),
+        };
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT kind, COUNT(*)::BIGINT FROM jobs \
-             WHERE ($1::text IS NULL OR status = $1) \
-             GROUP BY kind ORDER BY kind",
+            r#"
+            SELECT kind, COUNT(*)::BIGINT FROM jobs
+            WHERE ($1::text IS NULL OR status = $1)
+              AND ($2::text IS NULL OR owner_id = $2)
+              AND ($3::text[] IS NULL OR owner_id = ANY($3))
+              AND (
+                $4::text[] IS NULL
+                OR (subject_kind IN ('account', 'employee')
+                    AND subject_id = ANY($4))
+              )
+            GROUP BY kind ORDER BY kind
+            "#,
         )
         .bind(status.map(job_status_str))
+        .bind(scope_owner)
+        .bind(scope_owners.as_deref())
+        .bind(scope_accounts.as_deref())
         .fetch_all(&self.pool)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;

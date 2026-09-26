@@ -118,7 +118,8 @@ pub const INTERLOCK_TUNNEL: &str = "tunnel";
 /// The chore whose packet carries the converge's `tunnel_ingress` and
 /// `cloudflared` facts (infra/forge/cluster-deploy-runner.service).
 pub const CONVERGE_KIND: &str = "maintenance-cluster-converge";
-/// How many open backlog-items the dedup read is allowed to hold; a
+/// How many open estate packets (backlog-items carrying
+/// `estate_finding`, c5ac71de) the dedup read is allowed to hold; a
 /// page shorter than the list's `total` is a truncated dedup and the
 /// raise is HELD rather than made blind (estate.alarm's rule).
 const DEDUP_PAGE: usize = 200;
@@ -1456,10 +1457,15 @@ impl DnsObserve {
         r: &Reading,
     ) -> Result<&'static str, HandlerError> {
         let key = alarm_key(zone);
+        // Only the packets carrying `estate_finding`, the one key the
+        // dedup compares (backlog c5ac71de). Unfiltered, every open
+        // backlog-item counted toward the 200-row page; open items passed
+        // 200 in September 2026 (370 on 2026-09-26), so the first drift
+        // after that would have been held as a truncated read.
         let listing = get_json(
             &self.client,
             &format!(
-                "{}/api/jobs?kind=backlog-item&status=open&limit={DEDUP_PAGE}",
+                "{}/api/jobs?kind=backlog-item&status=open&metadata_has=estate_finding&limit={DEDUP_PAGE}",
                 self.base()
             ),
             rule,
@@ -3102,7 +3108,13 @@ measured = "2026-09-20: read from the IdP"
                         }
                         assert_eq!(q.get("kind").map(String::as_str), Some("backlog-item"));
                         assert_eq!(q.get("status").map(String::as_str), Some("open"));
-                        AxJson(json!({ "data": *alarms, "total": alarms.len() }))
+                        // Answered as the jobs API answers it, behind more
+                        // unrelated open items than one page (c5ac71de).
+                        AxJson(crate::handlers::listing_stub::backlog_listing(
+                            &alarms,
+                            q.get("metadata_has").map(String::as_str),
+                            q.get("limit").and_then(|l| l.parse().ok()),
+                        ))
                     }
                 })
                 .post(move |AxJson(body): AxJson<Json>| {
@@ -4387,6 +4399,53 @@ measured = "2026-09-20: read from the IdP"
         assert_eq!(
             patch["findings"][0]["record"],
             "playground.algedonic.dev CNAME"
+        );
+    }
+
+    /// THE DEDUP READS ONLY ESTATE PACKETS (backlog c5ac71de). Unfiltered,
+    /// the read counted every open backlog-item against a 200-row page;
+    /// open items passed 200 in September 2026 (370 on 2026-09-26), so
+    /// the first drift after that would have been HELD as a truncated
+    /// dedup, never raised. The stub answers as the jobs API does, behind
+    /// more unrelated open items than the page holds, with the zone's
+    /// standing alarm last: a drift must find it and refresh it — neither
+    /// held nor twinned.
+    #[tokio::test]
+    async fn a_backlog_past_one_page_does_not_hold_a_dns_drift() {
+        use crate::handlers::listing_stub::UNRELATED_BACKLOG;
+        const {
+            assert!(
+                UNRELATED_BACKLOG > DEDUP_PAGE,
+                "the fixture outgrows a page"
+            )
+        };
+        let open = vec![
+            json!({"id": "alarm-other", "kind": "backlog-item", "status": "open",
+                   "metadata": {"estate_finding": "sensor_unreadable:stripe-sponsorships"}}),
+            json!({"id": "alarm-1", "kind": "backlog-item", "status": "open",
+                   "metadata": {"estate_finding": "dns_drift:algedonic.dev"}}),
+        ];
+        let (jobs, captured) = stub_jobs_api("ready", open, LOCATION).await;
+        let live = vec![as_declared()[0].clone()]; // playground. ABSENT
+        let h = handler(
+            jobs,
+            FakeZone::with(live),
+            FakeAccess::with(account_as_declared()),
+            secrets(),
+            declarations(),
+        );
+        h.invoke(&zone_args(), &ctx())
+            .await
+            .expect("a drift must reach its alarm, not be held");
+        let w = writes(&captured);
+        let order: Vec<&str> = w.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            order,
+            vec![
+                "PATCH /api/jobs/alarm-1/metadata",
+                MERGE_OBSERVE,
+                PUT_OBSERVE
+            ]
         );
     }
 

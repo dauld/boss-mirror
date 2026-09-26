@@ -205,6 +205,9 @@ pub(super) fn region(
         machines: Vec::new(),
         // Set by the two regions that have places ([`Place`]).
         places: Vec::new(),
+        // Folded in by the regions read from the moves record
+        // (`crate::moves::with_undeclared`); unread until then.
+        undeclared: None,
     }
 }
 

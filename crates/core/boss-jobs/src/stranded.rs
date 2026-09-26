@@ -19,6 +19,9 @@
 //!
 //! - `superseded` — the green is dead: the branch was deleted, or the
 //!   same change landed by another branch (754b01b5).
+//! - `superseded_by` — the same fact, naming the successor branch or
+//!   packet: the word the retire door (`car_retire::SUPERSEDED_BY`)
+//!   writes, and so the one an operator reaches for (6cd1c369).
 //! - `hold` — the green is deliberately waiting: gated on purpose
 //!   without a park, e.g. a car that must land at a David-timed
 //!   restart. A brake deliberately on is not an alarm.
@@ -66,8 +69,15 @@ impl UnparkedGreen {
 pub const VERDICT_GREEN: &str = "green";
 
 /// Metadata keys that make a gate-run SPENT — no longer a candidate to
-/// become a car, whatever its verdict says.
-const SPENT_MARKERS: [&str; 3] = ["superseded", "rerailed_to", "park_skipped"];
+/// become a car, whatever its verdict says. `superseded_by` is the
+/// retire door's own key, reused rather than respelled, so the marker
+/// and the word operators write cannot drift (backlog 6cd1c369).
+const SPENT_MARKERS: [&str; 4] = [
+    "superseded",
+    crate::car_retire::SUPERSEDED_BY,
+    "rerailed_to",
+    "park_skipped",
+];
 
 /// THE definition of "is this marker set", read the way `superseded`
 /// has always been read: `null`, `false` and `""` are NO marker; `true`
@@ -244,6 +254,30 @@ mod tests {
             assert!(call(&md, &green(), &[]).is_none(), "{md} should be spent");
             assert!(spent_reason(&md).is_some());
         }
+    }
+
+    /// `superseded_by` names the SUCCESSOR, and an operator reaches for
+    /// it because it is the codebase's own word for the fact
+    /// (`car_retire::SUPERSEDED_BY`). On 2026-09-26 gate-run b0b2341a
+    /// carried `superseded_by = "<branch>-rw"` (its rework had landed in
+    /// train #685) and still rendered under HELD GREENS, because only
+    /// `superseded` was read (backlog 6cd1c369). A held green is not
+    /// exempt: spent wins over held.
+    #[test]
+    fn a_green_superseded_by_a_successor_is_not_unparked() {
+        for md in [
+            json!({"branch": "fix/a", "superseded_by": "fix/a-rw"}),
+            json!({"branch": "fix/a", "superseded_by": "fix/a-rw",
+                   "hold": "SUPERSEDED — do not release"}),
+        ] {
+            assert!(call(&md, &green(), &[]).is_none(), "{md} should be spent");
+            assert_eq!(spent_reason(&md), Some(crate::car_retire::SUPERSEDED_BY));
+        }
+        let blank = json!({"branch": "fix/a", "superseded_by": ""});
+        assert!(
+            call(&blank, &green(), &[]).is_some(),
+            "a blank successor is no marker"
+        );
     }
 
     /// A blank or false marker is NO marker — the empty string a

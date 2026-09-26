@@ -14,7 +14,7 @@
 /// exact-match routes. Pure-action / form-submit routes (/login,
 /// /finance/new, /finance/journal-entries/new) are excluded — the crawls
 /// assert surfaces RENDER, not that forms submit. Detail routes are
-/// included (a Workflow + a marketing asset) because the mock seeds them,
+/// included (a Workflow, a marketing asset, an employee) because the mock seeds them,
 /// and that is where the omitted-field crashes live — and one per
 /// parameterised catalog path (the rule editor), because a pattern is
 /// not a URL a crawl can open.
@@ -25,6 +25,11 @@ export const ROUTES: ReadonlyArray<string> = [
   // User Experiences perspective — bare / is the public home alias; the
   // operator surfaces are re-rooted under /ux/*.
   '/', '/ux/me', '/ux/inbox', '/ux/views', '/ux/jobs', '/ux/accounts', '/ux/vendors', '/ux/people', '/ux/parts',
+  // An employee's page — the persona's own row, which _smokeMocks.ts
+  // seeds at EMPLOYEE_DETAIL (backlog 1a83fe98). Until then only
+  // employee-page-roster-read.mocked.spec.ts checked what it says when
+  // its reads fail, and no crawl opened it at all.
+  '/ux/people/emp-001',
   '/ux/products', '/ux/shipping', '/ux/assets', '/ux/catalog',
   '/ux/marketing-assets', '/ux/marketing-assets/ma-1', '/ux/calendar/me',
   '/ux/support', '/ux/service', '/ux/qa', '/ux/hr', '/ux/sales',

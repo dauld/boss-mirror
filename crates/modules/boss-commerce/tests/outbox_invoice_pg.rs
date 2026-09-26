@@ -89,9 +89,14 @@ async fn create_records_the_event_in_tx_and_ghost_account_aborts_everything() {
         .await
         .unwrap();
 
-    repo.create_invoice_at(&fixture("INV-OK", "acc-real"), Utc::now(), &stamp())
+    let created = repo
+        .create_invoice_at(&fixture("INV-OK", "acc-real"), Utc::now(), &stamp())
         .await
         .expect("resolvable account must create");
+    assert!(matches!(
+        created,
+        boss_commerce::port::InvoiceCreate::Created(_)
+    ));
 
     let (outbox, actor): (i64, Option<String>) = (
         sqlx::query_scalar(

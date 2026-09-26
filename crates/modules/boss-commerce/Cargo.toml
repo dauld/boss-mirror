@@ -59,6 +59,10 @@ name = "agreements_audit_chain"
 required-features = ["postgres"]
 
 [[test]]
+name = "an_invoice_is_created_once_per_id"
+required-features = ["postgres"]
+
+[[test]]
 name = "financial_facts_e2e"
 required-features = ["postgres"]
 

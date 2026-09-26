@@ -48,6 +48,7 @@ pub mod jobs_config;
 pub mod landing;
 pub mod metadata_containment;
 pub mod metadata_key;
+pub mod moves;
 pub mod orphan_steps;
 pub mod plugin_version_repair;
 pub mod policy_glue;
@@ -96,7 +97,7 @@ pub mod subject_existence;
 pub mod surface_opens;
 
 pub use in_memory::InMemoryJobs;
-pub use port::{JobFilter, JobsError, JobsRepository};
+pub use port::{Admission, JobFilter, JobsError, JobsRepository};
 #[cfg(feature = "postgres")]
 pub use postgres::PgJobs;
 #[cfg(feature = "postgres")]

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { FINANCE_TABS, financeSearch, readFinanceView, type FinanceView } from './financeQuery';
+import { FINANCE_TABS, entrySearch, financeSearch, readFinanceView, type FinanceView } from './financeQuery';
 
 // /ux/finance kept its tab in component state and read neither ?entry=
 // nor ?fact=, though NewJournalEntryPage lands on ?entry=<id> after a
@@ -65,5 +65,17 @@ describe('financeSearch', () => {
         expect(readFinanceView(financeSearch('?from=home', v))).toEqual(v);
       }
     }
+  });
+});
+
+// EntryDetail's "Reversal posted: <id>" was plain text, so the entry
+// just posted could be read only by retyping its id (backlog 2349285d).
+describe('entrySearch', () => {
+  test('names the Trial Balance and the entry', () => {
+    expect(entrySearch('ent-9')).toBe('?tab=trial-balance&entry=ent-9');
+  });
+
+  test('reads back as that entry open on the Trial Balance', () => {
+    expect(readFinanceView(entrySearch('e 1&x'))).toEqual(view('trial-balance', 'e 1&x'));
   });
 });

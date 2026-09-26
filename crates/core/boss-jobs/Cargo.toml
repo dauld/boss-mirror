@@ -109,6 +109,10 @@ name = "dispatcher_firings_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "yard_moves_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "estate_readers_pg"
 required-features = ["postgres"]
 
@@ -266,6 +270,10 @@ required-features = ["postgres"]
 
 [[test]]
 name = "a_set_of_packets_reads_in_one_query_pg"
+required-features = ["postgres"]
+
+[[test]]
+name = "the_jobs_summary_counts_under_the_callers_scope_pg"
 required-features = ["postgres"]
 
 [[test]]

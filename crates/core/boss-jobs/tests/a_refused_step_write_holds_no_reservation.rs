@@ -64,11 +64,18 @@ struct HeldCalendar {
     /// calendar answers — the racer whose hold a start took as its own
     /// handing that hold back before the start's write lands.
     cancel_after_next_conflict: Mutex<Option<ReservationId>>,
+    /// A reservation a third party lands just after that cancel — on the
+    /// time the cancel freed, before anyone re-holds it.
+    taken_after_next_conflict: Mutex<Option<Reservation>>,
 }
 
 impl HeldCalendar {
     fn cancel_after_next_conflict(&self, id: ReservationId) {
         *self.cancel_after_next_conflict.lock().unwrap() = Some(id);
+    }
+
+    fn taken_after_next_conflict(&self, by: Reservation) {
+        *self.taken_after_next_conflict.lock().unwrap() = Some(by);
     }
 
     fn live_for(&self, ref_id: &str) -> usize {
@@ -104,6 +111,9 @@ impl CalendarClient for HeldCalendar {
                 for r in held.iter_mut().filter(|r| r.id == id) {
                     r.cancelled_at = Some(chrono::Utc::now());
                 }
+            }
+            if let Some(taken) = self.taken_after_next_conflict.lock().unwrap().take() {
+                held.push(taken);
             }
             return Err(CalendarClientError::Conflict { existing: clashing });
         }
@@ -441,6 +451,77 @@ async fn a_start_that_took_a_racers_hold_holds_time_when_the_racer_hands_it_back
         calendar.live_for(&ref_id),
         1,
         "the Active step W left holds its assignee's time"
+    );
+}
+
+#[tokio::test]
+async fn a_start_whose_time_a_third_party_took_records_the_lost_hold() {
+    // Backlog 4bdb8150 (the round-3 review of car 983696b5). The race
+    // above, with one more writer: between the racer handing its hold
+    // back and W re-asserting it, someone else reserves the assignee's
+    // time. W's step is Active and holds nothing, and the only trace was
+    // a `tracing::warn` — a lost reservation nobody reads. It is now a
+    // `jobs.step.hold_lost` event, recorded, naming the step, the window
+    // and the reservation that holds it.
+    let (app, jobs, calendar) = build_app();
+    let (job, step) = scheduled(&jobs).await;
+    let ref_id = step.id.to_string();
+    let racers = hold(&calendar, &step).await;
+    calendar.cancel_after_next_conflict(racers);
+    let start_at = chrono::DateTime::parse_from_rfc3339("2026-09-26T10:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let thief = Reservation {
+        id: ReservationId::new(),
+        subject: Subject::new("employee", "emp-tech"),
+        window: TimeWindow::new(start_at, start_at + chrono::Duration::minutes(30)).unwrap(),
+        reason_kind: boss_core::calendar::reason::JOB_STEP.to_string(),
+        reason_ref_id: "another-step".into(),
+        strength: boss_core::calendar::ReservationStrength::Hard,
+        notes: None,
+        created_by: "emp-other".into(),
+        created_at: start_at,
+        cancelled_at: None,
+    };
+    calendar.taken_after_next_conflict(thief.clone());
+
+    let (status, body) = start(&app, &job, &step).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "W lands: {body}");
+    assert_eq!(
+        calendar.live_for(&ref_id),
+        0,
+        "precondition: the Active step holds no time — the third party has it"
+    );
+
+    let lost: Vec<_> = jobs
+        .recorded_events()
+        .into_iter()
+        .filter(|e| e.kind == "jobs.step.hold_lost")
+        .collect();
+    assert_eq!(lost.len(), 1, "the lost hold is recorded once");
+    let p = &lost[0].payload;
+    assert_eq!(p["job_id"], job.id.to_string());
+    assert_eq!(p["step_id"], ref_id);
+    assert_eq!(p["assignee_id"], "emp-tech");
+    assert_eq!(p["window_start"], "2026-09-26T10:00:00+00:00");
+    assert_eq!(p["window_end"], "2026-09-26T11:30:00+00:00");
+    assert_eq!(p["held_by_count"], 1);
+    assert_eq!(p["held_by"][0]["id"], serde_json::json!(thief.id));
+    assert_eq!(p["held_by"][0]["reason_ref_id"], "another-step");
+    assert_eq!(p["_actor"], "emp-tech", "signed by the write that found it");
+}
+
+#[tokio::test]
+async fn a_start_that_holds_its_time_records_no_lost_hold() {
+    let (app, jobs, _calendar) = build_app();
+    let (job, step) = scheduled(&jobs).await;
+    let (status, body) = start(&app, &job, &step).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+    assert!(
+        jobs.recorded_events()
+            .iter()
+            .all(|e| e.kind != "jobs.step.hold_lost"),
+        "a start that reserved its time lost nothing"
     );
 }
 

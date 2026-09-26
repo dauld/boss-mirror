@@ -10,11 +10,13 @@ use axum::{Json, Router};
 use boss_clock_client::ClockClient;
 use boss_core::publisher::DomainPublisher;
 use boss_core::roles::{ANONYMOUS_VISITOR_IDS, PLATFORM_ADMIN_ROLE, is_anonymous_visitor_role};
-use boss_policy_client::{CurrentUser, User};
+use boss_policy_client::{CurrentUser, PolicyClient, User};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
 
+// Every read below asks `readable` first (backlog a621d091).
+use super::access::readable;
 use super::feed_token::{CalendarTokenSha256, mint_calendar_token};
 use super::ics::build_ics;
 use super::port::{SchedulingError, SchedulingRepository};
@@ -29,6 +31,9 @@ pub struct SchedulingApiState {
     /// so sim mode produces sim-dated audit_log rows. Same trait as
     /// the rest of the workspace.
     pub clock: Arc<dyn ClockClient>,
+    /// Who may read whose schedule — the `schedule` resource's grants
+    /// (backlog a621d091), asked by every read (`scheduling::access`).
+    pub policy: Arc<dyn PolicyClient>,
 }
 
 pub fn router(state: SchedulingApiState) -> Router {
@@ -122,15 +127,23 @@ async fn event_stamp(state: &SchedulingApiState) -> boss_core::publisher::EventS
 
 async fn list_avail(
     State(state): State<Arc<SchedulingApiState>>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<RangeQuery>,
 ) -> Response {
+    let who = match readable(state.policy.as_ref(), &user).await {
+        Ok(who) => who,
+        Err(refused) => return refused,
+    };
+    if let Some(refused) = who.refusal(q.employee_id.as_deref()) {
+        return refused;
+    }
     let (from, to) = resolve_range(&q);
     match state
         .repo
         .list_availability(q.employee_id.as_deref(), from, to)
         .await
     {
-        Ok(rows) => Json(rows).into_response(),
+        Ok(rows) => Json(who.keep(rows, |r| &r.employee_id)).into_response(),
         Err(e) => err(e),
     }
 }
@@ -174,8 +187,16 @@ struct AssignQuery {
 
 async fn list_assign(
     State(state): State<Arc<SchedulingApiState>>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<AssignQuery>,
 ) -> Response {
+    let who = match readable(state.policy.as_ref(), &user).await {
+        Ok(who) => who,
+        Err(refused) => return refused,
+    };
+    if let Some(refused) = who.refusal(q.tech_id.as_deref()) {
+        return refused;
+    }
     let from = q.from.unwrap_or_else(Utc::now);
     let to = q.to.unwrap_or_else(|| from + Duration::days(7));
     match state
@@ -183,7 +204,7 @@ async fn list_assign(
         .list_assignments(q.tech_id.as_deref(), q.target_job_id, from, to)
         .await
     {
-        Ok(rows) => Json(rows).into_response(),
+        Ok(rows) => Json(who.keep(rows, |r| &r.tech_id)).into_response(),
         Err(e) => err(e),
     }
 }
@@ -201,9 +222,18 @@ async fn create_assign(
 
 async fn get_assign(
     State(state): State<Arc<SchedulingApiState>>,
+    CurrentUser(user): CurrentUser,
     Path(id): Path<Uuid>,
 ) -> Response {
+    let who = match readable(state.policy.as_ref(), &user).await {
+        Ok(who) => who,
+        Err(refused) => return refused,
+    };
     match state.repo.get_assignment(id).await {
+        // The caller named an id, not an employee, so the refusal
+        // names nobody: echoing the row's tech_id would answer whose
+        // assignment it is, which is what is being refused.
+        Ok(Some(row)) if !who.admits(&row.tech_id) => super::access::not_in_scope(),
         Ok(Some(row)) => Json(row).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, id.to_string()).into_response(),
         Err(e) => err(e),
@@ -255,14 +285,22 @@ struct ShiftQuery {
 
 async fn list_shifts(
     State(state): State<Arc<SchedulingApiState>>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<ShiftQuery>,
 ) -> Response {
+    let who = match readable(state.policy.as_ref(), &user).await {
+        Ok(who) => who,
+        Err(refused) => return refused,
+    };
+    if let Some(refused) = who.refusal(q.employee_id.as_deref()) {
+        return refused;
+    }
     match state
         .repo
         .list_shift_patterns(q.employee_id.as_deref())
         .await
     {
-        Ok(rows) => Json(rows).into_response(),
+        Ok(rows) => Json(who.keep(rows, |r| &r.employee_id)).into_response(),
         Err(e) => err(e),
     }
 }
@@ -556,8 +594,13 @@ async fn public_ics_feed(
 
 async fn week_grid(
     State(state): State<Arc<SchedulingApiState>>,
+    CurrentUser(user): CurrentUser,
     Query(q): Query<WeekGridQuery>,
 ) -> Response {
+    let who = match readable(state.policy.as_ref(), &user).await {
+        Ok(who) => who,
+        Err(refused) => return refused,
+    };
     let from = q.from.unwrap_or_else(Utc::now);
     let to = q.to.unwrap_or_else(|| from + Duration::days(7));
     let emp_vec: Option<Vec<String>> = q.employees.as_deref().map(|s| {
@@ -567,7 +610,13 @@ async fn week_grid(
             .map(ToOwned::to_owned)
             .collect()
     });
-    let slice: Option<&[String]> = emp_vec.as_deref();
+    // Naming one employee outside scope refuses the whole grid rather
+    // than answering the part that is in it; naming nobody is everyone
+    // this caller may see.
+    if let Some(refused) = emp_vec.iter().flatten().find_map(|e| who.refusal(Some(e))) {
+        return refused;
+    }
+    let slice: Option<&[String]> = emp_vec.as_deref().or(who.only());
     match state.repo.week_grid(from, to, slice).await {
         Ok(rows) => Json(serde_json::json!({
             "from": from,

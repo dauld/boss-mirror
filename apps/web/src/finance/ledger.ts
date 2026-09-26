@@ -376,24 +376,6 @@ export function loadEntryDetail(entryId: string | null): Promise<LedgerEntryDeta
   return getJson<LedgerEntryDetail>(`${API_BASE}/entries/${entryId}`);
 }
 
-/// Lookup the single journal entry produced by a projection row.
-/// Two round trips: list entries by (source_table, source_id) →
-/// fetch the first entry's detail.
-export async function loadEntryBySource(
-  sourceTable: string | null,
-  sourceId: string | null,
-): Promise<LedgerEntryDetail | null> {
-  if (!sourceTable || !sourceId) return null;
-  const qs = new URLSearchParams({
-    source_table: sourceTable,
-    source_id: sourceId,
-    limit: '1',
-  }).toString();
-  const summaries = await getJson<LedgerEntry[]>(`${API_BASE}/entries?${qs}`);
-  if (!summaries || summaries.length === 0) return null;
-  return loadEntryDetail(summaries[0]!.id);
-}
-
 // ---------------------------------------------------------------------------
 // Mutations
 // ---------------------------------------------------------------------------

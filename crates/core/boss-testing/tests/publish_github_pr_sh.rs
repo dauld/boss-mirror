@@ -1180,9 +1180,15 @@ fn the_forge_push_as_another_user_carries_its_own_safe_directory() {
     );
 }
 
-/// The credential for the forge push is the converge's own: the
-/// checkout's `forgejo` remote URL carries it as userinfo, the way
-/// cluster-deploy-lib.sh derives every tenant URL from it. Measured
+/// The forge push goes where the converge fetches from: the checkout's
+/// `forgejo` remote, as it stands. Since design 1c90d183 (backlog
+/// c4cbc6b5) forge-converge's deposit strips that remote's userinfo once
+/// the owner's credential helper authenticates, so on a converted host
+/// the URL carries nothing and the owner's helper answers (the helper
+/// path is measured against a real 401-ing forge in
+/// credential_deposit_sh.rs). THIS case is a host the deposit has not
+/// converted, where the remote still carries the token: it is pushed to
+/// as it stands and never reaches a message. Measured
 /// 2026-09-19 04:55Z on ops-request 3d9d5f58, the second approved
 /// publish: with the URL built from sor.env the push as david died on
 /// `could not read Username for 'http://10.20.0.15:3000'` — no helper,

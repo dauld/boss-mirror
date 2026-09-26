@@ -443,6 +443,27 @@ async fn check_asset_classes(
     }
 }
 
+/// Policy: appending an asset event mutates an asset row, so both
+/// event doors ask Update on `Resource::asset()` — one question, asked
+/// one way. Until backlog 6c0f6547 (2026-09-26) only the single-event
+/// door asked; its batch twin asked nothing. A Deny is 403; a policy
+/// service that cannot answer refuses with the client error's own
+/// response (503 + Retry-After), never a pass. `None` allows: the
+/// test path the unit surface relies on; the binary wires a client.
+async fn require_asset_update<R: AssetsRepository, B: EventBus>(
+    state: &AssetsApiState<R, B>,
+    user: &boss_policy_client::User,
+) -> Result<(), Response> {
+    let Some(policy) = state.policy.as_ref() else {
+        return Ok(());
+    };
+    match policy.check(user, Action::Update, Resource::asset()).await {
+        Ok(Decision::Allow { .. }) => Ok(()),
+        Ok(Decision::Deny { reason }) => Err((StatusCode::FORBIDDEN, reason).into_response()),
+        Err(e) => Err(e.into_response()),
+    }
+}
+
 async fn post_event<R: AssetsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<AssetsApiState<R, B>>>,
     CurrentUser(user): CurrentUser,
@@ -455,20 +476,8 @@ async fn post_event<R: AssetsRepository + 'static, B: EventBus + 'static>(
     if let Err(resp) = check_asset_classes(state.classes_client.as_ref(), &event).await {
         return resp;
     }
-    // Policy: appending an asset event mutates an asset row. Gate as
-    // Action::Update on Resource::asset() when a policy client is wired
-    // (production). Test path (policy: None) bypasses to preserve the
-    // existing unit surface.
-    if let Some(ref policy) = state.policy {
-        match policy.check(&user, Action::Update, Resource::asset()).await {
-            Ok(Decision::Allow { .. }) => {}
-            Ok(Decision::Deny { reason }) => {
-                return (StatusCode::FORBIDDEN, reason).into_response();
-            }
-            Err(e) => {
-                return e.into_response();
-            }
-        }
+    if let Err(resp) = require_asset_update(&state, &user).await {
+        return resp;
     }
     if let Err(resp) =
         validate_actor_ids(state.people_client.as_ref(), std::slice::from_ref(&event)).await
@@ -490,6 +499,7 @@ async fn post_event<R: AssetsRepository + 'static, B: EventBus + 'static>(
 
 async fn batch_events<R: AssetsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<AssetsApiState<R, B>>>,
+    CurrentUser(user): CurrentUser,
     Json(events): Json<Vec<AssetEvent>>,
 ) -> Response {
     // Class-registry gate, per event, before any persistence. The
@@ -500,6 +510,12 @@ async fn batch_events<R: AssetsRepository + 'static, B: EventBus + 'static>(
         if let Err(resp) = check_asset_classes(state.classes_client.as_ref(), event).await {
             return resp;
         }
+    }
+    // The single-event door's question, once for the whole batch, in
+    // the same place in the order (after the registry gate, before the
+    // actor check and any write).
+    if let Err(resp) = require_asset_update(&state, &user).await {
+        return resp;
     }
     if let Err(resp) = validate_actor_ids(state.people_client.as_ref(), &events).await {
         return resp;
@@ -562,22 +578,65 @@ mod tests {
         classes_client: Option<Arc<dyn ClassesClient>>,
         people_client: Arc<dyn PeopleClient>,
     ) -> Router {
+        app_over(classes_client, people_client, None).0
+    }
+
+    /// The router plus the store behind it, so a test can read what a
+    /// request left in it.
+    fn app_over(
+        classes_client: Option<Arc<dyn ClassesClient>>,
+        people_client: Arc<dyn PeopleClient>,
+        policy: Option<Arc<dyn PolicyClient>>,
+    ) -> (Router, Arc<InMemoryAssets>) {
         let assets = Arc::new(InMemoryAssets::new());
         let bus = RecordingEventBus::new();
         let publisher =
             DomainPublisher::new(bus.clone() as Arc<dyn boss_core::port::EventBus>, "assets");
         let state = AssetsApiState {
-            assets,
+            assets: assets.clone(),
             bus,
             publisher,
             people_client,
             classes_client,
             hub: SseHub::new(),
-            policy: None,
+            policy,
             insights_clients: None,
             clock: Arc::new(boss_clock_client::WallClockClient),
         };
-        router(state)
+        (router(state), assets)
+    }
+
+    /// Backlog 6c0f6547 (2026-09-26): the single-event door asked
+    /// policy for Update on asset and its batch twin asked nothing, so
+    /// a caller refused one event at a time could append any number of
+    /// them at once. The batch now asks the same question, before it
+    /// writes anything.
+    #[tokio::test]
+    async fn a_denied_caller_cannot_append_asset_events_through_the_batch_door() {
+        let (app, assets) = app_over(
+            None,
+            Arc::new(AlwaysExistsPeople),
+            Some(Arc::new(boss_policy_client::FakePolicyClient::deny_all())),
+        );
+        let event = received_event_with_source("evt-batch-denied", "oem-new");
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/assets/events/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&vec![event.clone()]).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(
+            assets.events_for(&event.asset_id).await.unwrap().is_empty(),
+            "a refused batch must append nothing"
+        );
     }
 
     /// A `Received` event whose intake `source` is the given code.

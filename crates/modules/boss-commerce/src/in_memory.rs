@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use boss_core::publisher::EventStamp;
 
-use crate::port::{CommerceError, CommerceRepository};
+use crate::port::{CommerceError, CommerceRepository, InvoiceCreate};
 use crate::types::{
     AccountOpenAr, ArAgingBucket, Invoice, InvoiceStatus, InvoiceSummary, InvoiceTransition,
     RevenueLine,
@@ -18,6 +18,11 @@ pub struct InMemoryCommerce {
     /// recorded the pre-move row — and this adapter could not be held
     /// to the transition table the Pg adapter enforces.
     moved: std::sync::Mutex<std::collections::HashMap<String, Invoice>>,
+    /// Invoices `create_invoice_at` wrote, after the seed. Until backlog
+    /// 9d2af748 a create stored nothing — it recorded its event and
+    /// returned — so this adapter could not tell a repeat create from a
+    /// first one, and could not be held to creating once per id.
+    created: std::sync::Mutex<Vec<Invoice>>,
     /// Events the outbox-migrated paths would have recorded in-tx —
     /// the in-memory analogue of `event_outbox`, collected for test
     /// assertions (no relay here; the pg path is the real contract).
@@ -30,6 +35,7 @@ impl InMemoryCommerce {
             invoices,
             revenue: Vec::new(),
             moved: std::sync::Mutex::new(std::collections::HashMap::new()),
+            created: std::sync::Mutex::new(Vec::new()),
             recorded: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -59,13 +65,28 @@ impl InMemoryCommerce {
             .map_err(|e| CommerceError::Storage(format!("moved lock: {e}")))
     }
 
-    /// Every invoice as it stands now — the seed with the moves applied.
+    fn created(&self) -> Result<std::sync::MutexGuard<'_, Vec<Invoice>>, CommerceError> {
+        self.created
+            .lock()
+            .map_err(|e| CommerceError::Storage(format!("created lock: {e}")))
+    }
+
+    /// Every invoice as issued — the seed, then what was created — with
+    /// no move applied. Takes the `created` lock and releases it, so no
+    /// caller ever holds it and `moved` together.
+    fn issued(&self) -> Result<Vec<Invoice>, CommerceError> {
+        let created = self.created()?.clone();
+        Ok(self.invoices.iter().cloned().chain(created).collect())
+    }
+
+    /// Every invoice as it stands now — the seed and the created, with
+    /// the moves applied.
     fn current(&self) -> Result<Vec<Invoice>, CommerceError> {
+        let issued = self.issued()?;
         let moved = self.moved()?;
-        Ok(self
-            .invoices
-            .iter()
-            .map(|i| moved.get(&i.id).unwrap_or(i).clone())
+        Ok(issued
+            .into_iter()
+            .map(|i| moved.get(&i.id).cloned().unwrap_or(i))
             .collect())
     }
 
@@ -92,12 +113,9 @@ impl InMemoryCommerce {
         to: &str,
         paid_on: Option<chrono::NaiveDate>,
     ) -> Result<Option<Invoice>, CommerceError> {
+        let issued = self.issued()?.into_iter().find(|i| i.id == id);
         let mut moved = self.moved()?;
-        let Some(inv) = moved
-            .get(id)
-            .or_else(|| self.invoices.iter().find(|i| i.id == id))
-            .cloned()
-        else {
+        let Some(inv) = moved.get(id).cloned().or(issued) else {
             return Err(CommerceError::NotFound(format!("invoice {id}")));
         };
         match inv.status.transition_to(to) {
@@ -176,7 +194,7 @@ impl CommerceRepository for InMemoryCommerce {
         invoice: &Invoice,
         _now: chrono::DateTime<chrono::Utc>,
         stamp: &EventStamp,
-    ) -> Result<Invoice, CommerceError> {
+    ) -> Result<InvoiceCreate, CommerceError> {
         if invoice.line_items.is_empty() {
             return Err(CommerceError::Storage(format!(
                 "invoice {} has no line items",
@@ -200,14 +218,39 @@ impl CommerceRepository for InMemoryCommerce {
                 invoice.id, invoice.currency
             )));
         }
-        // In-memory impl has no FG inventory to draw down — return
-        // the invoice unchanged. Tests that depend on enrichment
-        // use the postgres impl.
+        // Once per id, as the Pg adapter's `ON CONFLICT (id) DO NOTHING`
+        // decides it (backlog 9d2af748): the `created` lock is held
+        // across the check and the write, so two creates cannot both
+        // find the id free. An existing id writes and records nothing.
+        let exists = {
+            let mut created = self.created()?;
+            let exists = self.invoices.iter().any(|i| i.id == invoice.id)
+                || created.iter().any(|i| i.id == invoice.id);
+            if !exists {
+                created.push(invoice.clone());
+            }
+            exists
+        };
+        if exists {
+            let stored = self
+                .invoice_by_id(&invoice.id)
+                .await?
+                .ok_or_else(|| CommerceError::NotFound(format!("invoice {}", invoice.id)))?;
+            let differing = invoice.issuance_differences(&stored);
+            return if differing.is_empty() {
+                Ok(InvoiceCreate::AlreadyCreated(stored))
+            } else {
+                Err(CommerceError::another_invoice_under_this_id(
+                    &invoice.id,
+                    &differing,
+                ))
+            };
+        }
         self.record(stamp.event(
             crate::events::INVOICE_CREATED,
             crate::events::invoice_created_payload(invoice),
         ));
-        Ok(invoice.clone())
+        Ok(InvoiceCreate::Created(invoice.clone()))
     }
 
     async fn mark_invoice_paid_at(

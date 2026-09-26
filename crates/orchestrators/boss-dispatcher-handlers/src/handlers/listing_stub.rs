@@ -33,6 +33,54 @@ pub(crate) fn empty_listing() -> Value {
     json!({ "data": [], "total": 0 })
 }
 
+/// How many UNRELATED backlog-items [`backlog_listing`] holds beside a
+/// test's own rows: the live `closed_within=7` count on 2026-09-26
+/// 03:18Z, when it first exceeded every dedup page in this crate (the
+/// largest is 1000, the jobs API's own `MAX_LIMIT`). An alarm handler
+/// whose dedup read forgets its `metadata_has` filter is TRUNCATED by
+/// this many rows and holds, as it did live (backlog c5ac71de).
+pub(crate) const UNRELATED_BACKLOG: usize = 1054;
+
+/// A backlog-item listing answered as the jobs API answers it: the
+/// test's `own` rows behind [`UNRELATED_BACKLOG`] unrelated ones (so a
+/// short page loses the rows that matter), narrowed to the rows that
+/// carry the metadata key `metadata_has` names when the read sends one
+/// (present at any value, as `metadata ? key` answers),
+/// cut to `limit`, with `total` counting every row the filter matched.
+///
+/// One definition for every handler whose dedup reads backlog-items by
+/// a metadata key — the cadence sweep, the DNS observer, the sensor
+/// poll and the estate recovery (c5ac71de) — so a stub cannot answer an
+/// unfiltered read with only the rows the test cared about, which is
+/// how four handlers passed their tests while every live pass held.
+pub(crate) fn backlog_listing(
+    own: &[Value],
+    metadata_has: Option<&str>,
+    limit: Option<usize>,
+) -> Value {
+    // No `kind` key: the listing is already one kind, and a literal
+    // backlog-item kind here would read as a machine filing to the lane
+    // pin (`common::lane_pin`), which scans this file as production.
+    let unrelated = (0..UNRELATED_BACKLOG).map(|i| {
+        json!({
+            "id": format!("unrelated-{i}"),
+            "status": "open",
+            "metadata": { "description": "an unrelated backlog item" },
+        })
+    });
+    let rows: Vec<Value> = unrelated
+        .chain(own.iter().cloned())
+        .filter(|r| {
+            // `metadata ? key` in the Postgres adapter: present, whatever
+            // its value (boss-jobs `metadata_key.rs`).
+            metadata_has.is_none_or(|k| r.get("metadata").and_then(|m| m.get(k)).is_some())
+        })
+        .collect();
+    let total = rows.len();
+    let page: Vec<Value> = rows.into_iter().take(limit.unwrap_or(total)).collect();
+    json!({ "data": page, "total": total })
+}
+
 /// A running stub: its base URL, and every non-GET request it saw as
 /// `"METHOD /path"` — the writes a refusal must NOT have made.
 pub(crate) struct Stub {

@@ -207,11 +207,69 @@ fn the_secrets_are_derived_from_the_broker_rules_and_nothing_else() {
         got.contains(&"boss-dev\tboss-dev-forge-token"),
         "broker-rotates-the-boss-dev-forge-token declares boss-dev/boss-dev-forge-token: {got:?}"
     );
+    assert!(
+        got.contains(&"boss\tforge-host-checkout-token"),
+        "broker-rotates-the-forge-host-checkout-token declares boss/forge-host-checkout-token \
+         (design 1c90d183, D5), once — its delivery rule names the same Secret: {got:?}"
+    );
     for line in &got {
         let (ns, name) = line.split_once('\t').expect("ns<TAB>name");
         assert!(
             !ns.is_empty() && !name.is_empty() && !line.contains('"'),
             "a bare namespace and name, never TOML quoting: {line:?}"
+        );
+    }
+}
+
+/// Every Secret a broker rule declares has the broker's grant on it, by
+/// NAME: a Role in that namespace whose one Secret rule is
+/// `resourceNames: [<name>]`, `verbs: [get, patch]` — `get` for the
+/// idempotence read, `patch` for the install, nothing else — bound to
+/// the boss pod's service account. The rule declares the Secret and the
+/// manifest grants it; that is one fact in two files (CLAUDE.md §9a),
+/// and a rule without its grant would mint a token and then fail the
+/// install with 403, the token orphaned at the issuer (design 1c90d183
+/// added the third such Secret, boss/forge-host-checkout-token).
+#[test]
+fn every_declared_broker_secret_is_granted_to_the_broker_by_name() {
+    let c = Case::new("granted");
+    let (rc, out, err) = c.run(
+        &format!(r#"broker_secrets "{}""#, repo_root().join(RULES).display()),
+        &[],
+    );
+    assert_eq!(rc, 0, "{err}");
+    let manifest = std::fs::read_to_string(
+        repo_root().join("infra/cluster/manifests/boss-credential-broker.yaml"),
+    )
+    .expect("the broker manifest");
+    let docs: Vec<&str> = manifest.split("\n---").collect();
+    for line in out.lines() {
+        let (ns, name) = line.split_once('\t').expect("ns<TAB>name");
+        let role = docs.iter().find(|d| {
+            d.contains("\nkind: Role\n")
+                && d.contains(&format!("  namespace: {ns}\n"))
+                && d.contains(&format!("resourceNames: [{name}]"))
+        });
+        let role = role
+            .unwrap_or_else(|| panic!("no Role in {ns} grants the broker Secret {name} by name"));
+        let secret_rule = role
+            .split("  - apiGroups:")
+            .find(|r| r.contains("resources: [secrets]") && r.contains(name))
+            .expect("the Role's secrets rule");
+        assert!(
+            secret_rule.contains("verbs: [get, patch]"),
+            "{ns}/{name}: the broker gets and patches, nothing more:\n{secret_rule}"
+        );
+        let role_name = role
+            .lines()
+            .find_map(|l| l.strip_prefix("  name: "))
+            .expect("the Role's name");
+        assert!(
+            docs.iter().any(|d| d.contains("\nkind: RoleBinding\n")
+                && d.contains(&format!("  namespace: {ns}\n"))
+                && d.contains(&format!("  name: {role_name}\n"))
+                && d.contains("    name: default\n    namespace: boss")),
+            "{ns}/{name}: Role {role_name} is bound to the boss pod's service account"
         );
     }
 }

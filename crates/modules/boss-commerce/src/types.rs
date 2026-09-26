@@ -265,6 +265,55 @@ pub struct Invoice {
     pub line_items: Vec<InvoiceLineItem>,
 }
 
+impl Invoice {
+    /// PURE: every field fixed at issuance where `self` — a create body
+    /// under an id `stored` already holds — does not read as `stored`
+    /// (backlog 9d2af748). Empty means the body describes the invoice
+    /// that exists, and the create is answered rather than written.
+    /// One definition for both adapters (CLAUDE.md §9a).
+    ///
+    /// Left out: `status` and `paid_on`, which the status verbs move
+    /// after issuance — a redelivered issue carries the status the
+    /// invoice was issued at, and must neither be refused for it nor
+    /// move the invoice back. The lines are compared as a set by id,
+    /// and a line's `invoice_id` is not compared: the adapter writes
+    /// the header's id there whatever the line carried.
+    pub fn issuance_differences(&self, stored: &Invoice) -> Vec<&'static str> {
+        let lines = |inv: &Invoice| {
+            let mut lines: Vec<InvoiceLineItem> = inv
+                .line_items
+                .iter()
+                .map(|l| InvoiceLineItem {
+                    invoice_id: inv.id.clone(),
+                    ..l.clone()
+                })
+                .collect();
+            lines.sort_by(|a, b| a.id.cmp(&b.id));
+            lines
+        };
+        [
+            ("account_id", self.account_id != stored.account_id),
+            ("issued_on", self.issued_on != stored.issued_on),
+            ("due_on", self.due_on != stored.due_on),
+            ("amount_cents", self.amount_cents != stored.amount_cents),
+            ("currency", self.currency != stored.currency),
+            ("tax_cents", self.tax_cents != stored.tax_cents),
+            (
+                "tax_jurisdiction",
+                self.tax_jurisdiction != stored.tax_jurisdiction,
+            ),
+            (
+                "payment_method",
+                self.payment_method != stored.payment_method,
+            ),
+            ("line_items", lines(self) != lines(stored)),
+        ]
+        .into_iter()
+        .filter_map(|(field, differs)| differs.then_some(field))
+        .collect()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RevenueLine {
     pub month: NaiveDate,

@@ -24,7 +24,7 @@
 // bundles by design (no imports from the SPA), so the ordering is
 // deliberately duplicated there. Change one, change both.
 
-import type { Step } from '../../jobs/types';
+import type { Job, Step } from '../../jobs/types';
 
 export type DocSection = Readonly<{ key: string; label: string; body: string }>;
 
@@ -137,4 +137,119 @@ export function closedOutcome(
   if (lastCompleted) return lastCompleted.title;
   const m = job.metadata['outcome'];
   return typeof m === 'string' && m.trim() !== '' ? m : null;
+}
+
+// ---------------------------------------------------------------------
+// The active card's facts (backlog 1a242883, gap 2 of page-audit
+// 9b9849f5). The card showed a title, a `when` that was blank on every
+// live packet, no severity, no age, and "(unassigned)" for the six of
+// the incident protocol's ten steps that a ROLE holds. CLAUDE.md
+// §Diagnosis: a troubled packet must look troubled.
+// ---------------------------------------------------------------------
+
+/// A Job as the list read sends it: `opened_at` is the server's
+/// admission instant (backlog 6c2eba00), on the wire and not yet on the
+/// shared `Job` type.
+export type IncidentJob = Job & { opened_at?: string | null };
+
+const text = (v: unknown): string | null =>
+  typeof v === 'string' && v.trim() !== '' ? v : null;
+
+/// The severity the raise recorded (`metadata.severity`), or null — the
+/// card shows it beside `priority`, never an invented level.
+export function severityOf(job: IncidentJob): string | null {
+  return text(job.metadata['severity']);
+}
+
+/// When the incident started, in the order the record can answer it:
+/// `started_at` (job metadata, else the first step carrying it — the
+/// `raised` step declares it as a field), the older packets'
+/// incident_at / incident_date, then the opening. Measured on a65ba21e
+/// (2026-09-26): no started_at anywhere, so without the opening
+/// fall-backs the card's When stays blank on real packets.
+export function startedAt(job: IncidentJob): string | null {
+  const stepStart = [...(job.steps ?? [])]
+    .sort((a, b) => a.sort_order - b.sort_order)
+    .map((s) => text(s.metadata?.['started_at']))
+    .find((v) => v !== null);
+  return (
+    text(job.metadata['started_at']) ??
+    stepStart ??
+    incidentAt(job.metadata) ??
+    text(job.opened_at) ??
+    text(job.metadata['opened_at']) ??
+    text(job.opened_on)
+  );
+}
+
+/// The instant "time open" counts from: the server stamp, the metadata
+/// convention, then `opened_on` at midnight UTC. An unparseable stamp
+/// falls through rather than answering NaN.
+export function openedAtMs(job: IncidentJob): number | null {
+  const candidates = [
+    text(job.opened_at),
+    text(job.metadata['opened_at']),
+    text(job.opened_on) === null ? null : `${job.opened_on}T00:00:00Z`,
+  ];
+  const ms = candidates
+    .map((c) => (c === null ? NaN : Date.parse(c)))
+    .find((n) => !Number.isNaN(n));
+  return ms ?? null;
+}
+
+/// A span as the card reads it: `<1m`, `12m`, `5h 12m`, `3d 4h`.
+export function durationText(ms: number): string {
+  const min = Math.floor(Math.max(0, ms) / 60_000);
+  if (min < 1) return '<1m';
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h ${min % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+/// Who a step is waiting on: the assignee, else the role, station or
+/// department its audience names (the projected `authority_role` /
+/// `station` keys, and the `audience` block itself for a department,
+/// which projects no key yet — f5ebd2e1). "unassigned" only when the
+/// step declares none of them.
+export function holderOf(step: Step): string {
+  if (step.assignee_id) return step.assignee_id;
+  const m = step.metadata ?? {};
+  const role = text(m['authority_role']);
+  if (role) return `role ${role}`;
+  const station = text(m['station']);
+  if (station) return `station ${station}`;
+  const audience = m['audience'];
+  const dept =
+    typeof audience === 'object' && audience !== null
+      ? text((audience as Record<string, unknown>)['department'])
+      : null;
+  return dept ? `department ${dept}` : 'unassigned';
+}
+
+/// How long a step has sat at ready/active, from the queue-age lens
+/// (`GET /api/jobs/queue-age`, 2a0b034e) — the projection's
+/// `became_ready_at`, which the Job read does not carry. `exact: false`
+/// means the stamp is an `updated_at` fallback: a LOWER bound.
+export type StepWait = Readonly<{ sinceMs: number; exact: boolean }>;
+export type StepWaits = Readonly<{ now: number | null; byStep: ReadonlyMap<string, StepWait> }>;
+
+/// Parse the lens's body. A body without a `data` list is a throw, so a
+/// wrong-shaped answer renders as unreadable, never as "no waits".
+export function parseStepWaits(raw: unknown): StepWaits {
+  const body = raw as { data?: unknown; now?: unknown } | null;
+  if (typeof body !== 'object' || body === null || !Array.isArray(body.data)) {
+    throw new Error('queue-age: the answer carries no data list');
+  }
+  const byStep = new Map<string, StepWait>(
+    (body.data as ReadonlyArray<Record<string, unknown>>).flatMap((r) => {
+      const id = text(r['step_id']);
+      const sinceMs = Date.parse(text(r['since']) ?? '');
+      return id === null || Number.isNaN(sinceMs)
+        ? []
+        : [[id, { sinceMs, exact: r['exact'] === true }] as const];
+    }),
+  );
+  const now = Date.parse(text(body.now) ?? '');
+  return { now: Number.isNaN(now) ? null : now, byStep };
 }

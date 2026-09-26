@@ -62,6 +62,27 @@ OWNER="${BOSS_FORGE_REPO_OWNER:-david}"
 . "${BOSS_FORGE_CONVERGE_INFRA:-$(dirname "$0")/..}/run-summary.sh"
 run_summary_reset
 
+# THE CHECKOUT'S FORGE CREDENTIAL, FIRST (design 1c90d183, David
+# 2026-09-26; backlog c4cbc6b5). It lived in the userinfo of the
+# `forgejo` remote, and a git error that printed the URL printed it into
+# this unit's journal. It now lives in a 0600 file of the owner's behind
+# a git credential helper scoped to the forge's URL, and the broker
+# rotates it: credential-deposit.sh reads the Secret the broker rule
+# declares through the forge's admin kubeconfig, proves a new value by
+# effect before it replaces the file, strips the remote's userinfo once
+# the helper authenticates, reports the held token's last eight on this
+# run's packet, and records delivery on the rotation packet so the
+# broker may revoke the old token. BEFORE the fetch, because it owes
+# nothing to the forge token: a revoked or broken one cannot stop the
+# step that repairs it. Its exit is carried like install.sh's, so the
+# rest of the converge still runs.
+INFRA="${BOSS_FORGE_CONVERGE_INFRA:-$REPO/infra}"
+FORGE_TOKEN_FILE="${BOSS_FORGE_TOKEN_FILE:-/home/$OWNER/.config/boss/forge-checkout.token}"
+deposit_rc=0
+"$INFRA/forge/credential-deposit.sh" \
+    --rule "$INFRA/dispatcher/rules/broker-rotates-the-forge-host-checkout-token.toml" \
+    --checkout "$REPO" --dest "$FORGE_TOKEN_FILE" --owner "$OWNER" || deposit_rc=$?
+
 # Fetch and check out forge main as the checkout's OWNER, never as root
 # — a root `git` in a david-owned clone leaves root-owned objects that
 # break the owner's later pulls. `-l` gives the owner's login env so the
@@ -121,27 +142,45 @@ install_rc=0
 # where protection lives, so the conductor's ancestry arm is the only
 # guard against it.
 #
-# THE CREDENTIAL IS THE CHECKOUT'S OWN: the userinfo of its `forgejo`
-# remote URL, read as its owner (the credential the fetch above used),
-# written as a Basic header into a root-only file by forge-auth-header.sh,
-# and deleted on exit. It never reaches an argv or the journal; the
-# reader's errors are printed redacted. NOT `git credential fill`: the
-# owner has no credential helper, so the fill read nothing and every
-# converge since #694 closed FAILED on protect-main's exit 4, while git's
+# THE CREDENTIAL IS THE CHECKOUT'S OWN: the token file the deposit
+# above keeps (the same value the fetch's helper read), copied by root
+# into a root-only header file with a builtin, and deleted on exit. It
+# never reaches an argv or the journal. The deposit runs first on every
+# pass, so the pass that cuts the checkout over already reads the file
+# here; a pass with no file (the deposit refused, and said why on this
+# packet) leaves the header empty and protect-main's own exit 4 names it.
+# NOT the remote URL's userinfo, which forge-auth-header.sh read from
+# #697 until this car deleted it (backlog 85f8a614): the deposit strips
+# that userinfo, after which the reader had nothing to read and would
+# have exited 3 on every run. And NOT `git credential fill`, whose
 # prompt-disabled error named the userinfo in this journal (backlog
-# 164f38c7, 37497977). Whether it may administer the repository is MEASURED by the
-# first write — a 401/403 is named on this run's packet — rather than
-# assumed; nothing here mints or places a credential (CLAUDE.md §Doors,
-# the credential broker). Run after install.sh, which renders the
-# /etc/boss/sor.env that carries BOSS_FORGE_URL.
+# 164f38c7, 37497977). Whether it may administer the repository is
+# MEASURED by the first write — a 401/403 is named on this run's packet —
+# rather than assumed; nothing here mints or places a credential
+# (CLAUDE.md §Doors, the credential broker). Run after install.sh, which
+# renders the /etc/boss/sor.env that carries BOSS_FORGE_URL.
 protect_rc=0
 auth_hdr="$(mktemp -t forge-auth.XXXXXX)"
 chmod 600 "$auth_hdr"
 trap 'rm -f "$BOSS_CONVERGE_SNAPSHOT" "$auth_hdr"' EXIT
-"$REPO/infra/forge/forge-auth-header.sh" "$auth_hdr" runuser -l "$OWNER" -c "git -C '$REPO' remote get-url forgejo" || true
+# The token file is the OWNER's to write and this script runs as root, so
+# root never reads it (review A1 of the re-review of 5ef6db0b,
+# 2026-09-26): a symlink planted there to /etc/boss-ops/kubeconfig was
+# read as root and sent to the forge in this header. A symlink gets no
+# header, which protect-main names; the file is read as the owner, who
+# cannot read what they could not already.
+if [ -L "$FORGE_TOKEN_FILE" ]; then
+    echo "forge-converge: $FORGE_TOKEN_FILE is a symlink, not the deposit's own file; protect-main gets no header" >&2
+elif [ -s "$FORGE_TOKEN_FILE" ] \
+    && FORGE_TOKEN="$(runuser -u "$OWNER" -- cat -- "$FORGE_TOKEN_FILE")"; then
+    printf 'Authorization: token %s\n' "$FORGE_TOKEN" >"$auth_hdr"
+    unset FORGE_TOKEN
+fi
 BOSS_FORGE_AUTH_HEADER_FILE="$auth_hdr" "$REPO/infra/forge/protect-main.sh" || protect_rc=$?
 
 # install.sh's verdict first (it is the older and wider one), then the
-# protection's: either reds this run and puts the packet on `failed`.
+# protection's, then the deposit's: any reds this run and puts the
+# packet on `failed`.
 [ "$install_rc" -eq 0 ] || exit "$install_rc"
-exit "$protect_rc"
+[ "$protect_rc" -eq 0 ] || exit "$protect_rc"
+exit "$deposit_rc"

@@ -22,7 +22,12 @@
 //!   window — the properties a post-mortem needs (bf362f25);
 //! - `?latest_per=host` answers the newest row of EACH host, grouped
 //!   before the limit, with `total` counting hosts — so a daily host is
-//!   not spent off the page by a fifteen-minute one (725532ab).
+//!   not spent off the page by a fifteen-minute one (725532ab);
+//! - `?host=` reads ONE host's own series, selected before the limit —
+//!   on a comparison by its `host` stamp, on an observation (which
+//!   carries none) by its first node's id — so the alarm can read a
+//!   daily host's last three rows behind a page of fifteen-minute ones
+//!   (111996f5).
 
 use boss_policy_client::types::{AccessTier, User};
 use std::sync::Arc;
@@ -503,4 +508,103 @@ async fn an_unknown_latest_per_key_is_refused_not_ignored() {
         body.to_string().contains("host"),
         "the refusal names the key it serves: {body}"
     );
+}
+
+/// Record one host-scope comparison AND one observation per reading, in
+/// the shapes each carries: the comparison stamped `host` (compare_host),
+/// the observation carrying none — its host is its first node (4579f9b5).
+fn host_reading(
+    host: &str,
+    i: i64,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Vec<boss_core::event::Event> {
+    vec![
+        boss_core::event::Event::new(
+            "jobs",
+            boss_jobs::events::ESTATE_COMPARED,
+            serde_json::json!({"scope": "host", "host": host, "marker": format!("{host}-{i}")}),
+            at,
+        ),
+        boss_core::event::Event::new(
+            "jobs",
+            boss_jobs::events::ESTATE_OBSERVED,
+            serde_json::json!({"scope": "host", "marker": format!("{host}-{i}"),
+                               "nodes": [{"id": host}]}),
+            at,
+        ),
+    ]
+}
+
+/// THE ALARM'S READ, REPRODUCED (backlog 111996f5, measured 2026-09-26
+/// by run e90cb490): boss-gcp read 12-13G free against a 17G floor on
+/// three consecutive daily comparisons and no ESTATE ALARM was filed,
+/// because the raiser read `scope=host&limit=20` — twenty rows of
+/// forge's fifteen-minute series, none of boss-gcp's daily one — and so
+/// never held three of boss-gcp's rows to intersect. `latest_per` gives
+/// one row per host; persistence needs a host's last THREE, so the read
+/// has to select the host itself, before the limit. The silence sweep
+/// needs the same of observations, which carry no `host` stamp: there
+/// the host is the first node, the identity compare_host stamps from.
+#[tokio::test]
+async fn host_selects_one_hosts_series_before_the_limit_on_both_readers() {
+    let (app, jobs) = app();
+    let t0: chrono::DateTime<chrono::Utc> = "2026-09-22T00:00:00Z".parse().unwrap();
+    // Three days, interleaved: forge every fifteen minutes, boss-gcp
+    // once a day at 10:25 — the cadences the live series has.
+    let mut events = Vec::new();
+    for i in 0..(3 * 96) {
+        events.extend(host_reading(
+            "forge",
+            i,
+            t0 + chrono::Duration::minutes(15 * i),
+        ));
+    }
+    for day in 0..3 {
+        let at = t0 + chrono::Duration::days(day) + chrono::Duration::minutes(10 * 60 + 25);
+        events.extend(host_reading("boss-gcp", day, at));
+    }
+    events.sort_by_key(|e| e.timestamp);
+    jobs.record_events(&events).await.expect("events record");
+
+    // Precondition: the page the raiser read holds none of boss-gcp's rows.
+    let (_, scoped) = get_as_guest(&app, "/api/estate/comparisons?scope=host&limit=20").await;
+    assert!(
+        !markers(&scoped).iter().any(|m| m.starts_with("boss-gcp")),
+        "precondition: forge spends the whole scoped page"
+    );
+
+    for reader in ["comparisons", "observations"] {
+        let (status, one) = get_as_guest(
+            &app,
+            &format!("/api/estate/{reader}?scope=host&host=boss-gcp&limit=20"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reader}: host= is guest-readable");
+        assert_eq!(
+            markers(&one),
+            vec!["boss-gcp-2", "boss-gcp-1", "boss-gcp-0"],
+            "{reader}: the daily host's own series, newest first"
+        );
+        assert_eq!(one["total"], 3, "{reader}: total counts that host's rows");
+
+        // The limit applies to the host's series, not before the filter.
+        let (_, forge) = get_as_guest(
+            &app,
+            &format!("/api/estate/{reader}?scope=host&host=forge&limit=2"),
+        )
+        .await;
+        assert_eq!(markers(&forge), vec!["forge-287", "forge-286"]);
+        assert_eq!(forge["total"], 288, "{reader}: rows < total shows the rest");
+
+        // Control: a host no row names answers empty, not the scope.
+        let (_, none) = get_as_guest(
+            &app,
+            &format!("/api/estate/{reader}?scope=host&host=nonesuch"),
+        )
+        .await;
+        assert_eq!(
+            none["total"], 0,
+            "{reader}: an unknown host matches nothing"
+        );
+    }
 }

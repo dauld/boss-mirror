@@ -179,8 +179,9 @@ impl Handler for CommerceInvoiceIssue {
         // returns 200 even when it REJECTS a row — the loss is reported in
         // `skipped[]`, not as a non-2xx — so a status-only check would ACK a
         // dropped invoice (lost FG drawdown + revenue, no redelivery). We
-        // send exactly one invoice, so anything but inserted==1 / skipped==[]
-        // is a hard failure → NAK so JetStream redelivers it.
+        // send exactly one invoice, so anything but "it exists as sent"
+        // (`batch_holds_the_invoice`) is a hard failure → NAK so JetStream
+        // redelivers it.
         let resp = self
             .client
             .post(&url)
@@ -204,20 +205,73 @@ impl Handler for CommerceInvoiceIssue {
         let body: serde_json::Value = resp.json().await.map_err(|e| {
             HandlerError::Downstream(format!("POST {url}: decode batch response: {e}"))
         })?;
-        let inserted = body.get("inserted").and_then(|v| v.as_i64()).unwrap_or(0);
-        let skipped_empty = body
-            .get("skipped")
-            .and_then(|v| v.as_array())
-            .map(|a| a.is_empty())
-            .unwrap_or(true);
-        if inserted != 1 || !skipped_empty {
-            return Err(HandlerError::Downstream(format!(
-                "POST {url}: invoice {invoice_id} rejected by batch (inserted={inserted}, skipped={})",
-                body.get("skipped")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null)
-            )));
+        batch_holds_the_invoice(&body, &invoice_id)
+            .map_err(|why| HandlerError::Downstream(format!("POST {url}: {why}")))
+    }
+}
+
+/// PURE: whether a one-invoice batch answer says `invoice_id` exists as
+/// sent — written by this POST (`inserted` 1) or by an earlier delivery
+/// of the same issue (`already_created` naming it; backlog 9d2af748).
+/// Anything else, a skipped row above all, is a refusal the caller
+/// NAKs so JetStream redelivers.
+fn batch_holds_the_invoice(body: &serde_json::Value, invoice_id: &str) -> Result<(), String> {
+    let inserted = body.get("inserted").and_then(|v| v.as_i64()).unwrap_or(0);
+    let already = body
+        .get("already_created")
+        .and_then(|v| v.as_array())
+        .is_some_and(|ids| ids.len() == 1 && ids[0] == invoice_id);
+    let skipped_empty = body
+        .get("skipped")
+        .and_then(|v| v.as_array())
+        .map(|a| a.is_empty())
+        .unwrap_or(true);
+    if skipped_empty && ((inserted == 1 && !already) || (inserted == 0 && already)) {
+        return Ok(());
+    }
+    Err(format!(
+        "invoice {invoice_id} rejected by batch (inserted={inserted}, already_created={}, skipped={})",
+        body.get("already_created")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        body.get("skipped")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null)
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::batch_holds_the_invoice;
+    use serde_json::json;
+
+    #[test]
+    fn a_written_invoice_is_held() {
+        let body = json!({"inserted": 1, "already_created": [], "skipped": []});
+        assert_eq!(batch_holds_the_invoice(&body, "inv-step-1"), Ok(()));
+        // An answer from before `already_created` existed reads the same.
+        let body = json!({"inserted": 1, "skipped": []});
+        assert_eq!(batch_holds_the_invoice(&body, "inv-step-1"), Ok(()));
+    }
+
+    /// Backlog 9d2af748: a redelivered issue finds its invoice already
+    /// created — `inserted` 0, the id named — and converges instead of
+    /// NAKing forever on a write that correctly did not happen.
+    #[test]
+    fn a_redelivered_issue_whose_invoice_exists_is_held() {
+        let body = json!({"inserted": 0, "already_created": ["inv-step-1"], "skipped": []});
+        assert_eq!(batch_holds_the_invoice(&body, "inv-step-1"), Ok(()));
+    }
+
+    #[test]
+    fn a_skipped_or_missing_invoice_is_refused() {
+        for body in [
+            json!({"inserted": 0, "already_created": [], "skipped": [{"id": "inv-step-1", "error": "x"}]}),
+            json!({"inserted": 0, "already_created": [], "skipped": []}),
+            json!({"inserted": 0, "already_created": ["inv-step-other"], "skipped": []}),
+        ] {
+            let why = batch_holds_the_invoice(&body, "inv-step-1").expect_err("refused");
+            assert!(why.contains("inv-step-1"), "{why}");
         }
-        Ok(())
     }
 }

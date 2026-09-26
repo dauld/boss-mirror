@@ -459,3 +459,58 @@ fn the_plan_verb_needs_no_approval_and_the_write_verb_does() {
     // The repo is never a parameter: it is derived from the instance.
     assert!(!names.iter().any(|n| n.contains("repo")), "{names:?}");
 }
+
+/// Review F2 of car 85b7b55f (2026-09-26). boss-ops-runner runs this verb
+/// as ROOT (its unit names no User=), and the tenant URL is the
+/// checkout's `forgejo` remote with the repo path replaced. Until design
+/// 1c90d183 that remote carried the forge token as userinfo, so root
+/// authenticated by accident of the URL; once the deposit strips it, the
+/// credential is a helper in the checkout OWNER's global git config and
+/// root has none. So as root the script re-runs itself as the owner
+/// before any git. Measured with an `id` that answers 0 to `-u` and a
+/// `runuser` that records whom it was asked to run as, then runs the
+/// argv: the plan still renders, byte-identical to a plain run, and the
+/// drop happened once.
+#[test]
+fn run_as_root_it_drops_to_the_checkouts_owner_before_any_git() {
+    let f = forge();
+    let (_, plain, _) = plan(&f);
+    let bin = f.root.join("bin");
+    let log = f.root.join("runuser.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    boss_testing::write_exec(
+        &bin.join("id"),
+        "#!/usr/bin/env bash\nif [ \"$*\" = -u ]; then echo 0; exit 0; fi\nPATH=\"${PATH#*:}\" exec id \"$@\"\n",
+    );
+    boss_testing::write_exec(
+        &bin.join("runuser"),
+        &format!(
+            "#!/usr/bin/env bash\n[ \"$1\" = -u ] && [ \"$3\" = -- ] || {{ echo \"runuser shape: $*\" >&2; exit 97; }}\necho \"$2\" >> '{}'\nshift 3\nexec \"$@\"\n",
+            log.display()
+        ),
+    );
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg(script())
+        .args(["--plan", "prod", "merge/ops-marketing"])
+        .envs(git_env())
+        .env("PATH", path)
+        .env("BOSS_TENANT_REMOTE_OF", &f.boss)
+        .env("BOSS_TENANT_CHECKOUT_OWNER", "someone")
+        .env("BOSS_CLI", &f.cli)
+        .output()
+        .expect("the script runs");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap_or_default(),
+        "someone\n",
+        "run as root, it re-runs ONCE as the checkout's owner: {stderr}"
+    );
+    assert_eq!(stdout, plain, "the owner renders the same plan root would");
+}

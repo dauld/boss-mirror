@@ -73,6 +73,8 @@ fn build_app(pool: PgPool) -> Router {
         repo: Arc::new(PgScheduling::new(pool)),
         publisher: Some(publisher),
         clock: Arc::new(boss_clock_client::WallClockClient),
+        // The reads' gate is not under test here; the writes ask none.
+        policy: Arc::new(boss_policy_client::PermissivePolicyClient),
     })
 }
 

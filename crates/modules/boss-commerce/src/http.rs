@@ -16,7 +16,7 @@ use boss_people_client::PeopleClient;
 use boss_policy::{Action, Decision, Resource};
 use boss_policy_client::{CurrentUser, PolicyClient};
 
-use crate::port::{CommerceError, CommerceRepository};
+use crate::port::{CommerceError, CommerceRepository, InvoiceCreate};
 
 fn error_response(err: CommerceError) -> Response {
     match err {
@@ -272,6 +272,30 @@ async fn check_revenue_category(
     }
 }
 
+/// Ask policy for `action` on `Resource::invoice()`, answering the
+/// response that refuses. Every write handler here asks it, so the
+/// batch door and the status moves ask exactly what create asks —
+/// until backlog 6c0f6547 (2026-09-26) create was the only one that
+/// asked at all, and the batch door is the live invoice-issue path.
+/// A Deny is 403; a policy service that cannot answer refuses with the
+/// client error's own response (503 + Retry-After), never a pass.
+/// `None` allows: the test path every existing harness relies on; the
+/// binary wires a client.
+async fn require<R: CommerceRepository>(
+    state: &CommerceApiState<R>,
+    user: &boss_policy_client::User,
+    action: Action,
+) -> Result<(), Response> {
+    let Some(policy) = state.policy.as_ref() else {
+        return Ok(());
+    };
+    match policy.check(user, action, Resource::invoice()).await {
+        Ok(Decision::Allow { .. }) => Ok(()),
+        Ok(Decision::Deny { reason }) => Err((StatusCode::FORBIDDEN, reason).into_response()),
+        Err(e) => Err(e.into_response()),
+    }
+}
+
 async fn create_invoice<R: CommerceRepository + 'static>(
     State(state): State<Arc<CommerceApiState<R>>>,
     CurrentUser(user): CurrentUser,
@@ -297,22 +321,9 @@ async fn create_invoice<R: CommerceRepository + 'static>(
         }
     }
     // Policy: creating an invoice requires an active Create rule on
-    // Resource::invoice() for the caller's role. If the state doesn't
-    // carry a policy client (test path), skip — the existing tests
-    // cover the invariants without role gating.
-    if let Some(ref policy) = state.policy {
-        match policy
-            .check(&user, Action::Create, Resource::invoice())
-            .await
-        {
-            Ok(Decision::Allow { .. }) => {}
-            Ok(Decision::Deny { reason }) => {
-                return (StatusCode::FORBIDDEN, reason).into_response();
-            }
-            Err(e) => {
-                return e.into_response();
-            }
-        }
+    // Resource::invoice() for the caller's role.
+    if let Err(resp) = require(&state, &user, Action::Create).await {
+        return resp;
     }
     let invoice_id = invoice.id.clone();
     // Outbox phase 2: the adapter records commerce.invoice.created
@@ -324,9 +335,16 @@ async fn create_invoice<R: CommerceRepository + 'static>(
         .create_invoice_at(&invoice, stamp.timestamp, &stamp)
         .await
     {
-        Ok(_enriched) => (
+        Ok(InvoiceCreate::Created(_)) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"ok": true, "id": invoice_id})),
+        )
+            .into_response(),
+        // A repeat of a create that landed (backlog 9d2af748): nothing
+        // was written, so 200 and not 201, and the body says so.
+        Ok(InvoiceCreate::AlreadyCreated(_)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"ok": true, "id": invoice_id, "already_created": true})),
         )
             .into_response(),
         Err(e) => error_response(e),
@@ -358,7 +376,14 @@ async fn batch_invoices<R: CommerceRepository + 'static>(
     CurrentUser(user): CurrentUser,
     Json(invoices): Json<Vec<crate::types::Invoice>>,
 ) -> Response {
+    // One question for the whole batch, before any row: the same
+    // Create on invoice that /create asks. A refusal is the batch's,
+    // not a per-row skip — the caller asked for all of it.
+    if let Err(resp) = require(&state, &user, Action::Create).await {
+        return resp;
+    }
     let mut inserted = 0u64;
+    let mut already_created: Vec<String> = Vec::new();
     let mut skipped: Vec<(String, String)> = Vec::new();
     let stamp = event_stamp(&state, &user).await;
     for inv in &invoices {
@@ -417,8 +442,8 @@ async fn batch_invoices<R: CommerceRepository + 'static>(
         // (sort by SKU) prevents the common case; this rides out any
         // residual so the batch recovers in-request instead of skipping →
         // NAK → dead-letter (which then 404s the downstream collection).
-        // create_invoice_at is idempotent (ON CONFLICT + already-issued
-        // guard), so re-invoking is safe.
+        // create_invoice_at is idempotent by id (backlog 9d2af748), so
+        // re-invoking is safe.
         let mut attempt = 0u32;
         let result = loop {
             match state.commerce.create_invoice_at(inv, now, &stamp).await {
@@ -430,8 +455,17 @@ async fn batch_invoices<R: CommerceRepository + 'static>(
             }
         };
         match result {
-            Ok(_enriched) => {
+            Ok(InvoiceCreate::Created(_)) => {
                 inserted += 1;
+            }
+            // Not `inserted`: nothing was written, and a count that
+            // claims a write is the record this item exists to stop
+            // (backlog 9d2af748). Named instead, so a caller whose
+            // delivery was a redelivery — the dispatcher's
+            // `commerce.invoice.issue` — reads that its invoice exists
+            // as sent, and converges rather than NAKing forever.
+            Ok(InvoiceCreate::AlreadyCreated(_)) => {
+                already_created.push(inv.id.clone());
             }
             Err(e) => {
                 // On a rejected row, log per-row + return the
@@ -452,6 +486,7 @@ async fn batch_invoices<R: CommerceRepository + 'static>(
         StatusCode::OK,
         Json(serde_json::json!({
             "inserted": inserted,
+            "already_created": already_created,
             "skipped": skipped.iter()
                 .map(|(id, err)| serde_json::json!({"id": id, "error": err}))
                 .collect::<Vec<_>>(),
@@ -485,6 +520,9 @@ async fn mark_invoice_paid<R: CommerceRepository + 'static>(
     CurrentUser(user): CurrentUser,
     body: Option<axum::Json<MarkPaidBody>>,
 ) -> Response {
+    if let Err(resp) = require(&state, &user, Action::Update).await {
+        return resp;
+    }
     let now = boss_clock_client::now_from(&state.clock).await;
     let paid_on = body
         .and_then(|axum::Json(b)| b.paid_on)
@@ -507,6 +545,9 @@ async fn mark_invoice_past_due<R: CommerceRepository + 'static>(
     Path(id): Path<String>,
     CurrentUser(user): CurrentUser,
 ) -> Response {
+    if let Err(resp) = require(&state, &user, Action::Update).await {
+        return resp;
+    }
     // Outbox phase 2: recorded in the adapter's transaction.
     let stamp = event_stamp(&state, &user).await;
     match state.commerce.mark_invoice_past_due(&id, &stamp).await {
@@ -520,6 +561,12 @@ async fn mark_invoice_written_off<R: CommerceRepository + 'static>(
     Path(id): Path<String>,
     CurrentUser(user): CurrentUser,
 ) -> Response {
+    // A write-off is a status move like paid and past-due, so it asks
+    // Update rather than Close; every live caller holding one holds
+    // the other (triage of 6c0f6547).
+    if let Err(resp) = require(&state, &user, Action::Update).await {
+        return resp;
+    }
     // Outbox phase 2: the adapter records the event in the flip's own
     // transaction, structurally gated on the flip winning — the
     // emit-once-on-`newly` dance this handler used to do is gone.
@@ -551,6 +598,11 @@ async fn write_off_invoice_from_past_due<R: CommerceRepository + 'static>(
     CurrentUser(user): CurrentUser,
     Json(body): Json<FromPastDueBody>,
 ) -> Response {
+    // Policy before the trigger is read: a refused caller learns
+    // nothing about which shapes resolve to an invoice.
+    if let Err(resp) = require(&state, &user, Action::Update).await {
+        return resp;
+    }
     let invoice_id = if let Some(step_id) = body
         .trigger
         .get("trigger")
@@ -780,6 +832,206 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Policy on every write (backlog 6c0f6547) ───────────────────
+    //
+    // Until 2026-09-26 create_invoice was the one handler here that
+    // asked policy. The batch door — the live invoice-issue path the
+    // dispatcher's commerce.invoice.issue handler drives — and the
+    // four status moves asked nothing, so a wired client closed one
+    // write of six. Each test below sends a write through a client
+    // that denies everything and reads the store back: a refusal that
+    // still wrote is not a refusal.
+
+    /// A policy client that cannot be asked: every check is an outage.
+    struct UnreachablePolicy;
+
+    #[async_trait::async_trait]
+    impl PolicyClient for UnreachablePolicy {
+        async fn check(
+            &self,
+            _user: &boss_policy_client::User,
+            _action: Action,
+            _resource: Resource,
+        ) -> Result<Decision, boss_policy_client::PolicyClientError> {
+            Err(boss_policy_client::PolicyClientError::Unreachable(
+                "test: policy pod rolling".into(),
+            ))
+        }
+        async fn scope_predicate(
+            &self,
+            _user: &boss_policy_client::User,
+            _resource: Resource,
+        ) -> Result<boss_policy_client::Predicate, boss_policy_client::PolicyClientError> {
+            Err(boss_policy_client::PolicyClientError::Unreachable(
+                "test: policy pod rolling".into(),
+            ))
+        }
+    }
+
+    /// The two seeded invoices behind `policy`; the store comes back
+    /// too, so a test can read what a refused write left behind.
+    fn app_with_policy(policy: Arc<dyn PolicyClient>) -> (Router, Arc<InMemoryCommerce>) {
+        let commerce = Arc::new(InMemoryCommerce::new(vec![
+            test_invoice("inv-001"),
+            test_invoice("inv-002"),
+        ]));
+        let app = router(CommerceApiState {
+            commerce: commerce.clone(),
+            publisher: None,
+            people_client: Arc::new(AlwaysExistsPeople),
+            policy: Some(policy),
+            clock: Arc::new(boss_clock_client::WallClockClient),
+            classes_client: None,
+        });
+        (app, commerce)
+    }
+
+    fn deny_app() -> (Router, Arc<InMemoryCommerce>) {
+        app_with_policy(Arc::new(boss_policy_client::FakePolicyClient::deny_all()))
+    }
+
+    async fn send_json(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn status_of(commerce: &InMemoryCommerce, id: &str) -> String {
+        commerce
+            .invoice_by_id(id)
+            .await
+            .unwrap()
+            .expect("seeded invoice")
+            .status
+            .as_str()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn a_denied_caller_cannot_issue_invoices_through_the_batch_door() {
+        let (app, commerce) = deny_app();
+        let resp = send_json(
+            &app,
+            "POST",
+            "/api/commerce/invoices/batch",
+            serde_json::to_value(vec![test_invoice("inv-batch-1")]).unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert!(
+            commerce
+                .invoice_by_id("inv-batch-1")
+                .await
+                .unwrap()
+                .is_none(),
+            "a refused batch must not issue the invoice"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_caller_cannot_mark_an_invoice_paid() {
+        let (app, commerce) = deny_app();
+        let resp = send_json(
+            &app,
+            "PUT",
+            "/api/commerce/invoices/inv-001/paid",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            status_of(&commerce, "inv-001").await,
+            InvoiceStatus::OUTSTANDING
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_caller_cannot_mark_an_invoice_past_due() {
+        let (app, commerce) = deny_app();
+        let resp = send_json(
+            &app,
+            "PUT",
+            "/api/commerce/invoices/inv-001/past-due",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            status_of(&commerce, "inv-001").await,
+            InvoiceStatus::OUTSTANDING
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_caller_cannot_write_an_invoice_off() {
+        let (app, commerce) = deny_app();
+        let resp = send_json(
+            &app,
+            "PUT",
+            "/api/commerce/invoices/inv-001/write-off",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            status_of(&commerce, "inv-001").await,
+            InvoiceStatus::OUTSTANDING
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_caller_cannot_write_off_from_a_past_due_trigger() {
+        let (app, commerce) = deny_app();
+        let resp = send_json(
+            &app,
+            "POST",
+            "/api/commerce/invoices/write-off/from-past-due",
+            serde_json::json!({"trigger": {"id": "inv-001"}}),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            status_of(&commerce, "inv-001").await,
+            InvoiceStatus::OUTSTANDING
+        );
+    }
+
+    /// A policy service that cannot answer is not a gate that passed,
+    /// and not a Deny either: the batch door answers the client
+    /// error's own 503, and issues nothing.
+    #[tokio::test]
+    async fn a_policy_outage_refuses_the_batch_door_with_503() {
+        let (app, commerce) = app_with_policy(Arc::new(UnreachablePolicy));
+        let resp = send_json(
+            &app,
+            "POST",
+            "/api/commerce/invoices/batch",
+            serde_json::to_value(vec![test_invoice("inv-batch-2")]).unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            commerce
+                .invoice_by_id("inv-batch-2")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

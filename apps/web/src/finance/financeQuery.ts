@@ -69,3 +69,11 @@ export function financeSearch(search: string, v: FinanceView): string {
   const s = params.toString();
   return s ? `?${s}` : '';
 }
+
+/** The search string that opens journal entry `id` on the Trial
+ *  Balance — the target of EntryDetail's "Reversal posted" link, which
+ *  was plain text until backlog 2349285d. The tab is named rather than
+ *  left to tabAbsentMeans so the link says where it goes. */
+export function entrySearch(id: string): string {
+  return `?${new URLSearchParams({ tab: 'trial-balance', entry: id }).toString()}`;
+}

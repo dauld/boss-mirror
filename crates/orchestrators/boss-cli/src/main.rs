@@ -1084,7 +1084,11 @@ enum CarAction {
     /// commit is matched in the carrier (a landed car's branch, or the
     /// merge sha that landed it) by patch-id, or as the same authored
     /// commit replayed — which is accepted only with --accept-replay,
-    /// after the files whose patch differs are named. Closes through
+    /// after the files whose patch differs are named. A commit neither
+    /// finds — a carrier that squashed the car into its own commit — is
+    /// proven by the whole tree: merging the car's head into main writes
+    /// main's own tree; otherwise the files are named and only
+    /// --accept-net-diff retires it (backlog 2b198cac). Closes through
     /// ship-a-change's `landed-twin` terminal with the proof recorded.
     ///
     /// `--superseded-by`: another car replaced it, for the same item,
@@ -1114,6 +1118,12 @@ enum CarAction {
         /// in the evidence with who accepted it.
         #[arg(long, requires = "carried_by")]
         accept_replay: bool,
+        /// Accept commits no carrier commit holds whose merge into main
+        /// does NOT write main's own tree, after the verb has named the
+        /// files that conflict or differ — your judgement that the car's
+        /// work is on main. Recorded in the evidence with who accepted it.
+        #[arg(long, requires = "carried_by")]
+        accept_net_diff: bool,
         /// Judge and print, write nothing.
         #[arg(long)]
         dry_run: bool,
@@ -1768,6 +1778,7 @@ async fn main() -> Result<()> {
                 carried_by,
                 superseded_by,
                 accept_replay,
+                accept_net_diff,
                 dry_run,
             } => {
                 car_retire::retire(
@@ -1775,6 +1786,7 @@ async fn main() -> Result<()> {
                     carried_by.as_deref(),
                     superseded_by.as_deref(),
                     accept_replay,
+                    accept_net_diff,
                     dry_run,
                 )
                 .await

@@ -25,7 +25,7 @@ use boss_core::job::{Job, JobId, JobStatus, Priority, Step, StepStatus, Subject}
 use boss_core::publisher::EventStamp;
 use boss_jobs::events::{JOB_CREATED, STEP_CREATED, step_state_payload};
 use boss_jobs::port::JobsError;
-use boss_jobs::{JobsRepository, PgJobs};
+use boss_jobs::{Admission, JobsRepository, PgJobs};
 use boss_testing::TestDb;
 use chrono::NaiveDate;
 use uuid::Uuid;
@@ -123,9 +123,11 @@ async fn the_job_and_every_step_and_every_event_commit_together() {
     let stamp = stamp();
     let (job_events, step_events) = events_for(&stamp, &j, &steps);
 
-    repo.create_job_with_steps_at(&j, &steps, stamp.timestamp, &job_events, &step_events)
+    let admission = repo
+        .create_job_with_steps_at(&j, &steps, stamp.timestamp, &job_events, &step_events)
         .await
         .expect("a whole packet is admitted");
+    assert_eq!(admission, Admission::Admitted);
 
     assert_eq!(counts(&db.pool, &j.id).await, (1, 10, 11));
     let created: Vec<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
@@ -252,4 +254,105 @@ async fn a_step_without_its_event_is_refused_before_any_write() {
         .expect_err("3 steps, 2 events");
     assert!(err.to_string().contains("3 step"), "{err}");
     assert_eq!(counts(&db.pool, &j.id).await, (0, 0, 0));
+}
+
+/// A second admission under an id the table already holds writes
+/// NOTHING (backlog 9d2af748). Its steps carry fresh ids — the
+/// handler materializes them anew on every admission — so the per-row
+/// guard the steps had could never fire: the job row decides for the
+/// whole graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_admission_under_one_id_writes_no_step_and_no_event() {
+    let db = TestDb::new().await;
+    let repo = PgJobs::new(db.pool.clone());
+    let j = job("00000000-0000-0000-0000-00000000a005");
+    let stamp = stamp();
+
+    let steps = steps_of(&j, 10);
+    let (job_events, step_events) = events_for(&stamp, &j, &steps);
+    let first = repo
+        .create_job_with_steps_at(&j, &steps, stamp.timestamp, &job_events, &step_events)
+        .await
+        .unwrap();
+    assert_eq!(first, Admission::Admitted);
+    assert_eq!(counts(&db.pool, &j.id).await, (1, 10, 11));
+
+    let again = steps_of(&j, 10);
+    let (job_events, step_events) = events_for(&stamp, &j, &again);
+    let second = repo
+        .create_job_with_steps_at(&j, &again, stamp.timestamp, &job_events, &step_events)
+        .await
+        .unwrap();
+    assert_eq!(second, Admission::AlreadyAdmitted);
+    assert_eq!(
+        counts(&db.pool, &j.id).await,
+        (1, 10, 11),
+        "no second copy of the steps, no event for any of them"
+    );
+}
+
+/// The race itself, on the real index. Another connection holds an
+/// UNCOMMITTED admission of the same id — the other first admission,
+/// which read "no packet" at the same moment this one did — so this
+/// one's job INSERT waits on the unique index. When the other commits,
+/// the INSERT does nothing; the adapter must then write nothing either
+/// and say it lost. Before 9d2af748 it went on to insert its ten steps
+/// and ten STEP_CREATED events onto the packet the other had admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_admission_that_loses_the_race_writes_nothing_and_says_so() {
+    let db = TestDb::new().await;
+    let j = job("00000000-0000-0000-0000-00000000a006");
+    let steps = steps_of(&j, 10);
+    let stamp = stamp();
+    let (job_events, step_events) = events_for(&stamp, &j, &steps);
+
+    // The other admission: its job row, not yet committed.
+    let mut winner = db.pool.begin().await.unwrap();
+    sqlx::query(
+        "INSERT INTO jobs (id, kind, subject_kind, subject_id, title, owner_id, priority, opened_on) \
+         VALUES ($1, 'user-feedback', 'custom', '/ux/jobs', 'the other admission', 'emp-1', \
+                 'standard', '2026-09-16')",
+    )
+    .bind(*j.id.inner().as_uuid())
+    .execute(&mut *winner)
+    .await
+    .unwrap();
+
+    let racing = {
+        let repo = PgJobs::new(db.pool.clone());
+        let j = j.clone();
+        tokio::spawn(async move {
+            repo.create_job_with_steps_at(&j, &steps, stamp.timestamp, &job_events, &step_events)
+                .await
+        })
+    };
+    // Wait until this admission is actually parked on the other's row —
+    // a sleep would pass whether or not the two ever met.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+              WHERE datname = current_database() AND wait_event_type = 'Lock'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the racing admission never waited on the other's job row"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    winner.commit().await.unwrap();
+
+    let admission = racing.await.unwrap().expect("the loser errs on nothing");
+    assert_eq!(admission, Admission::AlreadyAdmitted);
+    assert_eq!(
+        counts(&db.pool, &j.id).await,
+        (1, 0, 0),
+        "the packet is the winner's alone: no step and no event of the loser's"
+    );
 }

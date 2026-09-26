@@ -119,16 +119,23 @@ MIRROR_URL="${_mirror_url:-${BOSS_MIRROR_URL}.git}"
 # /etc/boss/sor.env (infra/lib/sor.sh) with the product repository's
 # path — the same owner every image repo lives under.
 # THE CREDENTIAL IS THE CONVERGE'S OWN. The push runs as $FORGE_PUSH_AS
-# over Forgejo's HTTP, and that user has no credential helper: measured
-# 2026-09-19 04:55Z on ops-request 3d9d5f58 (the second approved publish)
-# — `could not read Username for 'http://10.20.0.15:3000'` after the
-# ownership refusal of the first was fixed. What the converge fetches
-# through is the checkout's `forgejo` remote, whose URL carries the
-# credential as userinfo (cluster-deploy-lib.sh derives every tenant URL
-# from it, redacting it in every message). So with no BOSS_FORGE_PUSH_URL
-# the push target is that remote's URL, read AS THE OWNER (the checkout
-# is theirs); the bare sor.env URL is the fallback only when the checkout
-# has no such remote, and the userinfo never reaches a message.
+# over Forgejo's HTTP. Measured 2026-09-19 04:55Z on ops-request 3d9d5f58
+# (the second approved publish): that user then had NO credential helper
+# — `could not read Username for 'http://10.20.0.15:3000'` — and the
+# converge's credential rode the checkout's `forgejo` remote URL as
+# userinfo, so the push target became that remote's URL, read AS THE
+# OWNER. That shape is the one that leaked (design 1c90d183, backlog
+# c4cbc6b5: a git error printed the URL into the forge-converge
+# journal). Since then the credential is a 0600 file of the owner's
+# behind a git credential helper in the owner's GLOBAL config, scoped to
+# the forge's URL, and forge-converge's deposit (credential-deposit.sh)
+# strips the remote's userinfo once that helper authenticates. So the
+# URL read here carries no credential; the push authenticates because
+# it runs as the owner, whose helper answers for the forge. The URL is
+# still the remote's — the one the converge fetches through — and the
+# bare sor.env URL is the fallback only when the checkout has no such
+# remote. A remote that still carries userinfo (a host the deposit has
+# not converted) is pushed to as it stands and redacted in every message.
 FORGE_PUSH_AS="${BOSS_FORGE_PUSH_AS-david}"
 FORGE_CHECKOUT="${BOSS_FORGE_CHECKOUT:-/home/david/boss}"
 redact_url() { sed -E 's#://[^/@[:space:]]+@#://<redacted>@#g'; }

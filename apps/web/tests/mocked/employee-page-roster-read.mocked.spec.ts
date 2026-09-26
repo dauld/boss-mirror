@@ -71,3 +71,46 @@ test.describe('/ux/people/<id> names a failed roster read instead of an empty te
     expect(errs).toEqual([]);
   });
 });
+
+// A roster that ANSWERS but does not hold the manager (backlog 1a83fe98,
+// found by the builder of 03c88448, 2026-09-24). The read worked, so no
+// failure line is owed — but the record names a manager, so "No manager
+// — reports to board." is false, and a chain that simply stops part-way
+// up reads as though its last person reports to the board. The gap is
+// named, with the id the record holds.
+test.describe('/ux/people/<id> names a manager the answered roster does not hold', () => {
+  const chainItems = (page: Page) => page.locator('ol.checklist li');
+
+  test('the direct manager missing from the roster is a named gap, never the board', async ({ page }) => {
+    const errs = await openEmployee(page, (r) => json(r, [SELF, REPORT]));
+    await expect(page.locator('h1.detail-title')).toHaveText('Demo Manager');
+    await expect(chainItems(page)).toHaveText([
+      /emp-001 — the manager of Demo Manager, not in the roster this page read/,
+    ]);
+    await expect(page.getByText('No manager — reports to board.')).toHaveCount(0);
+    await expect(page.locator(FAILURE_MARKER)).toHaveCount(0);
+    expect(errs).toEqual([]);
+  });
+
+  test('a manager missing part-way up ends the chain with a named gap', async ({ page }) => {
+    const bossWithManager = row('emp-001', 'Demo Boss', 'emp-000');
+    const errs = await openEmployee(page, (r) => json(r, [bossWithManager, SELF, REPORT]));
+    await expect(chainItems(page)).toHaveText([
+      /Demo Boss/,
+      /emp-000 — the manager of Demo Boss, not in the roster this page read/,
+    ]);
+    await expect(page.getByText('No manager — reports to board.')).toHaveCount(0);
+    expect(errs).toEqual([]);
+  });
+
+  test('a manager_id cycle is named and the page still paints', async ({ page }) => {
+    const bossInLoop = row('emp-001', 'Demo Boss', 'emp-002');
+    const errs = await openEmployee(page, (r) => json(r, [bossInLoop, SELF, REPORT]));
+    await expect(chainItems(page)).toHaveText([
+      /Demo Boss/,
+      /emp-002 — the manager of Demo Boss, already in this chain: the manager records loop/,
+    ]);
+    await expect(page.getByText('No manager — reports to board.')).toHaveCount(0);
+    expect(errs).toEqual([]);
+  });
+});

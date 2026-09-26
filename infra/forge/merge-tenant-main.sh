@@ -74,6 +74,32 @@ export GIT_TERMINAL_PROMPT=0
 refuse() { echo "$ME: REFUSED — $*" >&2; exit 78; }
 fail() { echo "$ME: FAILED — $*" >&2; exit 1; }
 
+# AS THE CHECKOUT'S OWNER, BEFORE ANY GIT (review F2 of car 85b7b55f,
+# 2026-09-26). boss-ops-runner runs its verbs as root — its unit names no
+# User= — and the tenant URL below is the checkout's `forgejo` remote
+# with the repo path replaced. Until design 1c90d183 that remote carried
+# the forge token in its userinfo, so root authenticated by accident of
+# the URL. The forge-converge deposit (credential-deposit.sh) strips it
+# once the owner's credential helper is proved, and the helper lives in
+# the OWNER's global git config, so root has no credential for the forge
+# at all. As root this re-runs itself as the owner — read off the
+# checkout, never hardcoded — and every read and the one push then
+# authenticate the way every other consumer of that checkout does.
+# Non-login and with an explicit HOME, the shape delete-orphan-object.sh
+# uses: the owner's global config is found through HOME, and a login
+# profile's output would land in the plan's bytes.
+if [ "$(id -u)" = 0 ] && [ -z "${BOSS_MERGE_TENANT_AS_OWNER:-}" ]; then
+    owner="${BOSS_TENANT_CHECKOUT_OWNER:-$(stat -c %U "$REMOTE_OF" 2>/dev/null || true)}"
+    if [ -z "$owner" ] || [ "$owner" = UNKNOWN ]; then
+        fail "cannot resolve the owner of $REMOTE_OF (stat says '${owner:-}') — the forge credential is that account's, and root holds none"
+    fi
+    if [ "$owner" != root ]; then
+        owner_home="$(getent passwd "$owner" | cut -d: -f6 || true)"
+        exec runuser -u "$owner" -- env HOME="${owner_home:-/}" PATH="$PATH" \
+            BOSS_MERGE_TENANT_AS_OWNER=1 bash "$HERE/$(basename "${BASH_SOURCE[0]}")" "$@"
+    fi
+fi
+
 # shellcheck source=cluster-deploy-lib.sh
 . "$HERE/cluster-deploy-lib.sh"
 

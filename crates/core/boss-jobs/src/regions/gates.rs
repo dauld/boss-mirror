@@ -44,13 +44,24 @@ pub(super) fn gates(inputs: &RegionInputs<'_>, w: &Windows, out: &[OutRail]) -> 
             ),
         ));
     }
-    let what = if g.queued.is_empty() {
+    // THE TRAIN UNDER TEST stands here (design e765b3fc §2a, car R1): a
+    // train at `ci` is at the gates, its own gate riding it, and its own
+    // trouble — a red PR, a gate not yet filed — is read where it stands.
+    let under_test = trains_in(inputs, "gates");
+    findings.extend(train_findings(inputs, &under_test));
+    let bays = if g.queued.is_empty() {
         format!("{active} of {capacity} bays in use")
     } else {
         format!(
             "{active} of {capacity} bays in use, {} waiting for a slot",
             plural(g.queued.len(), "run", "runs")
         )
+    };
+    let what = if under_test.is_empty() {
+        bays
+    } else {
+        let titles: Vec<&str> = under_test.iter().map(|(j, _)| j.title.as_str()).collect();
+        format!("{bays} — {} under test", titles.join(", "))
     };
     // EVERY BAY IN USE is the gates doing their job (design e765b3fc
     // §4a, car F1): full while verdicts keep landing, stuck when they do
@@ -123,9 +134,12 @@ pub(super) fn gates(inputs: &RegionInputs<'_>, w: &Windows, out: &[OutRail]) -> 
             ),
         },
     ];
+    // The count is what the partition places here — the bays in use, with
+    // a train under test counted once as the train rather than as its
+    // gate-run (and counted in line when its gate has no bay yet).
     region(
         "gates",
-        Some(active),
+        Some(count_in(inputs, "gates").unwrap_or(active)),
         Some((capacity, BoundKind::Capacity)),
         "bays in use",
         settled,

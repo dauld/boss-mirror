@@ -161,7 +161,7 @@ pub const DOCK_EDGE_NEVER_CLEARS: Band = band(
 // --- every capacity region (design e765b3fc §4a, car F1) ---------------
 
 /// AT ITS CAPACITY, AND MOVING: a region whose bound is a capacity
-/// (`BoundKind::Capacity` — the three gate bays, the one track, the run
+/// (`BoundKind::Capacity` — the three gate bays, the run
 /// cap) holds as much as it can while what leaves it keeps leaving. The
 /// good state the map fills in solid; see [`at_capacity`].
 pub const FULL: Band = band(
@@ -204,17 +204,23 @@ pub const GATES_LINE_LONG: Band = band(
 /// (`yard::GATE_MAX_ACTIVE_HOURS`): a corpse holding a bay.
 pub const GATES_CORPSE: Band = band("gates-corpse", "gates", Troubled, "the gate deadline", 0);
 
-// --- track ------------------------------------------------------------
+// --- a train, wherever it stands --------------------------------------
+//
+// Declared `*` since car R1 (design e765b3fc §2a): a train is placed by
+// its active step — made up at the dock, under its gate at the gates, in
+// transit on the track — and its trouble is read in the region it stands
+// in (`regions::track::train_findings`). The ids keep their `track-`
+// prefix: they are what payloads and surfaces already name.
 
 /// A train the yard names blocked (`TrainStatus::block`): a red PR, a
 /// deploy refusal, a converge overdue, a stall past the policy. Each of
 /// those carries its own threshold already.
-pub const TRACK_BLOCKED: Band = band("track-blocked", "track", Troubled, "a blocked train", 0);
+pub const TRACK_BLOCKED: Band = band("track-blocked", "*", Troubled, "a blocked train", 0);
 /// The gate could not be filed and CI alone judged the train — stamped
 /// loudly on the train by the conductor.
 pub const TRACK_GATE_FALLBACK: Band = band(
     "track-gate-fallback",
-    "track",
+    "*",
     Troubled,
     "a train judged by CI alone",
     0,
@@ -225,7 +231,7 @@ pub const TRACK_GATE_FALLBACK: Band = band(
 /// working, and ten minutes of it is worth a look.
 pub const TRACK_GATE_WAITING: Band = band(
     "track-gate-waiting",
-    "track",
+    "*",
     Attention,
     "a train gate not filed for 10m",
     10,
@@ -406,10 +412,38 @@ pub const BORDER_STILL: Band = band(
     0,
 );
 
+// --- every region: the moves record ------------------------------------
+
+/// A MOVE ON A ROUTE THE MAP DOES NOT DRAW (design e765b3fc §2b, source
+/// 3; car M1): the moves record (`crate::moves`) saw packets take a
+/// region-to-region route that no drawn border declares. Zero on a
+/// network whose map is true — the `station_reach` pattern, a number
+/// that corrects the drawing beside it. Each region's
+/// `undeclared` reading names the routes into it and their counts.
+///
+/// A READING, NOT YET A STATE, and deliberately so until the routes are
+/// derived (car R2). The design put R2 before the moves record; M1 was
+/// moved ahead of it (David, on 84cba7e2 Q1: "let the motion cars jump
+/// the line too"), so the declared set is still the ten hand-drawn
+/// borders — and the design itself measured ten real routes none of them
+/// draws (§1, A-J), one of which, track -> shed, every landed car takes.
+/// Deciding the state on it now would hold the shed troubled all day for
+/// the map's own known gap: the permanently-red check CLAUDE.md
+/// §Diagnosis forbids, and one that would bury the shed's real troubles
+/// under it. Like [`BORDER_STILL`], it is declared here and decides no
+/// region's state; R2, which derives the declared set, makes it decide.
+pub const MOVES_UNDECLARED: Band = band(
+    "moves-undeclared",
+    "*",
+    Troubled,
+    "a route packets took that the map does not draw",
+    0,
+);
+
 /// EVERY BAND, once. A region names a band by referring to its constant,
 /// so an undeclared band cannot be named at all; this list is what the
 /// uniqueness and coverage pins read.
-pub const BANDS: [Band; 27] = [
+pub const BANDS: [Band; 28] = [
     UNREAD,
     MACHINE_FAILED,
     FULL,
@@ -437,6 +471,7 @@ pub const BANDS: [Band; 27] = [
     PUBLISH_PR_STALLED,
     PUBLISH_HELD,
     BORDER_STILL,
+    MOVES_UNDECLARED,
 ];
 
 /// ONE CONDITION a region found true on this read.

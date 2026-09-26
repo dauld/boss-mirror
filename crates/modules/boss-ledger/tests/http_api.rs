@@ -323,34 +323,18 @@ async fn entries_requires_account_or_fact_filter() {
         // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
         policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
     });
-    let resp = r
-        .oneshot(
-            Request::builder()
-                .uri("/api/ledger/entries")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let (status, body) = get(r, "/api/ledger/entries").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, "one of account_code or fact_id is required");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn entries_lookup_by_source_pair() {
-    // IT panel's activity tabs use this path: given a projection id
-    // (here source_table='invoices', source_id='i-src-1'), fetch the
-    // one journal entry it produced in a single round-trip.
+async fn entries_no_longer_filter_by_source_pair() {
+    // The (source_table, source_id) filter was deleted with its one
+    // caller, the web's loadEntryBySource (backlog 2349285d): the
+    // pair is now an unknown parameter, so a query carrying only it
+    // is refused exactly like an empty one.
     let db = TestDb::new().await;
-    let p = json!({"invoice_id": "i-src-1", "amount_cents": 500, "line_items": [{"category": "wholesale", "amount_cents": 500}]});
-    seed_entry(
-        &db,
-        "finance.invoice.issued",
-        NaiveDate::from_ymd_opt(2026, 3, 15).unwrap(),
-        &p,
-        "i-src-1",
-    )
-    .await;
-
     let r = router(LedgerApiState {
         pool: db.pool.clone(),
         publisher: None,
@@ -363,24 +347,8 @@ async fn entries_lookup_by_source_pair() {
         "/api/ledger/entries?source_table=invoices&source_id=i-src-1",
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    let entries = body.as_array().unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["fact_source_id"], "i-src-1");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn entries_source_filter_requires_both_halves() {
-    let db = TestDb::new().await;
-    let r = router(LedgerApiState {
-        pool: db.pool.clone(),
-        publisher: None,
-        clock: std::sync::Arc::new(boss_clock_client::WallClockClient),
-        // The read gate is not this test's subject (tests/the_ledger_read_gate.rs).
-        policy: std::sync::Arc::new(boss_policy_client::PermissivePolicyClient),
-    });
-    let (status, _) = get(r, "/api/ledger/entries?source_table=invoices").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body, "one of account_code or fact_id is required");
 }
 
 #[tokio::test(flavor = "multi_thread")]

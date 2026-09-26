@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use boss_core::job::{Job, JobId, JobStatus, Step, StepId, StepStatus};
 use chrono::{DateTime, Utc};
 
-use crate::port::{JobFilter, JobScope, JobsError, JobsRepository, StepVersion};
+use crate::port::{Admission, JobFilter, JobScope, JobsError, JobsRepository, StepVersion};
 
 #[derive(Default)]
 pub struct InMemoryJobs {
@@ -62,6 +62,9 @@ struct State {
     /// Packets whose own row read fails, set by
     /// [`InMemoryJobs::fail_job_read`].
     unreadable_jobs: BTreeSet<String>,
+    /// Packets the next `get_job` does not see yet, set by
+    /// [`InMemoryJobs::miss_next_job_read`].
+    unseen_once: BTreeSet<String>,
     /// Merges that land the moment a step is next read, set by
     /// [`InMemoryJobs::merge_after_next_read`].
     merge_after_read: HashMap<String, serde_json::Map<String, serde_json::Value>>,
@@ -128,6 +131,18 @@ impl InMemoryJobs {
     pub fn fail_job_read(&self, job_id: &JobId) {
         if let Ok(mut state) = self.inner.lock() {
             state.unreadable_jobs.insert(job_key(job_id));
+        }
+    }
+
+    /// Make the NEXT `get_job` of this packet answer `None` although it
+    /// exists — the read a writer took a moment before another writer's
+    /// admission of the same id committed. The in-memory stand-in for
+    /// two first admissions both passing the create handler's
+    /// existence check (backlog 9d2af748): the one that reaches the
+    /// adapter second must write nothing. One-shot.
+    pub fn miss_next_job_read(&self, job_id: &JobId) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.unseen_once.insert(job_key(job_id));
         }
     }
 
@@ -478,7 +493,7 @@ impl JobsRepository for InMemoryJobs {
         now: chrono::DateTime<chrono::Utc>,
         job_events: &[boss_core::event::Event],
         step_events: &[boss_core::event::Event],
-    ) -> Result<(), JobsError> {
+    ) -> Result<Admission, JobsError> {
         // Same refusal as the Pg adapter, before the lock: nothing is
         // written for a graph whose events do not pair with its rows.
         if steps.len() != step_events.len() {
@@ -500,7 +515,7 @@ impl JobsRepository for InMemoryJobs {
             stamped.push(self.stamp_plugin_version(step).await?);
         }
         let mut recorded = Vec::with_capacity(job_events.len() + step_events.len());
-        {
+        let admission = {
             let mut state = self.inner.lock().expect("poisoned");
             let key = job_key(&job.id);
             let inserted = match state.jobs.entry(key.clone()) {
@@ -510,26 +525,36 @@ impl JobsRepository for InMemoryJobs {
                     true
                 }
             };
+            // The job row decides for the whole graph, as it does in
+            // the Pg adapter (backlog 9d2af748): the steps carry fresh
+            // ids, so an existing packet under this id takes no step
+            // and records nothing.
             if inserted {
                 state.job_created_at.insert(key, now);
                 recorded.extend_from_slice(job_events);
-            }
-            for (step, event) in stamped.iter().zip(step_events) {
-                if insert_step_locked(&mut state, step, now) {
-                    recorded.push(event.clone());
+                for (step, event) in stamped.iter().zip(step_events) {
+                    if insert_step_locked(&mut state, step, now) {
+                        recorded.push(event.clone());
+                    }
                 }
+                Admission::Admitted
+            } else {
+                Admission::AlreadyAdmitted
             }
-        }
+        };
         self.record_all(&recorded);
-        Ok(())
+        Ok(admission)
     }
 
     async fn get_job(&self, id: &JobId) -> Result<Option<Job>, JobsError> {
-        let state = self.inner.lock().expect("poisoned");
+        let mut state = self.inner.lock().expect("poisoned");
         if state.unreadable_jobs.contains(&job_key(id)) {
             return Err(JobsError::Storage(format!(
                 "job {id} unreadable (injected by fail_job_read)"
             )));
+        }
+        if state.unseen_once.remove(&job_key(id)) {
+            return Ok(None);
         }
         Ok(state.jobs.get(&job_key(id)).cloned())
     }
@@ -792,6 +817,23 @@ impl JobsRepository for InMemoryJobs {
             .filter(|e| {
                 window.scope.as_deref().is_none_or(|want| {
                     e.payload.get("scope").and_then(|s| s.as_str()) == Some(want)
+                })
+            })
+            // The row's host as the SQL's COALESCE reads it: its `host`
+            // stamp, else its first node's id (111996f5).
+            .filter(|e| {
+                window.host.as_deref().is_none_or(|want| {
+                    let text = |v: &serde_json::Value| match v {
+                        serde_json::Value::Null => None,
+                        serde_json::Value::String(s) => Some(s.clone()),
+                        other => Some(other.to_string()),
+                    };
+                    let host = e
+                        .payload
+                        .get("host")
+                        .and_then(text)
+                        .or_else(|| e.payload.pointer("/nodes/0/id").and_then(text));
+                    host.as_deref() == Some(want)
                 })
             })
             .filter(|e| window.since.is_none_or(|since| e.timestamp >= since))
@@ -1398,15 +1440,19 @@ impl JobsRepository for InMemoryJobs {
     async fn count_jobs_by_kind(
         &self,
         status: Option<JobStatus>,
+        scope: &JobScope,
     ) -> Result<Vec<(String, i64)>, JobsError> {
+        // Status + scope through `matches_filter`, so these counts and
+        // `list_jobs`'s totals cannot disagree about whose packets they
+        // are (CLAUDE.md §9a — one definition of the scope rule).
+        let filter = JobFilter {
+            status,
+            scope: scope.clone(),
+            ..Default::default()
+        };
         let state = self.inner.lock().expect("poisoned");
         let mut counts: std::collections::BTreeMap<String, i64> = std::collections::BTreeMap::new();
-        for job in state.jobs.values() {
-            if let Some(want) = status
-                && job.status != want
-            {
-                continue;
-            }
+        for job in state.jobs.values().filter(|j| matches_filter(j, &filter)) {
             *counts.entry(job.kind.clone()).or_insert(0) += 1;
         }
         Ok(counts.into_iter().collect())

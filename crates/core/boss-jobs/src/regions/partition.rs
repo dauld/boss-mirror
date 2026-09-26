@@ -2,8 +2,58 @@
 //! packet a region counts, it counts ALONE. The eight regions whose own
 //! predicates name what they hold claim first ([`claimed`]); receiving
 //! and marshalling are the remainder ([`members`]).
+//!
+//! ONE PLACEMENT FUNCTION (design e765b3fc §2a, car R1). Which region
+//! holds a packet is decided packet by packet by [`place`], over the
+//! lookups one reading builds ([`Lookups`]); [`members`] is a fold of
+//! `place` over every packet the reading names. So what a region counts
+//! and where a packet stands are one answer — the counts, the rails and
+//! the moves record (`crate::moves`) cannot disagree (CLAUDE.md §9a).
+//!
+//! A TRAIN IS PLACED BY ITS ACTIVE STEP, not all on the track: made up
+//! at the dock, at the gates while its train gate runs, on the track once
+//! it has merged ([`train_region`]). David, on feedback 84cba7e2: "like
+//! how the dock routes a train over to the gates before it departs onto
+//! the tracks" — and that is what the conductor does. What a train
+//! carries rides it ([`Placed::Aboard`]): the cars it boarded, and its
+//! own train gate while it stands at the gates, which is the train under
+//! test and holds its bay as the train, counted once.
 
 use super::*;
+
+/// Where ONE packet stands on one reading.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Placed {
+    /// In a region of the map, which counts it.
+    At(&'static str),
+    /// Riding the open train with this id — a car it boarded, or its own
+    /// train gate while the train stands at the gates. In no region of
+    /// its own: the train is counted, what it carries is not.
+    Aboard(String),
+    /// On no region of the map this reading drew.
+    Off,
+}
+
+/// WHERE A TRAIN STANDS, by the step it is at — read off the yard's own
+/// phase ([`crate::yard::TrainPhase`], the one reading of a train's
+/// steps), matched exhaustively so a new phase cannot go unplaced:
+///
+/// | phase | the train is | region |
+/// |---|---|---|
+/// | boarding (`collect`, `assemble`, `pr`) | being made up | dock |
+/// | awaiting CI, awaiting the merge (`ci`) | under its train gate | gates |
+/// | deploying, converging (`merged` done) | in transit | track |
+///
+/// An open train whose arrival step has completed is still in transit
+/// until it closes; a closed one is in arrivals (the window's).
+pub fn train_region(phase: crate::yard::TrainPhase) -> &'static str {
+    use crate::yard::TrainPhase::*;
+    match phase {
+        Boarding => "dock",
+        AwaitingCi | AwaitingMerge => "gates",
+        Deploying | Converging | Arrived => "track",
+    }
+}
 
 /// The step kind a protocol's admission step carries. A trigger
 /// completes when the packet is admitted, so completing it takes
@@ -52,17 +102,27 @@ const MARSHALLING_NEEDS_INBOUND: &str = "the inbound packets could not be read, 
      stations' packets are still in receiving cannot be told";
 
 /// The eight regions whose OWN predicates name what they hold — a car on
-/// the dock or in the shed, a gate-run in a bay or the garage, a train on
-/// the track or arrived, a run on the shop floor, a pull request on the
-/// mirror — each as the ids its count counts. `None` exactly where the
-/// region's count is `None`: an unread region claims nothing, and says so
-/// on its own card.
+/// the dock or in the shed, a gate-run in a bay or the garage, a train at
+/// the dock, the gates or on the track ([`train_region`]) or arrived, a
+/// run on the shop floor, a pull request on the mirror — each as the ids
+/// its predicate names, in claim order. `None` exactly where the region's
+/// count is `None`: an unread region claims nothing, and says so on its
+/// own card. A train's own gate, while the train stands at the gates, is
+/// not a gate-run the gates claim: it rides the train ([`carried`]).
 fn claimed(inputs: &RegionInputs<'_>) -> [(&'static str, Option<Ids>); 8] {
     fn ids_of<'j>(rows: impl Iterator<Item = &'j Job>) -> Ids {
         rows.map(|j| j.id.to_string()).collect()
     }
     let s = inputs.status;
     let w = Windows::of(inputs.now, inputs.window_hours);
+    let trains_at = |region: &str| -> Ids {
+        s.trains
+            .iter()
+            .filter(|t| train_region(t.phase) == region)
+            .map(|t| t.id.clone())
+            .collect()
+    };
+    let under_test = trains_at("gates");
     let garage: Ids = s
         .held_cars
         .iter()
@@ -75,17 +135,27 @@ fn claimed(inputs: &RegionInputs<'_>) -> [(&'static str, Option<Ids>); 8] {
     [
         (
             "dock",
-            (inputs.dock_reading == Reading::Read)
-                .then(|| s.dock.iter().map(|d| d.id.clone()).collect()),
+            (inputs.dock_reading == Reading::Read).then(|| {
+                s.dock
+                    .iter()
+                    .map(|d| d.id.clone())
+                    .chain(trains_at("dock"))
+                    .collect()
+            }),
         ),
         (
             "gates",
-            Some(s.gates.active.iter().map(|g| g.packet_id.clone()).collect()),
+            Some(
+                s.gates
+                    .active
+                    .iter()
+                    .filter(|g| !g.train.as_ref().is_some_and(|t| under_test.contains(t)))
+                    .map(|g| g.packet_id.clone())
+                    .chain(under_test.iter().cloned())
+                    .collect(),
+            ),
         ),
-        (
-            "track",
-            Some(s.trains.iter().map(|t| t.id.clone()).collect()),
-        ),
+        ("track", Some(trains_at("track"))),
         (
             "shed",
             Some(ids_of(
@@ -129,63 +199,167 @@ fn claimed(inputs: &RegionInputs<'_>) -> [(&'static str, Option<Ids>); 8] {
     ]
 }
 
-/// Every id the eight regions of [`claimed`] hold between them.
-fn claimed_ids(inputs: &RegionInputs<'_>) -> Ids {
-    claimed(inputs)
-        .into_iter()
-        .filter_map(|(_, ids)| ids)
-        .flatten()
-        .collect()
+/// WHAT EACH OPEN TRAIN CARRIES, packet -> train: the cars it names in
+/// `boarded_jobs`, and — while the train stands at the gates — its own
+/// train gate, which is the train under test rather than a second packet
+/// in the bay.
+fn carried(inputs: &RegionInputs<'_>) -> std::collections::BTreeMap<String, String> {
+    let s = inputs.status;
+    let at_gates = |train: &str| {
+        s.trains
+            .iter()
+            .any(|t| t.id == train && train_region(t.phase) == "gates")
+    };
+    let cars = inputs.open_trains.iter().flat_map(|(train, _)| {
+        let id = train.id.to_string();
+        train
+            .metadata
+            .get("boarded_jobs")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(move |car| (car.to_string(), id.clone()))
+    });
+    let gates = s.gates.active.iter().filter_map(|g| {
+        let train = g.train.as_ref().filter(|t| at_gates(t))?;
+        Some((g.packet_id.clone(), train.clone()))
+    });
+    cars.chain(gates).collect()
 }
 
-/// RECEIVING's packets: the open inbound packets nothing has taken in
-/// ([`taken_in`]) that no region of their own holds. `None` when the
-/// inbound read failed.
+/// WHAT [`place`] READS: everything one reading says about which packet
+/// could stand where, built once per reading.
+pub struct Lookups {
+    /// The eight regions of their own, in claim order ([`claimed`]).
+    claims: [(&'static str, Option<Ids>); 8],
+    /// What the open trains carry ([`carried`]).
+    aboard: std::collections::BTreeMap<String, String>,
+    /// The open inbound packets nothing has taken in ([`taken_in`]).
+    /// `None` when the inbound read failed.
+    untaken: Option<Ids>,
+    /// Every packet standing at a station. `None` when the station
+    /// registry or the inbound read failed — without the second, which
+    /// station packets are still in receiving cannot be told.
+    stationed: Option<Ids>,
+}
+
+impl Lookups {
+    pub fn of(inputs: &RegionInputs<'_>) -> Self {
+        let untaken: Option<Ids> = inputs.inbound.map(|inbound| {
+            inbound
+                .iter()
+                .filter(|(j, steps)| j.status == JobStatus::Open && !taken_in(steps))
+                .map(|(j, _)| j.id.to_string())
+                .collect()
+        });
+        let stationed = inputs
+            .stations
+            .filter(|_| untaken.is_some())
+            .map(|st| st.iter().flat_map(|s| s.members.iter().cloned()).collect());
+        Lookups {
+            claims: claimed(inputs),
+            aboard: carried(inputs),
+            untaken,
+            stationed,
+        }
+    }
+
+    /// Whether `region` was read at all: `None` in [`members`] otherwise.
+    fn read(&self, region: &str) -> bool {
+        match region {
+            "receiving" => self.untaken.is_some(),
+            "marshalling" => self.stationed.is_some(),
+            _ => self
+                .claims
+                .iter()
+                .any(|(name, ids)| *name == region && ids.is_some()),
+        }
+    }
+
+    /// Every packet any lookup names.
+    fn packets(&self) -> Ids {
+        self.claims
+            .iter()
+            .filter_map(|(_, ids)| ids.as_ref())
+            .flatten()
+            .chain(self.aboard.keys())
+            .chain(self.untaken.iter().flatten())
+            .chain(self.stationed.iter().flatten())
+            .cloned()
+            .collect()
+    }
+}
+
+/// WHERE ONE PACKET STANDS — the placement function (design e765b3fc
+/// §2a, car R1).
+///
+/// ORDER IS THE RULE. The eight regions of [`claimed`] are defined by
+/// predicates of their own and claim their packets first, in map order;
+/// then a train's cargo rides the train; then the upstream pair takes
+/// the remainder. RECEIVING takes an open inbound packet not yet taken in
+/// that nothing else holds; MARSHALLING takes what stands at a station
+/// that neither receiving nor any other region holds. A packet matching
+/// five predicates still stands in one place.
 ///
 /// A region of its own wins because its predicate is the specific one:
 /// an `agent-run` is an inbound kind by the registry's rule, and until
 /// its `briefed` step completes it has taken nothing in — but it is a run
-/// in flight, and the shop floor counts it.
+/// in flight, and the shop floor counts it. And a station's predicate
+/// matches a STEP: a ready task lands on `q.platform-admin.task` whether
+/// it is an untriaged item's `triage`, a triaged one's `build`, a landed
+/// car's `proven` or a run's `briefed`; only the second is marshalling's.
+pub fn place(packet: &str, lookups: &Lookups) -> Placed {
+    let holds = |ids: &Option<Ids>| ids.as_ref().is_some_and(|ids| ids.contains(packet));
+    if let Some((region, _)) = lookups.claims.iter().find(|(_, ids)| holds(ids)) {
+        return Placed::At(region);
+    }
+    if let Some(train) = lookups.aboard.get(packet) {
+        return Placed::Aboard(train.clone());
+    }
+    if holds(&lookups.untaken) {
+        return Placed::At("receiving");
+    }
+    if holds(&lookups.stationed) {
+        return Placed::At("marshalling");
+    }
+    Placed::Off
+}
+
+/// RECEIVING's packets: the open inbound packets [`place`] puts there.
+/// `None` when the inbound read failed.
 pub(crate) fn receiving_standing<'a>(inputs: &RegionInputs<'a>) -> Option<Vec<&'a Job>> {
     let inbound = inputs.inbound?;
-    let elsewhere = claimed_ids(inputs);
+    let lookups = Lookups::of(inputs);
     Some(
         inbound
             .iter()
-            .filter(|(j, steps)| {
-                j.status == JobStatus::Open
-                    && !taken_in(steps)
-                    && !elsewhere.contains(&j.id.to_string())
-            })
+            .filter(|(j, _)| place(&j.id.to_string(), &lookups) == Placed::At("receiving"))
             .map(|(j, _)| j)
             .collect(),
     )
 }
 
 /// MARSHALLING's view of the stations: each station with only the
-/// packets that are marshalling's — neither still in receiving nor held
-/// by a region of their own. A station's predicate matches a STEP, and a
-/// ready task lands on `q.platform-admin.task` whether it is an
-/// untriaged item's `triage`, a triaged one's `build`, a landed car's
-/// `proven` or a run's `briefed`; only the second is waiting to be
-/// dispatched. `Err` names the read that failed — the station registry,
-/// or the inbound read without which the line cannot be drawn.
+/// packets [`place`] puts in marshalling — neither still in receiving,
+/// nor riding a train, nor held by a region of their own. `Err` names the
+/// read that failed — the station registry, or the inbound read without
+/// which the line cannot be drawn.
 pub(crate) fn marshalling_view(
     inputs: &RegionInputs<'_>,
 ) -> Result<Vec<StationReading>, &'static str> {
     let stations = inputs
         .stations
         .ok_or("the station registry could not be read")?;
-    let receiving = receiving_standing(inputs).ok_or(MARSHALLING_NEEDS_INBOUND)?;
-    let mut elsewhere = claimed_ids(inputs);
-    elsewhere.extend(receiving.iter().map(|j| j.id.to_string()));
+    inputs.inbound.ok_or(MARSHALLING_NEEDS_INBOUND)?;
+    let lookups = Lookups::of(inputs);
     Ok(stations
         .iter()
         .map(|s| StationReading {
             members: s
                 .members
                 .iter()
-                .filter(|m| !elsewhere.contains(*m))
+                .filter(|m| place(m, &lookups) == Placed::At("marshalling"))
                 .cloned()
                 .collect(),
             ..s.clone()
@@ -193,33 +367,57 @@ pub(crate) fn marshalling_view(
         .collect())
 }
 
-/// WHAT EACH REGION COUNTS, by packet id, in [`REGIONS`] order — the
-/// partition every region's `count` is pinned to (the test
-/// `no_job_id_is_counted_in_two_regions`). `None` exactly where the
-/// region's count is `None`.
-///
-/// ORDER IS THE RULE. The eight regions of [`claimed`] are defined by
-/// predicates of their own and claim their packets first; the upstream
-/// pair is the remainder. RECEIVING takes the open inbound packets not
-/// yet taken in that nothing else holds ([`receiving_standing`]);
-/// MARSHALLING takes what stands at a station that neither receiving nor
-/// any other region holds ([`marshalling_view`]). A packet matching five
-/// predicates is still counted once.
+/// WHAT EACH REGION COUNTS, by packet id, in [`REGIONS`] order — a fold
+/// of [`place`] over every packet the reading names, and the partition
+/// every region's `count` is pinned to (the tests
+/// `no_job_id_is_counted_in_two_regions` and
+/// `a_train_stands_where_its_active_step_is_and_what_it_carries_rides_it`).
+/// `None` exactly where the region was not read.
 pub fn members(inputs: &RegionInputs<'_>) -> Vec<(&'static str, Option<Ids>)> {
-    let mut all: Vec<(&'static str, Option<Ids>)> = claimed(inputs).into_iter().collect();
-    all.push((
-        "receiving",
-        receiving_standing(inputs).map(|js| js.iter().map(|j| j.id.to_string()).collect()),
-    ));
-    all.push((
-        "marshalling",
-        marshalling_view(inputs)
-            .ok()
-            .map(|st| st.into_iter().flat_map(|s| s.members).collect()),
-    ));
+    let lookups = Lookups::of(inputs);
+    let mut placed: std::collections::BTreeMap<&'static str, Ids> = Default::default();
+    for packet in lookups.packets() {
+        if let Placed::At(region) = place(&packet, &lookups) {
+            placed.entry(region).or_default().insert(packet);
+        }
+    }
     REGIONS
         .iter()
-        .filter_map(|name| all.iter().find(|(n, _)| n == name).cloned())
+        .map(|region| {
+            (
+                *region,
+                lookups
+                    .read(region)
+                    .then(|| placed.remove(region).unwrap_or_default()),
+            )
+        })
+        .collect()
+}
+
+/// How many packets the partition places in `region` — the count a
+/// region whose members are not one list of its own reports (the dock,
+/// the gates and the track, which trains and their cargo cross). `None`
+/// where the region was not read.
+pub(crate) fn count_in(inputs: &RegionInputs<'_>, region: &str) -> Option<usize> {
+    members(inputs)
+        .into_iter()
+        .find(|(name, _)| *name == region)
+        .and_then(|(_, ids)| ids.map(|ids| ids.len()))
+}
+
+/// The open trains [`train_region`] stands in `region`, with steps.
+pub(crate) fn trains_in<'a>(inputs: &RegionInputs<'a>, region: &str) -> Vec<&'a (Job, Vec<Step>)> {
+    inputs
+        .open_trains
+        .iter()
+        .filter(|(j, _)| {
+            let id = j.id.to_string();
+            inputs
+                .status
+                .trains
+                .iter()
+                .any(|t| t.id == id && train_region(t.phase) == region)
+        })
         .collect()
 }
 
@@ -278,6 +476,142 @@ mod tests {
         );
         skipped[1].status = StepStatus::Skipped;
         assert!(!taken_in(&skipped));
+    }
+
+    /// A TRAIN STANDS WHERE ITS ACTIVE STEP IS (design e765b3fc §2a, car
+    /// R1): made up at the dock (`collect`, `assemble`, `pr`), at the
+    /// gates while its train gate runs (`ci`), on the track once it has
+    /// merged. Its own gate rides with it — the train IS the thing under
+    /// test, so the bay it holds is counted once, as the train — and the
+    /// cars aboard ride it too. Each region's count is what the
+    /// partition places there.
+    #[test]
+    fn a_train_stands_where_its_active_step_is_and_what_it_carries_rides_it() {
+        let made_up = job("pr-train", "train made up", JobStatus::Open, json!({}));
+        let made_up_steps = vec![step(&made_up, "collect", StepStatus::Ready, None)];
+        let boarded_car = parked("fix/aboard", json!({}));
+        let under_test = job(
+            "pr-train",
+            "train under test",
+            JobStatus::Open,
+            json!({ "boarded_jobs": [boarded_car.0.id.to_string()] }),
+        );
+        let under_test_steps = vec![
+            step(
+                &under_test,
+                "collect",
+                StepStatus::Completed,
+                Some("2026-09-19T11:00:00Z"),
+            ),
+            step(
+                &under_test,
+                "pr",
+                StepStatus::Completed,
+                Some("2026-09-19T11:01:00Z"),
+            ),
+            step(&under_test, "ci", StepStatus::Ready, None),
+            step(&under_test, "merged", StepStatus::Ready, None),
+        ];
+        let in_transit = job("pr-train", "train in transit", JobStatus::Open, json!({}));
+        let in_transit_steps = vec![
+            step(
+                &in_transit,
+                "pr",
+                StepStatus::Completed,
+                Some("2026-09-19T10:01:00Z"),
+            ),
+            step(
+                &in_transit,
+                "ci",
+                StepStatus::Completed,
+                Some("2026-09-19T10:20:00Z"),
+            ),
+            step(
+                &in_transit,
+                "merged",
+                StepStatus::Completed,
+                Some("2026-09-19T10:21:00Z"),
+            ),
+            step(&in_transit, "deployed", StepStatus::Ready, None),
+        ];
+        let (made_up_id, under_test_id, in_transit_id) = (
+            made_up.id.to_string(),
+            under_test.id.to_string(),
+            in_transit.id.to_string(),
+        );
+        let open = vec![
+            (made_up, made_up_steps),
+            (under_test, under_test_steps),
+            (in_transit, in_transit_steps),
+        ];
+        let mut status = build_status_for(
+            YardInputs {
+                open_trains: &open,
+                now: Some(t(NOW)),
+                ..Default::default()
+            },
+            Reading::Read,
+            BoardingReadings::default(),
+        );
+        // Two bays in use: a car's gate, and the train's own.
+        status.gates.active = vec![
+            crate::yard::ActiveGate {
+                branch: "fix/in-a-bay".into(),
+                packet_id: "gate-car".into(),
+                since: "2026-09-19T11:30:00Z".into(),
+                stale: false,
+                train: None,
+            },
+            crate::yard::ActiveGate {
+                branch: "train/2026-09-19-1101".into(),
+                packet_id: "gate-train".into(),
+                since: "2026-09-19T11:02:00Z".into(),
+                stale: false,
+                train: Some(under_test_id.clone()),
+            },
+        ];
+        let cars = vec![boarded_car.clone()];
+        let i = inputs(&status, &open, &[], &cars, &[], Some(&[]), Some(&[]));
+
+        let lookups = Lookups::of(&i);
+        assert_eq!(place(&made_up_id, &lookups), Placed::At("dock"));
+        assert_eq!(place(&under_test_id, &lookups), Placed::At("gates"));
+        assert_eq!(place(&in_transit_id, &lookups), Placed::At("track"));
+        assert_eq!(place("gate-car", &lookups), Placed::At("gates"));
+        assert_eq!(
+            place("gate-train", &lookups),
+            Placed::Aboard(under_test_id.clone()),
+            "the train's gate is the train under test, not a second packet in a bay"
+        );
+        assert_eq!(
+            place(&boarded_car.0.id.to_string(), &lookups),
+            Placed::Aboard(under_test_id.clone())
+        );
+        assert_eq!(place("nobody", &lookups), Placed::Off);
+
+        // The partition still sums: every region's count is what it holds.
+        let out = regions(&i);
+        let held = members(&i);
+        for r in &out.regions {
+            let (_, ids) = held.iter().find(|(n, _)| *n == r.name).unwrap();
+            assert_eq!(
+                r.count,
+                ids.as_ref().map(Ids::len),
+                "{}: its count and its members disagree — {ids:?}",
+                r.name
+            );
+        }
+        assert_eq!(
+            by_name(&out, "dock").count,
+            Some(1),
+            "the train being made up"
+        );
+        assert_eq!(
+            by_name(&out, "gates").count,
+            Some(2),
+            "the car's bay and the train under test, its own bay counted once"
+        );
+        assert_eq!(by_name(&out, "track").count, Some(1), "the merged train");
     }
 
     /// NO JOB ID IS COUNTED IN TWO REGIONS, and every region's `count`
