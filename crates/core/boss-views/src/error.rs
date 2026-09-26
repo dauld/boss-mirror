@@ -15,4 +15,10 @@ pub enum ViewsError {
     Invalid(String),
     #[error("storage error: {0}")]
     Storage(String),
+    /// The caller's scope could not be decided. Kept as the policy
+    /// client's own error so the door renders it the one way every door
+    /// does — an outage is a 503 with Retry-After — rather than as a
+    /// storage 500 carrying its text (backlog fe9d212c).
+    #[error(transparent)]
+    Policy(#[from] boss_policy_client::PolicyClientError),
 }

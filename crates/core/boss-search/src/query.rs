@@ -8,7 +8,7 @@
 
 use sqlx::{PgPool, Row};
 
-use boss_policy_client::{Predicate, Resource, User};
+use boss_policy_client::{PolicyClientError, Predicate, Resource, User};
 
 use crate::error::SearchError;
 use crate::types::{RefKind, SearchResults, SearchRow, SubjectHit};
@@ -72,14 +72,15 @@ impl SearchScope {
     /// `Unrestricted` is treated as a denial. That fails closed — a
     /// tenant who writes `scope = "territory"` against `event` gets
     /// nothing rather than everything, and finds out immediately.
+    ///
+    /// Its only failure is the policy client's, returned as itself so
+    /// the door renders it the one way every door does (503 +
+    /// Retry-After for an outage; backlog fe9d212c).
     pub async fn for_user(
         policy: &dyn boss_policy_client::PolicyClient,
         user: &User,
-    ) -> Result<Self, SearchError> {
-        let predicate = policy
-            .scope_predicate(user, Resource::job())
-            .await
-            .map_err(|e| SearchError::storage_msg(format!("policy check failed: {e}")))?;
+    ) -> Result<Self, PolicyClientError> {
+        let predicate = policy.scope_predicate(user, Resource::job()).await?;
         let job_owners = predicate.owner_allow_list(user);
         Ok(Self {
             job_owners,
@@ -94,11 +95,8 @@ async fn unrestricted_read(
     policy: &dyn boss_policy_client::PolicyClient,
     user: &User,
     resource: Resource,
-) -> Result<bool, SearchError> {
-    let p = policy
-        .scope_predicate(user, resource)
-        .await
-        .map_err(|e| SearchError::storage_msg(format!("policy check failed: {e}")))?;
+) -> Result<bool, PolicyClientError> {
+    let p = policy.scope_predicate(user, resource).await?;
     Ok(matches!(p, Predicate::Unrestricted))
 }
 

@@ -136,7 +136,8 @@ pub enum PolicyClientError {
     /// reader must be able to tell "not allowed" from "could not ask"
     /// (backlog 45553536). Every caller still refuses on it. The
     /// rendered text carries `policy-unreachable`, the word boss-cli's
-    /// `names_a_policy_outage` keys on.
+    /// `names_a_policy_outage` keys on, and a door's 503 body is that
+    /// word alone (see `IntoResponse` below).
     #[error("policy-unreachable: {0}")]
     Unreachable(String),
     #[error("transport failure: {0}")]
@@ -152,6 +153,13 @@ pub const POLICY_OUTAGE_RETRY_AFTER_SECS: u64 = 5;
 /// outage the same way: 503 + `Retry-After` for
 /// [`PolicyClientError::Unreachable`], 500 for anything else. Both
 /// refuse; neither is a 403, because neither is a permission fact.
+///
+/// The BODY is fixed words, never the detail: the detail is reqwest's
+/// text, which names the policy service's internal URL, and it was
+/// handed to every caller of every door until backlog fe9d212c
+/// (2026-09-26). An outage's detail is logged where it is raised
+/// (`ReqwestPolicyClient::check`); a transport failure's is logged
+/// here, because nothing upstream of this logs it.
 impl axum::response::IntoResponse for PolicyClientError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::{StatusCode, header};
@@ -162,14 +170,13 @@ impl axum::response::IntoResponse for PolicyClientError {
                     header::RETRY_AFTER,
                     POLICY_OUTAGE_RETRY_AFTER_SECS.to_string(),
                 )],
-                self.to_string(),
+                "policy-unreachable",
             )
                 .into_response(),
-            PolicyClientError::Transport(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("policy check failed: {self}"),
-            )
-                .into_response(),
+            PolicyClientError::Transport(detail) => {
+                tracing::warn!(error = %detail, "policy check failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "policy check failed").into_response()
+            }
         }
     }
 }
@@ -1070,17 +1077,55 @@ mod tests {
             Some(POLICY_OUTAGE_RETRY_AFTER_SECS.to_string().as_str())
         );
         let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
-        let body = String::from_utf8_lossy(&body);
-        assert!(body.contains("policy-unreachable"), "{body}");
-        assert!(body.contains("connection refused"), "{body}");
+        // The fixed word and nothing else: the detail is the operator's
+        // (it is in the log), not the caller's (backlog fe9d212c).
+        assert_eq!(String::from_utf8_lossy(&body), "policy-unreachable");
 
         // Any other client failure stays a 500: not an outage we can
-        // promise will pass, and not a permission answer either.
-        let other = PolicyClientError::Transport("bad json".into()).into_response();
+        // promise will pass, and not a permission answer either. Its
+        // body is fixed words too — a reqwest decode error names the
+        // URL just as a connect error does.
+        let other = PolicyClientError::Transport(
+            "error decoding response body for url (http://policy.internal:7700/api/policy/check)"
+                .into(),
+        )
+        .into_response();
         assert_eq!(
             other.status(),
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         );
+        let body = axum::body::to_bytes(other.into_body(), 4096).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&body), "policy check failed");
+    }
+
+    /// Backlog fe9d212c (review of the 45553536 car): the body was
+    /// `self.to_string()`, and a real outage's detail is reqwest's own
+    /// text — "error sending request for url (http://<policy-host>:
+    /// <port>/api/policy/check)" — so every door handed its callers the
+    /// policy service's internal address. Measured on the wire, with
+    /// the real adapter, so the detail is the one production produces.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_real_outage_answers_without_the_policy_services_address() {
+        use axum::response::IntoResponse;
+        let url = dark_policy_url().await;
+        let c = ReqwestPolicyClient::new(url.clone());
+        let err = c
+            .check(&user(), Action::Read, Resource::job())
+            .await
+            .unwrap_err();
+        // The detail still exists — for the log, where it is read.
+        assert!(
+            err.to_string().contains("policy-unreachable"),
+            "the rendered error keeps its word: {err}"
+        );
+        let resp = err.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body = String::from_utf8_lossy(&body);
+        let host = url.trim_start_matches("http://");
+        assert!(!body.contains("http"), "no URL in the body: {body}");
+        assert!(!body.contains(host), "no address in the body: {body}");
+        assert_eq!(body, "policy-unreachable");
     }
 
     #[tokio::test(flavor = "multi_thread")]
