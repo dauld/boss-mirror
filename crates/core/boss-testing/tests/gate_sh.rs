@@ -1347,6 +1347,66 @@ fn a_doc_a_test_module_reads_by_repo_path_scopes_the_crate_that_pins_it() {
     );
 }
 
+/// The line `--auto` prints naming the tree-wide pins it will run, if
+/// it printed one.
+fn tree_wide_line(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find(|l| l.starts_with("gate: tree-wide pins"))
+        .map(str::to_string)
+}
+
+/// THE CAR THAT EARNED THIS (backlog c87ad472). Car 622c6944 changed a
+/// Svelte page and nothing else, so `--auto` derived web + dispatcher
+/// and never ran boss-testing — and the page added a hard-coded public
+/// mirror URL, which `the_public_mirror_url_lives_once` refuses by
+/// scanning `apps/web/src`. A pin that scans the TREE reads paths no
+/// file-level map can attribute to its crate, so it ran first on the
+/// train's assembled gate and struck ~16 cars. A tree-wide pin now
+/// declares itself in its own header and every scoped gate runs it,
+/// whatever the scope.
+#[test]
+fn a_web_only_car_still_runs_the_tree_wide_pins() {
+    // Built, not spelled: a whole repo-path literal in this file names
+    // the scratch page the clone then holds, and the gate's file-input
+    // index would map it to THIS crate — the fixture scoping itself.
+    let page = format!("apps/web/src/{}", "zz-a-scratch-page.svelte");
+    let (stdout, receipt) = auto_scope_of("gate-auto-tree-wide-pins-web", &[&page]);
+    assert!(
+        !scope_of(&receipt).iter().any(|c| c == "boss-testing"),
+        "the fixture is a web-only car, whose derived scope must NOT already hold \
+         boss-testing — else this proves nothing.\nstdout: {stdout}"
+    );
+    let line = tree_wide_line(&stdout).unwrap_or_else(|| {
+        panic!("a web-only --auto gate must name the tree-wide pins it runs.\nstdout: {stdout}")
+    });
+    assert!(
+        line.contains("the_public_mirror_url_lives_once"),
+        "the pin whose absence struck train 11bda216 must be among them: {line}"
+    );
+}
+
+/// …and a car whose scope already holds the pin's crate runs that
+/// crate's whole suite, pins included — naming them again would run
+/// them twice.
+#[test]
+fn a_car_scoped_to_the_pins_crate_does_not_run_them_twice() {
+    let (stdout, receipt) = auto_scope_of(
+        "gate-auto-tree-wide-pins-in-scope",
+        &["crates/core/boss-testing/tests/zz_a_scratch_pin.rs"],
+    );
+    assert!(
+        scope_of(&receipt).iter().any(|c| c == "boss-testing"),
+        "the fixture must scope boss-testing.\nstdout: {stdout}"
+    );
+    if let Some(line) = tree_wide_line(&stdout) {
+        assert!(
+            !line.contains("the_public_mirror_url_lives_once"),
+            "boss-testing is in scope, so its pins ride its own test run: {line}"
+        );
+    }
+}
+
 // ---- the hosting door's gate half (a479faf7; design 01c3cc3f reader 3) ----
 
 /// The lint the gate runs the edit level through, by name.

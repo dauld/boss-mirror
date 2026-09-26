@@ -5,7 +5,8 @@
 // roster" when it answered 500 — the page stated "0 active employees",
 // "0 certifications expiring in 90 days", Active (0) and All (0): the
 // false-empty class, in the header of a page whose body was honest.
-// The pure labels are pinned in src/people/roster-counts.test.ts; this
+// The pure labels are pinned in src/people/roster-counts.test.ts and
+// src/data/readState.test.ts (countLabel, backlog a97d4cf2); this
 // spec pins the page wiring through a forced 500 and a held read.
 //
 // Its own file on purpose: outage-crawl and false-empty pin the body's

@@ -12,6 +12,7 @@
 // anyway and surfaces a soft note, never the poisoning error.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { servePeopleRows } from './_smokeMocks';
 
 const EMP = { id: 'emp-david', name: 'David', email: 'd@a', role: 'platform-admin',
   department: 'it', hire_date: '2023-01-01', status: 'active', location: 'loc-hq',
@@ -47,6 +48,7 @@ async function mocks(page: Page, w: ReturnType<typeof world>) {
   // order, so later, more specific routes win over this one.
   await page.route('**/api/**', (r) => json(r, { data: [], total: 0 }));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: 'emp-david', role: 'platform-admin' }));
   await page.route(/\/api\/jobs\/assignments/, (r) =>

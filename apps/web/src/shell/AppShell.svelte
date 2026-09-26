@@ -327,6 +327,13 @@
           <div class="shell-user-name">{user.name}</div>
           <div class="shell-user-role">{user.role}</div>
         </a>
+      {:else if session.value.kind === 'unresolved'}
+        <!-- Signed in, but the viewer's own people row did not answer.
+             The chrome says so on every page rather than rendering
+             nobody (backlog b4f68a65). -->
+        <p class="load-failed" role="alert" style="font-size:12px">
+          Couldn't load your employee record — {session.value.error}.
+        </p>
       {/if}
     </div>
   </aside>

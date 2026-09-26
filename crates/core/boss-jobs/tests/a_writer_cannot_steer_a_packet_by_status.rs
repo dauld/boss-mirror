@@ -705,7 +705,7 @@ async fn the_repair_of_a_lost_outcome_still_lands_and_only_as_derived() {
         .as_object_mut()
         .expect("metadata")
         .remove("outcome");
-    jobs.update_job_at(&lost, chrono::Utc::now(), &[])
+    jobs.update_job_at(&lost, lost.status, chrono::Utc::now(), &[])
         .await
         .expect("strip the outcome");
     assert!(

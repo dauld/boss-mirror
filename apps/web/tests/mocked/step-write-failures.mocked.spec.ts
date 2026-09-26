@@ -12,6 +12,7 @@
 //      Retry restores the real surface without a reload.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { servePeopleRows } from './_smokeMocks';
 
 const JOB_ID = 'job-swf-1';
 
@@ -51,6 +52,7 @@ async function baseMocks(page: Page, steps: MockStep[], stepTypes: StepTypeRow[]
   };
   await page.route('**/api/**', (r) => json(r, []));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP, EMP2]));
+  await servePeopleRows(page, [EMP, EMP2]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: EMP.id, role: 'platform-admin' }));
   await page.route(/\/api\/jobs\/live$/, (r) =>

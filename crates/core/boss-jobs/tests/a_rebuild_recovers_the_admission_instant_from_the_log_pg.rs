@@ -189,6 +189,7 @@ async fn a_later_event_does_not_move_when_the_packet_arrived() {
     moved.opened_at = Some(stamped() - chrono::Duration::days(400));
     repo.update_job_at(
         &moved,
+        moved.status,
         Utc::now(),
         &[stamp.event(
             boss_jobs::events::JOB_UPDATED,

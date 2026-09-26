@@ -137,7 +137,8 @@ type Options = Readonly<{
   inbox?: ReadonlyArray<Msg> | ((r: Route) => Promise<void>);
   /// Ids whose Mark read / Archive answer 403.
   refuse?: ReadonlyArray<string>;
-  /// The roster: the list, or a handler. The SESSION reads it first.
+  /// The roster: the list, or a handler. Only the PAGE reads it — the
+  /// session reads the viewer's one row (backlog b4f68a65).
   roster?: unknown;
   /// The gateway's probe body (default: David, an operator).
   session?: Record<string, unknown>;
@@ -158,6 +159,12 @@ async function install(page: Page, opts: Options = {}): Promise<Backend> {
     typeof opts.roster === 'function'
       ? (opts.roster as (r: Route) => Promise<void>)(r)
       : json(r, opts.roster ?? ROSTER));
+  // The session's read: the viewer's own people row, by id.
+  await page.route(/\/api\/people\/[^/]+$/, (r) => {
+    const id = decodeURIComponent(new URL(r.request().url()).pathname.split('/').pop() ?? '');
+    const row = ROSTER.find((e) => e.id === id);
+    return row ? json(r, row) : json(r, `no employee with ID ${id}`, 404);
+  });
   await page.route(/\/api\/session$/, (r) =>
     json(r, opts.session ?? { username: 'david', employee_id: DAVID.id, role: 'platform-admin' }));
   await page.route(/\/api\/classes(\?|$)/, (r) => json(r, ROLE_CLASSES));
@@ -278,10 +285,11 @@ test.describe('/ux/inbox — the inbox, read', () => {
     await expect(page.locator('.inbox-entity')).toHaveText(['step: step-9', 'job: job-2', 'job: job-3']);
     await expect(list(page).getByRole('link')).toHaveText(['step: step-9', 'job: job-2']);
 
-    // Two reads of the roster — the shell's session (which resolves the
-    // viewer from it) and the page's — and one of the inbox. Gap 3
+    // One read of the roster — the page's. The shell's session used to
+    // read it too, to resolve the viewer, and now reads only the viewer's
+    // own row (backlog b4f68a65). And one of the inbox. Gap 3
     // (74da899d): the inbox read asks for everything, no limit, no page.
-    expect(await settledReads(page, () => seen.roster, 2)).toBe(2);
+    expect(await settledReads(page, () => seen.roster, 1)).toBe(1);
     expect(backend.inboxReads.map((u) => new URL(u).pathname + new URL(u).search))
       .toEqual(['/api/messages/inbox/emp-001']);
     expect(seen.writes).toHaveLength(0);
@@ -600,13 +608,13 @@ test.describe('/ux/inbox — the composer', () => {
   });
 
   test('gap 6 (7d1c11a3): a failed roster read empties the To list and names senders by id, and says nothing', async ({ page }) => {
-    // The session reads the roster first and resolves the viewer; the
-    // page's own read of it is the second, and it is the one refused.
+    // The page's own read is the only roster read — the session resolves
+    // the viewer from its one row (backlog b4f68a65) — and it is refused.
     let reads = 0;
     await open(page, {
-      roster: (r: Route) => (++reads === 1 ? json(r, ROSTER) : json(r, 'people store down', 500)),
+      roster: (r: Route) => (++reads, json(r, 'people store down', 500)),
     });
-    await expect.poll(() => reads).toBe(2);
+    await expect.poll(() => reads).toBe(1);
 
     await filter(page, 'All (5)').click();
     await expect(page.locator('.inbox-row .inbox-sender')).toHaveText([

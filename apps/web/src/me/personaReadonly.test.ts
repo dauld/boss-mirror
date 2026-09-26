@@ -27,8 +27,15 @@ const OPERATOR: Employee = {
   location: 'HQ', employment_type: 'full-time', skills: [], certifications: [],
 };
 
+// The persona is read as its own people row (backlog b4f68a65): the
+// roster the shell used to preload is gone, so the test answers the
+// one read setPersona makes.
+const people = async (url: string) => {
+  const found = url === `/api/people/${OPERATOR.id}`;
+  return { ok: found, status: found ? 200 : 404, json: async () => OPERATOR };
+};
+
 function becomeGuest(): void {
-  session.roster = [OPERATOR];
   session.fromGateway = true;
   session.readonly = true;
   session.value = { kind: 'ready', user: guestEmployee('guest@algedonic.dev') };
@@ -37,8 +44,8 @@ function becomeGuest(): void {
 describe('setPersona ends the guest identity', () => {
   beforeEach(becomeGuest);
 
-  test('switching guest → rostered operator clears readonly', () => {
-    setPersona(OPERATOR.id);
+  test('switching guest → rostered operator clears readonly', async () => {
+    await setPersona(OPERATOR.id, people);
 
     expect(session.value.kind).toBe('ready');
     if (session.value.kind === 'ready') {
@@ -50,8 +57,8 @@ describe('setPersona ends the guest identity', () => {
     expect(session.fromGateway).toBe(false);
   });
 
-  test('an id the roster does not know changes nothing', () => {
-    setPersona('emp-nobody');
+  test('an id the people service does not hold changes nothing', async () => {
+    await setPersona('emp-nobody', people);
 
     // No identity change, no state change — the guest stays a guest
     // rather than becoming a half-cleared chimera.

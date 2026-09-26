@@ -126,8 +126,9 @@ pub struct Target {
 ///
 /// Everything else the registry binds — `commerce.invoice.*`,
 /// `inventory.*`, `ledger.*`, `jobs.estate.*` — names a subject that is
-/// not a packet. Those return `None` and the dead-letter stays a loud log
-/// line. **Reading their `id` as a job id would annotate whatever packet
+/// not a packet. Those return `None`, and the runner records the
+/// dead-letter in its own firing record instead, as an `outcome =
+/// 'dead-letter'` row (`super::firings`, 4b175523). **Reading their `id` as a job id would annotate whatever packet
 /// happened to share that uuid**, which is worse than not annotating: a
 /// fabricated target is a false record, and this module exists to make
 /// the record true.

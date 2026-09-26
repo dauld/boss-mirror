@@ -867,6 +867,7 @@ impl JobsRepository for PgJobs {
     async fn update_job_at(
         &self,
         job: &Job,
+        read: JobStatus,
         now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
@@ -892,6 +893,10 @@ impl JobsRepository for PgJobs {
         // be. A row stored closed or cancelled is written only by a
         // write that keeps that status; anything else matches no row
         // and is named below, never answered as a write that landed.
+        // And only by a writer that READ it finished ($14): a writer
+        // that read the row open and closes it has lost to a close that
+        // committed after its read, and its body would erase what that
+        // close stamped (backlog 29a7ea09, the hand close).
         let result = sqlx::query(
             r#"
             UPDATE jobs SET subject_kind = $2, subject_id = $3,
@@ -899,7 +904,7 @@ impl JobsRepository for PgJobs {
                 opened_on = $8, due_on = $9, closed_on = $10, metadata = $11,
                 tags = $12, updated_at = $13
             WHERE id = $1
-              AND (status NOT IN ('closed', 'cancelled') OR status = $6)
+              AND (status NOT IN ('closed', 'cancelled') OR (status = $6 AND status = $14))
             "#,
         )
         .bind(*job.id.inner().as_uuid())
@@ -915,13 +920,15 @@ impl JobsRepository for PgJobs {
         .bind(&job.metadata)
         .bind(&job.tags)
         .bind(now)
+        .bind(job_status_str(read))
         .execute(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
 
         if result.rows_affected() == 0 {
             // No row matched: either there is none, or it is finished
-            // and this write would move its status. Read which, in the
+            // and this write would move its status, or its writer read
+            // it before it finished. Read which, in the
             // same transaction, so the refusal names the stored status.
             let stored: Option<String> =
                 sqlx::query_scalar("SELECT status FROM jobs WHERE id = $1")

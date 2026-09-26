@@ -2138,18 +2138,21 @@ pub(super) async fn update_job<R: JobsRepository + 'static, B: EventBus + 'stati
     }
     match state
         .jobs
-        .update_job_at(&job, stamp.timestamp, &job_events)
+        .update_job_at(&job, old_status, stamp.timestamp, &job_events)
         .await
     {
         Ok(()) => {}
         // The refusal above judged the row as READ; this is the same
         // refusal for a close that committed after that read (backlog
         // 570e72bd, road 5) — answered with the same 409, not a 500.
+        // It is also the hand close that lost to a step-driven close
+        // (backlog 29a7ea09): written, its body would have erased the
+        // outcome that close stamped and recorded JOB_CLOSED twice.
         Err(crate::port::JobsError::TerminalJob { status, .. }) => {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({
-                    "error": "a finished packet's status does not move",
+                    "error": "the packet finished after this write read it — a finished packet's status does not move, and its row is written only by a writer that read it finished",
                     "job_id": job_id.to_string(),
                     "stored_status": status,
                     "requested_status": job.status,

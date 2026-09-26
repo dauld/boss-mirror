@@ -59,8 +59,8 @@ async function install(page: Page, person: (r: Route) => Promise<void>): Promise
   // (boss-people http.rs `get_employee`): 404, plain text.
   await page.route(/\/api\/people\/shipping-clerk$/, (r) =>
     r.fulfill({ status: 404, contentType: 'text/plain', body: 'no employee with ID shipping-clerk' }));
-  // One-row reads only: the shell's session loader reads the roster for
-  // itself, so a bare /api/people here is not the surface's read.
+  // One-row reads only. The smoke session is anonymous, so the shell reads
+  // no people row of its own (backlog b4f68a65); every one counted is the surface's.
   const asked: string[] = [];
   page.on('request', (req) => {
     const path = new URL(req.url()).pathname;

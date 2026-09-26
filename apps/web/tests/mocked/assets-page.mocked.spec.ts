@@ -154,19 +154,6 @@ function landing(href: string): { kind: string; section: string; module: string 
   return { kind: route.kind, section, module: moduleForRoute(route)?.id ?? null };
 }
 
-/// The manifest as a SERVED page carries it: the gateway inlines it into
-/// index.html as `window.__BOSS_TENANT_MANIFEST__` (5578e42d), so the
-/// shell is `ready` before its first paint. The mocked dev-server does
-/// not inline, so without this the route mounts AssetsList while the
-/// manifest is still loading — the fallback leg, pinned separately below.
-async function inlineManifest(page: Page, modules: Readonly<Record<string, boolean>>): Promise<void> {
-  await page.addInitScript((m) => {
-    (globalThis as { __BOSS_TENANT_MANIFEST__?: unknown }).__BOSS_TENANT_MANIFEST__ = {
-      display_name: 'Algedonic, LLC', tenant_id: 'algedonic', modules: m, labels: {},
-    };
-  }, modules);
-}
-
 // The live leg reads the recorded live manifest (equipment false), not a
 // typed copy of the flag: that copy and MODULES_LIVE disagreed about the
 // same instance once already (41454ce1).
@@ -178,8 +165,7 @@ test.describe('/ux/assets — State A, the equipment module off (the live instan
     test(`${name} renders ModuleDisabled, and its one button goes home and back`, async ({ page }) => {
       const seen = watch(page);
       await installAssets(page);
-      await installTenantManifest(page, modules);
-      await inlineManifest(page, modules);
+      await installTenantManifest(page, modules, { inline: true });
       await mountPage(page, PATH);
 
       const notice = page.locator('.module-disabled');

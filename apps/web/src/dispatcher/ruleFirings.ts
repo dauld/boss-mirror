@@ -7,10 +7,12 @@
 // whether it RUNS, so a stalled auto-park-on-gate-green and an idle one
 // painted the same row. Two records already held the answer: the
 // firing a rule leaves when its handlers succeed (dispatcher_firings,
-// b14afc48), and the dead-letter it lands on the packet it owed when
-// they fail past the budget (a9c498eb). A rule whose newest dead-letter
-// is LATER than its newest firing is failing now; one with neither is
-// idle.
+// b14afc48 — the schedule runner's firings too, since 4b175523), and the
+// dead-letter it lands on the packet it owed when they fail past the
+// budget (a9c498eb) — or, on a topic that names no packet, the
+// dead-letter row it records in dispatcher_firings instead (4b175523).
+// A rule whose newest dead-letter is LATER than its newest firing is
+// failing now; one with neither is idle.
 //
 // UNREAD IS NOT EMPTY. The server sends each half as null with its
 // reason when it could not read it, and the words below print
@@ -25,6 +27,9 @@ export type RuleLastFiring = Readonly<{ rule: string; fired_on: string; fired_at
 export type DeadLetterRollup = Readonly<{
   rule: string;
   packets: number;
+  /** Dead-letters on topics that name no packet — recorded in the
+   *  firing record instead (4b175523). */
+  unrouted: number;
   newest_at: string | null;
   newest_job_id: string | null;
 }>;
@@ -63,6 +68,7 @@ export function parseRuleFirings(raw: unknown): RuleFirings {
         return {
           rule: String(r.rule ?? ''),
           packets: typeof r.packets === 'number' ? r.packets : 0,
+          unrouted: typeof r.unrouted === 'number' ? r.unrouted : 0,
           newest_at: str(r.newest_at),
           newest_job_id: str(r.newest_job_id),
         };
@@ -135,12 +141,6 @@ export function ruleActivity(rule: DispatcherRule, read: Remote<RuleFirings>): R
     const age = ageText(fired.fired_at, d.now);
     lastFired = age === '' ? fired.fired_at : `${age} ago`;
     lastFiredWhy = `fired ${fired.fired_at} on ${fired.fired_on}`;
-  } else if (!rule.on_event && rule.schedule) {
-    // The schedule runner does not write dispatcher_firings
-    // (boss-dispatcher rules/firings.rs, "WHAT IS NOT HERE"), so a
-    // scheduled rule's silence here is not a reading.
-    lastFired = 'not recorded';
-    lastFiredWhy = "a scheduled rule's firings are not recorded — only event rules write dispatcher_firings";
   } else {
     lastFired = `none in ${d.retention_days}d`;
     lastFiredWhy = `dispatcher_firings holds no firing of this rule in the last ${d.retention_days} days`;
@@ -149,7 +149,8 @@ export function ruleActivity(rule: DispatcherRule, read: Remote<RuleFirings>): R
   if (d.dead_letters === null) {
     return { lastFired, lastFiredWhy, deadLetters: UNREAD, deadLettersWhy: d.dead_letters_error ?? '', deadLetterJob: null, failing: false };
   }
-  if (dead === null || dead.packets === 0) {
+  const count = dead === null ? 0 : dead.packets + dead.unrouted;
+  if (dead === null || count === 0) {
     return {
       lastFired, lastFiredWhy,
       deadLetters: 'none',
@@ -162,10 +163,14 @@ export function ruleActivity(rule: DispatcherRule, read: Remote<RuleFirings>): R
   const age = dead.newest_at === null ? '' : ageText(dead.newest_at, d.now);
   const newest = age === '' ? '' : `, newest ${age} ago`;
   const verdict = !failing ? '' : fired === null ? ' — failing, no firing recorded' : ' — failing since its last firing';
+  const where = [
+    dead.packets > 0 ? `${dead.packets} on packet${dead.packets === 1 ? '' : 's'}` : '',
+    dead.unrouted > 0 ? `${dead.unrouted} on a topic that names no packet, recorded in dispatcher_firings` : '',
+  ].filter((w) => w !== '').join(' and ');
   return {
     lastFired, lastFiredWhy,
-    deadLetters: `${dead.packets}${newest}${verdict}`,
-    deadLettersWhy: `${dead.packets} packet${dead.packets === 1 ? '' : 's'} carry a dead-letter from this rule in the last ${d.retention_days} days${dead.newest_at ? `; the newest was recorded ${dead.newest_at}` : ''}`,
+    deadLetters: `${count}${newest}${verdict}`,
+    deadLettersWhy: `${count} dead-letter${count === 1 ? '' : 's'} from this rule in the last ${d.retention_days} days (${where})${dead.newest_at ? `; the newest was recorded ${dead.newest_at}` : ''}`,
     deadLetterJob: dead.newest_job_id,
     failing,
   };

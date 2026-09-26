@@ -4,25 +4,22 @@
 // from it regardless, so while the read was in flight — and above the
 // "Couldn't load the roster" line when it failed — the page stated
 // "0 active employees" and Active (0): an unread roster counted as an
-// empty one. A count is printed only for a roster that was read.
+// empty one. A count is printed only for a roster that was read. The
+// read state and the filter-button label are data/readState.ts's
+// (`readStateOfLoad`, `countLabel`) — this page and /ux/parts had each
+// built their own copies of both (backlog a97d4cf2).
 
-/// Where the roster read stands: in flight, failed, or read.
-export type RosterRead = 'loading' | 'failed' | 'read';
-
-export function rosterRead(loading: boolean, loadFailed: string | null): RosterRead {
-  if (loading) return 'loading';
-  return loadFailed === null ? 'read' : 'failed';
-}
+import type { ReadState } from '../data/readState';
 
 /// The page header. A read roster is counted — zero included, because
 /// a roster that was read and is empty IS empty; an unread one says
 /// why it has no count instead of printing one.
 export function rosterHeader(
-  read: RosterRead,
+  read: ReadState,
   activeCount: number,
   expiringCount: number,
 ): Readonly<{ title: string; subtitle: string }> {
-  if (read === 'read') {
+  if (read.kind === 'ok') {
     return {
       title: `${activeCount} active employees`,
       subtitle: `${expiringCount} certifications expiring in 90 days`,
@@ -31,12 +28,6 @@ export function rosterHeader(
   return {
     title: 'Active employees',
     subtitle:
-      read === 'loading' ? 'Loading the roster…' : 'Counts unknown: the roster did not load',
+      read.kind === 'loading' ? 'Loading the roster…' : 'Counts unknown: the roster did not load',
   };
-}
-
-/// A filter button's label: `Label (n)` for a read roster, the bare
-/// label otherwise — the button still filters, it just claims no count.
-export function countedLabel(label: string, count: number, read: RosterRead): string {
-  return read === 'read' ? `${label} (${count})` : label;
 }

@@ -67,7 +67,7 @@ async fn a_job_update_keeps_the_admitted_kind_and_version<R: JobsRepository>(
     reshaped.kind = "no-such-kind".into();
     reshaped.workflow_version = 7;
     reshaped.title = "Retitled".into();
-    repo.update_job_at(&reshaped, Utc::now(), &[])
+    repo.update_job_at(&reshaped, reshaped.status, Utc::now(), &[])
         .await
         .expect("update accepted");
 

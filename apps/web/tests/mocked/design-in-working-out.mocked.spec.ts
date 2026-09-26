@@ -15,6 +15,7 @@
 // a spec of its own.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { servePeopleRows } from './_smokeMocks';
 
 const json = (r: Route, b: unknown, status = 200) =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(b) });
@@ -66,6 +67,7 @@ const DECIDED = {
 async function mocks(page: Page, decided: (r: Route) => Promise<void>): Promise<void> {
   await page.route('**/api/**', (r) => json(r, []));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: 'emp-david', role: 'platform-admin' }));
   await page.route(/\/api\/jobs\/live$/, (r) => json(r, { counts: {}, open_total: 0, recent: [], sim_clock: {} }));

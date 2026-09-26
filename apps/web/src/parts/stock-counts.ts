@@ -5,16 +5,11 @@
 // "Couldn't load parts" line when a row source failed — the page stated
 // "0 need attention · 0 out · 0 critical" and All (0): an unread list
 // counted as an empty one. A count is printed only for a list that was
-// read. Same rule, same shape as /ux/people's roster-counts.ts (backlog
-// 47eadca3).
+// read. The read state and the filter-button label are
+// data/readState.ts's (`readStateOfLoad`, `countLabel`) — this page and
+// /ux/people had each built their own copies of both (backlog a97d4cf2).
 
-/// Where the page's row reads stand: in flight, failed, or read.
-export type StockRead = 'loading' | 'failed' | 'read';
-
-export function stockRead(loading: boolean, loadFailed: string | null): StockRead {
-  if (loading) return 'loading';
-  return loadFailed === null ? 'read' : 'failed';
-}
+import type { ReadState } from '../data/readState';
 
 export type HeaderCounts = Readonly<{
   total: number;
@@ -30,11 +25,11 @@ export type HeaderCounts = Readonly<{
 /// catalog read beside a good inventory read too: the rows exist, but
 /// the page is showing a failure, not them.
 export function partsHeader(
-  read: StockRead,
+  read: ReadState,
   label: string,
   counts: HeaderCounts,
 ): Readonly<{ title: string; subtitle: string }> {
-  if (read === 'read') {
+  if (read.kind === 'ok') {
     return {
       title: `${counts.total} ${label}`,
       subtitle: `${counts.attention} need attention · ${counts.out} out · ${counts.critical} critical`,
@@ -42,12 +37,6 @@ export function partsHeader(
   }
   return {
     title: label.charAt(0).toUpperCase() + label.slice(1),
-    subtitle: read === 'loading' ? 'Loading stock…' : 'Counts unknown: parts did not load',
+    subtitle: read.kind === 'loading' ? 'Loading stock…' : 'Counts unknown: parts did not load',
   };
-}
-
-/// A filter button's label: `Label (n)` for a read list, the bare label
-/// otherwise — the button still filters, it just claims no count.
-export function countedLabel(label: string, count: number, read: StockRead): string {
-  return read === 'read' ? `${label} (${count})` : label;
 }

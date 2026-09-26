@@ -11,7 +11,7 @@ use super::dead_letter::{
     DeadLetterClass, DeadLetterNote, DeadLetterSink, HandlerFailure, annotation_target,
 };
 use super::expr::HelperResolver;
-use super::firings::{Firing, FiringSink, firing_id};
+use super::firings::{Firing, FiringSink, Outcome, dead_letter_id, fired_rules, firing_id};
 use super::handler::{self, HandlerRegistry};
 use super::registry::{self, Registry};
 use anyhow::{Context, Result};
@@ -287,17 +287,13 @@ impl RulesRunner {
         // a partial failure double-applies the survivors on retry.
         let mut failures: Vec<HandlerFailure> = Vec::new();
         let mut all_permanent = true;
-        // Rule names whose handlers all succeeded, in fire order,
-        // deduplicated by the set below: a rule with three handlers
-        // fired ONCE on this event, not three times.
-        let mut fired: Vec<String> = Vec::new();
-        let mut failed: HashSet<String> = HashSet::new();
+        // Rule names whose handlers all succeeded, in fire order, each
+        // once: a rule with three handlers fired ONCE on this event, not
+        // three times (`fired_rules`, shared with the schedule runner).
+        let fired = fired_rules(&results);
         for r in results {
             match &r.outcome {
                 Ok(()) => {
-                    if !fired.contains(&r.rule_name) {
-                        fired.push(r.rule_name.clone());
-                    }
                     // Per-fire log at DEBUG, not INFO: at warp the runner
                     // fires tens of rules/sec, and an INFO line each
                     // flooded syslog (26G incident, 2026-06-23). Failures
@@ -313,7 +309,6 @@ impl RulesRunner {
                     if !e.is_permanent() {
                         all_permanent = false;
                     }
-                    failed.insert(r.rule_name.clone());
                     failures.push(HandlerFailure {
                         rule: r.rule_name.clone(),
                         handler: r.handler.clone(),
@@ -322,7 +317,6 @@ impl RulesRunner {
                 }
             }
         }
-        fired.retain(|rule| !failed.contains(rule));
         // What FIRED is recorded, after the settle is computed from it
         // and never able to change it (b14afc48). Only the rules whose
         // handlers all succeeded: a rule that failed did not move the
@@ -405,6 +399,7 @@ impl RulesRunner {
                     "event_id": event_id,
                     "simulated": simulated,
                 }),
+                outcome: Outcome::Fired,
             })
             .collect();
         if let Err(e) = sink.record(&rows).await {
@@ -416,6 +411,80 @@ impl RulesRunner {
                 "dispatcher firings: the firing record could not be written; \
                  the side effects still landed and the log line is the only trace"
             );
+        }
+    }
+
+    /// Record a dead-letter whose topic names no packet, as one
+    /// `dead-letter` row per failed rule in the firing record (backlog
+    /// 4b175523). Until this, such a dead-letter left a log line and an
+    /// in-process counter that resets with the pod, so the rules list's
+    /// "no failures" could not be told from loss.
+    ///
+    /// BEST-EFFORT, for the annotation's reasons: the settle is already
+    /// decided, a failed write is logged and dropped, and the answer is
+    /// only whether a durable record now exists — which is what the
+    /// liveness counter's `unrecorded` half asks.
+    async fn record_unrouted_dead_letter(&self, note: &DeadLetterNote) -> bool {
+        let Some(sink) = &self.firings else {
+            warn!(
+                topic = %note.topic,
+                triggering_event = %note.event_id,
+                attempts = note.attempts,
+                class = note.class.as_str(),
+                "dead-letter carries no packet to annotate and no firing record is wired: \
+                 the log line above and the liveness counter are the record"
+            );
+            return false;
+        };
+        let failures: Vec<String> = note.failures.iter().map(ToString::to_string).collect();
+        let mut rules: Vec<&str> = Vec::new();
+        for f in &note.failures {
+            if !rules.contains(&f.rule.as_str()) {
+                rules.push(&f.rule);
+            }
+        }
+        let recorded_at = boss_clock_client::wall_now();
+        let rows: Vec<Firing> = rules
+            .iter()
+            .map(|rule| Firing {
+                firing_id: dead_letter_id(rule, &note.event_id),
+                rule: rule.to_string(),
+                fired_on: note.topic.clone(),
+                fired_at: recorded_at,
+                detail: serde_json::json!({
+                    "event_id": note.event_id,
+                    "attempts": note.attempts,
+                    "class": note.class.as_str(),
+                    "failures": failures,
+                    "simulated": note.simulated,
+                }),
+                outcome: Outcome::DeadLetter,
+            })
+            .collect();
+        match sink.record(&rows).await {
+            Ok(()) => {
+                warn!(
+                    topic = %note.topic,
+                    triggering_event = %note.event_id,
+                    attempts = note.attempts,
+                    class = note.class.as_str(),
+                    "dead-letter carries no packet to annotate: recorded in dispatcher_firings \
+                     as outcome dead-letter"
+                );
+                true
+            }
+            Err(e) => {
+                error!(
+                    topic = %note.topic,
+                    triggering_event = %note.event_id,
+                    attempts = note.attempts,
+                    error = %e,
+                    "DEAD-LETTER record failed: this topic names no packet, and the \
+                     dispatcher_firings write failed, so this pod's log and the liveness \
+                     counter are the record"
+                );
+                false
+            }
         }
     }
 
@@ -436,9 +505,10 @@ impl RulesRunner {
     ///    accepts and never answers costs the loop seconds, not the loop.
     ///
     /// With no target (a topic whose subject is not a packet) there is
-    /// nothing to annotate, and saying so out loud is the honest answer —
-    /// pointing the annotation at whatever packet shares the subject's
-    /// uuid would file a false record.
+    /// nothing to annotate — pointing the annotation at whatever packet
+    /// shares the subject's uuid would file a false record — so the
+    /// dead-letter goes to the dispatcher's own firing record instead
+    /// ([`Self::record_unrouted_dead_letter`], 4b175523).
     async fn record_dead_letter(
         &self,
         topic: &str,
@@ -449,20 +519,6 @@ impl RulesRunner {
         failures: Vec<HandlerFailure>,
     ) {
         let Some(sink) = &self.dead_letters else {
-            if let Some(live) = &self.live {
-                live.record_dead_letter(false);
-            }
-            return;
-        };
-        let Some(target) = annotation_target(topic, payload) else {
-            warn!(
-                topic = %topic,
-                triggering_event = %event_id,
-                attempts = attempt,
-                class = class.as_str(),
-                "dead-letter carries no packet to annotate: this topic's subject is not a Job, \
-                 so the log line above and the liveness counter are the record"
-            );
             if let Some(live) = &self.live {
                 live.record_dead_letter(false);
             }
@@ -480,6 +536,13 @@ impl RulesRunner {
                 .get("_simulated")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+        };
+        let Some(target) = annotation_target(topic, payload) else {
+            let recorded = self.record_unrouted_dead_letter(&note).await;
+            if let Some(live) = &self.live {
+                live.record_dead_letter(recorded);
+            }
+            return;
         };
         let recorded = match sink.record(&target, &note).await {
             Ok(()) => {
@@ -566,44 +629,7 @@ mod tests {
         }
     }
 
-    /// A sink that keeps what the runner asked to record.
-    struct RecordingFirings {
-        recorded: tokio::sync::Mutex<Vec<Firing>>,
-    }
-
-    impl RecordingFirings {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                recorded: tokio::sync::Mutex::new(Vec::new()),
-            })
-        }
-        async fn rules(&self) -> Vec<String> {
-            self.recorded
-                .lock()
-                .await
-                .iter()
-                .map(|f| f.rule.clone())
-                .collect()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl FiringSink for RecordingFirings {
-        async fn record(&self, firings: &[Firing]) -> Result<(), String> {
-            self.recorded.lock().await.extend_from_slice(firings);
-            Ok(())
-        }
-    }
-
-    /// A sink that fails the way a down database would.
-    struct FailingFirings;
-
-    #[async_trait::async_trait]
-    impl FiringSink for FailingFirings {
-        async fn record(&self, _firings: &[Firing]) -> Result<(), String> {
-            Err("connection refused".into())
-        }
-    }
+    use crate::rules::firings::testing::{FailingFirings, RecordingFirings};
 
     #[test]
     fn subscriptions_dedupes_repeated_topics() {
@@ -1125,6 +1151,104 @@ handler = "h.invoice"
             snap["dead_letters_unrecorded"], 2,
             "a failed write left no record: {snap}"
         );
+    }
+
+    fn invoice_runner() -> RulesRunner {
+        use crate::rules::handler::HandlerError;
+        let mut runner = runner_with(
+            vec![("h.invoice", || Err(HandlerError::Downstream("503".into())))],
+            r#"
+[[rule]]
+name = "r-invoice"
+on_event = "commerce.invoice.paid"
+[[rule.do]]
+handler = "h.invoice"
+"#,
+        );
+        runner.dead_letters = Some(RecordingDeadLetters::new());
+        runner
+    }
+
+    /// 4b175523. A dead-letter on a topic that names no packet left a
+    /// log line and a counter that resets with the pod, so the rules
+    /// list's "no failures" could not be told from loss. It is now a
+    /// durable `dead-letter` row in the firing record, idempotent on
+    /// the rule and the event, and the counter calls it recorded.
+    #[tokio::test]
+    async fn a_dead_letter_with_no_packet_is_recorded_in_the_firing_record() {
+        let live = Arc::new(crate::liveness::DispatcherLiveness::default());
+        let firings = RecordingFirings::new();
+        let mut runner = invoice_runner();
+        runner.firings = Some(firings.clone());
+        runner.live = Some(live.clone());
+        let settle = runner
+            .handle(
+                "commerce.invoice.paid",
+                "evt-inv",
+                &serde_json::json!({"id": "inv-1"}),
+                FINAL,
+            )
+            .await;
+        assert!(matches!(settle, boss_nats::durable::Settle::Retry(_)));
+        let rows = firings.recorded.lock().await.clone();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, Outcome::DeadLetter);
+        assert_eq!(rows[0].rule, "r-invoice");
+        assert_eq!(rows[0].firing_id, "dead-letter:r-invoice:evt-inv");
+        assert_eq!(rows[0].fired_on, "commerce.invoice.paid");
+        assert_eq!(rows[0].detail["attempts"], FINAL);
+        assert_eq!(rows[0].detail["class"], "budget-exhausted");
+        assert!(
+            rows[0].detail["failures"][0]
+                .as_str()
+                .is_some_and(|f| f.starts_with("r-invoice/h.invoice: ") && f.contains("503")),
+            "the row carries what failed: {}",
+            rows[0].detail
+        );
+        let snap = live.snapshot();
+        assert_eq!(snap["dead_letters"], 1, "{snap}");
+        assert_eq!(
+            snap["dead_letters_unrecorded"], 0,
+            "a durable row is a record: {snap}"
+        );
+
+        // With budget left nothing is recorded: the NAK may still converge.
+        let firings = RecordingFirings::new();
+        let mut runner = invoice_runner();
+        runner.firings = Some(firings.clone());
+        runner
+            .handle(
+                "commerce.invoice.paid",
+                "evt-inv-2",
+                &serde_json::json!({"id": "inv-2"}),
+                FIRST,
+            )
+            .await;
+        assert!(firings.recorded.lock().await.is_empty());
+    }
+
+    /// BEST-EFFORT: the durable write failing leaves the settle alone
+    /// and counts the dead-letter as unrecorded.
+    #[tokio::test]
+    async fn a_dead_letter_record_that_cannot_be_written_never_changes_the_settle() {
+        let live = Arc::new(crate::liveness::DispatcherLiveness::default());
+        let mut runner = invoice_runner();
+        runner.firings = Some(Arc::new(FailingFirings));
+        runner.live = Some(live.clone());
+        let settle = runner
+            .handle(
+                "commerce.invoice.paid",
+                "evt-inv",
+                &serde_json::json!({"id": "inv-1"}),
+                FINAL,
+            )
+            .await;
+        assert!(
+            matches!(settle, boss_nats::durable::Settle::Retry(_)),
+            "the settle is the transport's, whatever the record did"
+        );
+        let snap = live.snapshot();
+        assert_eq!(snap["dead_letters_unrecorded"], 1, "{snap}");
     }
 
     struct FailingDeadLetters;

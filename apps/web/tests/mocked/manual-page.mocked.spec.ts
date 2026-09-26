@@ -166,6 +166,10 @@ test.describe('/manual — the page chrome and its two spellings', () => {
     await installManualReads(page);
     await page.route(/\/api\/session$/, (r) =>
       json(r, { username: 'david', employee_id: 'emp-001', role: 'platform-admin' }));
+    // The shell resolves the viewer from their own row (backlog
+    // b4f68a65), so that row carries the role the sidebar reads.
+    await page.route(/\/api\/people\/emp-001$/, (r) =>
+      json(r, { ...EMP_001, role: 'platform-admin', department: 'it' }));
     await mountPage(page, '/ux/manual', { titleMatch: /Company manual/ });
 
     await expect(page.locator('.shell-nav').getByRole('link', { name: 'My Day', exact: true }).first()).toBeVisible();
@@ -463,9 +467,9 @@ test.describe('/manual — empty and failed reads are never the same paint', () 
   // 5013bef4's other half: 0 of the 17 live bodies carry a shortcode,
   // and the page read the whole roster on every mount anyway. The
   // roster half is pinned by the shortcode test above (the roster
-  // fixture names emp-001 "Roster Copy"); the app shell's session still
-  // reads the roster once, which is not this page's read, so this
-  // counts the per-person reads only.
+  // fixture names emp-001 "Roster Copy"). The smoke persona's session
+  // is anonymous, so the shell reads no people row here, and every
+  // per-person read counted is the page's.
   test('a body with no shortcode reads no one, and a body with one reads only that person', async ({ page }) => {
     const personReads: string[] = [];
     page.on('request', (req) => {

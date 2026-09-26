@@ -56,6 +56,23 @@ fn the_emergency_merge_keeps_its_decided_shape() {
             .any(|f| f.name == "receipt_sha" && f.required),
         "the approver signs against a receipt sha, not a claim"
     );
+    // v1 typed receipt_verdict `green`, which the validator read as an
+    // unknown type and accepted any value under (backlog fcae2bfa): the
+    // receipt's three verdicts are recorded, and only green reaches the
+    // approver.
+    assert!(
+        step("gate-locally")
+            .fields
+            .iter()
+            .any(|f| f.name == "receipt_verdict"
+                && f.required
+                && f.field_type == "green|failed|refused"),
+        "the verdict is the receipt's own word"
+    );
+    assert!(
+        approve.ready_when.contains("receipt_verdict = \"green\""),
+        "nothing is put in front of the approver without a green receipt"
+    );
     assert!(
         step("merged").ready_when.contains("steps.retro.done"),
         "the lane closes only with its retro filed"
@@ -65,5 +82,8 @@ fn the_emergency_merge_keeps_its_decided_shape() {
         .iter()
         .filter_map(|s| s.terminal.as_ref().map(|t| t.outcome.as_str()))
         .collect();
-    assert_eq!(terminals, vec!["rolled-back", "refused", "merged"]);
+    assert_eq!(
+        terminals,
+        vec!["rolled-back", "not-green", "refused", "merged"]
+    );
 }

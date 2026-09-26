@@ -26,6 +26,7 @@ import { expect, test, type Page, type Request, type Route } from '@playwright/t
 import { answerRead, mountPage, openedRequests, recordPageRequests, settledReads } from './_helpers';
 import {
   installSmokeMocks, installTenantManifest, LIVE_MANIFEST_RECORDED_AT, MODULES_LIVE, MODULES_NONE,
+  tenantManifest,
 } from './_smokeMocks';
 import { FAILURE_MARKER } from './_routes';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
@@ -129,20 +130,6 @@ async function mountProducts(page: Page): Promise<void> {
   await expect(list(page).locator('tbody tr')).toHaveCount(ROWS.length);
 }
 
-/// The manifest as a SERVED page carries it: the gateway inlines it into
-/// index.html as `window.__BOSS_TENANT_MANIFEST__` (5578e42d), so the
-/// shell is `ready` before its first paint. The mocked dev-server does
-/// not inline, so without this the route mounts ProductsList while the
-/// manifest is still loading (a loading manifest hides nothing,
-/// manifest-inline.ts `moduleOn`) — pinned separately below (a1fcee7b).
-async function inlineManifest(page: Page, modules: Readonly<Record<string, boolean>>): Promise<void> {
-  await page.addInitScript((m) => {
-    (globalThis as { __BOSS_TENANT_MANIFEST__?: unknown }).__BOSS_TENANT_MANIFEST__ = {
-      display_name: 'Algedonic, LLC', tenant_id: 'algedonic', modules: m, labels: {},
-    };
-  }, modules);
-}
-
 test.describe('/ux/products — State A, the parts module off (the live instance)', () => {
   for (const [name, modules] of [
     // The recorded live manifest (page audit 6b4e43a1 spelled it here
@@ -154,8 +141,7 @@ test.describe('/ux/products — State A, the parts module off (the live instance
     test(`${name} renders ModuleDisabled, and its one button goes home and back`, async ({ page }) => {
       const seen = watch(page);
       await installProducts(page);
-      await installTenantManifest(page, modules);
-      await inlineManifest(page, modules);
+      await installTenantManifest(page, modules, { inline: true });
       await mountPage(page, PATH);
 
       const notice = page.locator('.module-disabled');
@@ -199,8 +185,7 @@ test.describe('/ux/products — State A, the parts module off (the live instance
   test('a deep link to one product renders the same notice, and reads nothing', async ({ page }) => {
     await recordPageRequests(page);
     await installProducts(page);
-    await installTenantManifest(page, MODULES_LIVE);
-    await inlineManifest(page, MODULES_LIVE);
+    await installTenantManifest(page, MODULES_LIVE, { inline: true });
     await mountPage(page, `${PATH}/KEG-IPA-HALF`);
 
     const notice = page.locator('.module-disabled');
@@ -231,7 +216,7 @@ test.describe('/ux/products — State A, the parts module off (the live instance
     const held = new Promise<void>((resolve) => { release = resolve; });
     await page.route(/\/api\/tenant\/manifest$/, async (r) => {
       await held;
-      await json(r, { display_name: 'Algedonic, LLC', tenant_id: 'algedonic', modules: MODULES_LIVE, labels: {} });
+      await json(r, tenantManifest(MODULES_LIVE));
     });
     await mountPage(page, PATH);
 

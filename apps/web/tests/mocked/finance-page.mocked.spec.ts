@@ -34,7 +34,7 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test, type Download, type Page, type Request, type Route } from '@playwright/test';
 import { mountPage } from './_helpers';
-import { installSmokeMocks } from './_smokeMocks';
+import { installSmokeMocks, servePeopleRows } from './_smokeMocks';
 import { FAILURE_MARKER } from './_routes';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 import { parseRoute } from '../../src/router';
@@ -985,6 +985,7 @@ test.describe('/ux/finance — an auditor reads, and writes nothing', () => {
   test('no create link, no Lock or Unlock, no Reverse', async ({ page }) => {
     await install(page, { periods: [PERIOD_OPEN, { ...PERIOD_LOCKED, id: 'per-2026-08', starts_on: '2026-08-01' }] });
     await page.route(/\/api\/people$/, (r) => json(r, [AUDITOR]));
+    await servePeopleRows(page, [AUDITOR]);
     await page.route(/\/api\/session$/, (r) => json(r, { username: 'ada', employee_id: AUDITOR.id, role: 'auditor' }));
     await mountPage(page, `${PATH}?entry=ent-0001`);
 

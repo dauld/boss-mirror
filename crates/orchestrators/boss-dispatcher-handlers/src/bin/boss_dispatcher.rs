@@ -859,6 +859,10 @@ async fn main() -> Result<()> {
                         pool: pool_rules.clone(),
                         calendar: calendar.clone(),
                         catchup_cap: DEFAULT_CATCHUP_CAP,
+                        // The same record the event runner writes
+                        // (4b175523): until this the rules list could
+                        // only say "not recorded" of a scheduled rule.
+                        firings: Some(firings.clone()),
                     });
                     let sched = {
                         let live = live_rules.clone();

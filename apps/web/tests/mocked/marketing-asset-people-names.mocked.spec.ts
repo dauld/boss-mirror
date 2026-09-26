@@ -37,8 +37,8 @@ async function install(page: Page, reviewer: (r: Route) => Promise<void>): Promi
   );
   await page.route(/\/api\/people\/emp-mkt-1$/, (r) => json(r, { id: 'emp-mkt-1', name: 'Mara Lind' }));
   await page.route(/\/api\/people\/emp-brand-2$/, reviewer);
-  // One-row reads only: the shell's session loader reads the roster for
-  // itself, so a bare /api/people here is not the page's read.
+  // One-row reads only. The smoke session is anonymous, so the shell reads
+  // no people row of its own (backlog b4f68a65); every one counted is the page's.
   const asked: string[] = [];
   page.on('request', (req) => {
     const path = new URL(req.url()).pathname;

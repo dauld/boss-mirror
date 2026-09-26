@@ -273,6 +273,16 @@
       matching employee in the roster.
     </p>
   </div>
+{:else if session.value.kind === 'unresolved'}
+  <!-- The viewer's people row could not be READ — not "no such
+       employee". A signed-in operator used to land on the line above
+       whenever /api/people blinked (backlog b4f68a65). -->
+  <div class="theme-exec" style="padding: 32px">
+    <p class="load-failed" role="alert">
+      Signed in as <strong>{session.value.username}</strong>, but couldn't load
+      your employee record — {session.value.error}.
+    </p>
+  </div>
 {:else if isBreakGlass}
   <!-- The emergency door opened. The session is real and narrow: it
        carries the break-glass role and no roster record, so what it

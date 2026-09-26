@@ -22,7 +22,7 @@
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { TERRITORIES } from '../../src/it/yard/world';
-import { DEPARTMENT_CLASSES, YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
+import { DEPARTMENT_CLASSES, YARD_BORDERS, YARD_REGIONS, installSmokeMocks, servePeopleRows } from './_smokeMocks';
 
 const json = (r: Route, b: unknown): Promise<void> =>
   r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
@@ -66,6 +66,7 @@ async function signIn(page: Page): Promise<void> {
     member_attribute: 'role', metadata: {}, sort_order: 1, retired_at: null,
   };
   await page.route(/\/api\/people$/, (r) => json(r, [emp]));
+  await servePeopleRows(page, [emp]);
   await page.route(/\/api\/session$/, (r) => json(r, { username: 'david', employee_id: emp.id, role: emp.role }));
   await page.route(/\/api\/classes(\?|$)/, (r) => json(r, [roleRow, ...DEPARTMENT_CLASSES]));
 }

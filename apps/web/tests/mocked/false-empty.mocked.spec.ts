@@ -13,6 +13,7 @@
 //   outage. Failure now renders with the error and a Retry.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { servePeopleRows } from './_smokeMocks';
 
 const json = (r: Route, b: unknown, status = 200) =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(b) });
@@ -61,6 +62,7 @@ async function triageMocks(page: Page) {
   await page.route(/\/api\/tenant\/manifest$/, (r) =>
     json(r, { display_name: 'Algedonic Ales', modules: {}, labels: {} }));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: EMP.id, role: 'platform-admin' }));
 }
@@ -109,6 +111,7 @@ async function inboxMocks(page: Page) {
   });
   await page.route('**/api/**', (r) => json(r, []));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: EMP.id, role: 'platform-admin' }));
 }
@@ -184,6 +187,7 @@ async function hrMocks(page: Page, steps: (r: Route) => Promise<void>) {
   await page.route(/\/api\/tenant\/manifest$/, (r) =>
     json(r, { display_name: 'Algedonic Ales', modules: {}, labels: {} }));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: EMP.id, role: 'platform-admin' }));
   await page.route(/\/api\/workflows$/, (r) => json(r, [HR_WORKFLOW]));
@@ -254,6 +258,7 @@ async function peopleMocks(page: Page, people: (r: Route) => Promise<void>) {
     json(r, { display_name: 'Algedonic Ales', modules: {}, labels: {} }));
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: EMP.id, role: 'platform-admin' }));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/people$/, people);
 }
 

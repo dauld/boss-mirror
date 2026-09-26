@@ -12,7 +12,10 @@
 //!
 //! THE RULE: a completed or skipped step's title, assignee and notes are
 //! frozen like its metadata — a write that would change one is refused
-//! 409 naming it, an unchanged re-send stays 204.
+//! 409 naming it, an unchanged re-send stays 204. And the ticketed PUT
+//! that completes a presence step changes the status alone: notes or a
+//! holder carried beside it are refused by name, as title and metadata
+//! already were (backlog c0b56fd9).
 //!
 //! NOT HERE: who dates a completion. The packet's second half — a
 //! completing PUT may carry its own `completed_on` — rode this car's
@@ -269,6 +272,69 @@ async fn a_bare_put_cannot_retitle_a_completed_presence_step() {
         "Approve the plan",
         "and the stored title is untouched"
     );
+}
+
+/// THE PACKET'S SECOND HALF, the part that was not the date: the
+/// completing PUT itself could set the notes and the holder of a
+/// presence step. The ticket binds only title + metadata, so a
+/// ticketed `{"status":"completed","notes":...,"assignee_id":...}`
+/// answered 204 and the record showed a passkey approval of a step
+/// that finished carrying words and a holder no passkey saw. The
+/// completion changes the status and nothing else; each extra field is
+/// refused by name and nothing moves. (`completed_on` is its own item,
+/// f3e78bdf.)
+#[tokio::test]
+async fn a_presence_completion_cannot_also_write_notes_or_holder() {
+    let (app, jobs) = seed().await;
+    let before = stored(&jobs, GUARDED).await;
+    for (n, (field, value)) in [
+        ("notes", serde_json::json!("approved, and also run rm -rf")),
+        ("assignee_id", serde_json::json!("emp-someone-else")),
+        ("assignee_id", serde_json::Value::Null),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (status, body) = put(
+            &app,
+            GUARDED,
+            serde_json::json!({ "status": "completed", field: value }),
+            Some(ticket_for(&before, &format!("ceremony-extra-{n}"))),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "{field}={value}: a presence completion completes what its ceremony saw: {body}"
+        );
+        assert_eq!(
+            refused(&body),
+            vec![field.to_string()],
+            "{field}: the refusal names the field: {body}"
+        );
+        let after = stored(&jobs, GUARDED).await;
+        assert_eq!(
+            after.status,
+            StepStatus::Ready,
+            "{field}: nothing completed"
+        );
+        assert_eq!(after.notes.as_deref(), Some("as planned"), "{field}");
+        assert_eq!(after.assignee_id.as_deref(), Some("emp-david"), "{field}");
+    }
+
+    // A re-send of what is stored changes nothing and still completes.
+    let (status, body) = put(
+        &app,
+        GUARDED,
+        serde_json::json!({
+            "status": "completed",
+            "notes": "as planned",
+            "assignee_id": "emp-david",
+        }),
+        Some(ticket_for(&before, "ceremony-resend")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
 }
 
 /// Title, holder and notes, one at a time, on an ordinary completed

@@ -64,6 +64,10 @@ proptest = "1"
 workspace = true
 
 [[test]]
+name = "a_guest_is_refused_the_roster_by_email"
+required-features = ["postgres"]
+
+[[test]]
 name = "audit_log_e2e"
 required-features = ["postgres"]
 

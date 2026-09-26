@@ -47,6 +47,15 @@ export function failedRead(error: string): ReadState {
   return { kind: 'failed', error };
 }
 
+/// A page that tracks its read as `loading` + `loadFailed` flags, as
+/// /ux/people and /ux/parts do. Each had built this as a string state of
+/// its own ('loading' | 'failed' | 'read') beside this type, which says
+/// the same thing and keeps the reason (backlog a97d4cf2, CLAUDE.md 9a).
+export function readStateOfLoad(loading: boolean, loadFailed: string | null): ReadState {
+  if (loading) return loadingRead;
+  return loadFailed === null ? okRead : failedRead(loadFailed);
+}
+
 /// A bare `fetch` Response, reduced to whether the read worked. The
 /// five `pResp.ok ? await pResp.json() : []` sites fetch this way, so
 /// this is the adapter they need; the error text matches `fetchPaged`

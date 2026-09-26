@@ -6,6 +6,7 @@
 // they do not — a registry that predates 139 must degrade, not blank.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { servePeopleRows } from './_smokeMocks';
 
 const EMP = { id: 'emp-david', name: 'David', email: 'd@a', role: 'platform-admin',
   department: 'it', hire_date: '2023-01-01', status: 'active', location: 'loc-hq',
@@ -36,6 +37,7 @@ async function mocks(page: Page) {
     r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) });
   await page.route('**/api/**', (r) => json(r, []));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: 'emp-david', role: 'platform-admin' }));
   await page.route(/\/api\/jobs\/live$/, (r) => json(r, { counts: {}, open_total: 0, recent: [], sim_clock: {} }));

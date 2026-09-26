@@ -968,21 +968,30 @@ pub trait JobsRepository: Send + Sync {
     /// store only reports what matched.
     async fn resolve_job_id_prefix(&self, prefix: &str) -> Result<Vec<JobId>, JobsError>;
 
+    /// A write with no read behind it: `read` is the status it writes.
     async fn update_job(&self, job: &Job) -> Result<(), JobsError> {
-        self.update_job_at(job, Utc::now(), &[]).await
+        self.update_job_at(job, job.status, Utc::now(), &[]).await
     }
 
     /// Replace the Job's row with `job`, recording `events` with it.
+    /// `read` is the status the writer judged the row in.
     ///
     /// A compare-and-set on a FINISHED status: a row stored Closed or
     /// Cancelled keeps it, and a write whose `status` differs is refused
-    /// as [`JobsError::TerminalJob`] with nothing written or recorded. A
-    /// write that keeps the finished status (a retitle after the close)
-    /// lands. The job PUT judged the row it read; only the store sees a
-    /// close that committed after that read (backlog 570e72bd).
+    /// as [`JobsError::TerminalJob`] with nothing written or recorded
+    /// (backlog 570e72bd). A write that keeps the finished status (a
+    /// retitle after the close) lands only when its writer READ the row
+    /// finished: one that read it open and closes it has lost to a close
+    /// that committed after its read, and written, its body would erase
+    /// what that close stamped — the outcome — and record JOB_CLOSED a
+    /// second time. That is refused the same way (backlog 29a7ea09: the
+    /// job PUT's hand close, the one close site `close_job_at` did not
+    /// take). The job PUT judged the row it read; only the store sees a
+    /// close that committed after that read.
     async fn update_job_at(
         &self,
         job: &Job,
+        read: JobStatus,
         now: DateTime<Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError>;

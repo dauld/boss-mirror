@@ -18,7 +18,7 @@
 
 import { test, expect } from '@playwright/test';
 import { mountPage } from './_helpers';
-import { installApiFloor } from './_smokeMocks';
+import { installApiFloor, servePeopleRows } from './_smokeMocks';
 
 const MANIFEST = { display_name: 'Algedonic Ales', modules: {}, labels: {} };
 
@@ -71,6 +71,7 @@ test.describe('full-page step route without a plugin', () => {
     await installApiFloor(page);
     await page.route(/\/api\/tenant\/manifest$/, (r) => r.fulfill({ json: MANIFEST }));
     await page.route(/\/api\/people$/, (r) => r.fulfill({ json: [EMP] }));
+    await servePeopleRows(page, [EMP]);
     await page.route(/\/api\/session$/, (r) =>
       r.fulfill({ json: { username: EMP.email, employee_id: EMP.id, role: EMP.role } }));
     await page.route(new RegExp(`/api/jobs/${JOB_ID}$`), (r) => r.fulfill({ json: JOB }));

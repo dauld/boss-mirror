@@ -603,6 +603,45 @@ fn one_of_carried<'a>(
         .collect()
 }
 
+/// The field types [`validate_field_type`] knows by name. Anything else
+/// must be an enum — see [`field_type_problem`].
+pub const BUILTIN_FIELD_TYPES: &[&str] = &[
+    "string",
+    "number",
+    "integer",
+    "boolean",
+    "array",
+    "object",
+    "date",
+    "date-time",
+    "uri",
+];
+
+/// Why `spec` is not a field type a value can be checked against, or
+/// `None` when it is: one of [`BUILTIN_FIELD_TYPES`], or an enum of two
+/// or more non-empty values separated by `|`.
+///
+/// ONE GRAMMAR, THREE READERS (backlog fcae2bfa): the completion
+/// validator below, the publish lint (`workflow_lint`, which refuses
+/// the row) and the step-type bundle's pin all ask this, so what a row
+/// may declare and what the validator can run cannot disagree. Until
+/// 2026-09-26 an enum was "contains a pipe" and everything else fell
+/// through to accept, so a single-token type — emergency-merge v1's
+/// `receipt_verdict = "green"` — accepted any value at all.
+pub fn field_type_problem(spec: &str) -> Option<String> {
+    if BUILTIN_FIELD_TYPES.contains(&spec) {
+        return None;
+    }
+    if spec.contains('|') && spec.split('|').all(|v| !v.is_empty()) {
+        return None;
+    }
+    Some(format!(
+        "'{spec}' is not a field type: declare one of {} or an enum of two or more \
+         non-empty values separated by '|' (e.g. 'green|failed')",
+        BUILTIN_FIELD_TYPES.join(", ")
+    ))
+}
+
 fn validate_field_type(
     name: &str,
     expected: &str,
@@ -622,7 +661,7 @@ fn validate_field_type(
         // offending value and the whole set, because the caller who
         // sent `verdict = "__probe__"` needs to know what would have
         // been accepted, not only that a string was the wrong string.
-        s if s.contains('|') => {
+        s if field_type_problem(s).is_none() => {
             let allowed: Vec<&str> = s.split('|').collect();
             return match value.as_str() {
                 Some(v) if allowed.contains(&v) => Ok(()),
@@ -643,7 +682,16 @@ fn validate_field_type(
                 }),
             };
         }
-        _ => true, // unknown type spec — accept
+        // An unknown type spec refuses every value: a check that cannot
+        // be run is not a pass (backlog fcae2bfa). The publish lint
+        // refuses such a row, so this arm is reached only by one that
+        // predates it.
+        unknown => {
+            return Err(ValidationError {
+                field: name.to_string(),
+                message: field_type_problem(unknown).unwrap_or_default(),
+            });
+        }
     };
 
     if ok {
@@ -1669,6 +1717,75 @@ mod tests {
                 .any(|e| e.field == "questions[0].exhibits" && e.message.contains("E2")),
             "{err:?}"
         );
+    }
+
+    /// Backlog fcae2bfa: a single-token type that is not a builtin
+    /// (`duplicate`, emergency-merge's `green`) fell through to
+    /// "unknown type spec — accept", so ANY value completed the step —
+    /// a misspelt one, a number, an object. An unknown type now refuses
+    /// every value and says why, because a check that cannot be run is
+    /// not a pass.
+    #[test]
+    fn an_unknown_field_type_refuses_every_value() {
+        use boss_core::job::StepField;
+        let fields = vec![StepField {
+            name: "receipt_verdict".into(),
+            field_type: "green".into(),
+            required: true,
+            filled_by: boss_core::job::FilledBy::Executor,
+            item_keys: Vec::new(),
+            covers: None,
+            binds: None,
+            item_value_max_bytes: None,
+            item_one_of: Vec::new(),
+        }];
+        for value in [
+            serde_json::json!("gren"),
+            serde_json::json!("green"),
+            serde_json::json!(42),
+            serde_json::json!({}),
+        ] {
+            let err = StepRegistry::validate_authored_fields(
+                &fields,
+                &serde_json::json!({ "receipt_verdict": value }),
+            )
+            .unwrap_err();
+            assert!(
+                err.iter().any(|e| e.field == "receipt_verdict"
+                    && e.message.contains("'green' is not a field type")),
+                "{err:?}"
+            );
+        }
+    }
+
+    /// The enum grammar is `a|b|…` with no empty member: `a||b` or a
+    /// trailing pipe declares an empty-string choice nobody meant.
+    #[test]
+    fn a_field_type_is_a_builtin_or_an_enum_of_non_empty_values() {
+        for ok in ["string", "date-time", "uri", "pass|fail", "a|b|c"] {
+            assert_eq!(field_type_problem(ok), None, "{ok}");
+        }
+        for bad in ["green", "strng", "", "pass|", "|fail", "a||b"] {
+            let why = field_type_problem(bad).unwrap_or_else(|| panic!("{bad:?} is refused"));
+            assert!(why.contains("string, number"), "names the builtins: {why}");
+        }
+    }
+
+    /// The step-type bundle is the other place a field type is declared
+    /// (`seeds/step_types.toml`); it is held to the same grammar here so
+    /// a bundle row cannot declare a type the validator cannot run.
+    #[test]
+    fn every_bundled_step_type_field_declares_a_known_type() {
+        let bad: Vec<String> = all_v1_types()
+            .iter()
+            .flat_map(|t| {
+                t.fields.iter().filter_map(move |f| {
+                    field_type_problem(f.field_type)
+                        .map(|why| format!("{}.{}: {why}", t.kind, f.name))
+                })
+            })
+            .collect();
+        assert!(bad.is_empty(), "{bad:#?}");
     }
 
     #[test]

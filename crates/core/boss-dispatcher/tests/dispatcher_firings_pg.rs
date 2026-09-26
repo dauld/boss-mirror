@@ -8,7 +8,9 @@
 //! transport may present one event eight times, and "how often did this
 //! rule fire" must answer about EVENTS, not deliveries.
 
-use boss_dispatcher::rules::firings::{Firing, FiringSink, PgFirings, firing_id};
+use boss_dispatcher::rules::firings::{
+    Firing, FiringSink, Outcome, PgFirings, dead_letter_id, firing_id,
+};
 use boss_testing::TestDb;
 use chrono::{TimeZone, Utc};
 use sqlx::Row;
@@ -20,7 +22,53 @@ fn firing(rule: &str, event: &str, fired_at: chrono::DateTime<Utc>) -> Firing {
         fired_on: "jobs.gate.green".to_string(),
         fired_at,
         detail: serde_json::json!({ "event_id": event, "simulated": false }),
+        outcome: Outcome::Fired,
     }
+}
+
+/// 4b175523: a dead-letter on a topic that names no packet lands as an
+/// `outcome = 'dead-letter'` row, beside — never instead of — a firing
+/// of the same rule on the same event.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_letter_row_lands_beside_a_firing_of_the_same_event() {
+    let db = TestDb::new().await;
+    let sink = PgFirings::new(db.pool.clone());
+    let t = Utc.with_ymd_and_hms(2026, 9, 26, 15, 0, 0).unwrap();
+    let dead = Firing {
+        firing_id: dead_letter_id("issue-invoice", "evt-inv"),
+        outcome: Outcome::DeadLetter,
+        ..firing("issue-invoice", "evt-inv", t)
+    };
+    sink.record(std::slice::from_ref(&dead)).await.unwrap();
+    sink.record(&[dead]).await.unwrap();
+    sink.record(&[firing("issue-invoice", "evt-inv", t)])
+        .await
+        .unwrap();
+    let rows = sqlx::query(
+        "SELECT firing_id, outcome FROM dispatcher_firings \
+         WHERE rule_name = 'issue-invoice' ORDER BY firing_id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let got: Vec<(String, String)> = rows
+        .iter()
+        .map(|r| (r.get("firing_id"), r.get("outcome")))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "dead-letter:issue-invoice:evt-inv".to_string(),
+                "dead-letter".to_string()
+            ),
+            (
+                "dispatcher:issue-invoice:evt-inv".to_string(),
+                "fired".to_string()
+            ),
+        ],
+        "one dead-letter however often recorded, and the later delivery's firing beside it"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

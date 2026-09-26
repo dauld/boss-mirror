@@ -21,6 +21,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { mountPage } from './_helpers';
 import { AA_FLOOR, describeUnreadable, measureContrast } from './_contrast';
+import { servePeopleRows } from './_smokeMocks';
 
 const json = (r: Route, b: unknown, status = 200) =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(b) });
@@ -67,6 +68,7 @@ async function mocks(page: Page) {
   await page.route(/\/api\/tenant\/manifest$/, (r) =>
     json(r, { display_name: 'Algedonic Ales', modules: { 'marketing-assets': true }, labels: {} }));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: EMP.id, role: 'platform-admin' }));
 }

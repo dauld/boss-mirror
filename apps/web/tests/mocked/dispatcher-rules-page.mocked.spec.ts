@@ -147,8 +147,10 @@ const payload = (rules: unknown[]) => ({
 /// The activity read (gap 5, backlog 43c4451a): when each rule last fired
 /// and its dead-letters, as boss-jobs http/rule_firings.rs answers it.
 /// auto-park fired an hour before `now` and is idle; the tenant rule fired
-/// two days ago and dead-lettered twice since — the stalled shape. The two
-/// scheduled rules and the triggerless row have no firing row.
+/// two days ago and dead-lettered twice since — the stalled shape. The
+/// five-minute poll fired on its last tick (the schedule runner records
+/// its firings since 4b175523); the weekly retro and the triggerless row
+/// have no firing row.
 const FIRINGS = /\/api\/yard\/rule-firings$/;
 const STALLED_JOB = 'a1b2c3d4-0000-4000-8000-000000000001';
 const ACTIVITY = {
@@ -157,10 +159,11 @@ const ACTIVITY = {
   firings: [
     { rule: 'auto-park-on-gate-green', fired_on: 'step.done.gate-verdict', fired_at: '2026-09-24T11:00:00Z' },
     { rule: 'tenant-reorder-on-low-stock', fired_on: 'inventory.stock.low', fired_at: '2026-09-22T12:00:00Z' },
+    { rule: 'sensors-poll-every-5-minutes', fired_on: 'clock.tick', fired_at: '2026-09-24T11:55:00Z' },
   ],
   firings_error: null,
   dead_letters: [
-    { rule: 'tenant-reorder-on-low-stock', packets: 2, newest_at: '2026-09-24T11:45:00Z', newest_job_id: STALLED_JOB },
+    { rule: 'tenant-reorder-on-low-stock', packets: 2, unrouted: 0, newest_at: '2026-09-24T11:45:00Z', newest_job_id: STALLED_JOB },
   ],
   dead_letters_error: null,
 };
@@ -235,16 +238,16 @@ test.describe('/it/registry/rules — the rows', () => {
     const row = (name: string) => page.locator('.catalog tbody tr').filter({ hasText: name });
     // describeTrigger's three branches: an event, a schedule (both cadence
     // spellings), and neither. The last two cells are gap 5's: an idle
-    // event rule, the stalled one, scheduled rules (whose firings the
-    // schedule runner does not record) and a rule with no firing row.
+    // event rule, the stalled one, scheduled rules (one fired on its tick,
+    // one silent in the window — 4b175523) and a rule with no firing row.
     await expect(row('auto-park-on-gate-green').locator('td')).toHaveText([
       'auto-park-on-gate-green', 'on step.done.gate-verdict', '1', '2', '1h ago', 'none',
     ]);
     await expect(row('sensors-poll-every-5-minutes').locator('td')).toHaveText([
-      'sensors-poll-every-5-minutes', 'every 5 minutes · from 2026-09-17', '1', '1', 'not recorded', 'none',
+      'sensors-poll-every-5-minutes', 'every 5 minutes · from 2026-09-17', '1', '1', '5m ago', 'none',
     ]);
     await expect(row('department-retros-weekly').locator('td')).toHaveText([
-      'department-retros-weekly', 'every week · from 2026-09-21', '1', '7', 'not recorded', 'none',
+      'department-retros-weekly', 'every week · from 2026-09-21', '1', '7', 'none in 30d', 'none',
     ]);
     await expect(row('tenant-reorder-on-low-stock').locator('td')).toHaveText([
       'tenant-reorder-on-low-stock', 'on inventory.stock.low', '2', '4', '2d ago',

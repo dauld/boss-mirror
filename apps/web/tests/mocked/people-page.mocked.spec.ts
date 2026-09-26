@@ -211,11 +211,11 @@ test.describe('/ux/people — the roster, read', () => {
       ['emp-002', 'Bo Cellar', 'Head of sales', 'Sales', '3.3y', '1', 'loc-taproom', 'active'],
     ]);
 
-    // Two reads of the one path: the page's, and the shell's own
-    // (libs/web-kit/src/session/session.svelte.ts resolves the signed-in
-    // employee from the same roster). A third would be the page reading
-    // twice.
-    expect(await settledReads(page, () => seen.reads.length, 2)).toBe(2);
+    // One read of the path: the page's. The shell's session used to read
+    // the roster too, to resolve the signed-in employee; it reads only
+    // that employee's row now (backlog b4f68a65). A second would be the
+    // page reading twice.
+    expect(await settledReads(page, () => seen.reads.length, 1)).toBe(1);
     expect(seen.writes).toHaveLength(0);
   });
 

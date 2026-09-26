@@ -176,12 +176,7 @@ async function installFleet(page: Page): Promise<void> {
 /// the one sponsor below.
 async function installLive(page: Page): Promise<void> {
   await installSmokeMocks(page);
-  await installTenantManifest(page, MODULES_LIVE);
-  await page.addInitScript((m) => {
-    (globalThis as { __BOSS_TENANT_MANIFEST__?: unknown }).__BOSS_TENANT_MANIFEST__ = {
-      display_name: 'Algedonic, LLC', tenant_id: 'algedonic', modules: m, labels: {},
-    };
-  }, MODULES_LIVE);
+  await installTenantManifest(page, MODULES_LIVE, { inline: true });
   await installAccountClasses(page);
   await page.route(ACCOUNTS, (r) => json(r, paged([SPONSOR], 1000)));
   await page.route(ASSETS, (r) => json(r, paged([], 1000)));
@@ -362,12 +357,7 @@ test.describe('/ux/accounts — the fleet shape (support on): the list', () => {
   test('with support off the ticket read is never made and Open SRs never shows', async ({ page }) => {
     const seen = watch(page);
     await installFleet(page);
-    await installTenantManifest(page, {});
-    await page.addInitScript(() => {
-      (globalThis as { __BOSS_TENANT_MANIFEST__?: unknown }).__BOSS_TENANT_MANIFEST__ = {
-        display_name: 'Algedonic, LLC', tenant_id: 'algedonic', modules: {}, labels: {},
-      };
-    });
+    await installTenantManifest(page, {}, { inline: true });
     await mountFleet(page);
 
     expect(await settledReads(page, () => seen.reads.length, 3)).toBe(3);

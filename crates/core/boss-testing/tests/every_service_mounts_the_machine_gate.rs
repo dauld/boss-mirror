@@ -30,6 +30,10 @@
 //!      that needs the patient is not an arm (CLAUDE.md §Diagnosis). This
 //!      is a fact that lives twice — the probe in the manifest, the
 //!      exemption in the binary — so it is pinned (CLAUDE.md §9a).
+//!
+//! tree-wide pin — it scans a tree no changed-file map can attribute
+//! to this crate, so every scoped gate runs it whatever its scope
+//! (`tree_wide_pins` in infra/gate.sh; backlog c87ad472).
 
 use boss_testing::repo_root;
 use regex::Regex;

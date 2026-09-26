@@ -31,6 +31,10 @@
 //!     answers it (`apps/web/src/marketing/claims.ts`, `source.repo`)
 //!     read the same declared value — the thing the URL having no home
 //!     blocked, and the reason this car exists.
+//!
+//! tree-wide pin — it scans a tree no changed-file map can attribute
+//! to this crate, so every scoped gate runs it whatever its scope
+//! (`tree_wide_pins` in infra/gate.sh; backlog c87ad472).
 
 use boss_testing::{repo_root, scratch_dir, write_file};
 use std::path::{Path, PathBuf};

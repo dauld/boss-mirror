@@ -7,6 +7,7 @@
 // hint) must stand whenever a filter is set.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { servePeopleRows } from './_smokeMocks';
 
 const EMP = { id: 'emp-david', name: 'David', email: 'd@a', role: 'platform-admin',
   department: 'it', hire_date: '2023-01-01', status: 'active', location: 'loc-hq',
@@ -26,6 +27,7 @@ async function mocks(page: Page, drained: { yes: boolean }) {
   // Catch-all FIRST — routes match last-registered-first.
   await page.route('**/api/**', (r) => json(r, []));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: 'emp-david', role: 'platform-admin' }));
   await page.route(/\/api\/jobs\/assignments/, (r) =>

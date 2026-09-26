@@ -94,8 +94,8 @@ const SILENT: ReadonlyMap<string, string> = new Map([
 /// the read and asserted the page's roster-failure line. A regression
 /// to "No employees match those filters." would have passed every spec.
 /// Breaking it on the one route that owns it keeps the other 50 crawled
-/// with the shell they need. The session read beside it tolerates the
-/// failure (loadSession falls through on an empty roster), and the
+/// with the shell they need. The shell no longer reads the roster at
+/// all — it reads the viewer's own row (backlog b4f68a65) — and the
 /// crawl's mocked session is unauthenticated anyway, so the shell still
 /// paints.
 ///

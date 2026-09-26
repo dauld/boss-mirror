@@ -68,7 +68,7 @@ fn firing(rule: &str, at: &str) -> (String, LastFiring) {
     )
 }
 
-fn app(firings: Option<Vec<(String, LastFiring)>>) -> (axum::Router, Arc<InMemoryJobs>) {
+fn app(firings: Option<InMemoryDispatcherFirings>) -> (axum::Router, Arc<InMemoryJobs>) {
     let jobs = Arc::new(InMemoryJobs::new());
     let policy_client: Arc<dyn PolicyClient> = Arc::new(
         FakePolicyClient::builder()
@@ -77,9 +77,7 @@ fn app(firings: Option<Vec<(String, LastFiring)>>) -> (axum::Router, Arc<InMemor
     );
     let bus = RecordingEventBus::new();
     let bus_dyn: Arc<dyn EventBus> = bus.clone();
-    let dispatcher_firings = firings.map(|f| {
-        Arc::new(InMemoryDispatcherFirings::new(f)) as Arc<dyn DispatcherFiringsRepository>
-    });
+    let dispatcher_firings = firings.map(|f| Arc::new(f) as Arc<dyn DispatcherFiringsRepository>);
     let state = JobsApiState {
         dispatcher_firings,
         ..JobsApiState::minimal(
@@ -159,11 +157,19 @@ async fn get(app: &axum::Router, role: &str) -> (StatusCode, Value) {
 
 #[tokio::test]
 async fn every_rule_answers_its_newest_firing_and_its_dead_letters() {
-    let (app, jobs) = app(Some(vec![
-        firing("auto-park-on-gate-green", "2026-09-24T09:00:00Z"),
-        firing("auto-park-on-gate-green", "2026-09-24T11:00:00Z"),
-        firing("complete-marker-on-step-ready", "2026-09-23T08:00:00Z"),
-    ]));
+    let (app, jobs) = app(Some(
+        InMemoryDispatcherFirings::new(vec![
+            firing("auto-park-on-gate-green", "2026-09-24T09:00:00Z"),
+            firing("auto-park-on-gate-green", "2026-09-24T11:00:00Z"),
+            firing("complete-marker-on-step-ready", "2026-09-23T08:00:00Z"),
+        ])
+        // 4b175523: a dead-letter on a topic that names no packet is a
+        // row in the firing record, and the rollup counts it.
+        .with_unrouted_dead_letters(vec![
+            ("issue-invoice".into(), t("2026-09-24T10:00:00Z")),
+            ("issue-invoice".into(), t("2026-09-24T10:30:00Z")),
+        ]),
+    ));
     let now = t(NOW);
     // The stalled shape: the rule fired at 11:00 and dead-lettered
     // after it, on two packets — one of them since closed by hand.
@@ -211,14 +217,20 @@ async fn every_rule_answers_its_newest_firing_and_its_dead_letters() {
     let dead = v["dead_letters"]
         .as_array()
         .expect("dead letters read: {v}");
-    assert_eq!(dead.len(), 1, "{v}");
+    assert_eq!(dead.len(), 2, "{v}");
     assert_eq!(dead[0]["rule"], "auto-park-on-gate-green");
     assert_eq!(dead[0]["packets"], 2);
+    assert_eq!(dead[0]["unrouted"], 0);
     assert_eq!(dead[0]["newest_at"], "2026-09-24T11:45:00Z");
     assert_eq!(
         dead[0]["newest_job_id"],
         "22222222-2222-2222-2222-222222222222"
     );
+    assert_eq!(dead[1]["rule"], "issue-invoice");
+    assert_eq!(dead[1]["packets"], 0);
+    assert_eq!(dead[1]["unrouted"], 2, "{v}");
+    assert_eq!(dead[1]["newest_at"], "2026-09-24T10:30:00Z");
+    assert_eq!(dead[1]["newest_job_id"], Value::Null, "no packet to open");
     assert_eq!(v["dead_letters_error"], Value::Null);
 }
 
@@ -236,11 +248,19 @@ async fn an_unwired_record_and_an_unscoped_caller_answer_null_with_the_reason() 
             .is_some_and(|e| e.contains("not wired")),
         "{v}"
     );
-    assert!(v["dead_letters"].is_array(), "{v}");
+    // The dead-letters that name no packet live in that same record, so
+    // the count is unread too — never "none" missing a half (4b175523).
+    assert_eq!(v["dead_letters"], Value::Null, "{v}");
+    assert!(
+        v["dead_letters_error"]
+            .as_str()
+            .is_some_and(|e| e.contains("name no packet")),
+        "{v}"
+    );
 
     // A caller whose policy reads no packets cannot be told there are no
     // dead-letters on them: unknown, with the reason.
-    let (wired, _) = app(Some(vec![]));
+    let (wired, _) = app(Some(InMemoryDispatcherFirings::new(vec![])));
     let (status, v) = get(&wired, "nobody").await;
     assert_eq!(status, StatusCode::OK, "{v}");
     assert_eq!(v["firings"], json!([]));

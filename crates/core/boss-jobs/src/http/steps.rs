@@ -1059,9 +1059,11 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         // wrote the whole row back closed with no outcome (.586476). A
         // write that changes nothing cannot have made a packet closable,
         // so it has nothing to close: answer 204 and touch nothing.
-        // (Both closes are still whole-row writes; a writer that DOES
-        // change a step can still race one — the compare-and-set close
-        // is the rest of 29a7ea09.)
+        // (A writer that DOES change a step can still race another
+        // close; both step-driven closes go through `close_job_at`, which
+        // merges only the keys a close owns into a row still open, and
+        // the job PUT's hand close lands only on a row still in the
+        // status it read — the rest of 29a7ea09.)
         if step == old {
             return StatusCode::NO_CONTENT.into_response();
         }
@@ -1189,11 +1191,33 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
         // gets the 422 that tells it to run the ceremony (the contract
         // an_assurance_holds_on_every_path pins); this refusal speaks
         // only to one that did.
+        //
+        // AND NOTHING BESIDE IT (backlog 42e7c6b9, the review of car
+        // 52ad60e6). The hash covers title and metadata only, so the
+        // completing PUT could still carry `notes` and `assignee_id`:
+        // 204, and the step finished holding words and a holder no
+        // passkey saw. Those two ride the same refusal, named in
+        // `refused_fields`. (Who dates the completion is f3e78bdf.)
         if assured.required >= boss_core::job::Assurance::Presence {
             let judged = boss_core::job::step_shape_hash(&old.title, &old.metadata);
             let completing = boss_core::job::step_shape_hash(&step.title, &step.metadata);
+            let mut moved: Vec<&str> = Vec::new();
+            if judged != completing {
+                if step.title != old.title {
+                    moved.push("title");
+                }
+                if step.metadata != old.metadata || moved.is_empty() {
+                    moved.push("metadata");
+                }
+            }
+            if step.notes != old.notes {
+                moved.push("notes");
+            }
+            if step.assignee_id != old.assignee_id {
+                moved.push("assignee_id");
+            }
             let skipping = step.status == StepStatus::Skipped;
-            if judged != completing || skipping {
+            if !moved.is_empty() || skipping {
                 return (
                     StatusCode::CONFLICT,
                     Json(serde_json::json!({
@@ -1201,8 +1225,9 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
                             "a presence-assured step is completed, never skipped"
                         } else {
                             "a presence-assured step completes the content its ceremony saw \
-                             — this PUT also changes its title or metadata"
+                             — this PUT also changes its title, metadata, notes or holder"
                         },
+                        "refused_fields": moved,
                         "step_id": step_id.to_string(),
                         "merge_door": format!("/api/jobs/{job_id}/steps/{step_id}/metadata"),
                         "hint": PRESENCE_CONTENT_HINT,

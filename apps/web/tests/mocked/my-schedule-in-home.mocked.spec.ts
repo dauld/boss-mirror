@@ -17,7 +17,7 @@
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { mountPage } from './_helpers';
-import { DEPARTMENT_CLASSES, installSmokeMocks } from './_smokeMocks';
+import { DEPARTMENT_CLASSES, installSmokeMocks, servePeopleRows } from './_smokeMocks';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 
 const json = (r: Route, body: unknown, status = 200): Promise<void> =>
@@ -50,6 +50,7 @@ async function homeAs(page: Page, role: string, row: Record<string, unknown>): P
     employment_type: 'full-time', skills: [], certifications: [],
   };
   await page.route(/\/api\/people$/, (r) => json(r, [emp]));
+  await servePeopleRows(page, [emp]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'reader', employee_id: emp.id, role }));
   await page.route(/\/api\/classes(\?|$)/, (r) => json(r, [row, ...DEPARTMENT_CLASSES]));

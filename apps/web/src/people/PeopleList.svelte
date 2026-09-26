@@ -19,7 +19,8 @@
     tenureYears,
     type CodeFilter,
   } from './utils';
-  import { countedLabel, rosterHeader, rosterRead } from './roster-counts';
+  import { rosterHeader } from './roster-counts';
+  import { countLabel, readStateOfLoad } from '../data/readState';
   import { classesFor } from '@boss/web-kit/session/classes.svelte';
   import { rowLink } from '@boss/web-kit/ui/RowLink';
   import { href, navigate } from '../router';
@@ -73,7 +74,7 @@
   // read — backlog 47eadca3: they counted the `[]` it starts as, so a
   // loading or failed read printed "0 active employees" and Active (0)
   // above an honest "Couldn't load the roster".
-  let read = $derived(rosterRead(loading, loadFailed));
+  let read = $derived(readStateOfLoad(loading, loadFailed));
   let header = $derived(rosterHeader(read, activeRoster.length, expiring90.length));
 
   // The Status buttons come from the (employee, status) Classes (loaded
@@ -200,24 +201,24 @@
               active={status.kind === 'code' && status.code === b.code}
               onclick={() => (status = { kind: 'code', code: b.code })}
             >
-              {countedLabel(b.label, b.count, read)}
+              {countLabel(b.label, read, b.count)}
             </FilterButton>
           {/each}
           <FilterButton active={status.kind === 'all'} onclick={() => (status = { kind: 'all' })}>
-            {countedLabel('All', roster.length, read)}
+            {countLabel('All', read, roster.length)}
           </FilterButton>
       </FilterGroup>
 
       <FilterGroup label="Department">
           <FilterButton active={dept.kind === 'all'} onclick={() => (dept = { kind: 'all' })}>
-            {countedLabel('All', statusAdmitted.length, read)}
+            {countLabel('All', read, statusAdmitted.length)}
           </FilterButton>
           {#each deptButtons as b (b.code ?? '')}
             <FilterButton
               active={dept.kind === 'code' && dept.code === b.code}
               onclick={() => (dept = { kind: 'code', code: b.code })}
             >
-              {countedLabel(b.label, b.count, read)}
+              {countLabel(b.label, read, b.count)}
             </FilterButton>
           {/each}
       </FilterGroup>

@@ -123,3 +123,60 @@ async fn every_rules_newest_firing_is_one_row_per_rule() {
     );
     assert_eq!(all[0].fired_on, "jobs.gate.green");
 }
+
+/// 4b175523: a dead-letter on a topic that names no packet is an
+/// `outcome = 'dead-letter'` row. It is NOT a firing — neither firing
+/// read may answer with it, or a rule failing every event would read
+/// "fired a minute ago" — and the dead-letter read counts it per rule
+/// inside the window.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dead_letter_row_is_read_as_a_dead_letter_and_never_as_a_firing() {
+    let db = TestDb::new().await;
+    let repo = PgDispatcherFirings::new(db.pool.clone());
+    insert(
+        &db.pool,
+        "dispatcher:issue-invoice:evt-1",
+        "issue-invoice",
+        "2026-09-26T09:00:00Z",
+    )
+    .await;
+    for (id, at) in [
+        ("evt-2", "2026-09-26T10:00:00Z"),
+        ("evt-3", "2026-09-26T11:00:00Z"),
+        // Outside the window asked for below.
+        ("evt-0", "2026-08-01T00:00:00Z"),
+    ] {
+        sqlx::query(
+            "INSERT INTO dispatcher_firings \
+             (firing_id, rule_name, fired_on, fired_at, detail, outcome) \
+             VALUES ($1, 'issue-invoice', 'commerce.invoice.issued', $2, '{}'::jsonb, 'dead-letter')",
+        )
+        .bind(format!("dead-letter:issue-invoice:{id}"))
+        .bind(at.parse::<chrono::DateTime<Utc>>().unwrap())
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    }
+
+    let last = repo.last_firing("issue-invoice").await.unwrap().unwrap();
+    assert_eq!(
+        last.firing_id, "dispatcher:issue-invoice:evt-1",
+        "the newest FIRING, not the newer dead-letters"
+    );
+    let all = repo.last_firings().await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(
+        all[0].fired_at,
+        Utc.with_ymd_and_hms(2026, 9, 26, 9, 0, 0).unwrap()
+    );
+
+    let since = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+    let dead = repo.unrouted_dead_letters(since).await.unwrap();
+    assert_eq!(dead.len(), 1, "{dead:?}");
+    assert_eq!(dead[0].rule, "issue-invoice");
+    assert_eq!(dead[0].count, 2, "the August one is outside the window");
+    assert_eq!(
+        dead[0].newest_at,
+        Utc.with_ymd_and_hms(2026, 9, 26, 11, 0, 0).unwrap()
+    );
+}

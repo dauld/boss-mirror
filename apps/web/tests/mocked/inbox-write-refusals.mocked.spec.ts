@@ -19,7 +19,7 @@
 // the two must not look alike.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { installApiFloor } from './_smokeMocks';
+import { installApiFloor, servePeopleRows } from './_smokeMocks';
 import { ROUTE_CATALOG } from '../../src/shell/nav-catalog';
 
 const PATH = ROUTE_CATALOG.inbox.path;
@@ -55,6 +55,7 @@ async function inboxMocks(page: Page): Promise<{ read: () => boolean; markRead: 
   });
   await installApiFloor(page);
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: EMP.id, role: 'platform-admin' }));
   await page.route(/\/api\/messages\/inbox\//, (r) =>

@@ -52,7 +52,7 @@ async fn a_finished_status_does_not_move<R: JobsRepository>(repo: &R, adapter: &
         ended.status = finished;
         ended.closed_on = Some(NaiveDate::from_ymd_opt(2026, 8, 2).unwrap());
         ended.metadata = serde_json::json!({ "outcome": "done" });
-        repo.update_job_at(&ended, Utc::now(), &[])
+        repo.update_job_at(&ended, JobStatus::Open, Utc::now(), &[])
             .await
             .expect("an open packet ends");
 
@@ -60,7 +60,7 @@ async fn a_finished_status_does_not_move<R: JobsRepository>(repo: &R, adapter: &
         let mut late = stale.clone();
         late.title = "Written from a read taken before the close".into();
         let err = repo
-            .update_job_at(&late, Utc::now(), &[])
+            .update_job_at(&late, JobStatus::Open, Utc::now(), &[])
             .await
             .expect_err("a stale open copy must not reopen a finished packet");
         assert!(
@@ -75,12 +75,29 @@ async fn a_finished_status_does_not_move<R: JobsRepository>(repo: &R, adapter: &
             _ => JobStatus::Closed,
         };
         let err = repo
-            .update_job_at(&flipped, Utc::now(), &[])
+            .update_job_at(&flipped, finished, Utc::now(), &[])
             .await
             .expect_err("a finished packet's end state does not flip");
         assert!(
             matches!(err, JobsError::TerminalJob { .. }),
             "{adapter}: {err:?}"
+        );
+
+        // Nor does a second close written from a copy read while the
+        // packet was open — the hand close that lost to the close above
+        // (backlog 29a7ea09). It keeps the finished status, so the
+        // status guard alone let it through, and its body erased the
+        // outcome the winning close had stamped.
+        let mut second = stale.clone();
+        second.status = finished;
+        second.closed_on = Some(NaiveDate::from_ymd_opt(2026, 8, 3).unwrap());
+        let err = repo
+            .update_job_at(&second, JobStatus::Open, Utc::now(), &[])
+            .await
+            .expect_err("a close from a copy read open must not land on a finished packet");
+        assert!(
+            matches!(err, JobsError::TerminalJob { .. }),
+            "{adapter}: refused as TerminalJob, got {err:?}"
         );
 
         let after = repo.get_job(&id).await.unwrap().expect("job exists");
@@ -98,7 +115,7 @@ async fn a_finished_status_does_not_move<R: JobsRepository>(repo: &R, adapter: &
         // a retitle after the close is not a reopen.
         let mut retitled = after.clone();
         retitled.title = "Retitled after the close".into();
-        repo.update_job_at(&retitled, Utc::now(), &[])
+        repo.update_job_at(&retitled, finished, Utc::now(), &[])
             .await
             .expect("a write that keeps the status lands");
         let after = repo.get_job(&id).await.unwrap().expect("job exists");
@@ -108,7 +125,7 @@ async fn a_finished_status_does_not_move<R: JobsRepository>(repo: &R, adapter: &
     // Control: a job that does not exist is still NotFound.
     let missing = job(JobId::from_uuid(Uuid::new_v4()));
     let err = repo
-        .update_job_at(&missing, Utc::now(), &[])
+        .update_job_at(&missing, JobStatus::Open, Utc::now(), &[])
         .await
         .expect_err("no such job");
     assert!(matches!(err, JobsError::NotFound(_)), "{adapter}: {err:?}");

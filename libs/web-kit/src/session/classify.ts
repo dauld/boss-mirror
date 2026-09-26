@@ -1,7 +1,8 @@
 // Pure session logic, deliberately free of runes.
 //
 // classifyProbe and guestEmployee are ordinary functions: given a
-// gateway probe body and a roster, they decide who you are. They used
+// gateway probe body and the read of the viewer's own people row, they
+// decide who you are. They used
 // to live in session.svelte.ts beside `export const session =
 // $state(...)`, and a module-level rune makes the whole module
 // unloadable outside the Svelte compiler - so the seven test files in
@@ -37,11 +38,18 @@ export type SessionState =
   | { kind: 'loading' }
   | { kind: 'ready'; user: Employee }
   | { kind: 'unauthenticated' }
-  | { kind: 'unrecognized'; username: string };
+  | { kind: 'unrecognized'; username: string }
+  /// Signed in as an employee whose people row could not be READ — a
+  /// refusal or a network error, not an answer. Distinct from
+  /// `unrecognized` (the people service answered: no such employee),
+  /// because a blink of /api/people used to render a real operator as
+  /// an unrecognized login with nothing on screen saying a read had
+  /// failed (backlog b4f68a65). `error` names the read, in the
+  /// `<url>: HTTP <status>` shape every page's failed-read line uses.
+  | { kind: 'unresolved'; username: string; error: string };
 
 export type SessionEnvelope = {
   value: SessionState;
-  roster: ReadonlyArray<Employee>;
   fromGateway: boolean;
   /// True for the read-only guest: every read surface renders,
   /// and surfaces that offer writes may hide or soften them.
@@ -111,16 +119,69 @@ export type ProbeBody = {
   role?: string;
 };
 
+/// What reading the viewer's own people row answered. `absent` is an
+/// ANSWER — no employee id to ask about, or the people service said
+/// 404 "no employee with ID" — and `failed` is the absence of one.
+export type ViewerRead =
+  | { kind: 'found'; employee: Employee }
+  | { kind: 'absent' }
+  | { kind: 'failed'; error: string };
+
+type Fetch = (url: string) => Promise<Pick<Response, 'ok' | 'status' | 'json'>>;
+
+function isEmployeeRow(body: unknown, id: string): body is Employee {
+  return typeof body === 'object' && body !== null && !Array.isArray(body)
+    && (body as { id?: unknown }).id === id;
+}
+
+/// Read ONE people row — the viewer's, or a persona's. The shell used
+/// to fetch the whole /api/people roster on every load to find this one
+/// row, and dropped a failed read on the floor (backlog b4f68a65,
+/// measured 2026-09-26): every page that names people read the roster
+/// again, and a failed shell read left an empty map that classified a
+/// signed-in operator as `unrecognized`. One row, and a failure that
+/// says so. The error text is the `<url>: HTTP <status>` /
+/// `<url>: <message>` shape of apps/web's readState, so the line the
+/// chrome renders reads like every other failed people read.
+export async function readPeopleRow(
+  id: string,
+  fetchFn: Fetch = (url) => fetch(url),
+): Promise<ViewerRead> {
+  const url = `/api/people/${encodeURIComponent(id)}`;
+  try {
+    const resp = await fetchFn(url);
+    if (resp.status === 404) return { kind: 'absent' };
+    if (!resp.ok) return { kind: 'failed', error: `${url}: HTTP ${resp.status}` };
+    const body = (await resp.json()) as unknown;
+    // A 200 that is not a row — a proxy's `[]`, an error envelope — is
+    // not the viewer, and rendering it as one crashes the chrome.
+    if (!isEmployeeRow(body, id)) return { kind: 'failed', error: `${url}: not an employee row` };
+    return { kind: 'found', employee: body };
+  } catch (e) {
+    return { kind: 'failed', error: `${url}: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 /// Pure classification of the gateway probe — extracted so the
 /// guest/unrecognized boundary is a tested decision, not a branch
 /// buried in a fetch handler.
 export function classifyProbe(
   body: ProbeBody,
-  byId: Map<string, Employee>,
+  viewer: ViewerRead,
 ): { value: SessionState; readonly: boolean } | null {
   const username = body.username ?? '';
-  const emp = body.employee_id ? (byId.get(body.employee_id) ?? null) : null;
-  if (emp) return { value: { kind: 'ready', user: emp }, readonly: false };
+  if (viewer.kind === 'found') {
+    return { value: { kind: 'ready', user: viewer.employee }, readonly: false };
+  }
+  // The row could not be read, so who this is is UNKNOWN — not
+  // unknown-to-the-people-service. Saying `unrecognized` here is the
+  // defect b4f68a65 names.
+  if (viewer.kind === 'failed') {
+    return {
+      value: { kind: 'unresolved', username: username || (body.employee_id ?? ''), error: viewer.error },
+      readonly: false,
+    };
+  }
   // A session with no employee and a read-only-floor role is the
   // guest — a first-class read-only persona, not a broken login.
   if (username && body.role && READ_ONLY_GUEST_ROLES.includes(body.role)) {

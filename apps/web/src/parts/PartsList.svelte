@@ -19,7 +19,8 @@
     type PurchaseOrder,
     type StockStatus,
   } from './types';
-  import { countedLabel, partsHeader, stockRead } from './stock-counts';
+  import { partsHeader } from './stock-counts';
+  import { countLabel, readStateOfLoad } from '../data/readState';
   import { rowLink } from '@boss/web-kit/ui/RowLink';
   import { href, navigate } from '../router';
   import { getLabel } from '@boss/web-kit/session/manifest.svelte';
@@ -164,7 +165,7 @@
   // backlog f867d71c: they counted the `[]` the inventory starts as, so
   // a loading or failed read printed "0 need attention · 0 out · 0
   // critical" and All (0) above an honest "Couldn't load parts".
-  let read = $derived(stockRead(loading, loadFailed));
+  let read = $derived(readStateOfLoad(loading, loadFailed));
   let header = $derived(
     partsHeader(read, getLabel('parts.page_title', 'parts'), {
       total: counts.total,
@@ -219,44 +220,44 @@
 
       <FilterGroup label="Stock status">
           <FilterButton active={filter === 'needs-attention'} onclick={() => (filter = 'needs-attention')}>
-            {countedLabel('Needs attention', attention, read)}
+            {countLabel('Needs attention', read, attention)}
           </FilterButton>
           <FilterButton active={filter === 'all'} onclick={() => (filter = 'all')}>
-            {countedLabel('All', counts.total, read)}
+            {countLabel('All', read, counts.total)}
           </FilterButton>
           <FilterButton active={filter === 'out'} onclick={() => (filter = 'out')}>
-            {countedLabel('Out of stock', counts.out, read)}
+            {countLabel('Out of stock', read, counts.out)}
           </FilterButton>
           <FilterButton active={filter === 'critical'} onclick={() => (filter = 'critical')}>
-            {countedLabel('Critical', counts.critical, read)}
+            {countLabel('Critical', read, counts.critical)}
           </FilterButton>
           <FilterButton active={filter === 'low'} onclick={() => (filter = 'low')}>
-            {countedLabel('Low', counts.low, read)}
+            {countLabel('Low', read, counts.low)}
           </FilterButton>
           <FilterButton active={filter === 'healthy'} onclick={() => (filter = 'healthy')}>
-            {countedLabel('Healthy', counts.healthy, read)}
+            {countLabel('Healthy', read, counts.healthy)}
           </FilterButton>
       </FilterGroup>
 
       <FilterGroup label="Kind">
           {#if counts.ingredient > 0}
             <FilterButton active={filter === 'ingredient'} onclick={() => (filter = 'ingredient')}>
-              {countedLabel('Ingredients', counts.ingredient, read)}
+              {countLabel('Ingredients', read, counts.ingredient)}
             </FilterButton>
           {/if}
           {#if counts.packaging > 0}
             <FilterButton active={filter === 'packaging'} onclick={() => (filter = 'packaging')}>
-              {countedLabel('Packaging', counts.packaging, read)}
+              {countLabel('Packaging', read, counts.packaging)}
             </FilterButton>
           {/if}
           {#if counts.spare > 0}
             <FilterButton active={filter === 'spare'} onclick={() => (filter = 'spare')}>
-              {countedLabel('Spare parts', counts.spare, read)}
+              {countLabel('Spare parts', read, counts.spare)}
             </FilterButton>
           {/if}
           {#if counts.consumable > 0}
             <FilterButton active={filter === 'consumable'} onclick={() => (filter = 'consumable')}>
-              {countedLabel('Consumables', counts.consumable, read)}
+              {countLabel('Consumables', read, counts.consumable)}
             </FilterButton>
           {/if}
       </FilterGroup>

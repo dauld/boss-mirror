@@ -25,11 +25,20 @@
 //! be the false-green the whole surface exists to refuse — the failure
 //! has its own record (the dead-letter, `super::dead_letter`).
 //!
-//! WHAT IS NOT HERE: the clock-driven schedule runner
-//! (`super::schedule_runner`). It fires on a sim-day boundary rather
-//! than an event, no border on the map names it as its machine, and a
-//! record nobody reads is the shape this car exists to remove — not
-//! add. Its firings join the same table when a surface asks.
+//! THE SCHEDULE RUNNER WRITES HERE TOO (backlog 4b175523). It was left
+//! out "until a surface asks", and the rules list asked: every
+//! scheduled rule — 24 of 76 live on 2026-09-26 — could only read "not
+//! recorded", so a stalled cadence and an idle one looked the same. A
+//! day rule's id is `dispatcher:<rule>:clock-day:<day>`, so a crash
+//! between firing a sim-day and persisting the cursor re-fires the day
+//! and records it once; a sub-day rule's is keyed by its tick instant.
+//!
+//! AND WHAT DID NOT DELIVER, WHEN NO PACKET CAN SAY SO. A dead-letter on
+//! a topic whose subject is not a packet (`super::dead_letter::
+//! annotation_target` answers None) has no packet to be annotated on;
+//! it is recorded here as an [`Outcome::DeadLetter`] row under
+//! [`dead_letter_id`], so the rules list's rollup can count it and the
+//! liveness counter can call it recorded (4b175523).
 //!
 //! BEST-EFFORT, ALWAYS. Recording happens after the settle is decided
 //! and can never change it: a firing record that could not be written
@@ -51,6 +60,27 @@ pub use boss_jobs::dispatcher_firings::RETENTION_DAYS;
 /// nothing and keeps the hot path one INSERT.
 pub const PRUNE_EVERY_MINUTES: i64 = 60;
 
+/// What a row says the rule did on its event — the `outcome` column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Every handler of the rule succeeded.
+    Fired,
+    /// The handlers failed past the budget (or permanently) on a topic
+    /// that names no packet to annotate.
+    DeadLetter,
+}
+
+impl Outcome {
+    /// The column's spelling, which the migration's CHECK and the
+    /// jobs API's readers (`boss_jobs::dispatcher_firings`) share.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Fired => "fired",
+            Outcome::DeadLetter => "dead-letter",
+        }
+    }
+}
+
 /// One rule firing, as the row holds it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Firing {
@@ -60,6 +90,7 @@ pub struct Firing {
     pub fired_on: String,
     pub fired_at: DateTime<Utc>,
     pub detail: Value,
+    pub outcome: Outcome,
 }
 
 /// The exactly-once id of one rule's firing on one event. Deterministic
@@ -69,6 +100,33 @@ pub struct Firing {
 /// them".
 pub fn firing_id(rule: &str, event_id: &str) -> String {
     format!("dispatcher:{rule}:{event_id}")
+}
+
+/// The exactly-once id of one rule's dead-letter on one event. A prefix
+/// of its own, so a log-tail restart that later DELIVERS the same event
+/// (a fresh budget) records its firing instead of the primary key
+/// swallowing it as the dead-letter already held.
+pub fn dead_letter_id(rule: &str, event_id: &str) -> String {
+    format!("dead-letter:{rule}:{event_id}")
+}
+
+/// The rules whose handlers ALL succeeded, in fire order, each once: a
+/// rule with three handlers fired once on its event, and a rule with one
+/// failed handler did not fire at all — its record is the dead-letter.
+/// The one reading of "fired" both runners record by.
+pub fn fired_rules(results: &[super::handler::InvocationResult]) -> Vec<String> {
+    let failed: std::collections::HashSet<&str> = results
+        .iter()
+        .filter(|r| r.outcome.is_err())
+        .map(|r| r.rule_name.as_str())
+        .collect();
+    let mut fired: Vec<String> = Vec::new();
+    for r in results {
+        if !failed.contains(r.rule_name.as_str()) && !fired.contains(&r.rule_name) {
+            fired.push(r.rule_name.clone());
+        }
+    }
+    fired
 }
 
 /// Where a firing is recorded. A port, so the runner's tests assert
@@ -140,14 +198,15 @@ mod pg {
             for f in firings {
                 sqlx::query(
                     "INSERT INTO dispatcher_firings \
-                     (firing_id, rule_name, fired_on, fired_at, detail) \
-                     VALUES ($1, $2, $3, $4, $5) ON CONFLICT (firing_id) DO NOTHING",
+                     (firing_id, rule_name, fired_on, fired_at, detail, outcome) \
+                     VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (firing_id) DO NOTHING",
                 )
                 .bind(&f.firing_id)
                 .bind(&f.rule)
                 .bind(&f.fired_on)
                 .bind(f.fired_at)
                 .bind(&f.detail)
+                .bind(f.outcome.as_str())
                 .execute(&self.pool)
                 .await
                 .map_err(|e| format!("recording firing {}: {e}", f.firing_id))?;
@@ -158,9 +217,95 @@ mod pg {
     }
 }
 
+/// In-memory sinks for the runners' tests: one that keeps what it was
+/// asked to record, one that fails the way a down database would.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use std::sync::Arc;
+
+    pub(crate) struct RecordingFirings {
+        pub(crate) recorded: tokio::sync::Mutex<Vec<Firing>>,
+    }
+
+    impl RecordingFirings {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                recorded: tokio::sync::Mutex::new(Vec::new()),
+            })
+        }
+        pub(crate) async fn rules(&self) -> Vec<String> {
+            self.recorded
+                .lock()
+                .await
+                .iter()
+                .map(|f| f.rule.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait]
+    impl FiringSink for RecordingFirings {
+        async fn record(&self, firings: &[Firing]) -> Result<(), String> {
+            self.recorded.lock().await.extend_from_slice(firings);
+            Ok(())
+        }
+    }
+
+    pub(crate) struct FailingFirings;
+
+    #[async_trait]
+    impl FiringSink for FailingFirings {
+        async fn record(&self, _firings: &[Firing]) -> Result<(), String> {
+            Err("connection refused".into())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::handler::{HandlerError, InvocationResult};
     use super::*;
+
+    fn result(rule: &str, ok: bool) -> InvocationResult {
+        InvocationResult {
+            rule_name: rule.to_string(),
+            handler: "h".to_string(),
+            outcome: if ok {
+                Ok(())
+            } else {
+                Err(HandlerError::Permanent("bad arg".into()))
+            },
+        }
+    }
+
+    #[test]
+    fn a_rule_fired_only_when_every_one_of_its_handlers_succeeded() {
+        let fired = fired_rules(&[
+            result("a", true),
+            result("a", true),
+            result("b", true),
+            result("b", false),
+            result("c", true),
+        ]);
+        assert_eq!(
+            fired,
+            ["a", "c"],
+            "each once, in order; b failed one handler"
+        );
+        assert!(fired_rules(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_dead_letter_and_a_firing_on_one_event_never_share_an_id() {
+        // A log-tail restart re-presents a dead-lettered event with a
+        // fresh budget; if it delivers, its firing must land beside the
+        // dead-letter, not be swallowed by the primary key.
+        assert_ne!(dead_letter_id("r", "evt-1"), firing_id("r", "evt-1"));
+        assert_eq!(dead_letter_id("r", "evt-1"), "dead-letter:r:evt-1");
+        assert_eq!(Outcome::Fired.as_str(), "fired");
+        assert_eq!(Outcome::DeadLetter.as_str(), "dead-letter");
+    }
 
     #[test]
     fn a_redelivered_event_computes_the_same_firing_id() {

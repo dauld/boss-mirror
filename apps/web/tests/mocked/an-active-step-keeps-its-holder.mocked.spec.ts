@@ -7,6 +7,7 @@
 // step, whose nomination nobody has claimed, it stays live.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { servePeopleRows } from './_smokeMocks';
 
 const JOB_ID = 'job-held-1';
 
@@ -39,6 +40,7 @@ async function mocks(page: Page, s: ReturnType<typeof step>): Promise<void> {
     { kind: 'task', label: 'Task', category: 'generic', ux: 'inline', description: '' },
   ]));
   await page.route(/\/api\/people$/, (r) => json(r, [OPERATOR]));
+  await servePeopleRows(page, [OPERATOR]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: OPERATOR.id, role: OPERATOR.role }));
 }

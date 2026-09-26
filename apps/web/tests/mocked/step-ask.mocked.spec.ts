@@ -16,6 +16,7 @@
 // button naming the route; the missing field named in the row.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { servePeopleRows } from './_smokeMocks';
 
 const JOB_ID = '6f58e9a1-0000-4000-8000-000000000001';
 const STEP_ID = '19b29853-0000-4000-8000-000000000002';
@@ -93,6 +94,7 @@ async function mocks(
   // order, so later, more specific routes win over this one.
   await page.route('**/api/**', (r) => json(r, { data: [], total: 0 }));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: EMP.id, role: EMP.role }));
   await page.route(/\/api\/jobs\/step-types$/, (r) =>

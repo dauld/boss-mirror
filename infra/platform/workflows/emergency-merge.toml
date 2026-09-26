@@ -102,9 +102,14 @@ name = "receipt_sha"
 field_type = "string"
 required = true
 
+# The three verdicts `infra/gate.sh` writes into `.gate-receipt.json`
+# (`write_receipt "green" | "failed" | "refused"`). v1 typed this
+# `green`, which the validator read as an unknown type and accepted ANY
+# value under (backlog fcae2bfa); now the receipt's own word is
+# recorded, and only `green` opens the approval.
 [[workflow.step.fields]]
 name = "receipt_verdict"
-field_type = "green"
+field_type = "green|failed|refused"
 required = true
 
 [[workflow.step.fields]]
@@ -115,7 +120,7 @@ required = true
 [[workflow.step]]
 title = "approve"
 kind = "sign-off"
-ready_when = "steps.gate-locally.done"
+ready_when = "steps.gate-locally.done AND steps.gate-locally.metadata.receipt_verdict = \"green\""
 title_template = "Approve the train bypass — the operator's call"
 authority_role = "platform-admin"
 sign_offs_required = ["platform-admin"]
@@ -172,6 +177,16 @@ ready_when = "steps.undo-first.done AND steps.undo-first.metadata.undo_result = 
 title_template = "Restored by rollback — no merge lane needed"
 metadata_defaults = { outcome_kind = "completed" }
 terminal = { outcome = "rolled-back" }
+
+# A local gate that did not come back green is the end of this lane:
+# nothing is put in front of the approver without a green receipt.
+[[workflow.step]]
+title = "not-green"
+kind = "outcome"
+ready_when = "steps.gate-locally.done AND steps.gate-locally.metadata.receipt_verdict != \"green\""
+title_template = "Local gate not green — no bypass is asked for"
+metadata_defaults = { outcome_kind = "aborted" }
+terminal = { outcome = "not-green" }
 
 [[workflow.step]]
 title = "refused"

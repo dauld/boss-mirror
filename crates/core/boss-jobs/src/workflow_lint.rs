@@ -7,7 +7,9 @@
 //! - **Phase 0 — metadata shapes.** Every value in a step's
 //!   `metadata_defaults` matches its StepType field's declared type
 //!   (catches a not-in-enum value like `channel = "in-person"` at
-//!   author time instead of mid-run).
+//!   author time instead of mid-run), and every step-authored field
+//!   declares a type the validator can run — a builtin or a `|` enum
+//!   (fcae2bfa: a single-token `green` accepted any value).
 //! - **Phase 1 — structural.** At least one trigger (`ready_when =
 //!   "true"`), at least one terminal, every `steps.<slug>` reference
 //!   resolves, the dependency graph is acyclic, and every leaf is a
@@ -56,7 +58,7 @@
 //! name the problem the whole time, and publish never asked it.
 
 use crate::registry::{StepSpec, WorkflowSpec, predicate_refs_job_metadata, predicate_step_refs};
-use crate::step_registry::StepRegistry;
+use crate::step_registry::{StepRegistry, field_type_problem};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -89,6 +91,7 @@ pub fn validate_workflow(spec: &WorkflowSpec, registry: &StepRegistry) -> Vec<Wo
     let mut errs = Vec::new();
     // Phase 0 — metadata default value shapes.
     for step in &spec.steps {
+        check_field_types_are_known(spec, step, &mut errs);
         check_metadata_defaults_values(spec, step, registry, &mut errs);
         check_item_keys_name_an_array(spec, step, &mut errs);
         check_covers_names_an_array_on_the_same_step(spec, step, &mut errs);
@@ -1097,6 +1100,28 @@ fn check_metadata_defaults_values(
 /// True when the value is an obvious placeholder rather than a real
 /// default (e.g. `""` for a date field a downstream step populates at
 /// completion time).
+/// Every step-authored field declares a type the completion validator
+/// can run: a builtin or a `|` enum ([`field_type_problem`], the one
+/// grammar). The validator refuses every value of an unknown type, so a
+/// row that published one would describe a step no executor can
+/// complete; refused here instead, naming the field (backlog fcae2bfa —
+/// emergency-merge v1's `receipt_verdict = "green"`).
+fn check_field_types_are_known(
+    spec: &WorkflowSpec,
+    step: &StepSpec,
+    errs: &mut Vec<WorkflowLintError>,
+) {
+    for field in &step.fields {
+        if let Some(why) = field_type_problem(&field.field_type) {
+            errs.push(WorkflowLintError {
+                workflow: spec.kind.clone(),
+                step: step.title.clone(),
+                reason: format!("field '{}': {why}", field.name),
+            });
+        }
+    }
+}
+
 /// `item_keys` describes the elements of an ARRAY field; on any other
 /// type it describes nothing, and admission would silently never check
 /// it. Refuse the spec instead of storing a shape nobody reads.
@@ -1262,10 +1287,12 @@ fn check_field_value(field_type: &str, value: &Value, field_name: &str) -> Optio
         "date" => value.as_str().is_some_and(|s| s.len() == 10),
         "date-time" => value.as_str().is_some_and(|s| s.len() >= 19),
         "uri" => value.is_string(),
-        s if s.contains('|') => {
+        s if field_type_problem(s).is_none() => {
             let allowed: Vec<&str> = s.split('|').collect();
             value.as_str().is_some_and(|v| allowed.contains(&v))
         }
+        // An unknown type is refused once, by `check_field_types_are_known`,
+        // not again for every default a step sets under it.
         _ => true,
     };
     if ok {
@@ -1604,6 +1631,41 @@ mod tests {
             !errs.iter().any(|e| e.reason.contains("item_keys")),
             "an array field with item_keys is the intended shape: {errs:?}"
         );
+    }
+
+    /// Backlog fcae2bfa: nothing refused a field type the validator
+    /// cannot run, so emergency-merge v1 published `receipt_verdict`
+    /// typed `green` and every value completed that required field. An
+    /// unknown type is refused at publish, naming the step, the field
+    /// and the grammar; a pipe enum of the same word passes.
+    #[test]
+    fn an_unknown_field_type_is_refused_at_publish() {
+        let reg = StepRegistry::v1();
+        let spec_with = |field_type: &str| {
+            let mut spec = viable_spec("em");
+            spec.steps[1].fields = vec![boss_core::job::StepField {
+                name: "receipt_verdict".into(),
+                field_type: field_type.into(),
+                required: true,
+                filled_by: boss_core::job::FilledBy::Executor,
+                item_keys: Vec::new(),
+                covers: None,
+                binds: None,
+                item_value_max_bytes: None,
+                item_one_of: Vec::new(),
+            }];
+            spec
+        };
+        let errs = validate_workflow(&spec_with("green"), &reg);
+        assert!(
+            errs.iter().any(|e| e.step == "finish"
+                && e.reason.contains("receipt_verdict")
+                && e.reason.contains("'green' is not a field type")),
+            "{errs:?}"
+        );
+        assert!(gate_active(&spec_with("green")).is_err());
+        let errs = validate_workflow(&spec_with("green|failed|refused"), &reg);
+        assert!(errs.is_empty(), "{errs:?}");
     }
 
     /// `covers` must relate two array fields on the same step; each way

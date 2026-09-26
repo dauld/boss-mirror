@@ -13,6 +13,7 @@
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { scrollNote, signedText } from '../../src/steps/presence';
+import { servePeopleRows } from './_smokeMocks';
 
 const JOB_ID = 'job-askp-1';
 const TICKET = 'ticket-askp';
@@ -88,6 +89,7 @@ async function opsApproval(
 
   await page.route('**/api/**', (r) => json(r, []));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
+  await servePeopleRows(page, [EMP]);
   await page.route(/\/api\/session$/, (r) =>
     json(r, { username: 'david', employee_id: EMP.id, role: 'platform-admin' }));
   await page.route(/\/api\/jobs\/live$/, (r) =>

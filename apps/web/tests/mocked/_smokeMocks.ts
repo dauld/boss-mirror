@@ -67,22 +67,43 @@ export const LIVE_MANIFEST_RECORDED_AT: string = LIVE_RECORDING.recorded_at;
 /// whatever the recording says.
 export const MODULES_NONE: Readonly<Record<string, boolean>> = {};
 
+/// The manifest body a spec serves: the recording's body verbatim —
+/// its display_name, tenant_id and labels, whatever the live gateway
+/// sent — with only `modules` replaced by the shape the leg is about.
+/// The name was typed five more times until backlog af138621: here as
+/// 'Algedonic Ales'/'brewery', a tenant the instance stopped being, and
+/// in four specs' own inline helpers as the live name. A recording that
+/// changes now changes every one of them. `labels` defaults to empty
+/// because the live body omits it when the tenant sets none.
+export function tenantManifest(
+  modules: Readonly<Record<string, boolean>>,
+): Readonly<Record<string, unknown>> {
+  return { labels: {}, ...LIVE_RECORDING.body, modules };
+}
+
 /// `GET /api/tenant/manifest` with the given modules — the one place a
 /// spec says which tenant it is rendering for. Registered routes win in
 /// reverse order, so calling this after installSmokeMocks replaces the
 /// all-on manifest the crawl needs.
+///
+/// `inline: true` also carries it the way a SERVED page does: the
+/// gateway inlines the manifest into index.html as
+/// `window.__BOSS_TENANT_MANIFEST__` (5578e42d), so the shell is `ready`
+/// before its first paint. The mocked dev-server does not inline, so a
+/// leg that pins a gated page's first paint needs this; a leg that pins
+/// the fetch fallback leaves it off.
 export async function installTenantManifest(
   page: Page,
   modules: Readonly<Record<string, boolean>>,
+  opts: Readonly<{ inline?: boolean }> = {},
 ): Promise<void> {
-  await page.route(/\/api\/tenant\/manifest$/, (r) =>
-    json(r, {
-      display_name: 'Algedonic Ales',
-      tenant_id: 'brewery',
-      modules,
-      labels: {},
-    }),
-  );
+  const body = tenantManifest(modules);
+  await page.route(/\/api\/tenant\/manifest$/, (r) => json(r, body));
+  if (opts.inline) {
+    await page.addInitScript((b) => {
+      (globalThis as { __BOSS_TENANT_MANIFEST__?: unknown }).__BOSS_TENANT_MANIFEST__ = b;
+    }, body);
+  }
 }
 
 /// The platform's department Classes (01-registries.sql) as `/api/classes`
@@ -202,6 +223,22 @@ export const EMPLOYEE_DETAIL = /\/api\/people\/emp-001$/;
 /// A future read of a list at that depth 404s under the floor — loud, and
 /// fixed by mocking it — where a person read used to get 200 [] quietly.
 export const PERSON_DETAIL = /\/api\/people\/(?!accounts(\?|$))[^/?]+(\?|$)/;
+/// The viewer's own people row, answered for each employee a spec signs
+/// in as. The shell's session resolves the gateway probe's employee_id
+/// by reading `/api/people/{id}` — one row, not the roster it used to
+/// read and search (backlog b4f68a65) — so a spec that mocks a persona
+/// answers that read beside its `/api/session`. Each route is spelled
+/// with its id, like EMPLOYEE_DETAIL, so no list under /api/people/ is
+/// answered with a person.
+export async function servePeopleRows(
+  page: Page,
+  rows: ReadonlyArray<Readonly<{ id: string }>>,
+): Promise<void> {
+  for (const row of rows) {
+    const id = encodeURIComponent(row.id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await page.route(new RegExp(`/api/people/${id}$`), (r) => json(r, row));
+  }
+}
 /// The audit log's size-and-growth read (boss-events AuditStats). The
 /// fixture /it/operate/audit sat in DEFERRED waiting for ("snapshot .length
 /// needs a faithful fixture"; page audit 65a273d5, gap 0398c4d0): a `[]`

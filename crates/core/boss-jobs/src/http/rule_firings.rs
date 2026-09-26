@@ -11,7 +11,9 @@
 //! `dispatcher_firings` row the rules runner writes when every handler
 //! succeeded (b14afc48); a failure past the redelivery budget is the
 //! `dead_letter` annotation the runner lands on the packet it owed
-//! (a9c498eb). This handler reads both and reduces the second per rule
+//! (a9c498eb) — or, when the topic names no packet, the `dead-letter`
+//! row it records in `dispatcher_firings` instead (4b175523). This
+//! handler reads them and reduces the dead-letters per rule
 //! ([`crate::dispatcher_firings::dead_letter_rollup`], pure and
 //! unit-tested). It lives beside the borders because it is the same
 //! record the borders read; the rules themselves are the dispatcher's,
@@ -27,7 +29,8 @@
 use super::*;
 
 use crate::dispatcher_firings::{
-    DEAD_LETTER_KEY, DeadLetterRollup, RETENTION_DAYS, RuleLastFiring, dead_letter_rollup,
+    DEAD_LETTER_KEY, DeadLetterRollup, RETENTION_DAYS, RuleLastFiring, UnroutedDeadLetters,
+    dead_letter_rollup, with_unrouted,
 };
 
 pub(super) async fn yard_rule_firings<R: JobsRepository + 'static, B: EventBus + 'static>(
@@ -37,7 +40,18 @@ pub(super) async fn yard_rule_firings<R: JobsRepository + 'static, B: EventBus +
     let now = boss_clock_client::now_from(&state.clock).await;
     let since = now - chrono::Duration::days(RETENTION_DAYS);
     let (firings, firings_error) = split(last_firings(&state).await);
-    let (dead_letters, dead_letters_error) = split(dead_letters(&state, &user, since).await);
+    // Both kinds of dead-letter or neither: a count missing the half
+    // that names no packet would say "none" of a rule failing only on
+    // invoice topics (4b175523).
+    let (dead_letters, dead_letters_error) = split(
+        match (
+            dead_letters(&state, &user, since).await,
+            unrouted_dead_letters(&state, since).await,
+        ) {
+            (Ok(packets), Ok(unrouted)) => Ok(with_unrouted(packets, &unrouted)),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        },
+    );
     Json(serde_json::json!({
         "now": now,
         // The window both halves answer: the firing record prunes past
@@ -69,6 +83,22 @@ async fn last_firings<R: JobsRepository + 'static, B: EventBus + 'static>(
     repo.last_firings()
         .await
         .map_err(|e| format!("reading dispatcher_firings: {e}"))
+}
+
+/// The dead-letters that named no packet, per rule, from the firing
+/// record (4b175523). Not scoped by packet policy: they are about no
+/// packet, and the rule list they sit beside is not scoped either.
+async fn unrouted_dead_letters<R: JobsRepository + 'static, B: EventBus + 'static>(
+    state: &Arc<JobsApiState<R, B>>,
+    since: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<UnroutedDeadLetters>, String> {
+    let repo = state.dispatcher_firings.as_ref().ok_or(
+        "the dispatcher firing record, which holds the dead-letters that name no packet, \
+         is not wired to this jobs API",
+    )?;
+    repo.unrouted_dead_letters(since)
+        .await
+        .map_err(|e| format!("reading unrouted dead-letters from dispatcher_firings: {e}"))
 }
 
 /// The dead-letter annotations the caller can see, rolled up per rule.

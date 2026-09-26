@@ -73,10 +73,15 @@ struct State {
     /// Changes that land just before a step's next judged write, set by
     /// [`InMemoryJobs::change_before_next_judged_write`].
     change_before_write: HashMap<String, StepChange>,
+    /// Changes that land on a job row the moment it is next read, set
+    /// by [`InMemoryJobs::change_job_after_next_read`].
+    job_change_after_read: HashMap<String, JobChange>,
 }
 
 /// A change another writer lands on a step row (test hook).
 type StepChange = Box<dyn FnOnce(&mut Step) + Send>;
+/// A change another writer lands on a job row (test hook).
+type JobChange = Box<dyn FnOnce(&mut Job) + Send>;
 
 impl InMemoryJobs {
     pub fn new() -> Self {
@@ -145,6 +150,24 @@ impl InMemoryJobs {
     pub fn miss_next_job_read(&self, job_id: &JobId) {
         if let Ok(mut state) = self.inner.lock() {
             state.unseen_once.insert(job_key(job_id));
+        }
+    }
+
+    /// Let another writer change this job row — through `change` — straight
+    /// AFTER its next `get_job` answers: the reader gets the row as it
+    /// stood, and the row moves under it. The job-row twin of
+    /// [`Self::merge_after_next_read`]: the stand-in for a step-driven
+    /// close committing between the job PUT's read and its write (backlog
+    /// 29a7ea09). One-shot.
+    pub fn change_job_after_next_read(
+        &self,
+        job_id: &JobId,
+        change: impl FnOnce(&mut Job) + Send + 'static,
+    ) {
+        if let Ok(mut state) = self.inner.lock() {
+            state
+                .job_change_after_read
+                .insert(job_key(job_id), Box::new(change));
         }
     }
 
@@ -558,7 +581,13 @@ impl JobsRepository for InMemoryJobs {
         if state.unseen_once.remove(&job_key(id)) {
             return Ok(None);
         }
-        Ok(state.jobs.get(&job_key(id)).cloned())
+        let read = state.jobs.get(&job_key(id)).cloned();
+        if let Some(change) = state.job_change_after_read.remove(&job_key(id))
+            && let Some(row) = state.jobs.get_mut(&job_key(id))
+        {
+            change(row);
+        }
+        Ok(read)
     }
 
     async fn resolve_job_id_prefix(&self, prefix: &str) -> Result<Vec<JobId>, JobsError> {
@@ -578,6 +607,7 @@ impl JobsRepository for InMemoryJobs {
     async fn update_job_at(
         &self,
         job: &Job,
+        read: JobStatus,
         _now: chrono::DateTime<chrono::Utc>,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
@@ -587,10 +617,12 @@ impl JobsRepository for InMemoryJobs {
             let Some(existing) = state.jobs.get(&key) else {
                 return Err(JobsError::NotFound(job.id));
             };
-            // A finished packet's status does not move — the Pg
-            // adapter's WHERE clause, mirrored (backlog 570e72bd).
+            // A finished packet's status does not move, and a finished
+            // row is written only by a writer that read it finished —
+            // the Pg adapter's WHERE clause, mirrored (backlogs 570e72bd,
+            // 29a7ea09).
             if matches!(existing.status, JobStatus::Closed | JobStatus::Cancelled)
-                && job.status != existing.status
+                && (job.status != existing.status || read != existing.status)
             {
                 return Err(JobsError::TerminalJob {
                     id: job.id,

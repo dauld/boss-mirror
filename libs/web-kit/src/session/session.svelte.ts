@@ -14,7 +14,7 @@
 
 /// Name of the cookie that tells the dev-server / gateway which
 /// persona the user is currently viewing as (demo mode only). The
-/// dev-server looks this up in the roster and synthesises
+/// dev-server looks this id up and synthesises
 /// x-boss-user from the matched employee's id + role + department
 /// so backend policy scoping reflects the selected persona.
 ///
@@ -33,15 +33,14 @@ function writePersonaCookie(id: string): void {
 // The pure half lives in ./classify so it can be tested without the
 // Svelte compiler; re-exported here so existing importers are
 // unaffected.
-import type { Certification, Employee, SessionState, SessionEnvelope, ProbeBody } from './classify';
-import { guestEmployee, classifyProbe } from './classify';
-export type { Certification, Employee, SessionState, SessionEnvelope, ProbeBody };
-export { guestEmployee, classifyProbe };
+import type { Certification, Employee, SessionState, SessionEnvelope, ProbeBody, ViewerRead } from './classify';
+import { guestEmployee, classifyProbe, readPeopleRow } from './classify';
+export type { Certification, Employee, SessionState, SessionEnvelope, ProbeBody, ViewerRead };
+export { guestEmployee, classifyProbe, readPeopleRow };
 export { BREAK_GLASS_ROLE, breakGlassOperator } from './classify';
 
 export const session = $state<SessionEnvelope>({
   value: { kind: 'loading' },
-  roster: [],
   fromGateway: false,
   readonly: false,
 });
@@ -53,24 +52,21 @@ export const session = $state<SessionEnvelope>({
 /// carrying the read-only role they actually hold, colliding
 /// with no roster id, assignable to nothing.
 export async function loadSession(): Promise<void> {
-  // 1. Fetch the roster first — it's the universe for every lookup.
-  let roster: Employee[] = [];
-  try {
-    const r = await fetch('/api/people');
-    if (r.ok) roster = (await r.json()) as Employee[];
-  } catch {
-    // Empty roster still lets the gateway fall through.
-  }
-  const byId = new Map(roster.map((e) => [e.id, e]));
-  session.roster = roster;
-
-  // 2. Gateway session probe — a successful hit with a resolved
-  //    employee_id wins.
+  // The gateway session probe, then the ONE people row it names. The
+  // shell used to fetch the whole /api/people roster first, to look
+  // this one row up, and a failed roster read was swallowed: every page
+  // that names people read the roster a second time, and a signed-in
+  // operator whose roster read blinked rendered as an unrecognized
+  // login (backlog b4f68a65, 2026-09-26). A failed row read is now its
+  // own state, `unresolved`, which the chrome renders as a failed read.
   try {
     const r = await fetch('/api/session', { credentials: 'same-origin' });
     if (r.ok) {
       const body = (await r.json()) as ProbeBody;
-      const classified = classifyProbe(body, byId);
+      const viewer: ViewerRead = body.employee_id
+        ? await readPeopleRow(body.employee_id)
+        : { kind: 'absent' };
+      const classified = classifyProbe(body, viewer);
       if (classified) {
         session.fromGateway = true;
         session.readonly = classified.readonly;
@@ -79,7 +75,7 @@ export async function loadSession(): Promise<void> {
       }
     }
   } catch {
-    // Network failure → fall through to demo-mode path
+    // Network failure on the probe → no session.
   }
 
   // No session, no user. There used to be a demo-mode fallback here
@@ -101,7 +97,14 @@ export async function loadSession(): Promise<void> {
 /// fallback and it was never restored, because a client-side
 /// identity that can disagree with the server's is the exact defect
 /// the fallback caused.
-export function setPersona(id: string): void {
+///
+/// The chosen persona is read as its own people row — there is no
+/// preloaded roster to search any more (backlog b4f68a65). An id the
+/// people service does not hold, or a read that fails, changes nothing.
+export async function setPersona(
+  id: string,
+  fetchFn?: Parameters<typeof readPeopleRow>[1],
+): Promise<void> {
   // Write the cookie so the dev-server + gateway can synthesise the
   // right x-boss-user header on API requests. Without this the
   // backend still saw the default (emp-001 CEO) and returned
@@ -112,8 +115,9 @@ export function setPersona(id: string): void {
     // document.cookie unavailable (SSR / non-browser) — safe to
     // skip; the UI still updates correctly.
   }
-  const emp = session.roster.find((e) => e.id === id);
-  if (emp) {
+  const read = await readPeopleRow(id, fetchFn);
+  if (read.kind === 'found') {
+    const emp = read.employee;
     session.fromGateway = false;
     // A persona switch is a full identity change. `readonly` belongs
     // to the guest identity, not to the tab — leaving it set kept a

@@ -8,6 +8,7 @@ import {
   loadingRead,
   okRead,
   readStateOf,
+  readStateOfLoad,
   readStateOfResponse,
   type ReadState,
 } from './readState';
@@ -154,6 +155,24 @@ describe('a read still in flight has not said anything yet', () => {
 
   test('a blank beside an unanswered read is unknown, not absent', () => {
     expect(blankMeaning(loadingRead)).toBe('unknown');
+  });
+});
+
+describe('a page that tracks its read as (loading, loadFailed)', () => {
+  // /ux/people (47eadca3) and /ux/parts (f867d71c) each built this as
+  // rosterRead / stockRead over a 'loading' | 'failed' | 'read' string
+  // of their own, beside the ReadState that already said it (backlog
+  // a97d4cf2, CLAUDE.md 9a). These are their cases, moved here.
+  test('is loading while the read is in flight, even with no failure yet', () => {
+    expect(readStateOfLoad(true, null)).toEqual(loadingRead);
+  });
+
+  test('is failed, keeping the reason, when the read failed', () => {
+    expect(readStateOfLoad(false, 'people HTTP 500')).toEqual(failedRead('people HTTP 500'));
+  });
+
+  test('is ok only when the read finished and did not fail', () => {
+    expect(readStateOfLoad(false, null)).toEqual(okRead);
   });
 });
 

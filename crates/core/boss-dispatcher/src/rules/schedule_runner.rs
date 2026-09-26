@@ -36,6 +36,11 @@
 //! right posture (there is nothing to catch up: it reads the world as
 //! it is now). The anchor date and business calendar still apply
 //! through `Schedule::fires_on` for the tick's day.
+//!
+//! EVERY FIRING IS RECORDED (backlog 4b175523) in `dispatcher_firings`,
+//! through the event runner's own sink and its reading of "fired" (every
+//! handler succeeded): `clock.day` rows keyed by the sim-day, `clock.tick`
+//! rows keyed by the tick. See [`ScheduleRunner::record_firings`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -49,6 +54,7 @@ use futures::StreamExt;
 use serde_json::json;
 use tracing::{debug, info, warn};
 
+use super::firings::{Firing, FiringSink, Outcome, fired_rules, firing_id};
 use super::handler::{self, HandlerRegistry};
 use super::registry::{MatchedInvocation, MatchedRule, Registry};
 
@@ -197,6 +203,11 @@ pub struct ScheduleRunner {
     pub calendar: Arc<dyn CalendarClient>,
     /// Catch-up cap (days). [`DEFAULT_CATCHUP_CAP`] in production.
     pub catchup_cap: u64,
+    /// Where a scheduled rule's firing is recorded — the same sink the
+    /// event runner writes (`super::firings`, backlog 4b175523). `None`
+    /// leaves the log as the only trace, which is what every scheduled
+    /// rule had until the rules list could only say "not recorded".
+    pub firings: Option<Arc<dyn FiringSink>>,
 }
 
 /// The distinct business-calendar codes referenced by the schedule rules
@@ -440,6 +451,111 @@ impl ScheduleRunner {
         matched
     }
 
+    /// Record the scheduled rules that fired on one dispatch (backlog
+    /// 4b175523). The id is [`firing_id`] over the synthetic event id —
+    /// `clock-day:<day>` or `clock-tick:<instant>` — so a day re-fired
+    /// after a crash between the dispatch and the cursor persist
+    /// computes the same id and the record says it fired once: the
+    /// per-day cursor's at-most-one re-fire, made exactly-once in the
+    /// record.
+    ///
+    /// BEST-EFFORT, the event runner's posture: it returns `()`, runs
+    /// after the dispatch, and its failure is logged and dropped — a
+    /// record that could not be written never changes what fired or
+    /// when the cursor moves.
+    async fn record_firings(
+        &self,
+        topic: &str,
+        event_id: &str,
+        results: &[handler::InvocationResult],
+    ) {
+        let Some(sink) = &self.firings else { return };
+        let fired = fired_rules(results);
+        if fired.is_empty() {
+            return;
+        }
+        // A RECORD STAMP, not the sim day: the same wall instant the
+        // event runner stamps, so the rules list ages both alike.
+        let fired_at = boss_clock_client::wall_now();
+        let rows: Vec<Firing> = fired
+            .iter()
+            .map(|rule| Firing {
+                firing_id: firing_id(rule, event_id),
+                rule: rule.clone(),
+                fired_on: topic.to_string(),
+                fired_at,
+                detail: json!({ "event_id": event_id }),
+                outcome: Outcome::Fired,
+            })
+            .collect();
+        if let Err(e) = sink.record(&rows).await {
+            warn!(
+                error = %e,
+                topic = %topic,
+                triggering_event = %event_id,
+                rules = rows.len(),
+                "dispatcher firings: a scheduled firing could not be recorded; \
+                 the side effects still landed and the log line is the only trace"
+            );
+        }
+    }
+
+    /// Fire every day rule due on `day`. A handler failure is logged and
+    /// the day still counts as processed (see `run`).
+    async fn fire_day(
+        &self,
+        calendars: &HashMap<String, BusinessCalendar>,
+        day: NaiveDate,
+        live: &crate::liveness::DispatcherLiveness,
+    ) {
+        let (matched, payload) =
+            Self::matched_for_day(&self.registry, calendars, day, self.helpers.as_ref());
+        if matched.is_empty() {
+            return;
+        }
+        // Synthesize a clock-day dispatch context: the topic is
+        // `clock.day` and the "triggering event id" is the day itself,
+        // so audit provenance chains the spawned work back to the
+        // calendar day that produced it.
+        let event_id = format!("clock-day:{}", day.format("%Y-%m-%d"));
+        match handler::dispatch(&matched, &self.handlers, &event_id, "clock.day", &payload).await {
+            Ok(results) => {
+                let mut fired = 0u64;
+                let mut failed = 0u64;
+                for r in &results {
+                    match &r.outcome {
+                        Ok(()) => {
+                            fired += 1;
+                            debug!(
+                                rule = %r.rule_name, handler = %r.handler,
+                                day = %day, "schedule rule fired"
+                            );
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            warn!(
+                                rule = %r.rule_name, handler = %r.handler,
+                                day = %day, error = %e,
+                                "schedule rule handler failed"
+                            );
+                        }
+                    }
+                }
+                info!(day = %day, fired, failed, "schedule runner: fired day");
+                self.record_firings("clock.day", &event_id, &results).await;
+                live.record_schedule();
+            }
+            Err(e) => {
+                // UnknownHandler is a registry/code drift — surface it
+                // loudly, but DON'T wedge the loop or skip the cursor
+                // advance (a bad rule must not freeze every other
+                // schedule). The day still counts as processed; the
+                // operator fixes the rule.
+                warn!(day = %day, error = %e, "schedule runner: dispatch error");
+            }
+        }
+    }
+
     /// Fire the sub-day rules whose bucket this tick crossed, advancing
     /// the in-memory bucket cursors. A handler failure is logged and
     /// the bucket still counts as fired: the next boundary fires again
@@ -486,7 +602,7 @@ impl ScheduleRunner {
         let event_id = format!("clock-tick:{}", now.to_rfc3339());
         match handler::dispatch(&matched, &self.handlers, &event_id, "clock.tick", &payload).await {
             Ok(results) => {
-                for r in results {
+                for r in &results {
                     match &r.outcome {
                         Ok(()) => {
                             debug!(rule = %r.rule_name, handler = %r.handler, at = %now, "schedule rule fired (tick)")
@@ -496,6 +612,7 @@ impl ScheduleRunner {
                         }
                     }
                 }
+                self.record_firings("clock.tick", &event_id, &results).await;
                 live.record_schedule();
             }
             Err(e) => warn!(at = %now, error = %e, "schedule runner: tick dispatch error"),
@@ -553,58 +670,7 @@ impl ScheduleRunner {
             // run ahead of what's durably recorded (we retry next tick).
             let mut persist_failed = false;
             for day in &advance.days_to_fire {
-                let (matched, payload) =
-                    Self::matched_for_day(&self.registry, &calendars, *day, self.helpers.as_ref());
-                if !matched.is_empty() {
-                    // Synthesize a clock-day dispatch context: the topic is
-                    // `clock.day` and the "triggering event id" is the day
-                    // itself, so audit provenance chains the spawned work
-                    // back to the calendar day that produced it.
-                    let event_id = format!("clock-day:{}", day.format("%Y-%m-%d"));
-                    match handler::dispatch(
-                        &matched,
-                        &self.handlers,
-                        &event_id,
-                        "clock.day",
-                        &payload,
-                    )
-                    .await
-                    {
-                        Ok(results) => {
-                            let mut fired = 0u64;
-                            let mut failed = 0u64;
-                            for r in results {
-                                match &r.outcome {
-                                    Ok(()) => {
-                                        fired += 1;
-                                        debug!(
-                                            rule = %r.rule_name, handler = %r.handler,
-                                            day = %day, "schedule rule fired"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        failed += 1;
-                                        warn!(
-                                            rule = %r.rule_name, handler = %r.handler,
-                                            day = %day, error = %e,
-                                            "schedule rule handler failed"
-                                        );
-                                    }
-                                }
-                            }
-                            info!(day = %day, fired, failed, "schedule runner: fired day");
-                            live.record_schedule();
-                        }
-                        Err(e) => {
-                            // UnknownHandler is a registry/code drift — surface
-                            // it loudly, but DON'T wedge the loop or skip the
-                            // cursor advance (a bad rule must not freeze every
-                            // other schedule). The day still counts as
-                            // processed; the operator fixes the rule.
-                            warn!(day = %day, error = %e, "schedule runner: dispatch error");
-                        }
-                    }
-                }
+                self.fire_day(&calendars, *day, &live).await;
                 // Record this day done before moving to the next, so a crash
                 // re-fires at most this one day. Stop advancing if the persist
                 // fails — the in-memory cursor must never lead the durable one.
@@ -1151,9 +1217,134 @@ handler = "h"
                 .expect("lazy pool"),
             calendar: Arc::new(boss_calendar_client::FakeCalendarClient::new()),
             catchup_cap: DEFAULT_CATCHUP_CAP,
+            firings: None,
         };
         let cals = r.load_calendars().await;
         assert!(cals.is_empty(), "absent calendar is skipped, not faked");
+    }
+
+    // ----- a scheduled firing is recorded (backlog 4b175523) ---------
+    //
+    // The rules list read every scheduled rule as "not recorded",
+    // because only the event runner wrote dispatcher_firings — so a
+    // stalled cadence and an idle one looked the same.
+
+    const RECORDED_RULES: &str = r#"
+[[rule]]
+name = "daily-ok"
+[rule.schedule]
+cadence = "daily"
+anchor_date = "2026-01-01"
+[[rule.do]]
+handler = "h.ok"
+
+[[rule]]
+name = "daily-broken"
+[rule.schedule]
+cadence = "daily"
+anchor_date = "2026-01-01"
+[[rule.do]]
+handler = "h.fail"
+
+[[rule]]
+name = "sensors-poll"
+[rule.schedule]
+cadence = "every-5-minutes"
+anchor_date = "2026-01-01"
+[[rule.do]]
+handler = "h.ok"
+"#;
+
+    fn recording_runner(firings: Option<Arc<dyn FiringSink>>) -> ScheduleRunner {
+        let mut handlers = HandlerRegistry::new();
+        handlers.register(handler::RecordingHandler::new("h.ok"));
+        handlers.register(handler::FailingHandler::new("h.fail", "503"));
+        ScheduleRunner {
+            registry: Registry::from_toml(RECORDED_RULES).unwrap(),
+            handlers,
+            helpers: Arc::new(NoHelpers),
+            clock_url: "http://127.0.0.1:7060".into(),
+            pool: sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://boss:boss@127.0.0.1/boss")
+                .expect("lazy pool"),
+            calendar: Arc::new(boss_calendar_client::FakeCalendarClient::new()),
+            catchup_cap: DEFAULT_CATCHUP_CAP,
+            firings,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_day_is_recorded_once_per_rule_and_sim_day() {
+        use crate::rules::firings::testing::RecordingFirings;
+        let sink = RecordingFirings::new();
+        let runner = recording_runner(Some(sink.clone()));
+        let live = crate::liveness::DispatcherLiveness::default();
+        let cals = HashMap::new();
+        // The same sim-day twice: a crash between the dispatch and the
+        // cursor persist re-fires it. The id must not change, so the
+        // table's primary key holds ONE firing for the day.
+        runner.fire_day(&cals, d(2026, 3, 9), &live).await;
+        runner.fire_day(&cals, d(2026, 3, 9), &live).await;
+        let rows = sink.recorded.lock().await.clone();
+        assert_eq!(
+            rows.iter().map(|f| f.rule.as_str()).collect::<Vec<_>>(),
+            ["daily-ok", "daily-ok"],
+            "the rule whose handler failed did not fire, and the sub-day rule \
+             rides the tick path: {rows:?}"
+        );
+        assert_eq!(
+            rows[0].firing_id,
+            "dispatcher:daily-ok:clock-day:2026-03-09"
+        );
+        assert_eq!(rows[0].firing_id, rows[1].firing_id, "one day, one id");
+        assert_eq!(rows[0].fired_on, "clock.day");
+        assert_eq!(rows[0].outcome, Outcome::Fired);
+        assert_eq!(rows[0].detail["event_id"], "clock-day:2026-03-09");
+
+        runner.fire_day(&cals, d(2026, 3, 10), &live).await;
+        let rows = sink.recorded.lock().await.clone();
+        assert_eq!(
+            rows[2].firing_id, "dispatcher:daily-ok:clock-day:2026-03-10",
+            "the next day is the next firing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sub_day_firing_is_recorded_under_its_tick() {
+        use crate::rules::firings::testing::RecordingFirings;
+        let sink = RecordingFirings::new();
+        let runner = recording_runner(Some(sink.clone()));
+        let live = crate::liveness::DispatcherLiveness::default();
+        let cals = HashMap::new();
+        let mut buckets = HashMap::new();
+        // The first tick baselines; the next bucket fires.
+        runner
+            .fire_tick(&cals, at("2026-09-18T10:03:00Z"), &mut buckets, &live)
+            .await;
+        runner
+            .fire_tick(&cals, at("2026-09-18T10:05:00Z"), &mut buckets, &live)
+            .await;
+        let rows = sink.recorded.lock().await.clone();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].rule, "sensors-poll");
+        assert_eq!(rows[0].fired_on, "clock.tick");
+        assert_eq!(
+            rows[0].firing_id,
+            "dispatcher:sensors-poll:clock-tick:2026-09-18T10:05:00+00:00"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scheduled_firing_record_that_cannot_be_written_changes_nothing() {
+        use crate::rules::firings::testing::FailingFirings;
+        let runner = recording_runner(Some(Arc::new(FailingFirings)));
+        let live = crate::liveness::DispatcherLiveness::default();
+        runner.fire_day(&HashMap::new(), d(2026, 3, 9), &live).await;
+        assert!(
+            live.snapshot()["schedule_events"].as_u64().unwrap_or(0) > 0,
+            "the day still counts as fired: {}",
+            live.snapshot()
+        );
     }
 
     // ----- when guards on schedule rules -----------------------------
