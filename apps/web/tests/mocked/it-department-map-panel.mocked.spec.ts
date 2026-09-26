@@ -202,9 +202,13 @@ test('the map carries no hold, machine or headway text — that is the panel\'s'
 
 test('a section selected while the rails cannot be read says no reading, never that it does not exist', async ({ page }) => {
   await mocks(page, { borders: { status: 503, contentType: 'text/plain', body: 'down' } });
-  await page.goto('/it?at=dock-%3Etrack');
+  // A route the server serves (car R3): the rails read is out, so its
+  // rate is unread — said as the read's failure, not as a route with no
+  // rate yet — and what declares it still leads the panel.
+  await page.goto('/it?at=gates-%3Edock');
   const panel = page.locator(PANEL);
   await expect(panel).toHaveAttribute('data-kind', 'section');
   await expect(panel).not.toContainText('Nothing on this map is named');
   await expect(field(page, 'rate')).toHaveText(['no reading — the sections could not be read']);
+  await expect(field(page, 'route').first()).toHaveText('rule:auto-park-on-gate-green: rule:auto-park-on-gate-green hands the packet on');
 });

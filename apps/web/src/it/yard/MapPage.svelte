@@ -159,7 +159,13 @@
         ? sectionCells(
             picked.border,
             borders.kind === 'ready' ? borders.data.now : '',
-            picked.route === null ? null : { route: picked.route, windowHours: routes.kind === 'ready' ? routes.data.window_hours : 24 },
+            picked.route === null
+              ? null
+              : {
+                  route: picked.route,
+                  windowHours: routes.kind === 'ready' ? routes.data.window_hours : 24,
+                  bordersRead: borders.kind === 'ready',
+                },
           )
         : [],
   );

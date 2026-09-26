@@ -134,13 +134,16 @@ const SECTION_FIELDS: ReadonlyArray<PanelField> = ['crossing', 'rate', 'waiting'
 export function sectionCells(
   b: Border | null,
   now: string,
-  served: Readonly<{ route: Route; windowHours: number }> | null = null,
+  served: Readonly<{ route: Route; windowHours: number; bordersRead: boolean }> | null = null,
 ): ReadonlyArray<PanelCell> {
   // WHAT DECLARES IT (car R3): the section is a route the server serves,
   // and its sources say why it is on the map — the protocol step that
   // makes the move, the hand-off, the moves the record counted.
   const declared = served === null ? [] : [cellOf('route', sourceLines(served.route, served.windowHours))];
-  if (b === null) return [...declared, ...SECTION_FIELDS.map((f) => cellOf(f, [served === null ? NO_RAILS : NO_RATE_YET]))];
+  // No border: the borders read failed, or it answered and keeps no rate
+  // for this route yet — two different facts, each said as itself.
+  const none = served !== null && served.bordersRead ? NO_RATE_YET : NO_RAILS;
+  if (b === null) return [...declared, ...SECTION_FIELDS.map((f) => cellOf(f, [none]))];
   return [
     ...declared,
     cellOf('crossing', [b.crossing]),

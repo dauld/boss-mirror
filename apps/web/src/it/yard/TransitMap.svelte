@@ -304,7 +304,7 @@
      and no protocol or hand-off declares it — dashed in the map's own
      trouble red, over its line, so the drawing says it is a finding. */
   .section.undeclared, .ramp-line.undeclared, .buffer.undeclared, .swatch line.undeclared {
-    stroke: var(--map-bad-edge); stroke-dasharray: 7 5; }
+    stroke: var(--map-bad-edge); stroke-dasharray: 9 6; stroke-linecap: butt; opacity: 1; }
   /* An exit or an entry: thinner than a section, because nothing waits
      on it — it is where the map begins or ends for a packet. */
   .ramp-line { fill: none; stroke-width: 4; stroke-linecap: round; }

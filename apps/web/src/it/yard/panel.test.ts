@@ -191,21 +191,28 @@ describe('sectionCells — one section of track', () => {
   };
 
   it('a served route leads with what declares it: the protocol step, and the moves the record counted', () => {
-    const served = sectionCells(b, NOW, { route, windowHours: 24 });
+    const served = sectionCells(b, NOW, { route, windowHours: 24, bordersRead: true });
     expect(served[0]!.field).toBe('route');
     expect(cell(served, 'route')).toEqual(['pr-train v3, step merged (completed)', '9 moves observed in 24h']);
   });
 
   it('a served route with no rate yet says so in every reading — never "could not be read", never 0', () => {
-    const served = sectionCells(null, NOW, { route, windowHours: 24 });
+    const served = sectionCells(null, NOW, { route, windowHours: 24, bordersRead: true });
     expect(served.map((c) => c.field)).toEqual(['route', 'crossing', 'rate', 'waiting', 'stuck', 'trend', 'verdict', 'machines', 'crossings']);
     for (const c of served.slice(1)) expect(c.lines, c.field).toEqual([NO_RATE_YET]);
+  });
+
+  it('a served route whose borders read failed says the read failed — not that it has no rate yet', () => {
+    const unread = sectionCells(null, NOW, { route, windowHours: 24, bordersRead: false });
+    expect(unread[0]!.field).toBe('route');
+    for (const c of unread.slice(1)) expect(c.lines, c.field).toEqual(['no reading — the sections could not be read']);
   });
 
   it('an undeclared route says it is a finding before its counts', () => {
     const undeclared = sectionCells(null, NOW, {
       route: { from: 'shed', to: 'arrivals', declared: false, sources: [{ source: 'observed', moves: 39, last_at: NOW }] },
       windowHours: 24,
+      bordersRead: true,
     });
     expect(cell(undeclared, 'route')).toEqual([
       'observed, undeclared — no protocol or hand-off declares this route',
