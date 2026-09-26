@@ -309,6 +309,10 @@ name = "a_presence_ticket_stamps_its_step_once_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "a_sign_off_stamp_survives_a_rebuild_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "no_orphan_steps_pg"
 required-features = ["postgres"]
 

@@ -128,7 +128,7 @@ async fn the_merge_door_voids_in_its_own_write_and_a_rebuild_reproduces_it() {
     .await
     .unwrap();
     let s1 = stamp_on(&step, "emp-david", Utc::now());
-    repo.append_sign_off(&step.id, &s1, Utc::now(), &[])
+    repo.append_sign_off(&step.id, &s1, &es(), &[])
         .await
         .unwrap();
     // A copy of the step read while S1 was alive — what a racing
@@ -445,9 +445,7 @@ async fn a_stamp_on_a_shape_the_row_has_left_is_refused_under_the_lock() {
         events::STEP_SIGNED_OFF,
         json!({"step_id": step.id.to_string()}),
     );
-    let refused = repo
-        .append_sign_off(&step.id, &s1, Utc::now(), &[marker])
-        .await;
+    let refused = repo.append_sign_off(&step.id, &s1, &es(), &[marker]).await;
     match refused {
         Err(boss_jobs::port::JobsError::StampOffShape {
             signed, current, ..
@@ -466,7 +464,7 @@ async fn a_stamp_on_a_shape_the_row_has_left_is_refused_under_the_lock() {
     // A stamp on the row as it stands lands.
     let now = repo.get_step(&step.id).await.unwrap().unwrap();
     let s2 = stamp_on(&now, "emp-david", Utc::now());
-    repo.append_sign_off(&step.id, &s2, Utc::now(), &[])
+    repo.append_sign_off(&step.id, &s2, &es(), &[])
         .await
         .unwrap();
     assert_eq!(stamps(&db.pool, &step).await, vec![s2]);
@@ -500,7 +498,7 @@ async fn a_claim_that_drops_the_run_edge_voids_in_its_own_write_and_a_rebuild_re
     .await
     .unwrap();
     let s1 = stamp_on(&step, "emp-david", Utc::now());
-    repo.append_sign_off(&step.id, &s1, Utc::now(), &[])
+    repo.append_sign_off(&step.id, &s1, &es(), &[])
         .await
         .unwrap();
 

@@ -1,12 +1,11 @@
 //! HTTP surface for boss-policy-api.
 //!
-//! Three groups of endpoints (per the design doc):
-//!   - hot path: POST /check, POST /check-batch
-//!   - frontend read: GET /my-scope (takes ?user_id=X)
+//! Two groups of endpoints:
+//!   - hot path: POST /check
 //!   - admin: list/upsert/deactivate rules + user-overrides
 //!
-//! Session 1 ships the hot path + minimal admin. The full admin matrix
-//! UI lands in session 2 on top of the same endpoints.
+//! `check-batch` and `my-scope` were deleted with no caller left in the
+//! tree (backlog 5a914364 S2).
 //!
 //! Every admin WRITE authorizes its caller against `policy-rule` and
 //! records that caller as `changed_by` (backlog 42c25542; see
@@ -17,17 +16,16 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use boss_policy_client::CurrentUser;
 use boss_policy_client::engine::PolicyEngine;
 use boss_policy_client::port::{PolicyError, PolicyRepository};
 use boss_policy_client::types::{
-    Action, Decision, PolicyRule, Resource, Scope, User, UserOverride, refuse_ambiguous_role,
-    rule_id,
+    Action, PolicyRule, Resource, User, UserOverride, refuse_ambiguous_role, rule_id,
 };
 
 use crate::authority::{self, Holdings};
@@ -42,8 +40,6 @@ pub fn router<R: PolicyRepository + 'static>(state: PolicyApiState<R>) -> Router
     Router::new()
         .route("/api/policy/health", get(health))
         .route("/api/policy/check", post(check::<R>))
-        .route("/api/policy/check-batch", post(check_batch::<R>))
-        .route("/api/policy/my-scope", post(my_scope::<R>))
         .route(
             "/api/policy/rules",
             get(list_rules::<R>).post(post_rule::<R>),
@@ -89,19 +85,25 @@ async fn health() -> Json<boss_core::startup::HealthResponse> {
 
 // ----- who may ask about whom ---------------------------------------------
 //
-// Until backlog b8e75382's rule 7 (F7) `check-batch`, `my-scope` and the
-// override list answered any caller about any user, and an override's
-// row and the deny it decides both carry its `reason` — free text an
-// operator wrote about a person. They now answer the caller about
-// itself, and anyone else only to a holder of Read on `policy-rule` at
-// scope all, the authority to read the table those answers come from.
+// Until backlog b8e75382's rule 7 (F7) the reads about a person answered
+// any caller about any user, and an override's row and the deny it
+// decides both carry its `reason` — free text an operator wrote about a
+// person. The override list now answers the caller about itself, and
+// anyone else only to a holder of Read on `policy-rule` at scope all,
+// the authority to read the table those answers come from.
 //
-// `/check` does NOT take this bound yet: every service asks it through
-// `ReqwestPolicyClient` with no `x-boss-user`, so a caller-only `/check`
-// would deny every policy check in the estate. It follows when callers
-// sign their policy calls (e84de48e, and the machine token of design
-// 6805c764) — the sequencing recorded on the item. So do the rule reads
-// (`GET /api/policy/rules`), which the headerless bootstrap reads.
+// `/check` takes the same bound WHENEVER the request is signed (backlog
+// 5a914364 S1): the gateway always sets `x-boss-user` on a session's
+// request, so a session asking about someone else is judged like the
+// list. An UNSIGNED `/check` stays open, because every service asks it
+// through `ReqwestPolicyClient` with no `x-boss-user` of its own, and a
+// bound there would deny every policy check in the estate. That arm
+// closes when callers sign their policy calls (e84de48e, and the
+// machine token of design 6805c764); until then a caller reaching the
+// port directly is the gap, pinned by
+// `an_unsigned_check_still_answers_about_anyone_until_callers_sign`. So
+// do the rule reads (`GET /api/policy/rules`), which the headerless
+// bootstrap reads.
 
 /// Allow a read about `id` (holding `role`, when the read names one),
 /// or the refusal to return.
@@ -143,10 +145,22 @@ struct CheckBody {
     resource: Resource,
 }
 
+/// A signed caller is judged by [`may_read_for`]; an unsigned one — every
+/// service's `ReqwestPolicyClient` today — is answered, until callers
+/// sign (e84de48e). Presence of the header is the test, not the id the
+/// extractor defaults to, because a signed request may carry any id.
 async fn check<R: PolicyRepository + 'static>(
     State(state): State<Arc<PolicyApiState<R>>>,
+    headers: HeaderMap,
+    CurrentUser(caller): CurrentUser,
     Json(body): Json<CheckBody>,
 ) -> Response {
+    if headers.contains_key("x-boss-user")
+        && let Err(refused) =
+            may_read_for(&state, &caller, &body.user.id, Some(&body.user.role)).await
+    {
+        return refused;
+    }
     match state
         .engine
         .check(&body.user, body.action, body.resource)
@@ -155,118 +169,6 @@ async fn check<R: PolicyRepository + 'static>(
         Ok(d) => Json(d).into_response(),
         Err(e) => err_response(e),
     }
-}
-
-#[derive(Deserialize)]
-struct CheckBatchBody {
-    user: User,
-    checks: Vec<CheckPair>,
-}
-
-#[derive(Deserialize, Serialize)]
-struct CheckPair {
-    action: Action,
-    resource: Resource,
-}
-
-#[derive(Serialize)]
-struct CheckBatchResult {
-    action: Action,
-    resource: Resource,
-    decision: Decision,
-}
-
-async fn check_batch<R: PolicyRepository + 'static>(
-    State(state): State<Arc<PolicyApiState<R>>>,
-    CurrentUser(caller): CurrentUser,
-    Json(body): Json<CheckBatchBody>,
-) -> Response {
-    if let Err(refused) = may_read_for(&state, &caller, &body.user.id, Some(&body.user.role)).await
-    {
-        return refused;
-    }
-    let mut out = Vec::with_capacity(body.checks.len());
-    for c in body.checks {
-        let resource = c.resource.clone();
-        match state.engine.check(&body.user, c.action, resource).await {
-            Ok(d) => out.push(CheckBatchResult {
-                action: c.action,
-                resource: c.resource,
-                decision: d,
-            }),
-            Err(e) => return err_response(e),
-        }
-    }
-    Json(out).into_response()
-}
-
-// ----- my-scope ------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct MyScopeBody {
-    user: User,
-}
-
-#[derive(Serialize)]
-struct MyScopeResult {
-    user_id: String,
-    role: String,
-    rules: Vec<ScopeEntry>,
-}
-
-#[derive(Serialize)]
-struct ScopeEntry {
-    resource: Resource,
-    action: Action,
-    scope: Scope,
-}
-
-async fn my_scope<R: PolicyRepository + 'static>(
-    State(state): State<Arc<PolicyApiState<R>>>,
-    CurrentUser(caller): CurrentUser,
-    Json(body): Json<MyScopeBody>,
-) -> Response {
-    if let Err(refused) = may_read_for(&state, &caller, &body.user.id, Some(&body.user.role)).await
-    {
-        return refused;
-    }
-    let mut entries = Vec::new();
-    // Iterate the platform's shipped resources (defaults::shipped_resources)
-    // so the discovery endpoint covers everything `default_rules` enumerates
-    // Read access against — including the registry resources (workflow,
-    // step_plugin) the SPA needs for /workflows + /system/step-plugins
-    // nav-gating.
-    for resource in boss_policy_client::defaults::shipped_resources() {
-        for action in [
-            Action::Read,
-            Action::Create,
-            Action::Update,
-            Action::Close,
-            Action::SignOff,
-            Action::Delete,
-        ] {
-            match state
-                .engine
-                .check(&body.user, action, resource.clone())
-                .await
-            {
-                Ok(Decision::Allow { scope }) => entries.push(ScopeEntry {
-                    resource: resource.clone(),
-                    action,
-                    scope,
-                }),
-                Ok(Decision::Deny { .. }) => {}
-                Err(e) => return err_response(e),
-            }
-        }
-    }
-
-    Json(MyScopeResult {
-        user_id: body.user.id.clone(),
-        role: body.user.role.clone(),
-        rules: entries,
-    })
-    .into_response()
 }
 
 // ----- rules admin ---------------------------------------------------------
@@ -552,6 +454,7 @@ mod tests {
     use boss_policy_client::InMemoryPolicy;
     use boss_policy_client::defaults::default_rules;
     use boss_policy_client::port::{Judge, ReconcileStats};
+    use boss_policy_client::types::Scope;
     use tower::ServiceExt;
 
     /// The in-memory adapter plus a record of every write the port
@@ -1551,32 +1454,47 @@ mod tests {
         assert_eq!(repo.writes(), vec![]);
     }
 
-    // ----- backlog b8e75382, rule 7 (F7): a read answers for its caller ---
+    // ----- backlog b8e75382 rule 7 (F7), and 5a914364: a read answers for
+    // its caller ---------------------------------------------------------
     //
-    // `check-batch`, `my-scope` and the override list answered any caller
-    // about any user, and an override's decision and row both carry its
-    // `reason` — free text an operator wrote about a person ("covering a
-    // leave"). `/check` is not here: every service asks it with no
-    // identity of its own yet, so it waits for callers to sign
-    // (e84de48e), as the item's sequencing note decided.
+    // `/check` and the override list answered any caller about any user,
+    // and an override's decision and row both carry its `reason` — free
+    // text an operator wrote about a person. Rule 7 bounded the list (and
+    // `check-batch` and `my-scope`, since deleted); its adversarial review
+    // (5a914364, S1) showed `/check` still handed the same reason to any
+    // session through the gateway, one question at a time. A SIGNED
+    // `/check` now takes the same bound; an unsigned one stays open until
+    // callers sign (e84de48e), and a pin below keeps that gap visible.
 
-    /// The three read doors about someone ELSE, each carrying the seeded
-    /// override's user, and one that names the caller itself.
+    /// A deny override's reason: what a read about emp-cover must not
+    /// hand to a caller who may not read it.
+    const DENY_REASON: &str = "suspended from the books";
+
+    /// The shipped rules and the seeded grant, plus a deny on emp-cover
+    /// whose decision carries [`DENY_REASON`].
+    async fn reads_repo() -> Arc<Recording> {
+        let repo = repo(vec![]).await;
+        let deny = UserOverride {
+            id: "ov-deny".to_string(),
+            reason: DENY_REASON.to_string(),
+            ..grant("emp-cover", Resource::ledger(), Action::Read, Scope::None)
+        };
+        repo.inner
+            .upsert_user_override(&deny, "seed")
+            .await
+            .expect("seed deny");
+        repo
+    }
+
+    /// The read doors about `id` holding `role`: the one question whose
+    /// decision is emp-cover's deny, and the override list.
     fn reads_about(id: &str, role: &str) -> Vec<(Method, String, Option<serde_json::Value>)> {
         let who = serde_json::json!({"id": id, "role": role, "access_tier": "user"});
         vec![
             (
                 Method::POST,
-                "/api/policy/check-batch".to_string(),
-                Some(serde_json::json!({
-                    "user": who,
-                    "checks": [{"action": "close", "resource": "job"}],
-                })),
-            ),
-            (
-                Method::POST,
-                "/api/policy/my-scope".to_string(),
-                Some(serde_json::json!({"user": who})),
+                "/api/policy/check".to_string(),
+                Some(serde_json::json!({"user": who, "action": "read", "resource": "ledger"})),
             ),
             (
                 Method::GET,
@@ -1612,32 +1530,40 @@ mod tests {
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    /// THE DEFECT: a caller without Read on `policy-rule` — a drafter, a
-    /// guest session (whose role holds that Read by shipped default, so
-    /// the refusal is by the identity, rule 5), a request with no
-    /// identity — learned another user's authority and the reason text
-    /// on their overrides. Each is refused, and the reason never leaves.
+    /// THE DEFECT: a signed caller without Read on `policy-rule` — an
+    /// employee drafting rules, a guest session (whose role holds that
+    /// Read by shipped default, so the refusal is by the identity, rule
+    /// 5) — learned another user's authority and the reason on their
+    /// overrides, from `/check` as well as from the list (5a914364 S1).
+    /// Each is refused, and no reason leaves in the refusal.
     #[tokio::test]
     async fn a_read_about_someone_else_is_refused_without_policy_read() {
-        let repo = repo(vec![]).await;
+        let repo = reads_repo().await;
         let drafter = user("emp-drafter", "rule-drafter");
         let guest = user("guest@algedonic.dev", "audit-readonly");
-        let callers: [(&str, Option<&str>); 3] = [
-            ("a drafter", Some(&drafter)),
-            ("a guest session", Some(&guest)),
-            ("no identity", None),
-        ];
-        for (who, caller) in callers {
+        for (who, caller) in [("a drafter", &drafter), ("a guest session", &guest)] {
             for (method, uri, body) in reads_about("emp-cover", "reviewer") {
-                let (status, text) = ask(&repo, method.clone(), &uri, body.as_ref(), caller).await;
+                let (status, text) =
+                    ask(&repo, method.clone(), &uri, body.as_ref(), Some(caller)).await;
                 assert_eq!(
                     status,
                     StatusCode::FORBIDDEN,
                     "{who}: {method} {uri} must be refused: {text}"
                 );
+                assert!(!text.contains(DENY_REASON), "{who}: {text}");
                 assert!(!text.contains("covering a leave"), "{who}: {text}");
             }
         }
+        // The list has no service caller, so no identity is refused too.
+        let (status, text) = ask(
+            &repo,
+            Method::GET,
+            "/api/policy/user-overrides/emp-cover",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
     }
 
     /// A caller always reads its OWN authority — but as itself: the
@@ -1645,12 +1571,13 @@ mod tests {
     /// its own id with a wider role is asking about someone else.
     #[tokio::test]
     async fn a_caller_reads_its_own_authority_and_only_as_itself() {
-        let repo = repo(vec![]).await;
+        let repo = reads_repo().await;
         let cover = user("emp-cover", "reviewer");
         for (method, uri, body) in reads_about("emp-cover", "reviewer") {
             let (status, text) =
                 ask(&repo, method.clone(), &uri, body.as_ref(), Some(&cover)).await;
             assert_eq!(status, StatusCode::OK, "{method} {uri}: {text}");
+            assert!(text.contains(DENY_REASON), "its own reason: {text}");
         }
         for (method, uri, body) in reads_about("emp-cover", "platform-admin") {
             if method == Method::GET {
@@ -1667,7 +1594,7 @@ mod tests {
     /// Read on override reasons design 2830b6b7 decides, not this car.
     #[tokio::test]
     async fn a_policy_reader_reads_anyones_authority() {
-        let repo = repo(vec![]).await;
+        let repo = reads_repo().await;
         let admin = user("emp-founder", "platform-admin");
         let auditor = user("emp-audit", "audit-readonly");
         for caller in [&admin, &auditor] {
@@ -1675,10 +1602,56 @@ mod tests {
                 let (status, text) =
                     ask(&repo, method.clone(), &uri, body.as_ref(), Some(caller)).await;
                 assert_eq!(status, StatusCode::OK, "{caller}: {method} {uri}: {text}");
-                if method == Method::GET {
-                    assert!(text.contains("covering a leave"), "{text}");
-                }
+                assert!(text.contains(DENY_REASON), "{text}");
             }
+        }
+    }
+
+    /// The control for every service in the estate: `ReqwestPolicyClient`
+    /// asks `/check` about the user it is serving and sends no
+    /// `x-boss-user` of its own, so an unsigned question is answered —
+    /// a bound on it would deny every policy check there is.
+    #[tokio::test]
+    async fn an_unsigned_service_check_is_still_answered() {
+        let repo = reads_repo().await;
+        let body = serde_json::json!({
+            "user": {"id": "emp-founder", "role": "platform-admin", "access_tier": "operator"},
+            "action": "create",
+            "resource": "job",
+        });
+        let (status, text) = ask(&repo, Method::POST, "/api/policy/check", Some(&body), None).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(text.contains("allow"), "{text}");
+    }
+
+    /// THE GAP, PINNED (5a914364 S4): an unsigned `/check` still answers
+    /// about anyone, reason and all. Every browser session reaches this
+    /// port through the gateway, which always signs, so the gap is a
+    /// caller that reaches the port directly — the machine door with
+    /// its gate mode off (2710c8fc/6805c764). This test is meant to go
+    /// RED when services sign their policy calls (e84de48e) and the
+    /// unsigned arm is closed; invert it then, do not delete it.
+    #[tokio::test]
+    async fn an_unsigned_check_still_answers_about_anyone_until_callers_sign() {
+        let repo = reads_repo().await;
+        let (method, uri, body) = reads_about("emp-cover", "reviewer").remove(0);
+        let (status, text) = ask(&repo, method, &uri, body.as_ref(), None).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(text.contains(DENY_REASON), "{text}");
+    }
+
+    /// `check-batch` and `my-scope` had no caller in the tree — the web
+    /// stopped fetching `my-scope`, nothing ever sent `check-batch` — so
+    /// they were deleted rather than guarded (5a914364 S2). A door that
+    /// returns is a door someone must bound again.
+    #[tokio::test]
+    async fn the_uncalled_scope_reads_are_gone() {
+        let repo = reads_repo().await;
+        let admin = user("emp-founder", "platform-admin");
+        for uri in ["/api/policy/check-batch", "/api/policy/my-scope"] {
+            let body = serde_json::json!({"user": {"id": "emp-founder", "role": "platform-admin"}});
+            let (status, text) = ask(&repo, Method::POST, uri, Some(&body), Some(&admin)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {text}");
         }
     }
 }

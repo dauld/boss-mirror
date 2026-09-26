@@ -667,8 +667,6 @@ fn build_router(
             "/api/it/{*rest}",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::LEDGER)),
         )
-        // Policy proxy carries a graceful-fallback for my-scope POST so
-        // pages don't log 502s if the policy upstream is down.
         .route(
             "/api/policy/{*rest}",
             axum::routing::any(|s, r| proxy::handle(s, r, &proxy::POLICY)),

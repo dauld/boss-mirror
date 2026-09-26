@@ -13,10 +13,10 @@
 //!   3. Surface upstream errors as 502 with a short reason string.
 //!
 //! Each route gets a `ProxyConfig` (name, env-var-overridable default
-//! upstream URL) and an optional `UpstreamFallback` that turns a
-//! connection failure into a graceful 200 — used today for the
-//! policy service's `my-scope` endpoint so the frontend doesn't log
-//! errors every page load when the policy upstream is down.
+//! upstream URL). There is no per-route fallback: the only one answered
+//! the policy service's `my-scope` with an empty scope when the upstream
+//! was down, for a fetch the web no longer makes, and went with that
+//! endpoint (backlog 5a914364 S2).
 
 use std::sync::{Arc, OnceLock};
 
@@ -25,7 +25,7 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures::StreamExt;
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::AppState;
 use boss_gateway::session::{self, Session, find_cookie};
@@ -42,34 +42,16 @@ pub struct ProxyConfig {
     /// OnceLock storing the resolved upstream URL (env var or
     /// `boss_ports::url(name)`).
     pub upstream: OnceLock<String>,
-    /// Optional fallback for specific (path, method) pairs when the
-    /// upstream is unreachable. Returns `Some(response)` to short-
-    /// circuit; `None` to proceed with the usual 502.
-    pub fallback: Option<fn(path: &str, method: &Method) -> Option<Response>>,
 }
 
 impl ProxyConfig {
-    /// Build a vanilla config that always proxies — no graceful fallback.
-    /// The default upstream URL is pulled from `boss_ports::url(name)`
-    /// at first-use; the `BOSS_<NAME>_UPSTREAM` env var still wins when
-    /// set.
+    /// Build a config that always proxies. The default upstream URL is
+    /// pulled from `boss_ports::url(name)` at first-use; the
+    /// `BOSS_<NAME>_UPSTREAM` env var still wins when set.
     pub const fn new(name: &'static str) -> Self {
         Self {
             name,
             upstream: OnceLock::new(),
-            fallback: None,
-        }
-    }
-
-    /// Build a config whose upstream failures can degrade gracefully.
-    pub const fn with_fallback(
-        name: &'static str,
-        fallback: fn(path: &str, method: &Method) -> Option<Response>,
-    ) -> Self {
-        Self {
-            name,
-            upstream: OnceLock::new(),
-            fallback: Some(fallback),
         }
     }
 
@@ -146,8 +128,8 @@ pub(crate) fn writer_gate(
 /// "Write" is every method but GET, HEAD and OPTIONS — the methods the
 /// SPA and every service here use for reads. A read spelled as a POST
 /// would be refused too, and deliberately: none is reached from a
-/// read-only session's browsing (the policy `my-scope` POST the
-/// fallback below names is no longer fetched by the web), and an
+/// read-only session's browsing (the policy `my-scope` POST that was
+/// the one exception is deleted, backlog 5a914364), and an
 /// allowlist of "POSTs that are really reads" is a list of holes.
 ///
 /// Read-only is `boss_core::roles::is_read_only_floor` of the session's
@@ -260,7 +242,6 @@ async fn forward_to_upstream(
 ) -> Response {
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(str::to_owned);
-    let method = req.method().clone();
     let upstream = config.upstream_url();
     let upstream_url = match query.as_deref() {
         Some(q) => format!("{upstream}{path}?{q}"),
@@ -270,12 +251,6 @@ async fn forward_to_upstream(
     match forward(req, &upstream_url, &state.proxy_client).await {
         Ok(resp) => resp,
         Err(()) => {
-            if let Some(fallback) = config.fallback
-                && let Some(resp) = fallback(&path, &method)
-            {
-                debug!(service = config.name, "upstream down — returning fallback");
-                return resp;
-            }
             warn!(service = config.name, url = %upstream_url, "upstream request failed");
             (
                 StatusCode::BAD_GATEWAY,
@@ -428,23 +403,7 @@ pub static CUSTOMERS: ProxyConfig = ProxyConfig::new("customers");
 /// boss_ports.
 pub static SIMULATOR: ProxyConfig = ProxyConfig::new("simulator");
 
-/// Policy's `my-scope` POST is called on every page load. When the
-/// upstream is down we'd otherwise log a 502 into every browser
-/// console — return an empty-scope payload instead so the frontend's
-/// MyScopeContext silently falls into its defaults-table path.
-pub static POLICY: ProxyConfig = ProxyConfig::with_fallback("policy", |path, method| {
-    if path == "/api/policy/my-scope" && method == Method::POST {
-        return Some(
-            axum::Json(serde_json::json!({
-                "allow_read": [],
-                "scope_filters": {},
-                "version": 0,
-            }))
-            .into_response(),
-        );
-    }
-    None
-});
+pub static POLICY: ProxyConfig = ProxyConfig::new("policy");
 
 #[cfg(test)]
 mod tests {

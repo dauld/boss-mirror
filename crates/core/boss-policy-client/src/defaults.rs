@@ -34,11 +34,8 @@
 use crate::types::{Action, PolicyRule as Rule, Resource, Scope};
 
 /// The 13 resources the platform's `default_rules` enumerate Read
-/// access over. Also consumed by `boss-policy::http::my_scope` to
-/// know what set to evaluate the caller's scope against — modules
-/// and tenants introduce their own via `Resource::new("specimen")`
-/// and seed grants through the admin API, but the discovery
-/// endpoint reports against this shipped floor.
+/// access over. Modules and tenants introduce their own via
+/// `Resource::new("specimen")` and seed grants through the admin API.
 pub fn shipped_resources() -> Vec<Resource> {
     vec![
         Resource::job(),
