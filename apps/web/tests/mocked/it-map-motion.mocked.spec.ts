@@ -174,9 +174,22 @@ async function ringsFor(page: Page, expected: number): Promise<void> {
   await page.clock.install({ time: new Date(NOW) });
   await installSmokeMocks(page);
   await page.route(FLIGHTS, (r) => json(r, { flights: ['it-map-motion'] }));
+  // The first regions read answers clear; every later one is HELD until
+  // the test answers it troubled, so each read lands where the test
+  // says and nowhere else (backlog 8db98b2a). An installed clock still
+  // runs on real time, so on a starved gate the page's own 10 s poll
+  // fired before the first runFor, gates was already troubled, and the
+  // ring the test counted for "0" was on the meter: gate 5093a4d3 red at
+  // 40.2 s; on the dev pod, 32 repeats pinned to two CPUs under 120 busy
+  // loops failed one run the same way (Expected "0", Received "1"), and
+  // ten real seconds held after the page moved failed it every time.
   let reads = 0;
-  await page.route(YARD_REGIONS, (r) => json(r, regions(reads++ === 0 ? 'clear' : 'troubled')));
+  const held: Route[] = [];
+  await page.route(YARD_REGIONS, (r) => (reads++ === 0 ? json(r, regions('clear')) : void held.push(r)));
   await page.route(YARD_BORDERS, (r) => json(r, borders()));
+  const answerTroubled = async (): Promise<void> => {
+    await Promise.all(held.splice(0).map((r) => json(r, regions('troubled'))));
+  };
   await page.goto('/it');
   const canvas = page.locator('canvas.motion-layer');
   await expect(canvas).toHaveAttribute('data-motion', expected === 0 ? 'reduced' : 'moving');
@@ -185,11 +198,18 @@ async function ringsFor(page: Page, expected: number): Promise<void> {
   await page.getByRole('button', { name: 'pause' }).click();
   await page.clock.runFor(1_000);
   await expect(canvas).toHaveAttribute('data-rings', '0');
-  // The next read finds gates troubled: one ring. A third finds it still troubled: none more.
+  // The next read finds gates troubled: one ring.
   await page.clock.runFor(10_000);
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  await answerTroubled();
   await expect(page.locator('.territory[data-region="gates"]')).toHaveAttribute('data-state', 'troubled');
   await page.clock.runFor(1_000);
   await expect(canvas).toHaveAttribute('data-rings', String(expected));
-  await page.clock.runFor(11_000);
+  // A later read finds it still troubled: none more.
+  const before = reads;
+  await page.clock.runFor(10_000);
+  await expect.poll(() => reads).toBeGreaterThan(before);
+  await answerTroubled();
+  await page.clock.runFor(1_000);
   await expect(canvas).toHaveAttribute('data-rings', String(expected));
 }

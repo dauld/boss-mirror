@@ -79,8 +79,10 @@ impl RosterLookup for AdminRoster {
             _ => Vec::new(),
         })
     }
+    /// `emp-someone-else` is on the roster and holds no role: a human
+    /// owner admission keeps as sent. `emp-departed` is not on it.
     async fn is_active_employee(&self, id: &str) -> Result<bool, String> {
-        Ok(id == "emp-bootstrap-admin")
+        Ok(id == "emp-bootstrap-admin" || id == "emp-someone-else")
     }
 }
 
@@ -250,6 +252,44 @@ async fn a_body_that_differs_from_the_admitted_packet_in_any_field_the_caller_se
             "{field}: the refusal names what differs: {answer}"
         );
     }
+    assert_eq!(
+        jobs.recorded_events().len(),
+        events_once,
+        "nothing recorded"
+    );
+    assert_eq!(jobs.list_steps(&child_id()).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_resend_naming_an_owner_admission_replaced_is_the_same_packet() {
+    // The round-3 review of car 983696b5 (backlog dc7c91cc, SF-B):
+    // admission replaces a person-shaped owner who is not on the active
+    // roster with the kind's role holder (owner_resolution), so the
+    // packet stores `emp-bootstrap-admin` for a body naming
+    // `emp-departed`. The already-admitted check compared the SENT owner
+    // with the stored one, so every byte-identical re-send was refused
+    // 409 owner_id — forever. An owner admission would not keep as sent
+    // is the server's to write, like an automation-shaped one.
+    let (app, jobs) = harness();
+    let mut body: serde_json::Value = serde_json::from_str(&spawn_body("/system/flow")).unwrap();
+    body["owner_id"] = "emp-departed".into();
+
+    let (status, first) = post(&app, body.to_string()).await;
+    assert_eq!(status, StatusCode::CREATED, "{first}");
+    assert_eq!(
+        jobs.get_job(&child_id()).await.unwrap().unwrap().owner_id,
+        "emp-bootstrap-admin",
+        "precondition: admission replaced the departed owner"
+    );
+    let events_once = jobs.recorded_events().len();
+
+    let (status, second) = post(&app, body.to_string()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the re-send is the packet that exists: {second}"
+    );
+    assert_eq!(second["already_admitted"], true, "{second}");
     assert_eq!(
         jobs.recorded_events().len(),
         events_once,

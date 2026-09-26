@@ -50,6 +50,10 @@ thiserror = { workspace = true }
 uuid = { workspace = true }
 axum = { workspace = true }
 async-stream = "0.3"
+# A calendar-feed token rests as its SHA-256 (scheduling/feed_token.rs,
+# backlog 4aaff4dc); both crates are already boss-core's.
+sha2 = "0.11"
+hex = "0.4"
 anyhow = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
@@ -174,6 +178,10 @@ required-features = ["postgres"]
 
 [[test]]
 name = "scheduling_audit_chain"
+required-features = ["postgres"]
+
+[[test]]
+name = "a_calendar_token_rests_as_its_hash_pg"
 required-features = ["postgres"]
 
 [[test]]

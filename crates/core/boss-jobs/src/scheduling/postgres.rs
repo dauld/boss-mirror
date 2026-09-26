@@ -5,6 +5,7 @@ use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::feed_token::CalendarTokenSha256;
 use super::port::{SchedulingError, SchedulingRepository};
 use super::types::{
     AssignmentKind, AssignmentStatus, AvailabilityKind, AvailabilitySource, NewScheduledAssignment,
@@ -590,12 +591,12 @@ impl SchedulingRepository for PgScheduling {
             .collect())
     }
 
-    async fn calendar_token_for(
+    async fn calendar_feed_created_at(
         &self,
         employee_id: &str,
-    ) -> Result<Option<String>, SchedulingError> {
-        let row: Option<(String,)> =
-            sqlx::query_as("SELECT token FROM tech_calendar_tokens WHERE employee_id = $1")
+    ) -> Result<Option<DateTime<Utc>>, SchedulingError> {
+        let row: Option<(DateTime<Utc>,)> =
+            sqlx::query_as("SELECT created_at FROM tech_calendar_tokens WHERE employee_id = $1")
                 .bind(employee_id)
                 .fetch_optional(&self.pool)
                 .await
@@ -606,7 +607,7 @@ impl SchedulingRepository for PgScheduling {
     async fn rotate_calendar_token(
         &self,
         employee_id: &str,
-        new_token: &str,
+        token_sha256: &CalendarTokenSha256,
         now: DateTime<Utc>,
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<(), SchedulingError> {
@@ -615,44 +616,131 @@ impl SchedulingRepository for PgScheduling {
         // audit_log.timestamp) so the replayed row matches this one
         // byte-for-byte. NOW() minted a second wall reading.
         sqlx::query(
-            "INSERT INTO tech_calendar_tokens (employee_id, token, created_at) \
-             VALUES ($1, $2, $3) \
+            "INSERT INTO tech_calendar_tokens (employee_id, token_sha256, logged_raw, created_at) \
+             VALUES ($1, $2, false, $3) \
              ON CONFLICT (employee_id) DO UPDATE \
-               SET token = EXCLUDED.token, created_at = EXCLUDED.created_at",
+               SET token_sha256 = EXCLUDED.token_sha256, logged_raw = false, \
+                   created_at = EXCLUDED.created_at",
         )
         .bind(employee_id)
-        .bind(new_token)
+        .bind(token_sha256.as_str())
         .bind(stamp.timestamp)
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
-        // OUTBOX (phase 2): records with the rotation so a published
-        // ICS URL keeps resolving after replay.
-        let event = stamp.event(
-            super::events::CALENDAR_TOKEN_ROTATED,
-            serde_json::json!({
-                "employee_id": employee_id,
-                "token": new_token,
-                "rotated_at": now,
-            }),
-        );
-        boss_events::outbox::record_event_in_tx(&mut tx, &event)
-            .await
-            .map_err(SchedulingError::Storage)?;
+        record_token_rotated(&mut tx, employee_id, token_sha256, now, stamp).await?;
         tx.commit().await.map_err(storage)?;
         Ok(())
     }
 
+    async fn revoke_calendar_token(
+        &self,
+        employee_id: &str,
+        token_sha256: &CalendarTokenSha256,
+        now: DateTime<Utc>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<(), SchedulingError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let n = replace_feed(&mut tx, employee_id, token_sha256, stamp).await?;
+        if n == 0 {
+            // Dropping `tx` rolls back: no row, no event.
+            return Err(SchedulingError::NotFound(format!(
+                "no calendar feed for {employee_id} to revoke"
+            )));
+        }
+        record_token_rotated(&mut tx, employee_id, token_sha256, now, stamp).await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(())
+    }
+
+    async fn count_calendar_tokens_logged_raw(&self) -> Result<i64, SchedulingError> {
+        let (n,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tech_calendar_tokens WHERE logged_raw")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(storage)?;
+        Ok(n)
+    }
+
+    async fn revoke_calendar_tokens_logged_raw(
+        &self,
+        now: DateTime<Utc>,
+        stamp: &boss_core::publisher::EventStamp,
+    ) -> Result<u64, SchedulingError> {
+        // One transaction for the whole revoke: every logged feed is
+        // replaced with its event, or none is. FOR UPDATE holds the
+        // rows against an employee's own rotate landing mid-run.
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let logged: Vec<(String,)> = sqlx::query_as(
+            "SELECT employee_id FROM tech_calendar_tokens WHERE logged_raw \
+             ORDER BY employee_id FOR UPDATE",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage)?;
+        for (employee_id,) in &logged {
+            let discarded = CalendarTokenSha256::of_a_discarded_token();
+            replace_feed(&mut tx, employee_id, &discarded, stamp).await?;
+            record_token_rotated(&mut tx, employee_id, &discarded, now, stamp).await?;
+        }
+        tx.commit().await.map_err(storage)?;
+        Ok(logged.len() as u64)
+    }
+
     async fn employee_by_calendar_token(
         &self,
-        token: &str,
+        token_sha256: &CalendarTokenSha256,
     ) -> Result<Option<String>, SchedulingError> {
         let row: Option<(String,)> =
-            sqlx::query_as("SELECT employee_id FROM tech_calendar_tokens WHERE token = $1")
-                .bind(token)
+            sqlx::query_as("SELECT employee_id FROM tech_calendar_tokens WHERE token_sha256 = $1")
+                .bind(token_sha256.as_str())
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(storage)?;
         Ok(row.map(|(e,)| e))
     }
+}
+
+/// Overwrite an existing feed's digest; the rows touched (0 or 1).
+async fn replace_feed(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    employee_id: &str,
+    token_sha256: &CalendarTokenSha256,
+    stamp: &boss_core::publisher::EventStamp,
+) -> Result<u64, SchedulingError> {
+    Ok(sqlx::query(
+        "UPDATE tech_calendar_tokens \
+            SET token_sha256 = $2, logged_raw = false, created_at = $3 \
+          WHERE employee_id = $1",
+    )
+    .bind(employee_id)
+    .bind(token_sha256.as_str())
+    .bind(stamp.timestamp)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?
+    .rows_affected())
+}
+
+/// OUTBOX (phase 2): the rotation's event, in the write's transaction,
+/// so rebuild reproduces the row. It carries the DIGEST — the log, the
+/// bus and every reader of either never see a token (backlog 4aaff4dc).
+async fn record_token_rotated(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    employee_id: &str,
+    token_sha256: &CalendarTokenSha256,
+    now: DateTime<Utc>,
+    stamp: &boss_core::publisher::EventStamp,
+) -> Result<(), SchedulingError> {
+    let event = stamp.event(
+        super::events::CALENDAR_TOKEN_ROTATED,
+        serde_json::json!({
+            "employee_id": employee_id,
+            "token_sha256": token_sha256.as_str(),
+            "rotated_at": now,
+        }),
+    );
+    boss_events::outbox::record_event_in_tx(tx, &event)
+        .await
+        .map_err(SchedulingError::Storage)
 }

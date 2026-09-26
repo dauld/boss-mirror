@@ -355,3 +355,208 @@ async fn rows_written_before_the_rule_are_re_judged_from_the_log_as_the_rebuild_
     sqlx::raw_sql(&sql).execute(pool).await.expect("a re-run");
     assert_eq!(stamps(pool, &x).await, rebuilt);
 }
+
+/// AN UNREADABLE LIST VOIDS, NOT NOTHING (backlog 4174c4a9, the review's
+/// rebuild nit). An invalidation whose `voided` does not parse used to
+/// void nothing in the replay, so the rebuilt row kept alive a stamp the
+/// live edit had killed. Every live void kills every stamp alive on the
+/// row at that write, so the replay reads it as the legacy event.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invalidation_whose_list_does_not_parse_voids_every_live_stamp_in_the_rebuild() {
+    let db = TestDb::new().await;
+    let pool = &db.pool;
+    let j = job("00000000-0000-0000-0000-00000000c855");
+    let t = |s: i64| {
+        DateTime::parse_from_rfc3339("2026-09-25T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            + Duration::seconds(s)
+    };
+    let x = approve_step(&j, "approved");
+    log(
+        pool,
+        "jobs.job.created",
+        t(0),
+        serde_json::to_value(&j).unwrap(),
+    )
+    .await;
+    log(
+        pool,
+        "jobs.step.created",
+        t(1),
+        events::step_state_payload(&x),
+    )
+    .await;
+    let s1 = stamp_on(&x, "emp-david", t(2));
+    let mut signed = x.clone();
+    signed.sign_offs = vec![s1];
+    log(
+        pool,
+        "jobs.step.updated",
+        t(2),
+        events::step_state_payload(&signed),
+    )
+    .await;
+    let mut bad = legacy_invalidation(&x);
+    bad["voided"] = json!("not a list of stamps");
+    let e1 = log(pool, "jobs.step.stamps_invalidated", t(3), bad).await;
+
+    let report = rebuild_jobs_and_steps(pool).await.expect("rebuild");
+    assert_eq!(report.stamps_voided, 1, "{report:?}");
+    let rebuilt = stamps(pool, &x).await;
+    assert_eq!(rebuilt[0].voided_by_event, Some(e1), "{rebuilt:?}");
+    assert_eq!(rebuilt[0].voided_at, Some(t(3)));
+}
+
+/// The run edge a dispatch writes and a claim by a new holder drops. It
+/// is metadata, so it is inside the shape a stamp signs.
+const RUN: &str = "0d9fc9c6-32e4-451f-9f7d-ecfe25b25a38";
+
+async fn outbox(pool: &PgPool, kind: &str) -> Vec<(Uuid, Value)> {
+    sqlx::query_as("SELECT event_id, payload FROM event_outbox WHERE kind = $1")
+        .bind(kind)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// THE REVIEW'S RACE, at the Pg append (backlog 4174c4a9). The sign-off
+/// door builds its stamp over the step it read; a write that lands before
+/// the append moves the row. The append judges the stamp against the row
+/// under the lock it writes through, refuses, and writes nothing — not
+/// the stamp and not the caller's signed-off marker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stamp_on_a_shape_the_row_has_left_is_refused_under_the_lock() {
+    let db = TestDb::new().await;
+    let repo = PgJobs::new(db.pool.clone());
+    let j = job("00000000-0000-0000-0000-00000000c853");
+    repo.create_job(&j).await.unwrap();
+    let step = approve_step(&j, "approved");
+    repo.add_step(&step).await.unwrap();
+
+    let read = repo.get_step(&step.id).await.unwrap().unwrap();
+    let s1 = stamp_on(&read, "emp-david", Utc::now());
+    let edge = json!({"agent_run": RUN});
+    repo.merge_step_metadata_at(&step.id, edge.as_object().unwrap(), &es())
+        .await
+        .unwrap();
+
+    let marker = es().event(
+        events::STEP_SIGNED_OFF,
+        json!({"step_id": step.id.to_string()}),
+    );
+    let refused = repo
+        .append_sign_off(&step.id, &s1, Utc::now(), &[marker])
+        .await;
+    match refused {
+        Err(boss_jobs::port::JobsError::StampOffShape {
+            signed, current, ..
+        }) => {
+            assert_eq!(signed, s1.shape_hash);
+            assert_ne!(current, s1.shape_hash);
+        }
+        other => panic!("the append must refuse a stamp off the row's shape, got {other:?}"),
+    }
+    assert!(stamps(&db.pool, &step).await.is_empty(), "no stamp landed");
+    assert!(
+        outbox(&db.pool, events::STEP_SIGNED_OFF).await.is_empty(),
+        "and no marker recorded for it"
+    );
+
+    // A stamp on the row as it stands lands.
+    let now = repo.get_step(&step.id).await.unwrap().unwrap();
+    let s2 = stamp_on(&now, "emp-david", Utc::now());
+    repo.append_sign_off(&step.id, &s2, Utc::now(), &[])
+        .await
+        .unwrap();
+    assert_eq!(stamps(&db.pool, &step).await, vec![s2]);
+}
+
+/// THE CLAIM MOVES A SHAPE TOO (backlog 4174c4a9). A claim by a new
+/// holder drops the run edge; the stamps that signed the step with it
+/// die in the claim's own transaction, the invalidation records beside
+/// the claim's events, writing the edge back revives nothing, and a
+/// rebuild reproduces the row's stamps from the log.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claim_that_drops_the_run_edge_voids_in_its_own_write_and_a_rebuild_reproduces_it() {
+    let db = TestDb::new().await;
+    let repo = PgJobs::new(db.pool.clone());
+    let j = job("00000000-0000-0000-0000-00000000c854");
+    let s = es();
+    repo.create_job_at(
+        &j,
+        Utc::now(),
+        &[s.event(events::JOB_CREATED, serde_json::to_value(&j).unwrap())],
+    )
+    .await
+    .unwrap();
+    let mut step = approve_step(&j, "approved");
+    step.metadata["agent_run"] = json!(RUN);
+    repo.add_step_at(
+        &step,
+        Utc::now(),
+        &[s.event(events::STEP_CREATED, events::step_state_payload(&step))],
+    )
+    .await
+    .unwrap();
+    let s1 = stamp_on(&step, "emp-david", Utc::now());
+    repo.append_sign_off(&step.id, &s1, Utc::now(), &[])
+        .await
+        .unwrap();
+
+    // The claim route's own event: the step as claimed, from its read.
+    let mut claimed = repo.get_step(&step.id).await.unwrap().unwrap();
+    claimed.assignee_id = Some("emp-other".into());
+    claimed.status = StepStatus::Active;
+    claimed.metadata = boss_jobs::agent_runs::without_edge(&claimed.metadata);
+    let claim = es();
+    let updated = claim.event(events::STEP_UPDATED, events::step_state_payload(&claimed));
+    repo.claim_step_at(&step.id, "emp-other", &claim, &[updated])
+        .await
+        .unwrap();
+
+    let row = stamps(&db.pool, &step).await;
+    let void_id = row[0]
+        .voided_by_event
+        .expect("the claim that moved the shape voided the stamp on the row");
+    assert_eq!(
+        row[0].voided_at,
+        Some(claim.timestamp),
+        "dated by the claim"
+    );
+    let inv = outbox(&db.pool, events::STEP_STAMPS_INVALIDATED).await;
+    assert_eq!(inv.len(), 1, "one invalidation, in the claim's own write");
+    assert_eq!(inv[0].0, void_id, "the stamp names the event that lists it");
+    let listed: Vec<SignOffStamp> = serde_json::from_value(inv[0].1["voided"].clone()).unwrap();
+    assert!(listed.len() == 1 && listed[0].same_stamp(&s1), "{listed:?}");
+
+    // A re-claim by the holder moves nothing and voids nothing.
+    repo.claim_step_at(&step.id, "emp-other", &es(), &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        outbox(&db.pool, events::STEP_STAMPS_INVALIDATED)
+            .await
+            .len(),
+        1
+    );
+
+    // The edge written back: the signed shape again, and the stamp stays dead.
+    let edge = json!({"agent_run": RUN});
+    let back = repo
+        .merge_step_metadata_at(&step.id, edge.as_object().unwrap(), &es())
+        .await
+        .unwrap();
+    assert_eq!(back.shape_hash(), s1.shape_hash, "back on the signed shape");
+    assert!(
+        !back.sign_offs_satisfied(),
+        "the stamp the claim moved does not count"
+    );
+
+    // The rebuild reproduces the row's stamps from the log.
+    drain_outbox(&db.pool).await;
+    let before = stamps(&db.pool, &step).await;
+    wipe_projection(&db.pool).await;
+    rebuild_jobs_and_steps(&db.pool).await.expect("rebuild");
+    assert_eq!(stamps(&db.pool, &step).await, before);
+}

@@ -121,10 +121,15 @@ install_rc=0
 # where protection lives, so the conductor's ancestry arm is the only
 # guard against it.
 #
-# THE CREDENTIAL IS THE CHECKOUT'S OWN, read as its owner through git's
-# credential helper (the same one the fetch above used) into a root-only
-# header file, and deleted on exit. It never reaches an argv or the
-# journal. Whether it may administer the repository is MEASURED by the
+# THE CREDENTIAL IS THE CHECKOUT'S OWN: the userinfo of its `forgejo`
+# remote URL, read as its owner (the credential the fetch above used),
+# written as a Basic header into a root-only file by forge-auth-header.sh,
+# and deleted on exit. It never reaches an argv or the journal; the
+# reader's errors are printed redacted. NOT `git credential fill`: the
+# owner has no credential helper, so the fill read nothing and every
+# converge since #694 closed FAILED on protect-main's exit 4, while git's
+# prompt-disabled error named the userinfo in this journal (backlog
+# 164f38c7, 37497977). Whether it may administer the repository is MEASURED by the
 # first write — a 401/403 is named on this run's packet — rather than
 # assumed; nothing here mints or places a credential (CLAUDE.md §Doors,
 # the credential broker). Run after install.sh, which renders the
@@ -133,8 +138,7 @@ protect_rc=0
 auth_hdr="$(mktemp -t forge-auth.XXXXXX)"
 chmod 600 "$auth_hdr"
 trap 'rm -f "$BOSS_CONVERGE_SNAPSHOT" "$auth_hdr"' EXIT
-runuser -l "$OWNER" -c "cd '$REPO' && printf 'url=%s\n\n' \"\$(git remote get-url forgejo)\" | GIT_TERMINAL_PROMPT=0 git credential fill" \
-    | sed -n 's/^password=\(.*\)$/Authorization: token \1/p' >"$auth_hdr" || true
+"$REPO/infra/forge/forge-auth-header.sh" "$auth_hdr" runuser -l "$OWNER" -c "git -C '$REPO' remote get-url forgejo" || true
 BOSS_FORGE_AUTH_HEADER_FILE="$auth_hdr" "$REPO/infra/forge/protect-main.sh" || protect_rc=$?
 
 # install.sh's verdict first (it is the older and wider one), then the

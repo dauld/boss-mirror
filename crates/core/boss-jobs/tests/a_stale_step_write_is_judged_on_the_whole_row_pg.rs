@@ -89,9 +89,17 @@ async fn a_stale_write_over_a_claim_is_refused_and_the_claim_stands() {
     // The assignment PUT reads …
     let (read, version) = repo.get_step_versioned(&step.id).await.unwrap().unwrap();
     // … a claim commits — status and holder, no metadata …
-    repo.claim_step_at(&step.id, "agent-claimer", chrono::Utc::now(), &[])
-        .await
-        .unwrap();
+    repo.claim_step_at(
+        &step.id,
+        "agent-claimer",
+        &boss_core::publisher::EventStamp::new(
+            "jobs",
+            boss_core::actor::ActorId::automation("test"),
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
     let updates_before = outbox_updates(&db, &step).await;
 
     // … and the PUT writes the row it computed from its read.
@@ -222,7 +230,9 @@ async fn a_read_does_not_move_the_version_and_a_list_read_answers_the_same_one()
             authority_id: "emp-1".into(),
             role: "qa".into(),
             stamped_at: chrono::Utc::now(),
-            shape_hash: "h".into(),
+            // On the row's own shape: a stamp on any other is refused
+            // before it is written (backlog 4174c4a9).
+            shape_hash: step.shape_hash(),
             assurance: Default::default(),
             presence_nonce: None,
             voided_at: None,

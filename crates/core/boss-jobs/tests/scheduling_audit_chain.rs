@@ -215,10 +215,12 @@ struct AssignmentRow {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// The token table holds a digest, never the token (backlog 4aaff4dc).
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 struct TokenRow {
     employee_id: String,
-    token: String,
+    token_sha256: String,
+    logged_raw: bool,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -235,7 +237,8 @@ async fn snapshot_assignments(pool: &PgPool) -> Vec<AssignmentRow> {
 
 async fn snapshot_tokens(pool: &PgPool) -> Vec<TokenRow> {
     sqlx::query_as(
-        "SELECT employee_id, token, created_at FROM tech_calendar_tokens ORDER BY employee_id",
+        "SELECT employee_id, token_sha256, logged_raw, created_at \
+         FROM tech_calendar_tokens ORDER BY employee_id",
     )
     .fetch_all(pool)
     .await

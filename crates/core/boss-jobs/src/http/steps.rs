@@ -2990,7 +2990,7 @@ pub(super) async fn claim_step<R: JobsRepository + 'static, B: EventBus + 'stati
 
     match state
         .jobs
-        .claim_step_at(&step_id, &user.id, stamp.timestamp, &claim_events)
+        .claim_step_at(&step_id, &user.id, &stamp, &claim_events)
         .await
     {
         Ok(step) => Json(step).into_response(),
@@ -3115,12 +3115,33 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
             "presence_nonce": presence_nonce,
         }),
     );
-    if let Err(e) = state
+    match state
         .jobs
         .append_sign_off(&step_id, &stamp, event_stamp.timestamp, &[signed_off_event])
         .await
     {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        Ok(()) => {}
+        // The step moved between this handler's read and the append's
+        // lock (backlog 4174c4a9): the stamp signs a shape the row no
+        // longer has, and nothing was written. The approver reads the
+        // step again and signs what is there.
+        Err(crate::port::JobsError::StampOffShape {
+            signed, current, ..
+        }) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "the step moved since it was read — sign it again as it stands",
+                    "signed_shape": signed,
+                    "current_shape": current,
+                })),
+            )
+                .into_response();
+        }
+        Err(crate::port::JobsError::StepNotFound(_)) => {
+            return (StatusCode::NOT_FOUND, "no such step").into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
     step.sign_offs.push(stamp);
     Json(step).into_response()

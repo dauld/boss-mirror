@@ -1,8 +1,9 @@
-//! An employee's calendar-feed token is theirs alone (backlog 7ae9ccec).
+//! An employee's calendar-feed token is theirs alone (backlog 7ae9ccec),
+//! and the server keeps only its digest (backlog 4aaff4dc).
 //!
 //! The token IS the authentication for the public, sessionless
 //! `/ics/{token}/calendar.ics` feed — 90 days of the employee's past
-//! and 180 of their future schedule. Until this car both token
+//! and 180 of their future schedule. Until car f46d9df2 both token
 //! handlers took no caller at all: a guest session (role
 //! `audit-readonly`, minted by `POST /api/auth/guest`) could GET any
 //! employee's token through the gateway's `/api/scheduling/*` proxy
@@ -14,9 +15,17 @@
 //! or a platform-admin (revoking a leaked feed is an operator's job),
 //! and an operator's rotate never hands the operator the new token.
 //!
+//! Since design 3101c506 (2026-09-26) the server holds the SHA-256 of a
+//! token and never the token: the read says only THAT a feed exists and
+//! when it was made, the employee sees the URL once in their own
+//! rotate's response, an operator's rotate is a revocation that refuses
+//! 404 when there is no feed to revoke, and the feeds minted before
+//! digests — whose tokens the audit log holds in the clear — are revoked
+//! by one bounded verb.
+//!
 //! The repository here is an in-memory fake holding only the token
-//! table — the handlers' authorization is the thing under test, and
-//! it runs before any storage is touched.
+//! table, and it holds it the way the Postgres adapter does: digests
+//! (a_calendar_token_rests_as_its_hash_pg.rs proves the adapter).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -27,8 +36,8 @@ use axum::http::StatusCode;
 use boss_core::publisher::EventStamp;
 use boss_jobs::scheduling::http::{SchedulingApiState, router};
 use boss_jobs::scheduling::{
-    NewScheduledAssignment, NewTechAvailability, ScheduledAssignment, SchedulingError,
-    SchedulingRepository, TechAvailability, TechShiftPattern, WeekGridRow,
+    CalendarTokenSha256, NewScheduledAssignment, NewTechAvailability, ScheduledAssignment,
+    SchedulingError, SchedulingRepository, TechAvailability, TechShiftPattern, WeekGridRow,
 };
 use boss_testing::TestRequest;
 use chrono::{DateTime, NaiveDate, Utc};
@@ -39,20 +48,56 @@ const OWNER: &str = "emp-tech-001";
 const OTHER: &str = "emp-tech-002";
 const SEEDED: &str = "seeded-token-of-emp-tech-001";
 const URI: &str = "/api/scheduling/techs/emp-tech-001/calendar-token";
+const LOGGED_RAW: &str = "/api/scheduling/calendar-tokens/logged-raw";
+const REVOKE_LOGGED_RAW: &str = "/api/scheduling/calendar-tokens/logged-raw/revoke";
 
+#[derive(Clone)]
+struct Feed {
+    sha: CalendarTokenSha256,
+    created_at: DateTime<Utc>,
+    logged_raw: bool,
+}
+
+/// The token table as digests, plus a count of the events a write
+/// would record — one per row written, none for a refusal.
 #[derive(Default)]
-struct Tokens(Mutex<HashMap<String, String>>);
+struct Tokens {
+    feeds: Mutex<HashMap<String, Feed>>,
+    events: Mutex<u64>,
+}
 
 impl Tokens {
+    /// OWNER holds a feed minted before digests: its token is in the
+    /// log in the clear, so it is marked `logged_raw`, as the migration
+    /// marks every row it re-hashed.
     fn seeded() -> Arc<Self> {
         let t = Self::default();
-        t.0.lock()
-            .unwrap()
-            .insert(OWNER.to_string(), SEEDED.to_string());
+        t.feeds.lock().unwrap().insert(
+            OWNER.to_string(),
+            Feed {
+                sha: CalendarTokenSha256::of(SEEDED),
+                created_at: Utc::now(),
+                logged_raw: true,
+            },
+        );
         Arc::new(t)
     }
-    fn of(&self, emp: &str) -> Option<String> {
-        self.0.lock().unwrap().get(emp).cloned()
+    fn of(&self, emp: &str) -> Option<CalendarTokenSha256> {
+        self.feeds.lock().unwrap().get(emp).map(|f| f.sha.clone())
+    }
+    fn events(&self) -> u64 {
+        *self.events.lock().unwrap()
+    }
+    fn write(&self, emp: &str, sha: &CalendarTokenSha256, at: DateTime<Utc>) {
+        self.feeds.lock().unwrap().insert(
+            emp.to_string(),
+            Feed {
+                sha: sha.clone(),
+                created_at: at,
+                logged_raw: false,
+            },
+        );
+        *self.events.lock().unwrap() += 1;
     }
 }
 
@@ -71,13 +116,15 @@ impl SchedulingRepository for Tokens {
     ) -> Result<TechAvailability, SchedulingError> {
         unused()
     }
+    /// The feed's schedule is empty here: the fake holds no schedule,
+    /// only the tokens that open one.
     async fn list_availability(
         &self,
         _: Option<&str>,
         _: DateTime<Utc>,
         _: DateTime<Utc>,
     ) -> Result<Vec<TechAvailability>, SchedulingError> {
-        unused()
+        Ok(vec![])
     }
     async fn delete_availability(
         &self,
@@ -107,7 +154,7 @@ impl SchedulingRepository for Tokens {
         _: DateTime<Utc>,
         _: DateTime<Utc>,
     ) -> Result<Vec<ScheduledAssignment>, SchedulingError> {
-        unused()
+        Ok(vec![])
     }
     async fn update_assignment_status(
         &self,
@@ -160,35 +207,79 @@ impl SchedulingRepository for Tokens {
     ) -> Result<Vec<WeekGridRow>, SchedulingError> {
         unused()
     }
-    async fn calendar_token_for(
+    async fn calendar_feed_created_at(
         &self,
         employee_id: &str,
-    ) -> Result<Option<String>, SchedulingError> {
-        Ok(self.of(employee_id))
+    ) -> Result<Option<DateTime<Utc>>, SchedulingError> {
+        Ok(self
+            .feeds
+            .lock()
+            .unwrap()
+            .get(employee_id)
+            .map(|f| f.created_at))
     }
     async fn rotate_calendar_token(
         &self,
         employee_id: &str,
-        new_token: &str,
-        _: DateTime<Utc>,
+        token_sha256: &CalendarTokenSha256,
+        now: DateTime<Utc>,
         _: &EventStamp,
     ) -> Result<(), SchedulingError> {
-        self.0
-            .lock()
-            .unwrap()
-            .insert(employee_id.to_string(), new_token.to_string());
+        self.write(employee_id, token_sha256, now);
         Ok(())
     }
-    async fn employee_by_calendar_token(
+    async fn revoke_calendar_token(
         &self,
-        token: &str,
-    ) -> Result<Option<String>, SchedulingError> {
+        employee_id: &str,
+        token_sha256: &CalendarTokenSha256,
+        now: DateTime<Utc>,
+        _: &EventStamp,
+    ) -> Result<(), SchedulingError> {
+        if self.of(employee_id).is_none() {
+            return Err(SchedulingError::NotFound(format!(
+                "no calendar feed for {employee_id}"
+            )));
+        }
+        self.write(employee_id, token_sha256, now);
+        Ok(())
+    }
+    async fn count_calendar_tokens_logged_raw(&self) -> Result<i64, SchedulingError> {
         Ok(self
-            .0
+            .feeds
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|f| f.logged_raw)
+            .count() as i64)
+    }
+    async fn revoke_calendar_tokens_logged_raw(
+        &self,
+        now: DateTime<Utc>,
+        _: &EventStamp,
+    ) -> Result<u64, SchedulingError> {
+        let logged: Vec<String> = self
+            .feeds
             .lock()
             .unwrap()
             .iter()
-            .find(|(_, t)| t.as_str() == token)
+            .filter(|(_, f)| f.logged_raw)
+            .map(|(e, _)| e.clone())
+            .collect();
+        for emp in &logged {
+            self.write(emp, &CalendarTokenSha256::of_a_discarded_token(), now);
+        }
+        Ok(logged.len() as u64)
+    }
+    async fn employee_by_calendar_token(
+        &self,
+        token_sha256: &CalendarTokenSha256,
+    ) -> Result<Option<String>, SchedulingError> {
+        Ok(self
+            .feeds
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, f)| &f.sha == token_sha256)
             .map(|(e, _)| e.clone()))
     }
 }
@@ -209,6 +300,18 @@ fn assert_refused_without_token(status: StatusCode, body: &str, who: &str) {
         !body.contains(SEEDED),
         "{who}'s refusal leaked the token: {body}"
     );
+}
+
+/// Whether `token` opens a feed, asked the way a calendar app asks.
+async fn opens(tokens: &Arc<Tokens>, token: &str) -> bool {
+    let r = TestRequest::get(format!("/ics/{token}/calendar.ics"))
+        .send(&app(tokens.clone()))
+        .await;
+    match r.status {
+        StatusCode::OK => true,
+        StatusCode::NOT_FOUND => false,
+        other => panic!("the feed answered {other}: {}", r.body_text()),
+    }
 }
 
 #[tokio::test]
@@ -251,8 +354,11 @@ async fn an_operator_cannot_read_an_employees_token_either() {
     assert_refused_without_token(r.status, &r.body_text(), "operator");
 }
 
+/// The server holds a digest, so even the employee's own read answers
+/// only that a feed exists and when it was made — the URL was theirs
+/// once, in the response to the rotate that made it.
 #[tokio::test]
-async fn the_employee_reads_their_own_token() {
+async fn the_employee_reads_that_their_feed_exists_and_never_its_url() {
     let r = TestRequest::get(URI)
         .as_user(OWNER, "service-tech")
         .send(&app(Tokens::seeded()))
@@ -260,8 +366,20 @@ async fn the_employee_reads_their_own_token() {
     r.assert_status(StatusCode::OK);
     let body: Value = r.assert_json();
     assert_eq!(body["employee_id"], OWNER);
-    assert_eq!(body["token"], SEEDED);
-    assert_eq!(body["ics_url"], format!("/ics/{SEEDED}/calendar.ics"));
+    assert!(body["created_at"].is_string(), "{body}");
+    for key in ["token", "ics_url", "token_sha256"] {
+        assert!(body.get(key).is_none(), "the read carried {key}: {body}");
+    }
+    assert!(!r.body_text().contains(SEEDED));
+}
+
+#[tokio::test]
+async fn an_employee_with_no_feed_reads_404() {
+    let r = TestRequest::get("/api/scheduling/techs/emp-tech-002/calendar-token")
+        .as_user(OTHER, "service-tech")
+        .send(&app(Tokens::seeded()))
+        .await;
+    r.assert_status(StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -274,17 +392,38 @@ async fn an_operators_rotate_revokes_the_feed_and_carries_no_token() {
     r.assert_status(StatusCode::OK);
     let body: Value = r.assert_json();
     assert_eq!(body["employee_id"], OWNER);
+    assert_eq!(body["revoked"], true, "{body}");
     assert!(
         body.get("token").is_none() && body.get("ics_url").is_none(),
         "an operator's rotate must not hand the operator the new feed: {body}"
     );
-    let now = tokens.of(OWNER).expect("the rotate wrote a token");
-    assert_ne!(now, SEEDED, "the old feed URL must stop working");
+    let now = tokens.of(OWNER).expect("the revoke wrote a digest");
+    assert_ne!(
+        now,
+        CalendarTokenSha256::of(SEEDED),
+        "the old feed URL must stop working"
+    );
+    assert!(!opens(&tokens, SEEDED).await, "the revoked URL still opens");
     assert!(
-        !r.body_text().contains(&now),
-        "the new token rode in the operator's response: {}",
+        !r.body_text().contains(now.as_str()),
+        "the new digest rode in the operator's response: {}",
         r.body_text()
     );
+}
+
+/// Round-2 finding 3 on car f46d9df2: an operator's rotate on an id
+/// nobody checked minted an orphan row and event. An operator's rotate
+/// is a revocation, so with no feed there is nothing to revoke.
+#[tokio::test]
+async fn an_operators_revoke_of_an_employee_with_no_feed_is_404_and_writes_nothing() {
+    let tokens = Tokens::seeded();
+    let r = TestRequest::post("/api/scheduling/techs/emp-made-up/calendar-token")
+        .as_user("emp-david", "platform-admin")
+        .send(&app(tokens.clone()))
+        .await;
+    r.assert_status(StatusCode::NOT_FOUND);
+    assert_eq!(tokens.of("emp-made-up"), None, "an orphan row was minted");
+    assert_eq!(tokens.events(), 0, "a refused revoke recorded an event");
 }
 
 #[tokio::test]
@@ -296,8 +435,8 @@ async fn another_employee_cannot_rotate_an_employees_token() {
         .await;
     assert_refused_without_token(r.status, &r.body_text(), "another employee's rotate");
     assert_eq!(
-        tokens.of(OWNER).as_deref(),
-        Some(SEEDED),
+        tokens.of(OWNER),
+        Some(CalendarTokenSha256::of(SEEDED)),
         "a refused rotate must write nothing"
     );
 }
@@ -310,7 +449,7 @@ async fn a_guest_session_cannot_rotate_an_employees_token() {
         .send(&app(tokens.clone()))
         .await;
     assert_refused_without_token(r.status, &r.body_text(), "guest rotate");
-    assert_eq!(tokens.of(OWNER).as_deref(), Some(SEEDED));
+    assert_eq!(tokens.of(OWNER), Some(CalendarTokenSha256::of(SEEDED)));
 }
 
 /// The path is the caller's to choose, so "you are the employee" must
@@ -371,7 +510,7 @@ async fn a_visitor_session_neither_reads_nor_mints_a_token() {
         None,
         "a visitor mints nothing"
     );
-    assert_eq!(tokens.of(OWNER).as_deref(), Some(SEEDED));
+    assert_eq!(tokens.of(OWNER), Some(CalendarTokenSha256::of(SEEDED)));
 }
 
 /// A read-only role never rotates, even on a path that names the
@@ -387,12 +526,18 @@ async fn a_read_only_role_does_not_rotate_its_own_token() {
             .send(&app(tokens.clone()))
             .await;
         assert_refused_without_token(r.status, &r.body_text(), role);
-        assert_eq!(tokens.of(OWNER).as_deref(), Some(SEEDED), "{role} rotated");
+        assert_eq!(
+            tokens.of(OWNER),
+            Some(CalendarTokenSha256::of(SEEDED)),
+            "{role} rotated"
+        );
     }
 }
 
+/// The employee's own rotate is the one place the token is shown — once
+/// — and what the server kept is its digest, not it.
 #[tokio::test]
-async fn the_employee_rotates_their_own_token_and_receives_it() {
+async fn the_employee_rotates_their_own_token_and_receives_it_once() {
     let tokens = Tokens::seeded();
     let r = TestRequest::post(URI)
         .as_user(OWNER, "service-tech")
@@ -400,9 +545,95 @@ async fn the_employee_rotates_their_own_token_and_receives_it() {
         .await;
     r.assert_status(StatusCode::OK);
     let body: Value = r.assert_json();
-    let now = tokens.of(OWNER).expect("the rotate wrote a token");
-    assert_ne!(now, SEEDED);
+    let token = body["token"]
+        .as_str()
+        .expect("the owner is handed the token");
     assert_eq!(body["employee_id"], OWNER);
-    assert_eq!(body["token"], now.as_str());
-    assert_eq!(body["ics_url"], format!("/ics/{now}/calendar.ics"));
+    assert_eq!(body["ics_url"], format!("/ics/{token}/calendar.ics"));
+    let kept = tokens.of(OWNER).expect("the rotate wrote a digest");
+    assert_eq!(kept, CalendarTokenSha256::of(token));
+    assert_ne!(kept.as_str(), token, "the server kept the token itself");
+    assert!(opens(&tokens, token).await, "the new URL must open");
+    assert!(!opens(&tokens, SEEDED).await, "the old URL still opens");
+}
+
+/// What the log and the table hold is the digest, so the digest must
+/// not open the feed — or holding the log would still be holding the
+/// feed.
+#[tokio::test]
+async fn the_feed_opens_with_its_token_and_never_with_its_digest() {
+    let tokens = Tokens::seeded();
+    assert!(opens(&tokens, SEEDED).await);
+    let digest = CalendarTokenSha256::of(SEEDED);
+    assert!(
+        !opens(&tokens, digest.as_str()).await,
+        "the stored digest opened the feed"
+    );
+}
+
+/// The feeds minted before digests have their tokens in the log, which
+/// cannot be edited — so they are revoked, by one bounded verb run after
+/// the deploy. Only a platform-admin runs it; it revokes exactly the
+/// rows whose tokens were logged, so a second run revokes nothing and a
+/// feed re-subscribed since keeps working.
+#[tokio::test]
+async fn the_logged_tokens_are_revoked_by_an_operator_and_only_once() {
+    let tokens = Tokens::seeded();
+    // OTHER mints a feed under digests before the revoke runs.
+    let other = TestRequest::post("/api/scheduling/techs/emp-tech-002/calendar-token")
+        .as_user(OTHER, "service-tech")
+        .send(&app(tokens.clone()))
+        .await;
+    other.assert_status(StatusCode::OK);
+    let other_token = other.assert_json::<Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let count = TestRequest::get(LOGGED_RAW)
+        .as_user("guest@algedonic.dev", "audit-readonly")
+        .send(&app(tokens.clone()))
+        .await;
+    count.assert_status(StatusCode::OK);
+    assert_eq!(count.assert_json::<Value>()["logged_raw"], 1);
+
+    for (id, role) in [
+        (OWNER, "service-tech"),
+        ("guest@algedonic.dev", "audit-readonly"),
+        ("anonymous", "guest"),
+    ] {
+        let r = TestRequest::post(REVOKE_LOGGED_RAW)
+            .as_user(id, role)
+            .send(&app(tokens.clone()))
+            .await;
+        r.assert_status(StatusCode::FORBIDDEN);
+    }
+    assert!(opens(&tokens, SEEDED).await, "a refused revoke revoked");
+
+    let r = TestRequest::post(REVOKE_LOGGED_RAW)
+        .as_user("emp-david", "platform-admin")
+        .send(&app(tokens.clone()))
+        .await;
+    r.assert_status(StatusCode::OK);
+    assert_eq!(r.assert_json::<Value>()["revoked"], 1);
+    assert!(!opens(&tokens, SEEDED).await, "a logged token still opens");
+    assert!(
+        opens(&tokens, &other_token).await,
+        "a digest-era feed broke"
+    );
+    assert!(
+        tokens.of(OWNER).is_some(),
+        "the revoke keeps the row, with a digest no URL matches"
+    );
+
+    let again = TestRequest::post(REVOKE_LOGGED_RAW)
+        .as_user("emp-david", "platform-admin")
+        .send(&app(tokens.clone()))
+        .await;
+    again.assert_status(StatusCode::OK);
+    assert_eq!(again.assert_json::<Value>()["revoked"], 0);
+    let after = TestRequest::get(LOGGED_RAW)
+        .send(&app(tokens.clone()))
+        .await;
+    assert_eq!(after.assert_json::<Value>()["logged_raw"], 0);
 }

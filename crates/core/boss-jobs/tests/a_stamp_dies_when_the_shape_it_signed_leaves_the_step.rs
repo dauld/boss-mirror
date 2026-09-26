@@ -344,3 +344,143 @@ async fn an_approval_edited_away_through_the_put_does_not_come_back() {
     );
     assert_completion_refused(&app, &step, "the PUT revived a dead stamp").await;
 }
+
+/// The run edge a dispatch writes and a claim by a new holder drops
+/// (`agent_run`, backlog 9562f6df). It sits in the metadata, so it is
+/// inside the shape a stamp signs.
+const RUN: &str = "0d9fc9c6-32e4-451f-9f7d-ecfe25b25a38";
+
+/// The event stamp a claim's write is attributed to.
+fn claim_stamp() -> boss_core::publisher::EventStamp {
+    boss_core::publisher::EventStamp::new("jobs", boss_core::actor::ActorId::human("emp-other"))
+}
+
+/// THE REVIEW'S RACE (backlog 4174c4a9, adversarial review of car
+/// e1a62aa5). The sign-off door reads the step, runs its policy and
+/// presence checks, and builds its stamp over the shape it READ; a write
+/// that lands between that read and the append moves the row. The append
+/// used to write the stamp anyway — alive, on a shape the row no longer
+/// had, so no edit had voided it — and a claim that dropped the run edge
+/// then put the row back on the stamp's shape without voiding anything,
+/// and the completion answered 204 over a signature the approver never
+/// made on the row as it stood. The race is reproduced here at the port,
+/// in the order it interleaves across the two requests: the append now
+/// refuses under the row's lock, so the stamp never lands.
+#[tokio::test]
+async fn a_stamp_built_on_a_shape_the_row_has_left_is_refused_where_it_is_written() {
+    let (app, jobs) = build_app();
+    let step = seed(&jobs, "00000000-0000-0000-0000-00000000c804").await;
+
+    // The sign-off door's read, and the stamp it builds from it — X.
+    let read = jobs.get_step(&step.id).await.unwrap().unwrap();
+    let stamp = boss_core::job::SignOffStamp {
+        authority_id: approver().id,
+        role: ROLE.into(),
+        stamped_at: chrono::Utc::now(),
+        shape_hash: read.shape_hash(),
+        assurance: boss_core::job::Assurance::Session,
+        presence_nonce: None,
+        voided_at: None,
+        voided_by_event: None,
+    };
+    // Between the read and the append, a dispatch writes its run edge:
+    // the row is X + edge now, and there is no stamp yet for it to void.
+    assert_eq!(
+        merge(&app, &step, json!({"agent_run": RUN})).await,
+        StatusCode::NO_CONTENT
+    );
+
+    let appended = jobs
+        .append_sign_off(&step.id, &stamp, chrono::Utc::now(), &[])
+        .await;
+    match appended {
+        Err(boss_jobs::port::JobsError::StampOffShape {
+            signed, current, ..
+        }) => {
+            assert_eq!(signed, stamp.shape_hash);
+            assert_ne!(current, stamp.shape_hash);
+        }
+        other => panic!(
+            "a stamp over a shape the row has left must be refused under the lock, got {other:?}"
+        ),
+    }
+    let row = stored(&jobs, &step).await;
+    assert_eq!(row["sign_offs"], json!([]), "nothing landed: {row}");
+
+    // A claim by a new holder drops the edge — X again, byte for byte.
+    jobs.claim_step_at(&step.id, "emp-other", &claim_stamp(), &[])
+        .await
+        .unwrap();
+    let row = stored(&jobs, &step).await;
+    assert_eq!(
+        boss_core::job::step_shape_hash(&step.title, &row["metadata"]),
+        stamp.shape_hash,
+        "the claim put the row back on the shape the refused stamp was built on"
+    );
+    assert_completion_refused(&app, &step, "a stamp that landed off its shape counted").await;
+}
+
+/// THE CLAIM MOVES A SHAPE TOO. Dropping the run edge changes the
+/// metadata, so a claim by a new holder is an edit of the signed content
+/// like any other, and the stamps it moved off die in the claim's own
+/// write, with the invalidation event that lists them (design 87329a13).
+/// Before, the claim voided nothing: writing the edge back (A-B-A through
+/// the edge) revived the approval and the completion answered 204.
+#[tokio::test]
+async fn a_claim_that_drops_the_run_edge_voids_the_stamps_it_moved() {
+    let (app, jobs) = build_app();
+    let step = seed(&jobs, "00000000-0000-0000-0000-00000000c805").await;
+
+    // The dispatch's edge, then an approval of the step as it stands.
+    assert_eq!(
+        merge(&app, &step, json!({"agent_run": RUN})).await,
+        StatusCode::NO_CONTENT
+    );
+    let (status, body) = sign(&app, &step).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let s1_shape = body["sign_offs"][0]["shape_hash"].clone();
+
+    // A new holder claims: the edge goes, and so does the stamp.
+    jobs.claim_step_at(&step.id, "emp-other", &claim_stamp(), &[])
+        .await
+        .unwrap();
+    let row = stored(&jobs, &step).await;
+    assert!(
+        row["sign_offs"][0]["voided_at"].is_string(),
+        "the claim that moved the shape voided the stamp on the row: {row}"
+    );
+    let inv = invalidations(&jobs);
+    assert_eq!(inv.len(), 1, "the claim recorded its invalidation: {inv:?}");
+    assert_eq!(inv[0]["voided"][0]["shape_hash"], s1_shape, "{inv:?}");
+    assert_eq!(
+        inv[0]["voided"][0]["voided_by_event"], row["sign_offs"][0]["voided_by_event"],
+        "the stamp names the event that lists it"
+    );
+
+    // The edge written back: the signed shape again, and the stamp stays dead.
+    assert_eq!(
+        merge(&app, &step, json!({"agent_run": RUN})).await,
+        StatusCode::NO_CONTENT
+    );
+    let row = stored(&jobs, &step).await;
+    assert_eq!(
+        boss_core::job::step_shape_hash(&step.title, &row["metadata"]),
+        s1_shape.as_str().unwrap(),
+    );
+    assert_completion_refused(
+        &app,
+        &step,
+        "the edge put back revived a stamp the claim moved",
+    )
+    .await;
+
+    // A re-claim by the holder moves nothing and voids nothing.
+    jobs.claim_step_at(&step.id, "emp-other", &claim_stamp(), &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        invalidations(&jobs).len(),
+        1,
+        "an idempotent re-claim is not an edit"
+    );
+}

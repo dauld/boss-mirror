@@ -28,8 +28,12 @@ pub const ASSIGNMENT_STATUS_CHANGED: &str = "scheduling.assignment.status-change
 /// Payload: full `TechShiftPattern` row.
 pub const SHIFT_PATTERN_UPSERTED: &str = "scheduling.shift-pattern.upserted";
 
-/// Calendar feed token rotated for a tech. Payload `{employee_id,
-/// token, rotated_at}`. Rebuild UPSERTs the `tech_calendar_tokens`
-/// row so a published `/ics/{token}/calendar.ics` URL keeps
-/// resolving after replay.
+/// Calendar feed token rotated (or revoked) for a tech. Payload
+/// `{employee_id, token_sha256, rotated_at}` — the token's SHA-256,
+/// NEVER the token (backlog 4aaff4dc, design 3101c506): this payload
+/// reaches `audit_log`, the bus, and every reader of either. Rebuild
+/// UPSERTs the `tech_calendar_tokens` row so a published
+/// `/ics/{token}/calendar.ics` URL keeps resolving after replay.
+/// Events recorded before 2026-09-26 carry the raw `token` instead;
+/// rebuild replays those as its digest, marked `logged_raw`.
 pub const CALENDAR_TOKEN_ROTATED: &str = "scheduling.calendar-token.rotated";

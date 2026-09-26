@@ -3,7 +3,9 @@
 // /api/scheduling/techs/{emp}/calendar-token, so the page offers no
 // control the server will refuse:
 //
-// - 'owner'        the employee themself: the feed URL, copy, rotate.
+// - 'owner'        the employee themself: whether a feed exists, and a
+//                  rotate whose response shows the URL once (the
+//                  server keeps only its digest, backlog 4aaff4dc).
 // - 'rotate-only'  a platform-admin on someone else's page: a revoke
 //                  button, whose response carries no token.
 // - 'none'         everyone else — another employee, a guest (global

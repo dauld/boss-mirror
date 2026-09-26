@@ -11,6 +11,7 @@ use sqlx::PgPool;
 use tracing::warn;
 use uuid::Uuid;
 
+use super::feed_token::CalendarTokenSha256;
 use super::types::{ScheduledAssignment, TechAvailability, TechShiftPattern};
 
 const REBUILD_LOCK_KEY: i64 = boss_core::rebuild::lock_key("scheduling");
@@ -170,22 +171,23 @@ pub async fn rebuild_scheduling(pool: &PgPool) -> Result<RebuildReport, RebuildE
                         .get("employee_id")
                         .and_then(|v| v.as_str())
                         .map(String::from);
-                    let token = ev
-                        .payload
-                        .get("token")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                    if let (Some(emp_id), Some(token)) = (emp_id, token) {
+                    if let (Some(emp_id), Some((token_sha256, logged_raw))) =
+                        (emp_id, rotated_digest(&ev.payload))
+                    {
                         // ev.ts = the instant the live mint bound into
                         // created_at; NOW() here stamped replay time.
                         sqlx::query(
-                            "INSERT INTO tech_calendar_tokens (employee_id, token, created_at) \
-                             VALUES ($1, $2, $3) \
+                            "INSERT INTO tech_calendar_tokens \
+                                (employee_id, token_sha256, logged_raw, created_at) \
+                             VALUES ($1, $2, $3, $4) \
                              ON CONFLICT (employee_id) DO UPDATE SET \
-                                token = EXCLUDED.token, created_at = EXCLUDED.created_at",
+                                token_sha256 = EXCLUDED.token_sha256, \
+                                logged_raw = EXCLUDED.logged_raw, \
+                                created_at = EXCLUDED.created_at",
                         )
                         .bind(&emp_id)
-                        .bind(&token)
+                        .bind(token_sha256.as_str())
+                        .bind(logged_raw)
                         .bind(ev.ts)
                         .execute(&mut *conn)
                         .await
@@ -209,6 +211,24 @@ pub async fn rebuild_scheduling(pool: &PgPool) -> Result<RebuildReport, RebuildE
     report.events_processed = stats.processed;
     report.events_skipped = stats.skipped;
     Ok(report)
+}
+
+/// The digest a `scheduling.calendar-token.rotated` payload rests as,
+/// and whether its token is in the log in the clear.
+///
+/// A payload since digests (backlog 4aaff4dc) carries `token_sha256`,
+/// replayed as it is. A LEGACY payload carries the raw `token`, which
+/// the log cannot shed: it replays as the digest of that token — what
+/// the re-hash migration wrote for the same row — marked `logged_raw`,
+/// so a replayed table equals the migrated one and the bounded revoke
+/// still finds it. The digest wins if a payload ever carried both.
+fn rotated_digest(payload: &serde_json::Value) -> Option<(CalendarTokenSha256, bool)> {
+    let field = |k: &str| payload.get(k).and_then(|v| v.as_str());
+    match (field("token_sha256"), field("token")) {
+        (Some(digest), _) => Some((CalendarTokenSha256::from_stored(digest), false)),
+        (None, Some(raw)) => Some((CalendarTokenSha256::of(raw), true)),
+        (None, None) => None,
+    }
 }
 
 fn parse_uuid(payload: &serde_json::Value, key: &str) -> Option<Uuid> {
@@ -296,4 +316,31 @@ async fn replay_upsert_shift_pattern(
     .await
     .map_err(|e| RebuildError::Storage(e.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_digest_payload_replays_as_it_was_written_and_is_not_logged_raw() {
+        let digest = CalendarTokenSha256::of("t").as_str().to_string();
+        let got = rotated_digest(&json!({"employee_id": "e", "token_sha256": digest}));
+        assert_eq!(
+            got,
+            Some((CalendarTokenSha256::from_stored(&digest), false))
+        );
+    }
+
+    #[test]
+    fn a_legacy_payload_replays_as_the_digest_of_its_token_and_is_logged_raw() {
+        let got = rotated_digest(&json!({"employee_id": "e", "token": "t"}));
+        assert_eq!(got, Some((CalendarTokenSha256::of("t"), true)));
+    }
+
+    #[test]
+    fn a_payload_with_neither_is_skipped() {
+        assert_eq!(rotated_digest(&json!({"employee_id": "e"})), None);
+    }
 }

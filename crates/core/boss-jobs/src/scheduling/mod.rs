@@ -14,6 +14,7 @@
 //! consume the same query API.
 
 pub mod events;
+pub mod feed_token;
 pub mod http;
 pub mod ics;
 pub mod materialize;
@@ -27,6 +28,7 @@ pub mod types;
 #[cfg(feature = "postgres")]
 pub use rebuild::{RebuildReport as SchedulingRebuildReport, rebuild_scheduling};
 
+pub use feed_token::{CalendarTokenSha256, mint_calendar_token};
 pub use port::{SchedulingError, SchedulingRepository};
 #[cfg(feature = "postgres")]
 pub use postgres::PgScheduling;

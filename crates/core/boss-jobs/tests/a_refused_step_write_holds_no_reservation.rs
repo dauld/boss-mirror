@@ -386,6 +386,38 @@ async fn a_start_refused_by_the_start_it_let_through_leaves_that_start_its_hold(
 }
 
 #[tokio::test]
+async fn a_start_refused_by_a_start_that_then_completed_leaves_the_completed_step_its_hold() {
+    // The round-3 review of car 983696b5 (backlog dc7c91cc, SF-A): the
+    // race above, with W's step COMPLETED before R's write is judged. R
+    // reserved, W took R's hold as the step's and landed, and the step
+    // completed. R is refused, reads the row — Completed, not Active —
+    // and handed back the only hold the step had. A completed step's hold
+    // is its record of past work (the hook's `done_does_not_cancel`), so
+    // the refused racer's reservation stays when the step as stored is
+    // Completed over exactly that time.
+    let (app, jobs, calendar) = build_app();
+    let (job, step) = scheduled(&jobs).await;
+    let ref_id = step.id.to_string();
+
+    jobs.change_before_next_judged_write(&step.id, |row| {
+        row.status = StepStatus::Completed;
+    });
+
+    let (status, body) = start(&app, &job, &step).await;
+    assert_eq!(status, StatusCode::CONFLICT, "R is refused: {body}");
+    assert_eq!(
+        jobs.get_step(&step.id).await.unwrap().unwrap().status,
+        StepStatus::Completed,
+        "precondition: W's start, then its completion, is what stands"
+    );
+    assert_eq!(
+        calendar.live_for(&ref_id),
+        1,
+        "the completed step keeps the hold its start took"
+    );
+}
+
+#[tokio::test]
 async fn a_start_that_took_a_racers_hold_holds_time_when_the_racer_hands_it_back() {
     // The same race with R's refusal landing EARLIER: W's hook takes R's
     // hold as the step's (AlreadyHeld), R is refused — by some other

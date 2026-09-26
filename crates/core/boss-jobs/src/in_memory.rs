@@ -1178,10 +1178,10 @@ impl JobsRepository for InMemoryJobs {
         &self,
         step_id: &StepId,
         actor: &str,
-        now: chrono::DateTime<chrono::Utc>,
+        stamp: &boss_core::publisher::EventStamp,
         events: &[boss_core::event::Event],
     ) -> Result<Step, JobsError> {
-        let claimed = {
+        let (claimed, invalidated) = {
             let mut state = self.inner.lock().expect("poisoned");
             let key = step_key(step_id);
             let Some(existing) = state.steps.get_mut(&key) else {
@@ -1203,19 +1203,25 @@ impl JobsRepository for InMemoryJobs {
             // A new holder does not inherit the previous run's edge
             // (9562f6df). No alias table here, so the holder is `actor`
             // exactly — the Pg adapter admits its aliases too.
+            let shape_before = existing.shape_hash();
             if crate::agent_runs::claim_changes_holder(existing.assignee_id.as_deref(), actor, &[])
             {
                 existing.metadata = crate::agent_runs::without_edge(&existing.metadata);
             }
             existing.assignee_id = Some(actor.to_string());
             existing.status = StepStatus::Active;
+            // The edge is inside the shape, so dropping it is an edit of
+            // the signed content, and it voids like one (backlog
+            // 4174c4a9) — or writing the edge back would revive them.
+            let invalidated = crate::events::void_stamps_if_moved(stamp, &shape_before, existing);
             let claimed = existing.clone();
             // A claim bumps `updated_at` in the Pg adapter; the ready
             // stamp, already written at the flip, stays put.
-            touch_step(&mut state, key, now);
-            claimed
+            touch_step(&mut state, key, stamp.timestamp);
+            (claimed, invalidated)
         };
         self.record_all(events);
+        self.record_all(invalidated.as_slice());
         Ok(claimed)
     }
 
@@ -1232,6 +1238,16 @@ impl JobsRepository for InMemoryJobs {
             let Some(existing) = state.steps.get_mut(&key) else {
                 return Err(JobsError::StepNotFound(*step_id));
             };
+            // The stamp lands only on the shape it signs, judged under
+            // the lock the push writes through (backlog 4174c4a9).
+            let current = existing.shape_hash();
+            if current != stamp.shape_hash {
+                return Err(JobsError::StampOffShape {
+                    id: *step_id,
+                    signed: stamp.shape_hash.clone(),
+                    current,
+                });
+            }
             existing.sign_offs.push(stamp.clone());
             // Mirrors the sign-off UPDATE's `updated_at = $3`.
             touch_step(&mut state, key, now);
@@ -2513,7 +2529,15 @@ mod tests {
         repo.add_step(&step).await.unwrap();
 
         let refused = repo
-            .claim_step_at(&step.id, "agent-claude", Utc::now(), &[])
+            .claim_step_at(
+                &step.id,
+                "agent-claude",
+                &boss_core::publisher::EventStamp::new(
+                    "jobs",
+                    boss_core::actor::ActorId::automation("test"),
+                ),
+                &[],
+            )
             .await;
         match refused {
             Err(JobsError::ClaimConflict { holder, status }) => {

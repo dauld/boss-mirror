@@ -19,7 +19,7 @@ use boss_core::job::{Job, JobId, JobStatus, Priority, Step, StepId, StepStatus, 
 use boss_jobs::JobsRepository;
 use boss_jobs::port::JobsError;
 use boss_testing::TestDb;
-use chrono::{NaiveDate, Utc};
+use chrono::NaiveDate;
 use uuid::Uuid;
 
 /// The one live pair, seeded by the migration that opened the alias
@@ -62,7 +62,15 @@ async fn a_claim_as_the_registered_id_takes_a_step_held_by_its_alias() {
     let step_id = seeded_step(&repo, ALIAS).await;
 
     let won = repo
-        .claim_step_at(&step_id, AGENT, Utc::now(), &[])
+        .claim_step_at(
+            &step_id,
+            AGENT,
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
         .await
         .expect("the holder, spelled by its registered id, claims its own step");
     assert_eq!(won.status, StepStatus::Active);
@@ -77,7 +85,15 @@ async fn a_claim_as_the_registered_id_takes_a_step_held_by_its_alias() {
     // And the re-claim by the same actor stays the idempotent no-op it
     // was: active, held by the registered id.
     let again = repo
-        .claim_step_at(&step_id, AGENT, Utc::now(), &[])
+        .claim_step_at(
+            &step_id,
+            AGENT,
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
         .await
         .expect("re-claim by the holder");
     assert_eq!(again.assignee_id.as_deref(), Some(AGENT));
@@ -89,7 +105,17 @@ async fn a_step_held_by_someone_else_still_refuses_the_claim() {
     let repo = boss_jobs::PgJobs::new(db.pool.clone());
     let step_id = seeded_step(&repo, "emp-someone-else").await;
 
-    let lost = repo.claim_step_at(&step_id, AGENT, Utc::now(), &[]).await;
+    let lost = repo
+        .claim_step_at(
+            &step_id,
+            AGENT,
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
+        .await;
     match lost {
         Err(JobsError::ClaimConflict { holder, status }) => {
             assert_eq!(holder.as_deref(), Some("emp-someone-else"));
@@ -116,7 +142,17 @@ async fn the_alias_is_not_admitted_to_a_step_the_registered_id_holds() {
     let repo = boss_jobs::PgJobs::new(db.pool.clone());
     let step_id = seeded_step(&repo, AGENT).await;
 
-    let lost = repo.claim_step_at(&step_id, ALIAS, Utc::now(), &[]).await;
+    let lost = repo
+        .claim_step_at(
+            &step_id,
+            ALIAS,
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
+        .await;
     match lost {
         Err(JobsError::ClaimConflict { holder, status }) => {
             assert_eq!(holder.as_deref(), Some(AGENT));

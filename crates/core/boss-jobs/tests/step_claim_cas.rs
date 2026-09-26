@@ -46,13 +46,31 @@ async fn a_claim_wins_exactly_once() {
     let (jobs, step_id) = seeded_step(StepStatus::Ready, None).await;
 
     let won = jobs
-        .claim_step_at(&step_id, "emp-a", Utc::now(), &[])
+        .claim_step_at(
+            &step_id,
+            "emp-a",
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
         .await
         .expect("first claim wins");
     assert_eq!(won.assignee_id.as_deref(), Some("emp-a"));
     assert_eq!(won.status, StepStatus::Active);
 
-    let lost = jobs.claim_step_at(&step_id, "emp-b", Utc::now(), &[]).await;
+    let lost = jobs
+        .claim_step_at(
+            &step_id,
+            "emp-b",
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
+        .await;
     match lost {
         Err(JobsError::ClaimConflict { holder, status }) => {
             assert_eq!(holder.as_deref(), Some("emp-a"), "loser learns the holder");
@@ -69,11 +87,27 @@ async fn a_claim_wins_exactly_once() {
 #[tokio::test]
 async fn reclaim_by_the_holder_is_idempotent() {
     let (jobs, step_id) = seeded_step(StepStatus::Ready, None).await;
-    jobs.claim_step_at(&step_id, "emp-a", Utc::now(), &[])
-        .await
-        .expect("claim");
+    jobs.claim_step_at(
+        &step_id,
+        "emp-a",
+        &boss_core::publisher::EventStamp::new(
+            "jobs",
+            boss_core::actor::ActorId::automation("test"),
+        ),
+        &[],
+    )
+    .await
+    .expect("claim");
     let again = jobs
-        .claim_step_at(&step_id, "emp-a", Utc::now(), &[])
+        .claim_step_at(
+            &step_id,
+            "emp-a",
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
         .await
         .expect("re-claim by the same actor is a no-op success");
     assert_eq!(again.assignee_id.as_deref(), Some("emp-a"));
@@ -88,7 +122,17 @@ async fn a_step_that_is_not_ready_cannot_be_claimed() {
         StepStatus::Skipped,
     ] {
         let (jobs, step_id) = seeded_step(status, None).await;
-        let res = jobs.claim_step_at(&step_id, "emp-a", Utc::now(), &[]).await;
+        let res = jobs
+            .claim_step_at(
+                &step_id,
+                "emp-a",
+                &boss_core::publisher::EventStamp::new(
+                    "jobs",
+                    boss_core::actor::ActorId::automation("test"),
+                ),
+                &[],
+            )
+            .await;
         match res {
             Err(JobsError::ClaimConflict { holder, status: st }) => {
                 assert_eq!(holder, None);
@@ -104,7 +148,17 @@ async fn a_dispatcher_assigned_ready_step_is_not_poachable() {
     // The group-queue lens hides steps another actor already holds;
     // the CAS is the backstop for a stale read racing that hide.
     let (jobs, step_id) = seeded_step(StepStatus::Ready, Some("emp-a")).await;
-    let res = jobs.claim_step_at(&step_id, "emp-b", Utc::now(), &[]).await;
+    let res = jobs
+        .claim_step_at(
+            &step_id,
+            "emp-b",
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
+        .await;
     match res {
         Err(JobsError::ClaimConflict { holder, status }) => {
             assert_eq!(holder.as_deref(), Some("emp-a"));
@@ -140,7 +194,15 @@ async fn seeded_step_with_edge(
 async fn a_claim_by_a_new_holder_clears_the_previous_runs_edge() {
     let (jobs, step_id) = seeded_step_with_edge(StepStatus::Ready, None).await;
     let won = jobs
-        .claim_step_at(&step_id, "emp-b", Utc::now(), &[])
+        .claim_step_at(
+            &step_id,
+            "emp-b",
+            &boss_core::publisher::EventStamp::new(
+                "jobs",
+                boss_core::actor::ActorId::automation("test"),
+            ),
+            &[],
+        )
         .await
         .expect("claim");
     assert!(
@@ -166,7 +228,15 @@ async fn a_reclaim_by_the_holder_keeps_its_run_edge() {
     for status in [StepStatus::Active, StepStatus::Ready] {
         let (jobs, step_id) = seeded_step_with_edge(status, Some("emp-a")).await;
         let again = jobs
-            .claim_step_at(&step_id, "emp-a", Utc::now(), &[])
+            .claim_step_at(
+                &step_id,
+                "emp-a",
+                &boss_core::publisher::EventStamp::new(
+                    "jobs",
+                    boss_core::actor::ActorId::automation("test"),
+                ),
+                &[],
+            )
             .await
             .expect("re-claim by the holder");
         assert_eq!(

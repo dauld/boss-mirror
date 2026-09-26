@@ -758,23 +758,35 @@ fn job_body_rejection(raw: &serde_json::Value, serde_err: &str) -> String {
 ///
 /// What is compared is what the CALLER decides at admission. Left out,
 /// each because the server writes it and a re-send cannot be expected
-/// to match it: `workflow_version` (the pin), `opened_at`, an
-/// automation-shaped `owner_id` (resolved to a person —
-/// [`crate::owner_resolution`]; a human owner is kept as sent, so it is
-/// compared), `opened_on` when the clock supplied it, the metadata keys
-/// the server stamps beside the caller's (only the keys SENT are
-/// compared), and `status`, which the packet's protocol moves after
-/// admission. A field an edit has moved since then differs too, and is
-/// refused: the packet under that id no longer reads as the body.
-fn admission_differences(sent: &Job, dated_by_caller: bool, existing: &Job) -> Vec<&'static str> {
+/// to match it: `workflow_version` (the pin), `opened_at`, an `owner_id`
+/// admission would not keep as sent (`owner_kept_as_sent` false: an
+/// automation-shaped id, or a person not on the active roster, both
+/// resolved to a role holder — [`crate::owner_resolution::kept_as_sent`];
+/// a kept owner is compared), `opened_on` when the clock supplied it,
+/// the metadata keys the server stamps beside the caller's (only the
+/// keys SENT are compared), and `status`, which the packet's protocol
+/// moves after admission. A field an edit has moved since then differs
+/// too, and is refused: the packet under that id no longer reads as the
+/// body.
+///
+/// The owner is judged by the keep rule, not by re-running the
+/// resolution (backlog dc7c91cc, SF-B): the role holder a replaced owner
+/// resolves to is a hash over the role's CURRENT holders, so a holder
+/// joining or leaving between the two sends would move it and refuse
+/// the re-send again.
+fn admission_differences(
+    sent: &Job,
+    dated_by_caller: bool,
+    owner_kept_as_sent: bool,
+    existing: &Job,
+) -> Vec<&'static str> {
     let metadata_differs = match sent.metadata.as_object() {
         Some(keys) => keys
             .iter()
             .any(|(k, v)| existing.metadata.get(k) != Some(v)),
         None => !sent.metadata.is_null() && sent.metadata != existing.metadata,
     };
-    let owner_differs = !crate::owner_resolution::is_automation_shaped(&sent.owner_id)
-        && sent.owner_id != existing.owner_id;
+    let owner_differs = owner_kept_as_sent && sent.owner_id != existing.owner_id;
     [
         ("kind", sent.kind != existing.kind),
         ("subject", sent.subject != existing.subject),
@@ -918,7 +930,10 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
     // subject compared, and nothing else).
     match state.jobs.get_job(&job.id).await {
         Ok(Some(existing)) => {
-            let differing = admission_differences(&job, !opened_by_clock, &existing);
+            let owner_kept_as_sent =
+                crate::owner_resolution::kept_as_sent(state.roster.as_deref(), &job.owner_id).await;
+            let differing =
+                admission_differences(&job, !opened_by_clock, owner_kept_as_sent, &existing);
             return if differing.is_empty() {
                 (
                     StatusCode::OK,

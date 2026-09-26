@@ -15,6 +15,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use super::feed_token::{CalendarTokenSha256, mint_calendar_token};
 use super::ics::build_ics;
 use super::port::{SchedulingError, SchedulingRepository};
 use super::types::{AssignmentStatus, NewScheduledAssignment, NewTechAvailability};
@@ -63,6 +64,14 @@ pub fn router(state: SchedulingApiState) -> Router {
             "/api/scheduling/techs/{emp_id}/calendar-token",
             get(get_calendar_token).post(rotate_calendar_token),
         )
+        .route(
+            "/api/scheduling/calendar-tokens/logged-raw",
+            get(count_logged_raw),
+        )
+        .route(
+            "/api/scheduling/calendar-tokens/logged-raw/revoke",
+            post(revoke_logged_raw),
+        )
         .route("/ics/{token}/calendar.ics", get(public_ics_feed))
         .with_state(shared)
 }
@@ -94,7 +103,7 @@ fn resolve_range(q: &RangeQuery) -> (DateTime<Utc>, DateTime<Utc>) {
 }
 
 /// Resolve the outbox event stamp for this request. Scheduling
-/// write handlers carry no CurrentUser extractor (only the two
+/// write handlers carry no CurrentUser extractor (only the
 /// calendar-token handlers do, to authorize); the publisher's
 /// `default_actor` resolves the request identity from the task-local
 /// context, and its clock probe settles `_simulated` — the same
@@ -349,11 +358,22 @@ const ICS_FUTURE_DAYS: i64 = 180;
 // rotate anyone's. Global READ is not this token's grant — the token is
 // the employee's own, like a password.
 //
-// - A read answers only the employee themself. Nobody else, operator
-//   included, gets 403.
+// - A read answers only the employee themself, and only THAT a feed
+//   exists and when it was made: the server keeps the token's SHA-256,
+//   never the token (backlog 4aaff4dc, design 3101c506), so there is no
+//   URL left to read. Anyone else, operator included, gets 403.
 // - A rotate is the employee, or a platform-admin revoking a leaked
-//   feed; the operator's response carries no token, so revoking a feed
-//   never hands the operator the new one.
+//   feed. The employee is handed the new URL once, in the response. An
+//   operator's rotate is a revocation: it writes the digest of a token
+//   nobody keeps, answers 404 when there is no feed to revoke, and its
+//   response carries no token.
+// - Until design 3101c506 this comment said "nobody else, operator
+//   included" reads a token — true of this handler, false of the
+//   system: the rotate wrote the token raw into its event, and the event
+//   tail hands every global-read role (a guest's audit-readonly among
+//   them) that payload. Only the digest now reaches the log, the bus or
+//   a backup, and the feeds whose tokens were logged before it are
+//   revoked by `revoke_calendar_tokens_logged_raw` below.
 // - An anonymous visitor's id — the CurrentUser fallback for a request
 //   with no x-boss-user (`anonymous`), or the guest session's fixed
 //   address — owns nothing, whatever the path says, and neither a
@@ -387,16 +407,15 @@ async fn get_calendar_token(
     if !is_the_employee(&user, &emp_id) {
         return not_yours(&emp_id, "read");
     }
-    match state.repo.calendar_token_for(&emp_id).await {
-        Ok(Some(t)) => Json(serde_json::json!({
+    match state.repo.calendar_feed_created_at(&emp_id).await {
+        Ok(Some(created_at)) => Json(serde_json::json!({
             "employee_id": emp_id,
-            "token": t,
-            "ics_url": format!("/ics/{t}/calendar.ics"),
+            "created_at": created_at,
         }))
         .into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            format!("no calendar token for {emp_id}"),
+            format!("no calendar feed for {emp_id}"),
         )
             .into_response(),
         Err(e) => err(e),
@@ -411,37 +430,81 @@ async fn rotate_calendar_token(
     if !may_rotate(&user, &emp_id) {
         return not_yours(&emp_id, "rotate");
     }
-    // Two v4 UUIDs concatenated = 256 bits of randomness. `simple()`
-    // format emits 32 hex chars per UUID, so the token is a 64-char
-    // URL-safe string.
-    let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let now = boss_clock_client::now_from(&state.clock).await;
+    let stamp = event_stamp(&state).await;
+    if !is_the_employee(&user, &emp_id) {
+        // An operator's rotate is a revocation: the old URL stops
+        // working, no URL opens the new row, and the employee rotates
+        // their own feed for a new one.
+        let discarded = CalendarTokenSha256::of_a_discarded_token();
+        return match state
+            .repo
+            .revoke_calendar_token(&emp_id, &discarded, now, &stamp)
+            .await
+        {
+            Ok(()) => Json(serde_json::json!({
+                "employee_id": emp_id,
+                "revoked": true,
+            }))
+            .into_response(),
+            Err(e) => err(e),
+        };
+    }
+    // The only place the token exists on the server, and only for the
+    // length of this response: what is written is its digest.
+    let token = mint_calendar_token();
+    match state
+        .repo
+        .rotate_calendar_token(&emp_id, &CalendarTokenSha256::of(&token), now, &stamp)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "employee_id": emp_id,
+            "token": token,
+            "ics_url": format!("/ics/{token}/calendar.ics"),
+        }))
+        .into_response(),
+        Err(e) => err(e),
+    }
+}
+
+/// `GET /api/scheduling/calendar-tokens/logged-raw` — how many feeds
+/// still open with a token the audit log holds in the clear (minted
+/// before digests, not yet revoked). A count, so any caller may read
+/// it; the proof of this design reads it to zero.
+async fn count_logged_raw(State(state): State<Arc<SchedulingApiState>>) -> Response {
+    match state.repo.count_calendar_tokens_logged_raw().await {
+        Ok(n) => Json(serde_json::json!({ "logged_raw": n })).into_response(),
+        Err(e) => err(e),
+    }
+}
+
+/// `POST /api/scheduling/calendar-tokens/logged-raw/revoke` — revoke
+/// every feed whose token the log holds, one rotated event each, signed
+/// as the operator who runs it (backlog 4aaff4dc). Run once after the
+/// deploy that brings digests; bounded to the logged rows, so a second
+/// run answers `revoked: 0` and never breaks a feed re-subscribed since.
+/// A platform-admin's act only: it breaks every such employee's feed
+/// until they rotate their own.
+async fn revoke_logged_raw(
+    State(state): State<Arc<SchedulingApiState>>,
+    CurrentUser(user): CurrentUser,
+) -> Response {
+    if user.role != PLATFORM_ADMIN_ROLE {
+        return (
+            StatusCode::FORBIDDEN,
+            "revoking the logged calendar tokens is a platform-admin's act",
+        )
+            .into_response();
+    }
     let now = boss_clock_client::now_from(&state.clock).await;
     let stamp = event_stamp(&state).await;
     match state
         .repo
-        .rotate_calendar_token(&emp_id, &token, now, &stamp)
+        .revoke_calendar_tokens_logged_raw(now, &stamp)
         .await
     {
-        // Only the employee is handed the new feed. An operator's
-        // rotate is a revocation: the old URL stops working, and the
-        // employee reads the new one themself.
-        Ok(()) if is_the_employee(&user, &emp_id) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "employee_id": emp_id,
-                "token": token,
-                "ics_url": format!("/ics/{token}/calendar.ics"),
-            })),
-        )
-            .into_response(),
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "employee_id": emp_id,
-                "rotated": true,
-            })),
-        )
-            .into_response(),
+        Ok(n) => Json(serde_json::json!({ "revoked": n })).into_response(),
         Err(e) => err(e),
     }
 }
@@ -450,7 +513,10 @@ async fn public_ics_feed(
     State(state): State<Arc<SchedulingApiState>>,
     Path(token): Path<String>,
 ) -> Response {
-    let emp_id = match state.repo.employee_by_calendar_token(&token).await {
+    // Looked up by digest: the table holds nothing else. The digest
+    // itself opens nothing — it is not a token any row was minted from.
+    let presented = CalendarTokenSha256::of(&token);
+    let emp_id = match state.repo.employee_by_calendar_token(&presented).await {
         Ok(Some(e)) => e,
         Ok(None) => return (StatusCode::NOT_FOUND, "unknown calendar token").into_response(),
         Err(e) => return err(e),
