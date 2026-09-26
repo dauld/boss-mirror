@@ -33,7 +33,10 @@
 # SCOPE when
 #   * the namespace is one the tree OWNS — $DIR declares a `Namespace`
 #     object for it (today: boss, boss-dev); and
-#   * $DIR declares at least one object of that kind in it; and
+#   * $DIR declares at least one object of that kind in it — or a
+#     generateName TEMPLATE of that kind names it (the gate Job), in
+#     which case a live object carrying the template's literal labels
+#     is declared by it (THE TEMPLATE RULE, below; backlog 4438217e); and
 #   * the kind is not in $EXCLUDED_KINDS below.
 #
 # AND ONE OBJECT AT A TIME, BY LABEL: an object carrying the tree's own
@@ -301,12 +304,17 @@ TARGET=""
 # The JSON arrives in a FILE, not on stdin: the python body itself is
 # this function's stdin, so a script that also read stdin would read an
 # empty string and report a clean cluster.
-objects_from_json() { # json-file source-file
-    python3 - "$1" "$2" <<'PY'
+#
+# With a third argument `templates` it prints the OTHER half instead:
+# kind<TAB>ns<TAB>selector<TAB>file for every generateName template —
+# see THE TEMPLATE RULE below.
+objects_from_json() { # json-file source-file [templates]
+    python3 - "$1" "$2" "${3:-}" <<'PY'
 import json, sys
 
 dec = json.JSONDecoder()
 src = sys.argv[2]
+templates = sys.argv[3] == "templates"
 s = open(sys.argv[1]).read()
 docs, i, n = [], 0, len(s)
 while i < n:
@@ -323,8 +331,21 @@ for d in docs:
     kind = d.get("kind")
     md = d.get("metadata") or {}
     name, ns = md.get("name"), md.get("namespace") or ""
+    if templates:
+        # A generateName template declares no specific object, but it
+        # does declare its kind here and the labels its objects carry.
+        # Only LITERAL labels can select what it stamped; a `$PLACEHOLDER`
+        # is filled per launch. No literal label, no template.
+        if kind and not name and md.get("generateName"):
+            labels = md.get("labels") or {}
+            sel = ",".join(f"{k}={v}" for k, v in sorted(labels.items())
+                           if "$" not in k and "$" not in str(v))
+            if sel:
+                print(f"{kind}\t{ns}\t{sel}\t{src}")
+        continue
     # No name means a generateName template (the gate Job): it declares
-    # no specific object, so it can neither be found nor be missed.
+    # no specific object, so it can neither be found nor be missed — its
+    # kind and labels are read by the `templates` pass instead.
     if not kind or not name:
         continue
     print(f"{kind}\t{ns}\t{name}\t{src}")
@@ -425,8 +446,10 @@ objects_in_file() { # path
         sed 's/^/    /' "$TMP/parse.err" >&2
         return 1
     fi
-    objects_from_json "$TMP/parse.json" "$rel"
+    objects_from_json "$TMP/parse.json" "$rel" || return 1
+    objects_from_json "$TMP/parse.json" "$rel" templates >> "$TMP/templates"
 }
+: > "$TMP/templates"
 
 # --- what the tree declares ------------------------------------------------
 declared_converged="$TMP/declared-converged"
@@ -519,7 +542,34 @@ mapfile -t pairs < <(LC_ALL=C awk -F'\t' -v mns="$(printf '%s\n' "${managed_ns[@
     BEGIN { n = split(mns, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") own[a[i]] = 1 }
     $2 != "" && ($2 in own) { print $1 "\t" $2 }
 ' "$declared_converged" | LC_ALL=C sort -u)
-declares_pair() { in_set "$(printf '%s\t%s' "$1" "$2")" ${pairs[@]+"${pairs[@]}"}; }
+
+# THE TEMPLATE RULE (backlog 4438217e). A generateName template — the
+# gate Job, infra/gate-runner/gate-runner.yaml — declares no specific
+# object, so until 2026-09-26 it put no pair in scope, and the tree held
+# no other Job in boss-dev: a hand-made `Job/boss-dev/seed-dir-probe-2`
+# (2026-09-12, no owner, no ttlSecondsAfterFinished) was REFUSED by
+# `--check` as "the tree declares no Job in boss-dev", so neither the
+# lint nor `delete-orphan-object` could ever name it. A template DOES
+# declare its kind in its namespace, and the objects it stamps out are
+# the ones carrying its LITERAL labels (`app=gate-runner`; the per-launch
+# `$PLACEHOLDER` labels select nothing). So its (kind, ns) pair is in
+# scope, and a live object matching its selector is declared by it — 285
+# gate Jobs on 2026-09-26, none a finding. It declares its kind in ITS
+# namespace only: it adds nothing to the label rule's declared-somewhere
+# kinds, because a template is a claim on what it stamped, not on the
+# kind everywhere. Templates are read from every manifest this script
+# reads, converged or not, like the objects in $declared_all.
+mapfile -t template_pairs < <(LC_ALL=C awk -F'\t' -v mns="$(printf '%s\n' "${managed_ns[@]}")" '
+    BEGIN { n = split(mns, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") own[a[i]] = 1 }
+    $2 != "" && ($2 in own) { print $1 "\t" $2 }
+' "$TMP/templates" | LC_ALL=C sort -u | LC_ALL=C comm -23 - <(printf '%s\n' ${pairs[@]+"${pairs[@]}"} | LC_ALL=C sort -u))
+declares_pair() {
+    in_set "$(printf '%s\t%s' "$1" "$2")" ${pairs[@]+"${pairs[@]}"} ${template_pairs[@]+"${template_pairs[@]}"}
+}
+# selector<TAB>file for every template of one (kind, ns).
+templates_of() { # kind ns
+    LC_ALL=C awk -F'\t' -v k="$1" -v n="$2" '$1 == k && $2 == n { print $3 "\t" $4 }' "$TMP/templates"
+}
 
 # The tree's own mark on what it creates; every manifest under $DIR
 # carries it. An object without it in an undeclared pair is not ours to
@@ -559,6 +609,33 @@ live_labelled_names() { # kind ns
     fi
     printf '%s\n' "$out" | LC_ALL=C awk -F'\t' 'NF && $1 != "" && $2 == "" { print $1 }'
 }
+# Live names matching one label selector, owner or not — what a template
+# stamped. Returns 1 when this credential cannot look.
+live_selected_names() { # kind ns selector
+    local out
+    if ! out=$("${KUBECTL[@]}" get "$1" -n "$2" -l "$3" \
+            -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' \
+            --request-timeout=10s 2>"$TMP/get.err"); then
+        return 1
+    fi
+    printf '%s\n' "$out" | LC_ALL=C awk -F'\t' 'NF && $1 != "" { print $1 }'
+}
+# The names a template of this (kind, ns) declares, one per line, and
+# the selector<TAB>file that declares each as `name<TAB>selector<TAB>file`.
+# Returns 1 when any selector cannot be read: a template's objects that
+# could not be looked up are not undeclared, they are unknown.
+template_names() { # kind ns
+    local sel file names
+    while IFS=$'\t' read -r sel file; do
+        [ -n "$sel" ] || continue
+        names=$(live_selected_names "$1" "$2" "$sel") || return 1
+        [ -n "$names" ] || continue
+        printf '%s\n' "$names" | LC_ALL=C awk -v s="$sel" -v f="$file" '{ print $0 "\t" s "\t" f }'
+    done <<EOF
+$(templates_of "$1" "$2")
+EOF
+}
+
 # One object's part-of label, or empty. Returns 1 when the read failed.
 label_of() { # kind ns name
     "${KUBECTL[@]}" get "$1" "$3" -n "$2" \
@@ -635,6 +712,19 @@ if [ "$MODE" = "--check" ]; then
         say "REFUSED $kind/$ns/$name — it is EXEMPT in $ME (generated from sources already in the tree)."
         exit 3
     fi
+    if [ -n "$(templates_of "$kind" "$ns")" ]; then
+        if ! stamped=$(template_names "$kind" "$ns"); then
+            say "CANNOT ANSWER for $kind/$ns/$name — this credential cannot list the $kind a template in the tree stamps in \`$ns\`:"
+            sed 's/^/    /' "$TMP/get.err" >&2
+            exit "$CANNOT_ANSWER"
+        fi
+        hit=$(LC_ALL=C awk -F'\t' -v n="$name" '$1 == n { print $2 " (" $3 ")"; exit }' <<<"$stamped")
+        if [ -n "$hit" ]; then
+            say "REFUSED $kind/$ns/$name — the tree DECLARES it by template: it carries $hit,"
+            say "  the literal labels of a generateName $kind template."
+            exit 3
+        fi
+    fi
     if ! names=$(live_names "$kind" "$ns"); then
         say "CANNOT ANSWER for $kind/$ns/$name — this credential cannot list $kind in \`$ns\`:"
         sed 's/^/    /' "$TMP/get.err" >&2
@@ -704,16 +794,23 @@ while IFS=$'\t' read -r kind ns; do
         unreadable_names+=("$kind in $ns — not listable by this credential: $(read_error "$TMP/get.err")")
         continue
     fi
+    stamped=""
+    if [ -n "$(templates_of "$kind" "$ns")" ] && ! stamped=$(template_names "$kind" "$ns"); then
+        unreadable=$((unreadable + 1))
+        unreadable_names+=("$kind in $ns (by template) — not listable by this credential: $(read_error "$TMP/get.err")")
+        continue
+    fi
     pairs_checked=$((pairs_checked + 1))
     while IFS= read -r name; do
         [ -n "$name" ] || continue
         [ -n "$(declaring_file "$kind" "$ns" "$name")" ] && continue
         is_exempt "$kind" "$ns" "$name" && continue
+        [ -n "$(LC_ALL=C awk -F'\t' -v n="$name" '$1 == n { print; exit }' <<<"$stamped")" ] && continue
         orphans+=("$(printf '%s\t%s\t%s' "$kind" "$ns" "$name")")
     done <<EOF
 $names
 EOF
-done < <(printf '%s\n' ${pairs[@]+"${pairs[@]}"})
+done < <(printf '%s\n' ${pairs[@]+"${pairs[@]}"} ${template_pairs[@]+"${template_pairs[@]}"})
 
 # Pairs in scope BY LABEL ONLY: the tree declares the kind elsewhere,
 # not here, and only objects carrying its own label are its business.
