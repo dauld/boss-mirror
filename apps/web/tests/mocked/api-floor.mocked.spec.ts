@@ -22,7 +22,7 @@
 
 import { test, expect, type Page } from '@playwright/test';
 import { mountPage } from './_helpers';
-import { installApiFloor } from './_smokeMocks';
+import { installApiFloor, installSmokeMocks } from './_smokeMocks';
 
 /// Three code paths for the chrome: an AppShell route, an IT surface,
 /// and /login, which renders outside the shell.
@@ -65,4 +65,32 @@ test.describe('the api floor', () => {
       expect(misses, `reached the dev-server under the floor on ${path}`).toEqual([]);
     });
   }
+
+  // A person nothing seeded is ABSENT, the way the live server says it:
+  // GET /api/people/emp-nobody-d50e5828 answered 404 "no employee with
+  // ID …" on 2026-09-26. The floor answered 200 [] until then, so a spec
+  // that forgot to mock a person read passed quietly with the id painted
+  // as the name (backlog d50e5828). The accounts list at the same depth
+  // stays a list, and a persona a spec seeds still wins over the floor.
+  test('answers a person nothing seeded with 404, as the server does', async ({ page }) => {
+    await installApiFloor(page);
+    await mountPage(page, '/ux/jobs');
+    const status = (path: string): Promise<number> =>
+      page.evaluate(async (p) => (await fetch(p)).status, path);
+    expect(await status('/api/people/emp-nobody')).toBe(404);
+    expect(await status('/api/people/emp-nobody?fields=name')).toBe(404);
+    expect(await status('/api/people/accounts')).toBe(200);
+    expect(await status('/api/people')).toBe(200);
+  });
+
+  test('a seeded persona still answers over the floor', async ({ page }) => {
+    await installSmokeMocks(page);
+    await mountPage(page, '/ux/jobs');
+    const read = await page.evaluate(async () => {
+      const r = await fetch('/api/people/emp-001');
+      return { status: r.status, body: (await r.json()) as { name?: string } };
+    });
+    expect(read.status).toBe(200);
+    expect(read.body.name).toBe('Demo CEO');
+  });
 });
