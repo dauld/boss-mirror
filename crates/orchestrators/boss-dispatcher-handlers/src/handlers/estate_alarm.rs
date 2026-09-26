@@ -47,7 +47,10 @@
 //!   durable record anywhere else, 8834804a), and `door_dark` (a door
 //!   half dark past its declared band, e6406701 — band-judged, so it
 //!   raises on sight rather than after PERSIST_N; see
-//!   [`banded_findings`]).
+//!   [`banded_findings`]), and `ops_credentials_absent` (a declared
+//!   cluster-operator without the root material only David can place,
+//!   714bc71f — recorded, never fatal, on the converge, so this is the
+//!   reader that interrupts someone).
 //!   `observed_not_declared` is a paperwork gap and `drift` is config
 //!   — real, but not 03:00-urgent, and an alarm that cries over
 //!   paperwork trains operators to ignore it.
@@ -334,6 +337,12 @@ fn hard_findings(comparison: &Value) -> Vec<(String, Value)> {
         // keyed `<door>/<half>`, so WHICH half is down is the finding.
         // Band-judged — see [`banded_findings`] — so it raises on sight.
         ("door_dark", "door_dark"),
+        // A declared cluster-operator without its root material
+        // (backlog 714bc71f). The converge records it as not-ready and
+        // stays green, because no converge can place what only David
+        // can; this is the reader that makes the absence interrupt
+        // someone, keyed by host, the entry naming the act.
+        ("ops_credentials_absent", "ops_credentials_absent"),
     ] {
         for v in entries(comparison, field) {
             let id = v
@@ -1131,6 +1140,29 @@ mod tests {
         c["findings"]["dead_letters_unrecorded"] = json!([]);
         c["findings"]["dispatcher_unread"] = json!("curl: (7) Failed to connect");
         assert!(hard_finding_keys(&c).is_empty(), "unread is informational");
+    }
+
+    #[test]
+    fn absent_root_material_on_a_cluster_operator_is_hard_and_unmeasured_is_not() {
+        // Backlog 714bc71f: the forge's missing admin kubeconfig redded
+        // every converge for twelve hours with no alarm, then became a
+        // recorded not-ready — which is silent unless it reaches this
+        // reader. Keyed by host, so each host's missing set is ONE
+        // packet, and its excerpt carries the act that clears it.
+        let mut c = host_comparison("forge", false);
+        c["findings"]["ops_credentials_absent"] = json!([{
+            "id": "forge", "state": "not ready: talosconfig:absent kubeconfig:absent",
+            "act": "place /etc/boss-ops/kubeconfig and /etc/boss-ops/talosconfig root:root 600 on forge" }]);
+        c["findings"]["ops_credentials_unmeasured"] = json!([{"id": "boss-gcp"}]);
+        assert_eq!(
+            hard_finding_keys(&c).into_iter().collect::<Vec<_>>(),
+            vec!["ops_credentials_absent:forge".to_string()],
+        );
+        let (_, entry) = hard_findings(&c)
+            .into_iter()
+            .next()
+            .expect("the hard finding");
+        assert!(excerpt(&entry).contains("root:root 600"), "{entry}");
     }
 
     #[test]

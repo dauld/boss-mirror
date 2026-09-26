@@ -680,6 +680,7 @@ fn the_shipped_approval_verbs_hold_the_contract_and_the_disk_verb_stays_inert() 
     for (write, plan) in [
         ("reap-terminated-pods", "plan-a-pod-reap"),
         ("merge-tenant-main", "plan-a-tenant-merge"),
+        ("reclaim-gcp-root", "plan-a-gcp-root-reclaim"),
     ] {
         let w = read(write);
         let p = read(plan);

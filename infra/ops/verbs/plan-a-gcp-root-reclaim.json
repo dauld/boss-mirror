@@ -1,0 +1,12 @@
+{
+  "about": "READ-ONLY: renders what `reclaim-gcp-root` WOULD remove on boss-gcp, and removes nothing (infra/gcp/reclaim-gcp-root.sh --dry-run; backlog d3c7eada car 2). It runs every bound the write runs — the two fixed globs /opt/boss-binbak-* and /opt/boss-dev-bak, real directories only, no .git, nothing changed (ctime) in 30 days, nothing live: no live tree, mount, symlink, running process, loaded unit or unit file on disk resolving into one — and then prints the plan: each candidate's path, size in MiB and top-level entries, sorted, and the fixed journal line (vacuum to 1G). No clock, free space or journal usage in the bytes (those ride stderr); its sha256 is printed on stderr as `plan-sha256:`, and that hash is what David's passkey signs (design 17835005 q1). Any refusal renders no plan.",
+  "hosts": [
+    "boss-gcp"
+  ],
+  "argv": [
+    "infra/gcp/reclaim-gcp-root.sh",
+    "--dry-run"
+  ],
+  "params": [],
+  "timeout": 600
+}

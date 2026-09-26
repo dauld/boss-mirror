@@ -1,0 +1,22 @@
+{
+  "about": "MUTATING — free boss-gcp's root disk by removing EXACTLY the hand-made pre-deploy binary backups /opt/boss-binbak-* and /opt/boss-dev-bak, then vacuuming the systemd journal to a fixed 1G, and nothing else (infra/gcp/reclaim-gcp-root.sh). boss-gcp's 48 GB root sat at 11-13 GB free for nine days against its 17 GB floor (backlog d3c7eada, estate finding disk_tight:boss-gcp); car 1's disk-report reading (ops-request b21ddeb3, 2026-09-26) found four July 2026 backups under /opt (~2.3 GB, named by no commit in the tree) and a 4.1 GB journal. The lasting gain is the ~2.3 GB of backups: with no SystemMaxUse drop-in, journald grows the journal back toward ~4 GB. AUTHORISED PER RUN BY DAVID'S PASSKEY, in design 17835005's shape (reap-terminated-pods is the worked example): it declares requires_approval with the read-only plan-a-gcp-root-reclaim (this script's --dry-run) as its plan_verb, so the runner renders the plan onto the request's approve step, runs this only after a passkey on the approvers list signs those bytes, and hands the script sha256 of the SIGNED plan; the script re-renders and removes nothing unless today's plan hashes to it, which also makes a second run of an applied plan a refusal. THE BOUND IS THE SCRIPT'S, NEVER A PARAM: the paths are two globs fixed in the script and the one argument is the plan hash, so no packet can name a path; each candidate must be a real directory (a symlink is refused) whose realpath is /opt/<its own name>, may hold no .git (a checkout may carry unpushed commits), may hold nothing whose ctime is within 30 days (ctime, because cp -a preserves mtimes), and is refused as LIVE when /opt/boss or /opt/boss-cli resolves into or around it, when a mount is at or under it, when a symlink in /opt, /usr/local/bin, /usr/bin, /usr/sbin or /etc/systemd/system resolves into it, when a running process's executable is in it, when a loaded service unit's ExecStart/ExecStartPre/WorkingDirectory/FragmentPath resolves into it, or when any unit file on disk (loaded or not, drop-ins included) names it — any refusal, and any bound that cannot be evaluated, removes nothing. The journal bound is fixed at 1G so no request can ask for 0. OUT OF REACH BY CONSTRUCTION, because they are data and David's call on retention: /var/backups/*, every home directory, /usr/local, /opt/boss and /opt/boss-cli. The write prints the approved plan first, then removes one directory at a time with rm -rf --one-file-system, printing each as it lands so a run killed at the timeout leaves an exact record, then vacuums and prints free space before and after. Own timeout: a du, an rm and a vacuum over ~7 GB. Admitted to boss-gcp by name in infra/lint/a-verb-declares-the-hosts-it-serves.sh, pending David's authorisation of the verb itself.",
+  "hosts": [
+    "boss-gcp"
+  ],
+  "requires_approval": true,
+  "plan_verb": "plan-a-gcp-root-reclaim",
+  "approvers": [
+    "emp-david"
+  ],
+  "argv": [
+    "infra/gcp/reclaim-gcp-root.sh",
+    "{1}"
+  ],
+  "params": [
+    {
+      "name": "plan_sha256",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  ],
+  "timeout": 600
+}

@@ -145,7 +145,19 @@ never said is listed field by field and never published (there is no
 time). Its `mode` DEFAULTS to `--check`, which is what lets a
 dispatcher rule file it on boss-gcp's checkout moving without any
 authority widening: a `jobs.spawn` packet carries no args, so it can
-only ask; `--for-real` is a word a packet carries on purpose.
+only ask; `--for-real` is a word a packet carries on purpose. The sixth,
+`reclaim-gcp-root` (backlog d3c7eada car 2, 2026-09-26; admitted when
+David authorises the verb), frees boss-gcp's root: it removes exactly
+`/opt/boss-binbak-*` and `/opt/boss-dev-bak` — two globs fixed in the
+script, never a param — refusing a symlink, a checkout, a backup
+changed (ctime) in 30 days, or one that a live tree, a mount, a
+symlink, a running process, a loaded unit or a unit file on disk
+resolves into, and vacuums the journal to a fixed 1G. It is an
+approval verb: its plan verb `plan-a-gcp-root-reclaim` runs every bound
+and removes nothing, and each real run needs David's passkey on that
+plan. `/var/backups`, homes, `/usr/local`, `/opt/boss` and
+`/opt/boss-cli` are data and David's call, out of its reach by
+construction.
 
 ## Approval verbs
 

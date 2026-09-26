@@ -763,6 +763,42 @@ fn an_unreadable_secret_is_named_and_touches_nothing() {
     assert!(c.server.writes().is_empty());
 }
 
+/// An ABSENT admin kubeconfig is not the refusal above: it is root
+/// material David has not placed yet (design 835c0c9c), which no
+/// converge can repair, so it is recorded as not ready and the pass
+/// stays green (backlog 714bc71f). Car 78a88f65 made it exit 1, and
+/// every forge converge closed failed for twelve hours after 06:10Z
+/// 2026-09-26 — a permanent red that would have hidden every real one.
+/// No stub kubectl here: the script takes the host path, reading
+/// `$BOSS_OPS_DIR/kubeconfig`, and the directory is empty.
+#[test]
+fn an_absent_admin_kubeconfig_is_not_ready_and_does_not_fail_the_pass() {
+    let c = Case::new("no-kubeconfig");
+    c.converted(OLD);
+    let ops = c.root.join("boss-ops");
+    std::fs::create_dir_all(&ops).unwrap();
+    let ops_dir = ops.display().to_string();
+    let (rc, out) = c.run(
+        &[],
+        &[("BOSS_DEPOSIT_KUBECTL", ""), ("BOSS_OPS_DIR", &ops_dir)],
+    );
+    assert_eq!(
+        rc, 0,
+        "absent root material is not ready, not a failure: {out}"
+    );
+    let secret = c.summary("deposit_secret");
+    assert!(secret.starts_with("not ready"), "{secret}\n{out}");
+    assert!(
+        secret.contains(&format!("{ops_dir}/kubeconfig absent"))
+            && secret.contains("placed by David")
+            && secret.contains("835c0c9c"),
+        "the record names the file and whose act places it: {secret}"
+    );
+    assert_eq!(c.file().as_deref(), Some(OLD), "the file is untouched");
+    assert!(c.server.writes().is_empty(), "nothing is recorded: {out}");
+    c.assert_nothing_leaked(&out);
+}
+
 #[test]
 fn a_remote_target_is_refused_until_the_break_glass_delivery_builds_it() {
     let c = Case::new("remote-target");

@@ -157,6 +157,19 @@ GCP_MUTATING_ADMITTED = {
     # Flagged for David's review as the first verb that publishes
     # MORE THAN ONE registry row per request.
     "publish-drift": "David 2026-09-18, retro 27fad542 / backlog a2f97942 — flagged for review",
+    # backlog d3c7eada car 2, 2026-09-26: boss-gcp's root at 12 GB free
+    # against its 17 GB floor. Bounded to two globs fixed in the script
+    # (/opt/boss-binbak-*, /opt/boss-dev-bak — hand-made July binary
+    # backups) plus a journal vacuum to a fixed 1G; the one param is a
+    # plan hash; a symlink, a checkout, a backup changed (ctime) in 30
+    # days, or one a live tree, mount, link, process, loaded unit or
+    # unit file resolves into is refused. Each run needs David's passkey
+    # on the plan plan-a-gcp-root-reclaim renders (requires_approval).
+    # /var/backups, homes, /usr/local, /opt/boss and /opt/boss-cli are
+    # data and David's call, out of reach by construction. Admitted
+    # when David authorises this verb: the car stands at the dock under
+    # a hold until he does.
+    "reclaim-gcp-root": "admitted when David authorises this verb (backlog d3c7eada); each run needs his passkey on the rendered plan",
 }
 
 problems = []
