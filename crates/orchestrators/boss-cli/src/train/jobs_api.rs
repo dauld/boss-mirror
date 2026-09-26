@@ -31,6 +31,45 @@ pub(crate) enum Failure {
     Http(u16),
     /// The answer arrived and was unusable — an unparseable body.
     Malformed,
+    /// A 403 whose reason is the policy service FAILING, not deciding:
+    /// the jobs API's policy client fails closed when the service is
+    /// dark (`policy-unreachable`) or answers 5xx, and the jobs API
+    /// renders that deny as a 403 like any other. A blip wearing an
+    /// answer's status (backlog 5d4ad086).
+    PolicyOutage,
+}
+
+/// Does this refusal name the policy service failing rather than a
+/// policy decision? THE one predicate for it in boss-cli: the conductor
+/// and cadence classifiers reach it through [`http_failure`], and `boss
+/// gate --wait`'s `is_transient` reads the rendered message through it
+/// directly (CLAUDE.md §9a — two classifiers, one fact).
+///
+/// Keyed on the REASON the deny carries, never on the 403: a scope
+/// refusal is the same status and is a real answer. The two reasons
+/// are `boss-policy-client`'s own fail-closed denies — `policy-
+/// unreachable` for a transport failure, `policy service returned
+/// <status>` for a non-2xx — and only a 5xx of the second is an
+/// outage; a 4xx there is the jobs API asking wrongly, which asking
+/// again does not fix.
+pub(crate) fn names_a_policy_outage(text: &str) -> bool {
+    const RETURNED: &str = "policy service returned ";
+    let t = text.to_ascii_lowercase();
+    t.contains("policy-unreachable")
+        || t.match_indices(RETURNED).any(|(at, _)| {
+            let code = &t.as_bytes()[at + RETURNED.len()..];
+            code.len() >= 3 && code[0] == b'5' && code[..3].iter().all(u8::is_ascii_digit)
+        })
+}
+
+/// A non-2xx answer, classified: a 403 naming a policy outage is
+/// [`Failure::PolicyOutage`]; every other status is itself.
+pub(crate) fn http_failure(status: u16, body: &str) -> Failure {
+    if status == 403 && names_a_policy_outage(body) {
+        Failure::PolicyOutage
+    } else {
+        Failure::Http(status)
+    }
 }
 
 /// Retry, or surface? Two rules, and the second is the one that keeps
@@ -38,7 +77,8 @@ pub(crate) enum Failure {
 ///
 ///   - a 4xx is an ANSWER (a 422 is the SoR saying no, and asking the
 ///     same question three times does not change it); only transport
-///     failures and 5xx are blips;
+///     failures, 5xx, and a 403 that is the policy service failing
+///     closed ([`Failure::PolicyOutage`]) are blips;
 ///   - a blip that leaves the write AMBIGUOUS may only be re-sent when
 ///     the call is idempotent. Re-POSTing an ambiguous create is how
 ///     one blip becomes two train Jobs. A refused connection is not
@@ -54,6 +94,11 @@ pub(crate) fn retryable(method: &Method, failure: &Failure) -> bool {
         Failure::Ambiguous => idempotent,
         Failure::Http(status) => idempotent && (500..600).contains(status),
         Failure::Malformed => false,
+        // Retried like a 5xx and for the same reason: the SoR failed to
+        // decide. Idempotent only — the brief's bound, and the ordering
+        // of a handler's policy check against its write is not this
+        // classifier's to assume.
+        Failure::PolicyOutage => idempotent,
     }
 }
 
@@ -825,11 +870,21 @@ pub(crate) fn step_completion_writes(
         .collect()
 }
 
-/// The overlay half of `merge_job_metadata`, pure: jobs-api's PATCH
-/// semantics stop at the top level — a PUT replaces `metadata`
-/// wholesale — so every update must carry the record's existing keys
-/// forward. A `Value::Null` value REMOVES the key: how a boarding car
-/// sheds a stale `skip_reason` instead of carrying "" forever.
+/// The write `merge_job_metadata` makes, pure: ONE PATCH through the
+/// job's merge door carrying only the keys it changes. A `Value::Null`
+/// is sent as-is, and the server DELETES that key: how a boarding car
+/// sheds a stale `skip_reason` instead of carrying "" forever. No other
+/// key rides along, so a concurrent writer's keys survive (design
+/// 38f3a488 D4; the full-PUT overlay this replaced erased them).
+pub(crate) fn job_metadata_patch(jid: &str, kv: Vec<(&str, Value)>) -> (Method, String, Value) {
+    let body: Map<String, Value> = kv.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
+    (
+        Method::PATCH,
+        format!("/api/jobs/{jid}/metadata"),
+        Value::Object(body),
+    )
+}
+
 /// Has this train's arrival report already been filed?
 ///
 /// Reads the JOB's metadata, not the `arrived` step's. The report moved
@@ -843,21 +898,6 @@ pub(crate) fn arrival_already_filed(train: &Value) -> bool {
         .get("metadata")
         .and_then(|m| m.get("arrival_report"))
         .is_some_and(|v| !v.is_null())
-}
-
-pub(crate) fn overlay_metadata(container: &Value, kv: Vec<(&str, Value)>) -> Map<String, Value> {
-    let mut md = metadata_map(container);
-    for (k, v) in kv {
-        match v {
-            Value::Null => {
-                md.remove(k);
-            }
-            v => {
-                md.insert(k.to_string(), v);
-            }
-        }
-    }
-    md
 }
 
 #[cfg(test)]
@@ -1471,43 +1511,33 @@ mod tests {
         assert_eq!(calls.get(), 1);
     }
 
-    // -- metadata overlays merge, never clobber ----------------------------
+    // -- metadata merges through the server's merge door -------------------
     //
-    // jobs-api PUT replaces top-level `metadata` wholesale; every
-    // update must carry the existing keys forward, and clearing a key
-    // means removing it, not writing "".
+    // Design 38f3a488 D4 (backlog b15b0f4e): the conductor merged by GET,
+    // overlay and full job PUT, so a key another writer set between the
+    // read and the write was erased. The server's PATCH merges against
+    // the row as it stands, in one transaction; the body names only the
+    // keys this write changes, and a null deletes one.
 
     #[test]
-    fn a_metadata_overlay_preserves_existing_keys() {
-        let job = json!({"metadata": {"branch": "feat/x", "queue": "q-1"}});
-        let md = overlay_metadata(&job, vec![("skip_reason", json!("conflict: a.rs"))]);
-        assert_eq!(md.get("branch"), Some(&json!("feat/x")));
-        assert_eq!(md.get("queue"), Some(&json!("q-1")));
-        assert_eq!(md.get("skip_reason"), Some(&json!("conflict: a.rs")));
+    fn a_metadata_merge_is_one_patch_through_the_merge_door() {
+        let (method, path, body) = job_metadata_patch("j-1", vec![("skip_reason", json!("x"))]);
+        assert_eq!(method, Method::PATCH);
+        assert_eq!(path, "/api/jobs/j-1/metadata");
+        assert_eq!(body, json!({"skip_reason": "x"}));
     }
 
     #[test]
-    fn a_null_overlay_removes_the_key() {
+    fn a_metadata_merge_names_only_the_keys_it_changes() {
         // Boarding stamps `train` and sheds the stale skip note in one
-        // update; the key goes away rather than lingering as "".
-        let job = json!({"metadata": {"branch": "feat/x", "skip_reason": "conflict: a.rs"}});
-        let md = overlay_metadata(
-            &job,
+        // write; the null is SENT, because the server deletes on it —
+        // and no other key rides along to overwrite a concurrent writer.
+        let (_, _, body) = job_metadata_patch(
+            "j-1",
             vec![("train", json!("t-1")), ("skip_reason", Value::Null)],
         );
-        assert!(!md.contains_key("skip_reason"));
-        assert_eq!(md.get("train"), Some(&json!("t-1")));
-        assert_eq!(md.get("branch"), Some(&json!("feat/x")));
-    }
-
-    #[test]
-    fn an_overlay_on_a_bare_job_starts_fresh() {
-        let job = json!({"id": "j-1"});
-        let md = overlay_metadata(&job, vec![("skip_reason", json!("x"))]);
-        assert_eq!(md.len(), 1);
-        // Removing a key that was never there is a quiet no-op.
-        let md = overlay_metadata(&job, vec![("skip_reason", Value::Null)]);
-        assert!(md.is_empty());
+        assert_eq!(body, json!({"train": "t-1", "skip_reason": null}));
+        assert!(body.get("branch").is_none());
     }
 
     /// f402a681: the report moved to the job when terminal steps became
@@ -1601,6 +1631,66 @@ mod tests {
         // 2xx/3xx never reach the classifier, and are not blips either.
         assert!(!retryable(&Method::GET, &Failure::Http(200)));
         assert!(!retryable(&Method::GET, &Failure::Http(301)));
+    }
+
+    /// Backlog 5d4ad086, 2026-09-25 ~21:35Z, the rollout of train #689:
+    /// for about a minute every packet read answered this 403, because
+    /// the jobs API's policy client fails CLOSED when the policy service
+    /// is dark (boss-policy-client, D9). That is the infrastructure
+    /// saying it cannot decide — not a permission fact — so it retries
+    /// like a 5xx: an idempotent call only, inside the same budget.
+    #[test]
+    fn a_policy_outage_is_a_blip_and_a_scope_refusal_is_an_answer() {
+        for body in [
+            "reading packets is refused: policy-unreachable",
+            "reading packets is refused: policy service returned 503 Service Unavailable",
+            "reading packets is refused: policy service returned 502 Bad Gateway",
+        ] {
+            let kind = http_failure(403, body);
+            assert_eq!(kind, Failure::PolicyOutage, "{body}");
+            assert!(retryable(&Method::GET, &kind), "{body}");
+            assert!(retryable(&Method::PUT, &kind), "{body}");
+            assert!(
+                !retryable(&Method::POST, &kind),
+                "a create stays unretried on anything but a refused connect: {body}"
+            );
+        }
+        // A policy ANSWER stays an answer: a scope refusal, and a 4xx
+        // from the policy service (the jobs API asked it wrongly —
+        // asking again asks wrongly again).
+        for body in [
+            "job is outside your scope",
+            "reading packets is refused: not permitted",
+            "reading packets is refused: policy service returned 400 Bad Request",
+        ] {
+            let kind = http_failure(403, body);
+            assert_eq!(kind, Failure::Http(403), "{body}");
+            assert!(!retryable(&Method::GET, &kind), "{body}");
+        }
+        // Only a 403 is the deny's rendering; any other status keeps
+        // its own meaning whatever its body quotes.
+        assert_eq!(http_failure(422, "policy-unreachable"), Failure::Http(422));
+        assert_eq!(http_failure(503, "policy-unreachable"), Failure::Http(503));
+    }
+
+    #[test]
+    fn a_policy_outage_is_named_by_its_reason_not_its_status() {
+        assert!(names_a_policy_outage("policy-unreachable"));
+        assert!(names_a_policy_outage(
+            "jobs api GET /api/jobs/x -> 403 Forbidden: reading packets is refused: \
+             policy-unreachable"
+        ));
+        assert!(names_a_policy_outage(
+            "Policy Service Returned 500 Internal Server Error"
+        ));
+        assert!(!names_a_policy_outage(
+            "policy service returned 404 Not Found"
+        ));
+        assert!(!names_a_policy_outage("policy service returned 5"));
+        assert!(!names_a_policy_outage(
+            "403 forbidden: job is outside your scope"
+        ));
+        assert!(!names_a_policy_outage(""));
     }
 
     #[test]

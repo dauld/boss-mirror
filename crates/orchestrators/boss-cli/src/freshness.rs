@@ -376,6 +376,10 @@ pub(crate) struct Rebased {
     /// Commits main already held, in branch order — replayed EMPTY and
     /// skipped, each one named to the operator (1cfab20e).
     pub dropped: Vec<Dropped>,
+    /// The car already carried a merge of main, so main was MERGED into
+    /// it again and pushed as a fast-forward rather than replayed
+    /// (backlog 28eedb03); `replayed` is then 0.
+    pub merged: bool,
     /// Did the forge, re-read after the push, actually hold `new_head`?
     /// `false` means the push was accepted and the branch could not be
     /// re-read to confirm it — the caller says so rather than claiming a
@@ -413,8 +417,11 @@ impl Dropped {
 /// branch is moved on the forge with `--force-with-lease` on the head
 /// this function read, so a push that raced it is refused, not
 /// overwritten. A replay that CONFLICTS is refused naming the files and
-/// nothing is pushed: this verb never guesses a merge, it names the one
-/// the builder makes ([`MERGE_MAIN_PATH`]).
+/// nothing is pushed: this verb never resolves a conflict, it names the
+/// merge the builder makes ([`MERGE_MAIN_PATH`]). A car that already
+/// carries a merge of main is not replayed: main is merged into it again
+/// and pushed as a plain fast-forward, and a conflicting merge is refused
+/// the same way (backlog 28eedb03).
 ///
 /// Measured 2026-09-12 (protocol retro 8043c1f5): seven cars in one
 /// session were built on a main that had moved by gate time — trains
@@ -522,14 +529,21 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
             new_head: old_head,
             replayed: 0,
             dropped: vec![],
+            merged: false,
             // Nothing was pushed, so the head read above IS the forge's.
             confirmed: true,
         }));
     }
-    // A CAR THAT HAS MERGED MAIN IS NOT REPLAYED (e173be13, 2026-09-25).
-    // Its commit list carries the merge, and `git cherry-pick <merge>`
-    // without `-m` fails mid-replay with nothing a builder can act on.
-    // Refuse before any worktree exists, naming the path it took before.
+    // A CAR THAT HAS MERGED MAIN TAKES MAIN BY MERGING AGAIN (backlog
+    // 28eedb03, 2026-09-26). Its commit list carries the merge, and `git
+    // cherry-pick <merge>` without `-m` fails mid-replay, so e173be13
+    // refused it up front — which held every merge-forwarded car at the
+    // dock for a hand merge each time main moved into its files (six held
+    // departures of three cars on 2026-09-25, and every replay conflict
+    // answered by rule 1's merge made one more such car). Merge main into
+    // the car's OWN head instead and push that as a FAST-FORWARD: a clean
+    // merge, re-gated, is the evidence a replay gives, trains squash, and
+    // nothing is force-pushed. Only a conflict stops for a human.
     let merges = ok(
         &git(&[
             "rev-list",
@@ -538,17 +552,7 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
         ])?,
         "listing the car's merge commits",
     )?;
-    if let Some(m) = merges.lines().find(|l| !l.is_empty()) {
-        bail!(
-            "boss gate --rebase: REFUSED — {branch} carries a merge commit ({}) above \
-             origin/main@{}, and a replay cannot carry one. Nothing was pushed; {branch} still \
-             points at {}. A car that has merged main takes main by merging again. \
-             {MERGE_MAIN_PATH}",
-            &m[..8.min(m.len())],
-            &main_head[..8.min(main_head.len())],
-            &old_head[..8.min(old_head.len())]
-        );
-    }
+    let merge_forward = merges.lines().any(|l| !l.is_empty());
     // ONE ATTEMPT, ONE DIRECTORY. pid + head alone named the same path
     // for every replay of the same head, and `cleanup` below removes it
     // with --force: a retry (18909a43) or a second caller replaying that
@@ -573,7 +577,8 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
             "-q",
             "--detach",
             tmp.to_str().context("temp path is utf8")?,
-            &main_head,
+            // A replay starts from main; a merge-forward from the car.
+            if merge_forward { &old_head } else { &main_head },
         ])?,
         "adding the temporary worktree",
     )?;
@@ -591,8 +596,85 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
             .output()
             .with_context(|| format!("git {args:?} in {tmp_str}"))
     };
+    let conflicted = || {
+        in_tmp(&["diff", "--name-only", "--diff-filter=U"])
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .replace('\n', ", ")
+            })
+            .unwrap_or_default()
+    };
+    if merge_forward {
+        // The merge's author and committer are this verb, set explicitly
+        // as the cherry-pick below sets its committer: a gate runner's or
+        // a test's environment has no git identity.
+        let merge = crate::git_auth::command()
+            .arg("-C")
+            .arg(&tmp_str)
+            .args([
+                "merge",
+                "--no-ff",
+                "--no-edit",
+                "-m",
+                &format!(
+                    "Merge origin/main@{} into {branch}",
+                    &main_head[..8.min(main_head.len())]
+                ),
+                &main_head,
+            ])
+            .env("GIT_AUTHOR_NAME", "boss gate --rebase")
+            .env("GIT_AUTHOR_EMAIL", "boss@algedonic.dev")
+            .env("GIT_COMMITTER_NAME", "boss gate --rebase")
+            .env("GIT_COMMITTER_EMAIL", "boss@algedonic.dev")
+            .output()
+            .context("merge")?;
+        if !merge.status.success() {
+            let files = conflicted();
+            let said = String::from_utf8_lossy(&merge.stderr).trim().to_string();
+            let _ = in_tmp(&["merge", "--abort"]);
+            cleanup(&git);
+            if files.is_empty() {
+                bail!(
+                    "boss gate --rebase: merging origin/main@{} into {branch} failed before any \
+                     conflict could be read — git said: {said}. Nothing was pushed; {branch} \
+                     still points at {}.",
+                    &main_head[..8],
+                    &old_head[..8]
+                );
+            }
+            // The replay's own refusal shape, so the dock's
+            // `replay_refused` holds the car and names the files.
+            bail!(
+                "boss gate --rebase: REFUSED — merging origin/main@{} into {branch} hit a \
+                 conflict in: {files}. Nothing was pushed; {branch} still points at {}. \
+                 {MERGE_MAIN_PATH}",
+                &main_head[..8],
+                &old_head[..8]
+            );
+        }
+        // Merged to main's own tree: the car's work landed under another
+        // sha, and a car with no diff is not one to gate — the landed
+        // refusal below, for a merge.
+        let landed = in_tmp(&["diff", "--quiet", &main_head, "HEAD"])
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if landed {
+            cleanup(&git);
+            bail!(
+                "boss gate --rebase: REFUSED — {branch} is already landed: merging \
+                 origin/main@{} into it leaves no difference from main, so there is nothing to \
+                 gate. Nothing was pushed; {branch} still points at {}. Confirm with `boss \
+                 merged {branch}`.",
+                &main_head[..8],
+                &old_head[..8]
+            );
+        }
+    }
     let mut dropped: Vec<Dropped> = Vec::new();
-    for c in &commits {
+    // A merge-forward replays nothing: the merge above is the whole move.
+    let to_replay: &[&str] = if merge_forward { &[] } else { &commits };
+    for c in to_replay {
         // cherry-pick keeps the car's AUTHOR; the COMMITTER is this
         // verb, acting for whoever runs it — set explicitly so the replay
         // does not depend on a git identity in the environment (a gate
@@ -606,17 +688,7 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
             .output()
             .context("cherry-pick")?;
         if !pick.status.success() {
-            let files = crate::git_auth::command()
-                .arg("-C")
-                .arg(&tmp_str)
-                .args(["diff", "--name-only", "--diff-filter=U"])
-                .output()
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .trim()
-                        .replace('\n', ", ")
-                })
-                .unwrap_or_default();
+            let files = conflicted();
             // A pick with NO conflict that left the index equal to HEAD
             // produced nothing: main already holds this patch under
             // another sha (the predecessor car landed by squash). git
@@ -667,7 +739,7 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
     // Every commit dropped: the branch is entirely on main. Nothing to
     // gate — pushing main's head to the branch would only manufacture a
     // car with no diff — so refuse, and point at the verb that proves it.
-    if !commits.is_empty() && dropped.len() == commits.len() {
+    if !to_replay.is_empty() && dropped.len() == to_replay.len() {
         cleanup(&git);
         let named = dropped
             .iter()
@@ -694,27 +766,36 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
     };
     // Author preserved by cherry-pick; committer is whoever runs this, as
     // with any push. The lease is the head this function read, so a push
-    // that raced us is refused rather than overwritten.
+    // that raced us is refused rather than overwritten. A merge-forward
+    // descends from that head, so it needs no force at all: a plain push
+    // is refused as a non-fast-forward if the branch moved.
+    let lease = format!("--force-with-lease=refs/heads/{branch}:{old_head}");
+    let target = format!("HEAD:refs/heads/{branch}");
+    let push_args: Vec<&str> = if merge_forward {
+        vec!["push", "-q", "origin", &target]
+    } else {
+        vec!["push", "-q", &lease, "origin", &target]
+    };
     let push = crate::git_auth::command()
         .arg("-C")
         .arg(&tmp_str)
-        .args([
-            "push",
-            "-q",
-            &format!("--force-with-lease=refs/heads/{branch}:{old_head}"),
-            "origin",
-            &format!("HEAD:refs/heads/{branch}"),
-        ])
+        .args(&push_args)
         .output()
         .context("pushing the replayed branch")?;
     cleanup(&git);
     let short = |s: &str| s[..8.min(s.len())].to_string();
+    let how = if merge_forward {
+        "as a fast-forward of"
+    } else {
+        "with a lease on"
+    };
     if !push.status.success() {
-        // A lease refused IS the race — the branch moved between the head
-        // this attempt read and the push. Say what was seen and let the
-        // caller replay against the branch as it now stands.
+        // A refused lease, or a refused fast-forward, IS the race — the
+        // branch moved between the head this attempt read and the push.
+        // Say what was seen and let the caller replay against the branch
+        // as it now stands.
         return Ok(Replay::Raced(format!(
-            "the push of {} was refused under the lease on {}: {}",
+            "the push of {} {how} {} was refused: {}",
             short(&new_head),
             short(&old_head),
             String::from_utf8_lossy(&push.stderr).trim()
@@ -743,7 +824,7 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
         && head != &new_head
     {
         return Ok(Replay::Raced(format!(
-            "{} was pushed with a lease on {} and accepted, but {branch} on the forge reads {}",
+            "{} was pushed {how} {} and accepted, but {branch} on the forge reads {}",
             short(&new_head),
             short(&old_head),
             short(head)
@@ -752,8 +833,9 @@ fn replay_once(repo: &Path, branch: &str) -> anyhow::Result<Replay> {
     Ok(Replay::Settled(Rebased {
         old_head,
         new_head,
-        replayed: commits.len() - dropped.len(),
+        replayed: to_replay.len() - dropped.len(),
         dropped,
+        merged: merge_forward,
         // An unreadable branch is not a finding either way: the caller
         // prints the move without vouching for it.
         confirmed: observed.is_some(),
@@ -1330,62 +1412,156 @@ mod tests {
         );
     }
 
-    /// A car that has MERGED main and fallen behind again is refused up
-    /// front, naming the merge again — never replayed until `git
-    /// cherry-pick <merge>` fails with no `-m` and the refusal can only
-    /// say it "failed before any conflict could be read" (e173be13,
-    /// read from the code 2026-09-25: the commit list carries the merge).
-    #[test]
-    fn a_car_that_merged_main_is_refused_up_front_naming_the_merge_again() {
-        let f = Forge::build("boss-cli-freshness-rebase-merged");
-        let origin = f.origin();
-        let w = |rel: &str, body: &str| {
-            boss_testing::scratch::write_file(&origin.join(rel), body);
-        };
-        // Cut from B, one commit of its own, then main merged in — the
-        // path the rules name when a replay conflicts.
-        Forge::git(&origin, &["checkout", "-q", "-b", "car/merged", "main~2"]);
-        w("mine.rs", "fn mine() {}\nfn merged_car() {}\n");
-        Forge::git(&origin, &["commit", "-qam", "car edits mine.rs"]);
-        Forge::git(&origin, &["merge", "-q", "--no-edit", "main"]);
-        // ...and main moves on again.
-        Forge::git(&origin, &["checkout", "-q", "main"]);
-        w("later.rs", "fn later() {}\n");
-        Forge::git(&origin, &["add", "."]);
-        Forge::git(&origin, &["commit", "-qm", "train: lands after the merge"]);
-        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
-        let old_head = String::from_utf8_lossy(
-            &Forge::git(&f.clone, &["rev-parse", "origin/car/merged"]).stdout,
-        )
-        .trim()
-        .to_string();
+    impl Forge {
+        /// A car that has MERGED main — cut from B, one commit of its own
+        /// to mine.rs, then main merged in, the path builder rule 1 names
+        /// when a replay conflicts — after which main moves on again with
+        /// `main_then` (path, body) written and committed. Returns the
+        /// car's head as the clone's `origin/<branch>` reads it.
+        fn merged_car(&self, branch: &str, main_then: &[(&str, &str)]) -> String {
+            let origin = self.origin();
+            let w = |rel: &str, body: &str| {
+                boss_testing::scratch::write_file(&origin.join(rel), body);
+            };
+            Forge::git(&origin, &["checkout", "-q", "-b", branch, "main~2"]);
+            w("mine.rs", "fn mine() {}\nfn merged_car() {}\n");
+            Forge::git(&origin, &["commit", "-qam", "car edits mine.rs"]);
+            Forge::git(&origin, &["merge", "-q", "--no-edit", "main"]);
+            Forge::git(&origin, &["checkout", "-q", "main"]);
+            for (rel, body) in main_then {
+                w(rel, body);
+            }
+            Forge::git(&origin, &["add", "."]);
+            Forge::git(&origin, &["commit", "-qm", "train: lands after the merge"]);
+            Forge::git(&self.clone, &["fetch", "-q", "origin"]);
+            self.head(&format!("origin/{branch}"))
+        }
 
+        fn head(&self, rev: &str) -> String {
+            String::from_utf8_lossy(&Forge::git(&self.clone, &["rev-parse", rev]).stdout)
+                .trim()
+                .to_string()
+        }
+
+        fn worktrees(&self) -> usize {
+            String::from_utf8_lossy(&Forge::git(&self.clone, &["worktree", "list"]).stdout)
+                .lines()
+                .count()
+        }
+    }
+
+    /// A car that has MERGED main and fallen behind again takes main by
+    /// MERGING AGAIN, pushed as a fast-forward (backlog 28eedb03). Until
+    /// 2026-09-26 it was refused up front (e173be13), so the dock held
+    /// every merge-forwarded car for a hand merge each time main moved
+    /// into its files: six held departures of three cars on 2026-09-25.
+    /// A clean merge, re-gated, is the evidence a replay gives — trains
+    /// squash — and nothing is force-pushed: the old head is the new
+    /// head's first parent.
+    #[test]
+    fn a_car_that_merged_main_is_merged_forward_again_as_a_fast_forward() {
+        let f = Forge::build("boss-cli-freshness-rebase-merged");
+        let old_head = f.merged_car("car/merged", &[("later.rs", "fn later() {}\n")]);
+        let main_head = f.head("origin/main");
+        assert_eq!(observe(&f.clone, "car/merged").standing, Base::Behind);
+
+        let done = rebase_onto_main(&f.clone, "car/merged")
+            .expect("a merge-carrying car merges main forward cleanly");
+        assert_eq!(done.old_head, old_head);
+        assert!(done.merged, "{done:?}");
+        assert!(done.confirmed, "read back from the forge: {done:?}");
+        assert_eq!(done.replayed, 0, "nothing was cherry-picked: {done:?}");
+
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        assert_eq!(
+            f.head("origin/car/merged"),
+            done.new_head,
+            "the forge carries the merge"
+        );
+        // A FAST-FORWARD: the car's old head is the merge's first parent,
+        // main's head its second.
+        assert_eq!(f.head(&format!("{}^1", done.new_head)), old_head);
+        assert_eq!(f.head(&format!("{}^2", done.new_head)), main_head);
+        assert_eq!(observe(&f.clone, "car/merged").standing, Base::Current);
+        let tree = String::from_utf8_lossy(
+            &Forge::git(&f.clone, &["show", "origin/car/merged:mine.rs"]).stdout,
+        )
+        .to_string();
+        assert!(tree.contains("merged_car"), "the car's own work: {tree}");
+        Forge::git(&f.clone, &["show", "origin/car/merged:later.rs"]);
+        assert_eq!(f.worktrees(), 1, "the temporary worktree is gone");
+    }
+
+    /// A merge-forward that CONFLICTS is refused in the replay's own shape
+    /// — `REFUSED … hit a conflict in: <files>` — so the dock's
+    /// `replay_refused` still holds the car and names the files, the
+    /// forge is untouched, and the way past is the hand merge.
+    #[test]
+    fn a_conflicting_merge_forward_is_refused_naming_the_files_and_moves_nothing() {
+        let f = Forge::build("boss-cli-freshness-rebase-merged-conflict");
+        let old_head = f.merged_car(
+            "car/merged",
+            &[("mine.rs", "fn mine() {}\nfn mains_own_line() {}\n")],
+        );
         let err = rebase_onto_main(&f.clone, "car/merged")
             .unwrap_err()
             .to_string();
+        // `REFUSED` is the word `dock_regate::replay_refused` holds a car
+        // on (pinned there by `a_replay_refusal_is_told_from_a_failure`).
         assert!(
-            err.contains("REFUSED") && err.contains("merge commit"),
+            err.contains("REFUSED") && err.contains("conflict in: mine.rs"),
             "{err}"
         );
         assert!(
             err.contains(MERGE_MAIN_PATH) && err.contains("git merge origin/main"),
             "{err}"
         );
-        assert!(!err.contains("failed before any conflict"), "{err}");
         Forge::git(&f.clone, &["fetch", "-q", "origin"]);
-        let forge_head = String::from_utf8_lossy(
-            &Forge::git(&f.clone, &["rev-parse", "origin/car/merged"]).stdout,
-        )
-        .trim()
-        .to_string();
-        assert_eq!(forge_head, old_head, "the forge's branch did not move");
-        let wts = String::from_utf8_lossy(&Forge::git(&f.clone, &["worktree", "list"]).stdout)
-            .to_string();
         assert_eq!(
-            wts.lines().count(),
-            1,
-            "no temporary worktree left behind: {wts}"
+            f.head("origin/car/merged"),
+            old_head,
+            "the forge's branch did not move"
         );
+        assert_eq!(f.worktrees(), 1, "no temporary worktree left behind");
+    }
+
+    /// A merge-carrying car whose work main already holds (it landed by
+    /// squash under another sha) merges to main's own tree: nothing to
+    /// gate, so it is refused as landed, as the replay refuses one —
+    /// never pushed as a car with no diff.
+    #[test]
+    fn a_merge_forward_that_leaves_no_diff_is_refused_as_landed() {
+        let f = Forge::build("boss-cli-freshness-rebase-merged-landed");
+        let old_head = f.merged_car(
+            "car/merged",
+            &[("mine.rs", "fn mine() {}\nfn merged_car() {}\n")],
+        );
+        let err = rebase_onto_main(&f.clone, "car/merged")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("REFUSED") && err.contains("already landed"),
+            "{err}"
+        );
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        assert_eq!(f.head("origin/car/merged"), old_head);
+        assert_eq!(f.worktrees(), 1, "no temporary worktree left behind");
+    }
+
+    /// The merge-forward keeps the replay's read-back: a push the forge
+    /// accepts and undoes once is merged again against the branch as it
+    /// then stands, and the head reported is the head the forge holds.
+    #[test]
+    fn a_merge_forward_the_forge_undid_once_is_merged_again() {
+        let f = Forge::build("boss-cli-freshness-rebase-merged-race");
+        f.merged_car("car/merged", &[("later.rs", "fn later() {}\n")]);
+        f.retreats(true);
+        let done = rebase_onto_main(&f.clone, "car/merged")
+            .expect("the second attempt settles the branch");
+        assert!(done.merged && done.confirmed, "{done:?}");
+        Forge::git(&f.clone, &["fetch", "-q", "origin"]);
+        assert_eq!(f.head("origin/car/merged"), done.new_head);
+        assert_eq!(observe(&f.clone, "car/merged").standing, Base::Current);
     }
 
     /// THE REFUSAL AND THE RULES SAY ONE PATH. The builder reads rule 1
@@ -1414,9 +1590,9 @@ mod tests {
                 "builder-rules.md rule 1 must name `{said}`, as the --rebase refusal does"
             );
         }
-        // A car that merged main is refused by --rebase up front; the rule
-        // must send it back to the merge, and must not call a merge
-        // forbidden.
+        // A car that merged main takes main by merging again (--rebase
+        // does it since 28eedb03); the rule must say so, and must not
+        // call a merge forbidden.
         assert!(rule_one.contains("merge again"), "{rule_one}");
         assert!(!rule_one.contains("merge-or-reset"), "{rule_one}");
     }

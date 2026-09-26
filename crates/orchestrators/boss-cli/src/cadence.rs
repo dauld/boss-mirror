@@ -992,7 +992,7 @@ async fn api_once(
     })?;
     if !status.is_success() {
         return Err(train::ApiFailure {
-            kind: train::Failure::Http(status.as_u16()),
+            kind: train::http_failure(status.as_u16(), &text),
             cause: anyhow!("{method} {path}: HTTP {status}: {}", text.trim()),
         });
     }

@@ -156,7 +156,11 @@ impl CredentialStore {
         Ok(())
     }
 
-    pub fn upsert(&self, email: &str, password: &str) -> Result<()> {
+    /// Create or overwrite `email`'s credential. `Ok(true)` when it
+    /// created one, `Ok(false)` when it replaced one — decided under the
+    /// write lock, so the auth-admin event that reports it cannot race
+    /// another writer (backlog 17ae5248).
+    pub fn upsert(&self, email: &str, password: &str) -> Result<bool> {
         let email = email.to_lowercase();
         let now = Utc::now();
         let salt = generate_salt();
@@ -165,6 +169,7 @@ impl CredentialStore {
             .map_err(|e| anyhow!("argon2 hash: {e}"))?
             .to_string();
         let mut inner = self.inner.write().map_err(|_| anyhow!("store poisoned"))?;
+        let created = !inner.by_email.contains_key(&email);
         let entry = inner
             .by_email
             .entry(email.clone())
@@ -178,7 +183,8 @@ impl CredentialStore {
         entry.password_hash = hash;
         entry.last_rotated = now;
         entry.reset_token = None;
-        save_locked(&inner)
+        save_locked(&inner)?;
+        Ok(created)
     }
 
     pub fn remove(&self, email: &str) -> Result<bool> {
@@ -377,7 +383,10 @@ pub struct LocalAuthState {
     pub mail: std::sync::Arc<dyn crate::mail::MailTransport>,
     /// Origin the reset link points at, e.g. `https://boss.example`.
     pub public_url: String,
-    /// Last accepted `forgot` per email, for rate limiting.
+    /// Last reset mail per email, for rate limiting — claimed by the
+    /// public `forgot` AND the admin `issue_reset` (backlog 17ae5248),
+    /// because the inbox a window protects is the same whichever door
+    /// asked. The name predates the second door.
     ///
     /// In-process and therefore a HEURISTIC, not a guarantee: with a
     /// second gateway in front of the same store it does not hold.
@@ -714,12 +723,18 @@ pub async fn onboard(
     headers: HeaderMap,
     Json(req): Json<OnboardRequest>,
 ) -> Response {
-    if !is_admin(&headers, &state.session_key) {
+    let Some(admin) = admin_session(&headers, &state.session_key) else {
         return (StatusCode::FORBIDDEN, "admin only").into_response();
-    }
-    if let Err(e) = state.store.upsert(&req.email, &req.password) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response();
-    }
+    };
+    let created = match state.store.upsert(&req.email, &req.password) {
+        Ok(created) => created,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    // Who wrote which credential, and whether it replaced one: before
+    // this an overwrite through this door named nobody (17ae5248).
+    state
+        .audit
+        .credential_written(&req.email.to_lowercase(), created, actor_of(&admin));
     (
         StatusCode::CREATED,
         Json(serde_json::json!({"email": req.email})),
@@ -746,11 +761,25 @@ pub async fn issue_reset(
     headers: HeaderMap,
     Json(req): Json<IssueResetRequest>,
 ) -> Response {
-    if !is_admin(&headers, &state.session_key) {
+    let Some(admin) = admin_session(&headers, &state.session_key) else {
         return (StatusCode::FORBIDDEN, "admin only").into_response();
+    };
+    let email = req.email.trim().to_lowercase();
+    // `forgot`'s window, claimed after the admin check so a refused
+    // caller cannot spend it. The admin is authenticated, so the
+    // refusal is said out loud rather than swallowed (17ae5248).
+    if !claim_reset_window(&state, &email) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "a reset was mailed to {email} within the last {}s; the link in it still works",
+                RESET_WINDOW.as_secs()
+            ),
+        )
+            .into_response();
     }
     let ttl = 60 * 60; // 1h
-    match state.store.issue_reset_token(&req.email, ttl) {
+    match state.store.issue_reset_token(&email, ttl) {
         Ok(token) => {
             // Mail it; do not return it. Returning the token was
             // correct while this was admin-only and the admin was the
@@ -759,8 +788,14 @@ pub async fn issue_reset(
             // handler that answers with a credential is one routing
             // mistake away from handing anyone anyone else's reset.
             let mail = crate::mail::reset_mail(&req.email, &token, &state.public_url);
-            if let Err(e) = state.mail.send(&mail).await {
+            let sent = state.mail.send(&mail).await;
+            state
+                .audit
+                .reset_issued(&email, sent.is_ok(), actor_of(&admin));
+            if let Err(e) = sent {
                 tracing::warn!(error = %e, "reset token issued but mail failed");
+                // Nothing reached the inbox, so the window is not spent.
+                release_reset_window(&state, &email);
                 return (
                     StatusCode::BAD_GATEWAY,
                     "token issued but could not be sent; check the mail transport",
@@ -773,7 +808,60 @@ pub async fn issue_reset(
             })
             .into_response()
         }
-        Err(e) => (StatusCode::BAD_REQUEST, format!("{e}")).into_response(),
+        Err(e) => {
+            release_reset_window(&state, &email);
+            (StatusCode::BAD_REQUEST, format!("{e}")).into_response()
+        }
+    }
+}
+
+/// How long one reset mail per address holds off the next, whichever
+/// door sent it.
+const RESET_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Claim `email`'s reset window: `true` if no reset mail went to it in
+/// the last [`RESET_WINDOW`], and the claim is recorded atomically with
+/// the check. Shared by `forgot` and `issue_reset`.
+fn claim_reset_window(state: &LocalAuthState, email: &str) -> bool {
+    let mut seen = match state.forgot_seen.write() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let now = std::time::Instant::now();
+    seen.retain(|_, t| now.duration_since(*t) < RESET_WINDOW);
+    if seen.contains_key(email) {
+        return false;
+    }
+    seen.insert(email.to_string(), now);
+    true
+}
+
+/// Hand back a claim whose reset sent nothing. Only the admin door
+/// does this; `forgot` keeps its claim even for an unknown address,
+/// because releasing it there would tell a prober which is which.
+fn release_reset_window(state: &LocalAuthState, email: &str) {
+    let mut seen = match state.forgot_seen.write() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    seen.remove(email);
+}
+
+/// The caller's session when it may administer auth — `is_admin`'s
+/// verdict plus the session it judged, so an admin act can name its
+/// actor.
+fn admin_session(headers: &HeaderMap, key: &[u8]) -> Option<Session> {
+    if !is_admin(headers, key) {
+        return None;
+    }
+    extract_session(headers, key)
+}
+
+fn actor_of(s: &Session) -> crate::audit::AdminActor<'_> {
+    crate::audit::AdminActor {
+        email: &s.username,
+        employee_id: s.employee_id.as_deref(),
+        role: s.role.as_deref(),
     }
 }
 
@@ -802,20 +890,10 @@ pub async fn forgot(
     Json(req): Json<ForgotRequest>,
 ) -> Response {
     let email = req.email.trim().to_lowercase();
-    const WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
-    {
-        let mut seen = match state.forgot_seen.write() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
-        };
-        let now = std::time::Instant::now();
-        seen.retain(|_, t| now.duration_since(*t) < WINDOW);
-        if seen.contains_key(&email) {
-            tracing::info!(%email, "forgot: within the rate-limit window; ignoring");
-            return StatusCode::NO_CONTENT.into_response();
-        }
-        seen.insert(email.clone(), now);
+    if !claim_reset_window(&state, &email) {
+        tracing::info!(%email, "forgot: within the rate-limit window; ignoring");
+        return StatusCode::NO_CONTENT.into_response();
     }
 
     let ttl = 60 * 60;
@@ -1547,5 +1625,204 @@ mod tests {
                 .consume_reset_token("ghost@example.com", "x", "y")
                 .is_err()
         );
+    }
+
+    // ---- the admin doors leave a record (backlog 17ae5248) -----------
+    //
+    // `onboard` upserted a credential and `issue_reset` mailed a reset
+    // with no call on `state.audit`: a credential created OR
+    // OVERWRITTEN through the auth-admin door named nobody, and an
+    // admin reset — exactly the act an audit trail exists for — left
+    // no trace. `issue_reset` also had none of `forgot`'s per-email
+    // window, so an administrator could mail a reset on every call.
+    //
+    // Helper names here are distinct from the ones car
+    // fix/auth-admin-refuses-audit-readonly adds to this module, so
+    // the two cars assemble on one train.
+
+    fn audited_admin_state() -> (
+        TempDir,
+        Arc<LocalAuthState>,
+        Arc<CapturingTransport>,
+        Arc<crate::audit::testing::Captured>,
+    ) {
+        let (td, store) = temp_store();
+        let mail = Arc::new(CapturingTransport::default());
+        let rec = Arc::new(crate::audit::testing::Captured::default());
+        let st = Arc::new(LocalAuthState {
+            store,
+            session_key: vec![7u8; 32],
+            http: reqwest::Client::new(),
+            audit: crate::audit::AuthAudit::spawn(rec.clone()),
+            guest_access: GuestAccess::Off,
+            oidc: None,
+            mail: mail.clone(),
+            public_url: "https://boss.test".into(),
+            forgot_seen: Default::default(),
+        });
+        (td, st, mail, rec)
+    }
+
+    /// A platform-admin session signed with the state's own key, as
+    /// `login` would mint it.
+    fn platform_admin_cookie(st: &LocalAuthState) -> HeaderMap {
+        let mut sess = Session::new("admin@example.com", 60);
+        sess.role = Some(boss_core::roles::PLATFORM_ADMIN_ROLE.to_string());
+        sess.employee_id = Some("emp-admin".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!(
+                "{}={}",
+                session::COOKIE_NAME,
+                sess.encode(&st.session_key)
+            ))
+            .unwrap(),
+        );
+        headers
+    }
+
+    /// Runtime-generated: no credential-shaped literal in the binary.
+    fn runtime_password() -> String {
+        use rand::RngExt;
+        format!("pw-{}", rand::rng().random::<u64>())
+    }
+
+    async fn admin_resets(st: &Arc<LocalAuthState>, email: &str) -> Response {
+        issue_reset(
+            State(st.clone()),
+            platform_admin_cookie(st),
+            Json(IssueResetRequest {
+                email: email.into(),
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn onboard_records_who_wrote_which_credential_and_never_the_password() {
+        let (_td, st, _mail, rec) = audited_admin_state();
+        let first = runtime_password();
+        let second = runtime_password();
+        for pw in [&first, &second] {
+            let resp = onboard(
+                State(st.clone()),
+                platform_admin_cookie(&st),
+                Json(OnboardRequest {
+                    email: "New@Example.com".into(),
+                    password: pw.clone(),
+                }),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+
+        let events = crate::audit::testing::drain(&rec, 2).await;
+        assert_eq!(events.len(), 2, "one event per credential write");
+        for e in &events {
+            assert_eq!(e.kind, "auth.credential.written");
+            assert_eq!(e.payload["email"], "new@example.com");
+            assert_eq!(e.payload["actor"], "admin@example.com");
+            assert_eq!(e.payload["actor_employee_id"], "emp-admin");
+            assert_eq!(e.payload["actor_role"], "platform-admin");
+            let raw = e.payload.to_string();
+            assert!(
+                !raw.contains(&first) && !raw.contains(&second),
+                "no password in the payload: {raw}"
+            );
+        }
+        assert_eq!(events[0].payload["outcome"], "created");
+        assert_eq!(
+            events[1].payload["outcome"], "overwritten",
+            "an upsert over an existing credential says so"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_reset_records_who_issued_it_and_never_the_token() {
+        let (_td, st, mail, rec) = audited_admin_state();
+        st.store
+            .upsert("user@example.com", &runtime_password())
+            .expect("seed");
+
+        let resp = admin_resets(&st, "user@example.com").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = mail.sent.lock().expect("lock")[0].body.clone();
+        let token = body
+            .split("reset=")
+            .nth(1)
+            .and_then(|t| t.split_whitespace().next())
+            .expect("the mail carries the token")
+            .to_string();
+
+        let events = crate::audit::testing::drain(&rec, 1).await;
+        assert_eq!(events.len(), 1);
+        let e = &events[0];
+        assert_eq!(e.kind, "auth.reset.issued");
+        assert_eq!(e.payload["email"], "user@example.com");
+        assert_eq!(e.payload["actor"], "admin@example.com");
+        assert_eq!(e.payload["mailed"], true);
+        assert!(
+            !e.payload.to_string().contains(&token),
+            "no token in the payload"
+        );
+    }
+
+    /// `forgot`'s window, shared: one reset mail per address per 60 s
+    /// whichever door asked, because the inbox being protected is the
+    /// same inbox. The admin is authenticated, so the refusal is said
+    /// out loud (429) rather than swallowed as `forgot` must.
+    #[tokio::test]
+    async fn issue_reset_honours_the_per_email_window_forgot_keeps() {
+        let (_td, st, mail, rec) = audited_admin_state();
+        st.store
+            .upsert("user@example.com", &runtime_password())
+            .expect("seed");
+
+        let first = admin_resets(&st, "user@example.com").await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let again = admin_resets(&st, "USER@example.com").await;
+        assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(mail.sent.lock().expect("lock").len(), 1, "one mail");
+
+        // The same window `forgot` claims: a public forgot inside it is
+        // silently ignored, as it always was.
+        let fg = forgot(
+            State(st.clone()),
+            Json(ForgotRequest {
+                email: "user@example.com".into(),
+            }),
+        )
+        .await;
+        assert_eq!(fg.status(), StatusCode::NO_CONTENT);
+        assert_eq!(mail.sent.lock().expect("lock").len(), 1, "still one");
+
+        let events = crate::audit::testing::drain(&rec, 1).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.kind == "auth.reset.issued")
+                .count(),
+            1,
+            "a refused reset issues nothing and records no issue"
+        );
+    }
+
+    /// A reset that sent nothing does not spend the window: an admin
+    /// who asks before onboarding, onboards, and asks again is not
+    /// made to wait a minute for a mail that never went.
+    #[tokio::test]
+    async fn a_reset_that_sent_nothing_does_not_spend_the_window() {
+        let (_td, st, mail, _rec) = audited_admin_state();
+        let early = admin_resets(&st, "late@example.com").await;
+        assert_eq!(early.status(), StatusCode::BAD_REQUEST, "onboard first");
+
+        st.store
+            .upsert("late@example.com", &runtime_password())
+            .expect("seed");
+        let resp = admin_resets(&st, "late@example.com").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(mail.sent.lock().expect("lock").len(), 1);
     }
 }

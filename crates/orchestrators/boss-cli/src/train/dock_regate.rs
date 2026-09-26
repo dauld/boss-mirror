@@ -405,17 +405,23 @@ pub(crate) fn departure_hold(
 /// PURE: what this pass writes to the car's claim on the next free gate
 /// bay (`gate::DOCK_WAITING`, design 42279fb2 D3) — `waiting` is the main
 /// the dock is waiting for a bay to re-gate it on, `None` when it is not
-/// waiting. Waiting re-stamps the claim every pass, which is the heartbeat
-/// builders read it by; not waiting deletes a claim the car still carries
-/// (a merge deletes a `null`), so a re-gate that has launched is never
-/// counted twice. `None` = write nothing.
+/// waiting. The claim records only its CHANGES (design 38f3a488 D1): a car
+/// that starts waiting, or whose main moved, gets `{main, since: now}`; a
+/// car already claiming a bay on the same main gets nothing, so a pass
+/// that changes nothing writes nothing — builders read liveness off the
+/// refresh rule's last firing, not off the claim. Not waiting deletes a
+/// claim the car still carries (a merge deletes a `null`), so a re-gate
+/// that has launched is never counted twice. `None` = write nothing.
 pub(crate) fn waiting_write(
     car: &Value,
     waiting: Option<&str>,
     now: DateTime<Utc>,
 ) -> Option<Value> {
     match waiting {
-        Some(main) => Some(crate::gate::dock_waiting_stamp(main, now)),
+        Some(main) => match crate::gate::dock_claim(car) {
+            Some((held, _)) if held == main => None,
+            _ => Some(crate::gate::dock_waiting_stamp(main, now)),
+        },
         None => car
             .pointer(&format!("/metadata/{}", crate::gate::DOCK_WAITING))
             .filter(|v| !v.is_null())
@@ -569,10 +575,9 @@ mod tests {
     use super::*;
 
     /// D3 of design 42279fb2: the dock's claim on the next free bay is
-    /// written while it waits for one — re-stamped every pass, which is
-    /// its heartbeat — and removed the pass it stops waiting, so a
-    /// launched re-gate is never counted twice (once running, once
-    /// waiting). A car that never waited is never written.
+    /// written when it starts waiting for one and removed the pass it
+    /// stops, so a launched re-gate is never counted twice (once running,
+    /// once waiting). A car that never waited is never written.
     #[test]
     fn the_dock_claims_a_bay_only_while_it_waits_for_one() {
         let now = DateTime::parse_from_rfc3339("2026-09-25T22:30:00Z")
@@ -582,7 +587,7 @@ mod tests {
         assert_eq!(
             waiting_write(&bare, Some("77bf499e"), now),
             Some(crate::gate::dock_waiting_stamp("77bf499e", now)),
-            "waiting: the claim is written, naming the main it waits on"
+            "starts waiting: the claim is written, naming the main it waits on"
         );
         assert_eq!(
             waiting_write(&bare, None, now),
@@ -603,6 +608,46 @@ mod tests {
             crate::gate::DOCK_WAITING: null,
         }});
         assert_eq!(waiting_write(&cleared, None, now), None);
+    }
+
+    /// Design 38f3a488 D1 (backlog b15b0f4e): the claim records its own
+    /// CHANGES, not the dock's liveness. It used to be re-stamped with
+    /// `at = now` on every two-minute pass, so the unchanged-hold guard
+    /// could never match and each waiting car cost a full job PUT and an
+    /// audit event per pass — 7 cars x 30 passes = 210 events an hour on
+    /// the evening of 2026-09-25, each saying only "still waiting".
+    /// Liveness is read off the refresh rule's last firing instead.
+    #[test]
+    fn a_car_still_waiting_on_the_same_main_writes_nothing() {
+        let began = DateTime::parse_from_rfc3339("2026-09-25T21:20:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let now = DateTime::parse_from_rfc3339("2026-09-25T22:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let waiting = json!({"id": "car-g", "metadata": {
+            "branch": "feat/g",
+            crate::gate::DOCK_WAITING: crate::gate::dock_waiting_stamp("77bf499e", began),
+        }});
+        assert_eq!(
+            waiting_write(&waiting, Some("77bf499e"), now),
+            None,
+            "same main, still waiting: no write, and `since` keeps its instant"
+        );
+        assert_eq!(
+            waiting_write(&waiting, Some("24ea4303"), now),
+            Some(crate::gate::dock_waiting_stamp("24ea4303", now)),
+            "main moved: a new claim, waiting since now, on the new main"
+        );
+        // The old heartbeat shape is no claim to a builder, so a car that
+        // still carries one is rewritten once into the claim that counts.
+        let heartbeat = json!({"id": "car-g", "metadata": {
+            crate::gate::DOCK_WAITING: {"main": "77bf499e", "at": "2026-09-25T22:28:00Z"},
+        }});
+        assert_eq!(
+            waiting_write(&heartbeat, Some("77bf499e"), now),
+            Some(crate::gate::dock_waiting_stamp("77bf499e", now)),
+        );
     }
 
     fn paths(list: &[&str]) -> Vec<String> {

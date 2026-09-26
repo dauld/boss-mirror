@@ -22,6 +22,11 @@
 //! not a schema change. `auth.session.guest` counts mints of the
 //! unauthenticated read-only capability.
 //!
+//! The auth-admin doors joined later (backlog 17ae5248, 2026-09-25):
+//! `auth.credential.written` (onboard: created or overwritten) and
+//! `auth.reset.issued` (issue-reset), each naming the target email and
+//! the acting session — never a password or a token.
+//!
 //! Failure posture (the LogTransport principle): emitting never
 //! blocks and never fails a login. The handler hands the event to a
 //! bounded channel; a background task stages it. Channel full,
@@ -80,6 +85,31 @@ impl DeniedReason {
             Self::BadCredentials => "bad_credentials",
             Self::NoEmployeeRecord => "no_employee_record",
             Self::IdpDenied => "idp_denied",
+        }
+    }
+}
+
+/// Who performed an auth-administration act, read off the caller's
+/// verified session — never off the request body, which is not
+/// evidence of anything.
+#[derive(Debug, Clone, Copy)]
+pub struct AdminActor<'a> {
+    /// The session's username (the admin's email).
+    pub email: &'a str,
+    pub employee_id: Option<&'a str>,
+    pub role: Option<&'a str>,
+}
+
+impl AdminActor<'_> {
+    /// `actor`, plus `actor_employee_id` / `actor_role` when the
+    /// session carries them — omitted rather than asserted as null.
+    fn stamp(self, payload: &mut serde_json::Value) {
+        payload["actor"] = json!(self.email);
+        if let Some(id) = self.employee_id {
+            payload["actor_employee_id"] = json!(id);
+        }
+        if let Some(role) = self.role {
+            payload["actor_role"] = json!(role);
         }
     }
 }
@@ -184,6 +214,29 @@ impl AuthAudit {
                 "aaguid": aaguid,
             }),
         );
+    }
+
+    /// A local credential was written through the auth-admin door
+    /// (`POST /api/auth/onboard`). `created` is false when the write
+    /// replaced an existing credential — the upsert that used to leave
+    /// no trace either way (backlog 17ae5248). Never the password.
+    pub fn credential_written(&self, email: &str, created: bool, actor: AdminActor<'_>) {
+        let mut payload = json!({
+            "email": email,
+            "outcome": if created { "created" } else { "overwritten" },
+        });
+        actor.stamp(&mut payload);
+        self.emit("auth.credential.written", payload);
+    }
+
+    /// An administrator issued a password reset for `email`
+    /// (`POST /api/auth/issue-reset`). `mailed` is whether the link
+    /// left the building; a token issued but not sent is still a token
+    /// issued. Never the token (backlog 17ae5248).
+    pub fn reset_issued(&self, email: &str, mailed: bool, actor: AdminActor<'_>) {
+        let mut payload = json!({ "email": email, "mailed": mailed });
+        actor.stamp(&mut payload);
+        self.emit("auth.reset.issued", payload);
     }
 
     fn emit(&self, kind: &'static str, payload: serde_json::Value) {
@@ -305,6 +358,91 @@ mod tests {
         let events = drain(&cap, 1).await;
         assert_eq!(events[0].kind, "auth.session.guest");
         assert_eq!(events[0].payload["email"], "guest@algedonic.dev");
+    }
+
+    /// Backlog 17ae5248: a credential written through the auth-admin
+    /// door names who wrote it, to which email, and whether it was
+    /// created or overwritten — and carries nothing that is itself a
+    /// credential. The key set is asserted whole so a later field
+    /// cannot ride in unread.
+    #[tokio::test]
+    async fn a_credential_write_names_actor_target_and_outcome_only() {
+        let cap = Arc::new(Captured::default());
+        let audit = AuthAudit::spawn(cap.clone());
+        let actor = AdminActor {
+            email: "admin@example.com",
+            employee_id: Some("emp-admin"),
+            role: Some("platform-admin"),
+        };
+        audit.credential_written("new@example.com", true, actor);
+        audit.credential_written("new@example.com", false, actor);
+        let events = drain(&cap, 2).await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, "auth.credential.written");
+        assert_eq!(events[0].source, "gateway");
+        assert_eq!(events[0].payload["outcome"], "created");
+        assert_eq!(events[1].payload["outcome"], "overwritten");
+        let e = &events[0];
+        assert_eq!(e.payload["email"], "new@example.com");
+        assert_eq!(e.payload["actor"], "admin@example.com");
+        assert_eq!(e.payload["actor_employee_id"], "emp-admin");
+        assert_eq!(e.payload["actor_role"], "platform-admin");
+        let mut keys: Vec<&str> = e
+            .payload
+            .as_object()
+            .expect("object payload")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "actor",
+                "actor_employee_id",
+                "actor_role",
+                "email",
+                "outcome"
+            ]
+        );
+    }
+
+    /// Backlog 17ae5248: an admin-issued reset names who issued it and
+    /// for which email, never the token; `mailed` says whether the
+    /// link left the building.
+    #[tokio::test]
+    async fn a_reset_issue_names_actor_and_target_only() {
+        let cap = Arc::new(Captured::default());
+        let audit = AuthAudit::spawn(cap.clone());
+        audit.reset_issued(
+            "user@example.com",
+            true,
+            AdminActor {
+                email: "glass@example.com",
+                employee_id: None,
+                role: Some("break-glass"),
+            },
+        );
+        let events = drain(&cap, 1).await;
+        let e = &events[0];
+        assert_eq!(e.kind, "auth.reset.issued");
+        assert_eq!(e.payload["email"], "user@example.com");
+        assert_eq!(e.payload["actor"], "glass@example.com");
+        assert_eq!(e.payload["actor_role"], "break-glass");
+        assert_eq!(e.payload["mailed"], true);
+        assert!(
+            e.payload.get("actor_employee_id").is_none(),
+            "an absent employee id is omitted, not asserted as null"
+        );
+        let mut keys: Vec<&str> = e
+            .payload
+            .as_object()
+            .expect("object payload")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["actor", "actor_role", "email", "mailed"]);
     }
 
     #[tokio::test]

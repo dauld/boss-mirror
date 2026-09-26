@@ -629,46 +629,113 @@ pub(crate) const fn may_launch(
 /// WHY A CLAIM ON THE CAR AND NOT A PLACE IN THE GATE-RUN LINE: the dock
 /// cannot file its gate-run before a bay is free — the replay onto main
 /// comes first, and a replayed branch that is not gated is a car that
-/// cannot board (`launch_base_regate`). So the claim rides on the car the
-/// dock already writes each pass, and it launches through the dock's own
-/// admission (`admits(live, max, Car)`), which never reads the builder
-/// line; only builders read the claim, and yield to it.
+/// cannot board (`launch_base_regate`). So the claim rides on the car,
+/// beside the hold the dock records there, and it launches through the
+/// dock's own admission (`admits(live, max, Car)`), which never reads the
+/// builder line; only builders read the claim, and yield to it.
 ///
-/// HELD BY A HEARTBEAT, like a builder's place: the conductor re-stamps
-/// it on every walk of the dock (the two-minute `train-dock-refresh`,
-/// inside [`QUEUE_PLACE_TTL_SECS`]), and only while the track is clear.
-/// A claim nobody re-stamps — a train on the track, whose merge is about
-/// to replace the main it waits on; a stopped conductor — ages out on the
-/// same TTL as a builder's place, so the line never waits on a ghost.
+/// WRITTEN ON CHANGE, READ ALIVE OFF THE REFRESH (design 38f3a488,
+/// backlog b15b0f4e). The claim is `{main, since}`: set the pass a car
+/// starts waiting, rewritten only when the main it waits on moves, and
+/// deleted the pass it stops — each a real change of state, so each is
+/// in the audit log and nothing else is. It used to be a heartbeat
+/// (`at` re-stamped on every two-minute walk), which made every waiting
+/// car a full job PUT and an audit event per pass: 7 cars waiting on the
+/// evening of 2026-09-25 would have been 210 events an hour saying only
+/// "still waiting", and the audit log records work, not liveness (David,
+/// 2026-09-16).
+///
+/// Liveness is read instead off the conductor's own walk: a claim counts
+/// only while [`DOCK_REFRESH_RULE`] has fired inside
+/// [`QUEUE_PLACE_TTL_SECS`] with rc 0 or none yet ([`dock_waiting`]). A
+/// stopped conductor stops firing, and every claim stops counting within
+/// the same TTL as a builder's place, so the line never waits on a ghost.
+/// A refresh held by a train on the track still fires, so the held pass
+/// deletes the claims itself (`Conductor::refresh`): that train's merge
+/// is about to replace the main they wait on.
 pub(crate) const DOCK_WAITING: &str = "regate_waiting";
 
+/// The cadence rule that walks the dock every two minutes — the one
+/// process that keeps a dock claim true, so the one whose last firing
+/// says whether the claims are still held.
+pub(crate) const DOCK_REFRESH_RULE: &str = "train-dock-refresh";
+
 /// The claim the dock writes: the main it waits to re-gate on, and when
-/// it last said so.
-pub(crate) fn dock_waiting_stamp(main: &str, at: chrono::DateTime<chrono::Utc>) -> Value {
-    json!({ "main": main, "at": stamp(at) })
+/// it began waiting for a bay on it.
+pub(crate) fn dock_waiting_stamp(main: &str, since: chrono::DateTime<chrono::Utc>) -> Value {
+    json!({ "main": main, "since": stamp(since) })
 }
 
-/// PURE: how many parked cars hold a live dock claim — each one ahead of
-/// every builder place. A claim whose `at` does not parse is no claim,
-/// never a guess into the head of the line.
+/// PURE: the claim a car carries — the main and the instant it began
+/// waiting. `None` for no claim, the retired heartbeat shape (`at`), or
+/// a `since` that does not parse: never a guess into the head of the
+/// line.
+pub(crate) fn dock_claim(car: &Value) -> Option<(&str, chrono::DateTime<chrono::Utc>)> {
+    let claim = car.pointer(&format!("/metadata/{DOCK_WAITING}"))?;
+    let main = claim.get("main").and_then(Value::as_str)?;
+    let since = claim
+        .get("since")
+        .and_then(Value::as_str)
+        .and_then(parse_instant)?;
+    Some((main, since))
+}
+
+/// PURE: how many parked cars carry a claim, alive or not.
+pub(crate) fn dock_claims(cars: &[Value]) -> usize {
+    cars.iter().filter(|c| dock_claim(c).is_some()).count()
+}
+
+/// PURE: how many dock claims stand ahead of every builder place, given
+/// the refresh rule's last firing. `Err` names why the claims the dock
+/// carries are NOT counted — no firing, a stale one, a failed one — so
+/// the caller can say it; with no claims there is nothing to judge.
+///
+/// `rc` none is a refresh still in flight, not a failure (the cadence
+/// door's own reading, `LastFiring::rc`).
 pub(crate) fn dock_waiting(
     cars: &[Value],
+    refresh: Option<&boss_jobs::cadence::LastFiring>,
     now: chrono::DateTime<chrono::Utc>,
     ttl_secs: i64,
-) -> usize {
-    cars.iter()
-        .filter_map(|c| c.pointer(&format!("/metadata/{DOCK_WAITING}/at")))
-        .filter_map(Value::as_str)
-        .filter_map(parse_instant)
-        .filter(|at| (now - *at).num_seconds() <= ttl_secs)
-        .count()
+) -> std::result::Result<usize, String> {
+    let claims = dock_claims(cars);
+    if claims == 0 {
+        return Ok(0);
+    }
+    let not_counted = format!("{claims} dock claim(s) not counted");
+    let Some(last) = refresh else {
+        return Err(format!(
+            "{DOCK_REFRESH_RULE} has no recorded firing, so nothing keeps the dock's claims \
+             current — {not_counted}"
+        ));
+    };
+    let age = (now - last.fired_at).num_seconds();
+    if age > ttl_secs {
+        return Err(format!(
+            "{DOCK_REFRESH_RULE} last fired {age}s ago, past the {ttl_secs}s a claim lives \
+             without it — {not_counted}"
+        ));
+    }
+    match last.rc {
+        None | Some(0) => Ok(claims),
+        Some(rc) => Err(format!(
+            "{DOCK_REFRESH_RULE}'s last firing ({}) exited {rc}, so it kept no claim current \
+             — {not_counted}",
+            last.firing_id
+        )),
+    }
 }
 
 /// The dock's claims, read now. BEST-EFFORT, LOUDLY: a builder must owe
-/// nothing to the dock, so a read that fails counts none — the line as
-/// it was before D3 — and says so.
-async fn dock_waiting_now(http: &reqwest::Client, now: chrono::DateTime<chrono::Utc>) -> usize {
-    match api(
+/// nothing to the dock, so a read that fails — the dock's, or the
+/// refresh rule's last firing — counts none, the line as it was before
+/// design 42279fb2 D3, and the `Err` says why for the caller to print.
+/// The firing is read only when some car carries a claim.
+async fn dock_waiting_now(
+    http: &reqwest::Client,
+    now: chrono::DateTime<chrono::Utc>,
+) -> std::result::Result<usize, String> {
+    let cars = api(
         http,
         reqwest::Method::GET,
         "/api/stations/loading-dock/queue",
@@ -676,16 +743,36 @@ async fn dock_waiting_now(http: &reqwest::Client, now: chrono::DateTime<chrono::
     )
     .await
     .and_then(rows)
-    {
-        Ok(cars) => dock_waiting(&cars, now, QUEUE_PLACE_TTL_SECS),
-        Err(e) => {
-            eprintln!(
-                "boss gate: could not read the loading dock ({e:#}) — counting no dock \
-                 re-gates ahead of this place"
-            );
-            0
-        }
+    .map_err(|e| format!("could not read the loading dock ({e:#})"))?;
+    if dock_claims(&cars) == 0 {
+        return Ok(0);
     }
+    let path = format!("/api/cadence/rules/{DOCK_REFRESH_RULE}/last-firing");
+    let refresh = api(http, reqwest::Method::GET, &path, None)
+        .await
+        .and_then(|v| match v {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => serde_json::from_value::<boss_jobs::cadence::LastFiring>(v)
+                .map(Some)
+                .context("parsing the last firing"),
+        })
+        .map_err(|e| {
+            format!(
+                "could not read {DOCK_REFRESH_RULE}'s last firing ({e:#}) — {} dock claim(s) \
+                 not counted",
+                dock_claims(&cars)
+            )
+        })?;
+    dock_waiting(&cars, refresh.as_ref(), now, QUEUE_PLACE_TTL_SECS)
+}
+
+/// The dock's claims for a builder's admission: a count, with the reason
+/// printed when none could be counted.
+fn dock_count_or_say(read: std::result::Result<usize, String>) -> usize {
+    read.unwrap_or_else(|why| {
+        eprintln!("boss gate: {why} — counting no dock re-gates ahead of this place");
+        0
+    })
 }
 
 /// Roughly what a place costs, a gate at a time. Arithmetic on the
@@ -3229,19 +3316,33 @@ pub async fn run(
         // longer reaches here at all — `rebase_onto_main` retries and
         // then refuses — so the only remaining doubt is a forge that
         // could not be re-read, and that doubt is printed.
+        // A car that already carried a merge of main was merged forward,
+        // not replayed (28eedb03): say which move happened.
+        let (moved, pushed) = if done.merged {
+            (
+                format!("merged origin/main into {branch} (it already carries a merge of main)"),
+                "pushed as a fast-forward of the old head",
+            )
+        } else {
+            (
+                format!(
+                    "replayed {} commit(s) of {branch} onto origin/main",
+                    done.replayed
+                ),
+                "pushed with a lease on the old head",
+            )
+        };
         println!(
-            "boss gate: --rebase replayed {} commit(s) of {branch} onto origin/main — {} → {} \
-             ({}; your own worktree still has the old head: `git fetch origin && git reset --hard \
-             origin/{branch}` there when you are done)",
-            done.replayed,
+            "boss gate: --rebase {moved} — {} → {} ({pushed}{}; your own worktree still has the \
+             old head: `git fetch origin && git reset --hard origin/{branch}` there when you are \
+             done)",
             &done.old_head[..8.min(done.old_head.len())],
             &done.new_head[..8.min(done.new_head.len())],
             if done.confirmed {
-                "pushed with a lease on the old head and read back: the forge's branch holds it"
+                " and read back: the forge's branch holds it"
             } else {
-                "pushed with a lease on the old head, but the forge could NOT be re-read to \
-                 confirm the branch holds it — check with `git ls-remote origin` before trusting \
-                 this line"
+                ", but the forge could NOT be re-read to confirm the branch holds it — check \
+                 with `git ls-remote origin` before trusting this line"
             }
         );
         base_obs = crate::freshness::observe(std::path::Path::new("."), branch);
@@ -3328,7 +3429,7 @@ pub async fn run(
         wait,
         ahead,
         QUEUE_CAP,
-        dock_waiting_now(&http, now).await,
+        dock_count_or_say(dock_waiting_now(&http, now).await),
     ) {
         Admission::Refuse(why) => bail!("{why}"),
         Admission::Queue => true,
@@ -3978,6 +4079,24 @@ pub(crate) fn is_transient(msg: &str) -> bool {
         || m.contains("broken pipe")
         || m.contains("timed out")
         || m.contains("dns error")
+        // The jobs API answering 403 because ITS policy client failed
+        // closed while the policy service rolled — the conductor's
+        // classifier's predicate, not a second copy (backlog 5d4ad086:
+        // this wait exited 1 on it at 21:35Z on 2026-09-25 while the
+        // gate it watched went green).
+        || crate::train::names_a_policy_outage(msg)
+}
+
+/// What the wait says it is waiting out, named off the error that
+/// sent it there: a dark SoR, or a live one whose policy check is
+/// failing closed. The two send an operator to different services.
+fn absence_named(msg: &str) -> &'static str {
+    if crate::train::names_a_policy_outage(msg) {
+        "the jobs API is refusing reads because its policy service is failing \
+         (a fail-closed 403: policy-unreachable, or a policy 5xx)"
+    } else {
+        "system of record unreachable"
+    }
 }
 
 /// watch. Reading the packet is also what any other actor would do.
@@ -4038,8 +4157,9 @@ async fn wait_for_verdict(
                     );
                 }
                 eprintln!(
-                    "boss gate: system of record unreachable ({}s) — a deploy rolls it \
-                     briefly; the gate Job is unaffected, still waiting",
+                    "boss gate: {} ({}s) — a deploy rolls it briefly; the gate Job is \
+                     unaffected, still waiting",
+                    absence_named(&format!("{e:#}")),
                     since.elapsed().as_secs()
                 );
                 continue;
@@ -4214,6 +4334,7 @@ async fn wait_for_slot(
     let mut absent_since: Option<std::time::Instant> = None;
     let mut reported: Option<usize> = None;
     let mut dock_reported = 0;
+    let mut dock_uncounted = false;
     loop {
         tokio::time::sleep(QUEUE_POLL).await;
         // `now` is minted once at the CLI boundary (the no-wallclock
@@ -4266,8 +4387,8 @@ async fn wait_for_slot(
                     );
                 }
                 eprintln!(
-                    "boss gate: system of record unreachable ({}s) — a deploy rolls it \
-                     briefly; still holding the place",
+                    "boss gate: {} ({}s) — a deploy rolls it briefly; still holding the place",
+                    absence_named(&format!("{e:#}")),
                     since.elapsed().as_secs()
                 );
                 continue;
@@ -4282,8 +4403,22 @@ async fn wait_for_slot(
         let live = running_gates(namespace)?;
         // The dock's claims go before the whole line (design 42279fb2
         // D3). Said once each time the count changes, so a place that
-        // does not move says why.
-        let dock = dock_waiting_now(http, at).await;
+        // does not move says why — and a count that could not be taken
+        // (design 38f3a488) is said when it starts, not every poll.
+        let read = dock_waiting_now(http, at).await;
+        let dock = match read {
+            Ok(n) => {
+                dock_uncounted = false;
+                n
+            }
+            Err(why) => {
+                if !dock_uncounted {
+                    eprintln!("boss gate: {why} — counting no dock re-gates ahead of this place");
+                }
+                dock_uncounted = true;
+                0
+            }
+        };
         if dock != dock_reported {
             if dock > 0 {
                 println!(
@@ -6625,29 +6760,99 @@ mod tests {
         json!({ "id": id, "metadata": md })
     }
 
-    /// A dock claim is held only while the conductor re-stamps it: every
-    /// two-minute refresh while the track is clear (D1). One the dock
-    /// stopped stamping — a train on the track, a dead conductor, a car
-    /// that boarded — ages out on the same TTL as a builder's place, so
-    /// the line never waits on a ghost (the fd217c65 rule, for the dock).
+    /// The refresh rule's last firing, as the cadence door answers it.
+    fn firing(fired_at: &str, rc: Option<i32>) -> boss_jobs::cadence::LastFiring {
+        boss_jobs::cadence::LastFiring {
+            firing_id: format!("cadence:{DOCK_REFRESH_RULE}:{fired_at}"),
+            fired_at: at(fired_at),
+            rc,
+        }
+    }
+
+    /// Design 38f3a488 D1: a claim is `{main, since}` and records when the
+    /// car STARTED waiting, so its age says nothing about whether anyone
+    /// still holds it. What a claim needs is a main and a `since` that
+    /// parses; the old heartbeat shape (`at`) is no claim, and neither is
+    /// garbage — never a guess into the head of the line.
     #[test]
-    fn only_a_dock_claim_the_conductor_still_stamps_is_ahead_of_the_line() {
-        let now = at("2026-09-25T22:30:00Z");
+    fn a_dock_claim_is_a_main_and_the_instant_it_began_waiting() {
         let cars = vec![
             parked(
-                "fresh",
-                Some(dock_waiting_stamp("77bf499e", at("2026-09-25T22:28:00Z"))),
-            ),
-            parked(
-                "stale",
-                Some(dock_waiting_stamp("77bf499e", at("2026-09-25T22:20:00Z"))),
+                "old",
+                Some(dock_waiting_stamp("77bf499e", at("2026-09-25T20:00:00Z"))),
             ),
             parked("none", None),
             parked("cleared", Some(Value::Null)),
-            parked("garbage", Some(json!({"main": "77bf499e", "at": "soon"}))),
+            parked(
+                "heartbeat",
+                Some(json!({"main": "77bf499e", "at": "2026-09-25T22:29:00Z"})),
+            ),
+            parked(
+                "garbage",
+                Some(json!({"main": "77bf499e", "since": "soon"})),
+            ),
+            parked("no-main", Some(json!({"since": "2026-09-25T22:29:00Z"}))),
         ];
-        assert_eq!(dock_waiting(&cars, now, QUEUE_PLACE_TTL_SECS), 1);
-        assert_eq!(dock_waiting(&[], now, QUEUE_PLACE_TTL_SECS), 0);
+        assert_eq!(dock_claims(&cars), 1, "only the {{main, since}} claim");
+        assert_eq!(
+            dock_claim(&cars[0]),
+            Some(("77bf499e", at("2026-09-25T20:00:00Z")))
+        );
+        assert_eq!(dock_claims(&[]), 0);
+    }
+
+    /// Design 38f3a488 D2: a claim written once is alive exactly while the
+    /// conductor is still walking the dock — read off the refresh rule's
+    /// own last firing, not a per-car heartbeat in the audit log. A claim
+    /// from hours ago counts while the refresh fired inside the TTL; a
+    /// stale firing (a stopped conductor), no firing at all, or a failed
+    /// one counts none, and says why, so the line never waits on a ghost
+    /// (the fd217c65 rule, for the dock).
+    #[test]
+    fn a_dock_claim_counts_only_while_the_refresh_rule_is_firing() {
+        let now = at("2026-09-25T22:30:00Z");
+        let cars = vec![
+            parked(
+                "hours-old",
+                Some(dock_waiting_stamp("77bf499e", at("2026-09-25T19:00:00Z"))),
+            ),
+            parked(
+                "recent",
+                Some(dock_waiting_stamp("77bf499e", at("2026-09-25T22:28:00Z"))),
+            ),
+            parked("none", None),
+        ];
+        let fresh = firing("2026-09-25T22:28:30Z", Some(0));
+        assert_eq!(
+            dock_waiting(&cars, Some(&fresh), now, QUEUE_PLACE_TTL_SECS),
+            Ok(2),
+            "a fresh, clean firing counts every claim, however old"
+        );
+        let running = firing("2026-09-25T22:29:50Z", None);
+        assert_eq!(
+            dock_waiting(&cars, Some(&running), now, QUEUE_PLACE_TTL_SECS),
+            Ok(2),
+            "rc null is a refresh still in flight, not a failure"
+        );
+        let stale = firing("2026-09-25T22:20:00Z", Some(0));
+        let why = dock_waiting(&cars, Some(&stale), now, QUEUE_PLACE_TTL_SECS)
+            .expect_err("a stale firing counts none");
+        assert!(
+            why.contains("600s ago") && why.contains("2 dock claim"),
+            "names the age and what it did not count: {why}"
+        );
+        let why = dock_waiting(&cars, None, now, QUEUE_PLACE_TTL_SECS)
+            .expect_err("no firing counts none");
+        assert!(why.contains("no recorded firing"), "{why}");
+        let failed = firing("2026-09-25T22:29:00Z", Some(1));
+        let why = dock_waiting(&cars, Some(&failed), now, QUEUE_PLACE_TTL_SECS)
+            .expect_err("a failed refresh keeps no claim current");
+        assert!(why.contains("exited 1"), "{why}");
+        assert_eq!(
+            dock_waiting(&[parked("none", None)], None, now, QUEUE_PLACE_TTL_SECS),
+            Ok(0),
+            "no claims: nothing to judge, nothing to say"
+        );
     }
 
     /// The estimate is arithmetic on the measured median (2026-09-08:
@@ -7829,8 +8034,57 @@ kind: Job\n\
             "operation timed out",
             "connection reset by peer",
             "dns error: failed to lookup address",
+            // Backlog 5d4ad086: the 21:35Z answer that ended a wait on a
+            // gate that went green — the policy client failing closed
+            // while the policy service rolled. Keyed on the REASON, not
+            // the status: the scope 403 below stays final.
+            "jobs api GET /api/jobs/6266b4be -> 403 Forbidden: reading packets is refused: \
+             policy-unreachable",
+            "jobs api GET /api/jobs/6266b4be -> 403 Forbidden: reading packets is refused: \
+             policy service returned 503 Service Unavailable",
         ] {
             assert!(is_transient(msg), "should ride this out: {msg}");
+        }
+    }
+
+    /// The wait says WHICH absence it is waiting out: an operator told
+    /// "system of record unreachable" while the API is answering 403s
+    /// goes looking at the wrong service.
+    #[test]
+    fn the_wait_names_a_policy_outage_as_one() {
+        let policy = absence_named(
+            "jobs api GET /api/jobs/x -> 403 Forbidden: reading packets is refused: \
+             policy-unreachable",
+        );
+        assert!(policy.contains("policy-unreachable"), "{policy}");
+        assert!(policy.contains("policy service"), "{policy}");
+        let roll = absence_named("error sending request: tcp connect error: No route to host");
+        assert!(roll.contains("system of record unreachable"), "{roll}");
+    }
+
+    /// CLAUDE.md §9a: the gate's wait (a rendered message) and the
+    /// conductor's classifier (a status and a body) decide the same
+    /// question — is this 403 an outage or an answer — so they share
+    /// one predicate, and this pins that each 403 reads the same to
+    /// both for an idempotent read.
+    #[test]
+    fn a_policy_403_reads_the_same_to_both_retry_classifiers() {
+        for body in [
+            "reading packets is refused: policy-unreachable",
+            "reading packets is refused: policy service returned 502 Bad Gateway",
+            "reading packets is refused: policy service returned 400 Bad Request",
+            "job is outside your scope",
+            "reading packets is refused: not permitted",
+        ] {
+            let rendered = format!("jobs api GET /api/jobs/x -> 403 Forbidden: {body}");
+            assert_eq!(
+                is_transient(&rendered),
+                crate::train::retryable(
+                    &reqwest::Method::GET,
+                    &crate::train::http_failure(403, body)
+                ),
+                "the two classifiers disagree on: {body}"
+            );
         }
     }
 
@@ -7844,6 +8098,8 @@ kind: Job\n\
             "jobs api GET /api/jobs/x: 404 job not found",
             "invalid job id",
             "the gate receipt names no head",
+            "jobs api GET /api/jobs/x -> 403 Forbidden: reading packets is refused: \
+             policy service returned 400 Bad Request",
         ] {
             assert!(!is_transient(msg), "should fail fast: {msg}");
         }

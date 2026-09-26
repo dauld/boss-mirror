@@ -1,6 +1,7 @@
 //! The conductor.
 
 use super::*;
+use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
 // The conductor
@@ -79,6 +80,26 @@ pub(crate) fn metadata_already(car: &Value, kv: &[(&str, Value)]) -> bool {
             .and_then(|m| m.get(*k))
             .is_some_and(|have| have == v)
     })
+}
+
+/// PURE: the cars whose claim on a gate bay (`gate::DOCK_WAITING`) this
+/// pass deletes — every car carrying one, in any shape, whose claim the
+/// pass has not already decided (`settled`). Design 38f3a488 D3: a claim
+/// is written once and counted while the refresh rule fires, so a claim
+/// nobody withdraws stands ahead of every builder for as long as the
+/// conductor runs. A held refresh settles nothing and withdraws all; a
+/// walk of the dock withdraws the claims of the cars it held for anything
+/// but a bay.
+pub(crate) fn claims_to_withdraw(cars: &[Value], settled: &HashSet<String>) -> Vec<String> {
+    cars.iter()
+        .filter(|c| {
+            c.pointer(&format!("/metadata/{}", crate::gate::DOCK_WAITING))
+                .is_some_and(|v| !v.is_null())
+        })
+        .filter_map(|c| c.get("id").and_then(Value::as_str))
+        .filter(|id| !settled.contains(*id))
+        .map(str::to_string)
+        .collect()
 }
 
 /// The refresh's one journal line: what the walk found, so a two-minute
@@ -248,7 +269,7 @@ impl Conductor {
             .map_err(|e| ApiFailure::transport(e, format!("reading {method} {path} response")))?;
         if !status.is_success() {
             return Err(ApiFailure {
-                kind: Failure::Http(status.as_u16()),
+                kind: http_failure(status.as_u16(), &body),
                 cause: anyhow!("{method} {path}: HTTP {status}: {}", body.trim()),
             });
         }
@@ -375,30 +396,30 @@ impl Conductor {
         Ok(())
     }
 
-    /// update_job takes a whole Job; fetch, merge metadata, put back.
-    /// The overlay itself is `overlay_metadata` — pure, and pinned by
-    /// tests: PUT replaces metadata wholesale, so clobbering here
-    /// would silently eat another writer's keys. A `Value::Null`
-    /// value removes the key.
-    /// The server now offers this merge atomically as
-    /// `PATCH /api/jobs/{id}/metadata` (same null-removes convention);
-    /// migrating the conductor off this client-side RMW is a follow-up.
-    async fn merge_job_metadata(&self, jid: &str, kv: Vec<(&str, Value)>) -> Result<Value> {
-        let mut job = self.get_job(jid).await?;
-        let keys: Vec<&str> = kv.iter().map(|(k, _)| *k).collect();
-        let md = overlay_metadata(&job, kv);
-        job["metadata"] = Value::Object(md);
+    /// Merge top-level metadata keys into a job through the server's
+    /// merge door, `PATCH /api/jobs/{id}/metadata` (`job_metadata_patch`,
+    /// pinned by tests): the keys named here are set, a `Value::Null`
+    /// deletes one, and every other key stays as the row holds it.
+    ///
+    /// It was a client-side GET, overlay and full job PUT until design
+    /// 38f3a488 D4 (backlog b15b0f4e): the PUT replaced `metadata`
+    /// wholesale, so a key another writer set between the read and the
+    /// write was erased. The server merges in one transaction against the
+    /// row as it stands. It still records one event per write — what
+    /// keeps the log to work is writing only what changed.
+    async fn merge_job_metadata(&self, jid: &str, kv: Vec<(&str, Value)>) -> Result<()> {
         if self.cfg.dry {
+            let keys: Vec<&str> = kv.iter().map(|(k, _)| *k).collect();
             log(format!(
                 "DRY: would set {} on job {}",
                 py_keys(&keys),
                 id8(jid)
             ));
-            return Ok(job);
+            return Ok(());
         }
-        self.api(Method::PUT, &format!("/api/jobs/{jid}"), Some(job.clone()))
-            .await?;
-        Ok(job)
+        let (method, path, body) = job_metadata_patch(jid, kv);
+        self.api(method, &path, Some(body)).await?;
+        Ok(())
     }
 
     /// Close each boarded car of a just-merged train, BEST-EFFORT, and
@@ -3086,9 +3107,9 @@ impl Conductor {
     /// — on an arrived train's `arrived` step, once. The sweep is the
     /// conductor's visit to every arrived train, so the report is
     /// composed here from the full job record plus the boarded cars
-    /// the sweep already fetched. The step PUT merges metadata (the
-    /// same rule `overlay_metadata` pins): the outcome step's own
-    /// keys survive the filing.
+    /// the sweep already fetched. It lands on the job through the
+    /// metadata merge (`job_metadata_patch`), so the job's other keys
+    /// survive the filing.
     async fn file_arrival_report(&self, train: &Value, cars: &[Value]) -> Result<()> {
         let tid = job_id(train)?;
         let Some(step) = find_step(train, "arrived", "Train arrived") else {
@@ -3302,8 +3323,11 @@ impl Conductor {
             .await
         })
         .await?;
-        for j0 in listed {
-            let jid = job_id(&j0)?.to_string();
+        // The cars whose bay claim this walk decides as it goes; every
+        // other claim at the dock is withdrawn after it (design 38f3a488).
+        let mut settled = HashSet::new();
+        for j0 in &listed {
+            let jid = job_id(j0)?.to_string();
             let j = self.get_job(&jid).await?;
             if !parked_ready(&j) {
                 continue;
@@ -3465,14 +3489,17 @@ impl Conductor {
                 log(format!("{}: {reason} — leaving behind", id8(&jid)));
                 left_behind.push(json!({"car_id_short": id8(&jid), "reason": reason.as_str()}));
                 round.extend(in_round);
+                settled.insert(jid.clone());
                 if !self.cfg.dry {
                     let mut kv = vec![("skip_reason", json!(reason))];
                     if let Some(stamp) = stamp {
                         kv.push((dock_regate::BASE_REGATE, stamp));
                     }
-                    // The dock's claim on the next free bay: re-stamped
-                    // every pass while it waits (its heartbeat, so this
-                    // write is new each time), deleted the pass it stops.
+                    // The dock's claim on the next free bay: written the
+                    // pass it starts waiting or its main moves, deleted
+                    // the pass it stops — and otherwise not at all, so a
+                    // car still waiting leaves this write unchanged
+                    // (design 38f3a488 D1).
                     if let Some(w) = dock_regate::waiting_write(&j, waiting.as_deref(), Utc::now())
                     {
                         kv.push((crate::gate::DOCK_WAITING, w));
@@ -3480,8 +3507,8 @@ impl Conductor {
                     // Only a CHANGED hold is written: the dock is walked
                     // every two minutes by the refresh as well as on every
                     // board (design 42279fb2), and a reason the car already
-                    // carries is not a new fact — it would be a full job
-                    // PUT and an event for nothing.
+                    // carries is not a new fact — it would be an audit
+                    // event for nothing.
                     if !metadata_already(&j, &kv) {
                         self.merge_job_metadata(&jid, kv).await?;
                     }
@@ -3490,6 +3517,7 @@ impl Conductor {
             }
             // Boardable, so it waits for no bay: a claim it still carries
             // would hold builders back for a car about to depart.
+            settled.insert(jid.clone());
             if let Some(w) = dock_regate::waiting_write(&j, None, Utc::now())
                 && !self.cfg.dry
             {
@@ -3498,6 +3526,12 @@ impl Conductor {
             }
             out.push((j, branch));
         }
+        // Every car this walk held for anything but a bay — two strikes,
+        // an ordering edge, a missing branch, a review hold — is waiting
+        // for no bay either. A claim it still carries is withdrawn here,
+        // because nothing else would: a claim counts for as long as the
+        // refresh fires, not until it ages (design 38f3a488).
+        self.withdraw_claims(&listed, &settled).await?;
         Ok(DockPass {
             boardable: out,
             left_behind,
@@ -3702,9 +3736,14 @@ impl Conductor {
             ..stamp
         };
         log(format!(
-            "{}: main moved into {} of its path(s) since its gate — replayed {} -> {} onto main {}",
+            "{}: main moved into {} of its path(s) since its gate — {} {} -> {} onto main {}",
             id8(jid),
             touched.len(),
+            if rebased.merged {
+                "merged forward"
+            } else {
+                "replayed"
+            },
             &rebased.old_head[..8.min(rebased.old_head.len())],
             &rebased.new_head[..8.min(rebased.new_head.len())],
             &reading.main[..8.min(reading.main.len())],
@@ -3755,6 +3794,22 @@ impl Conductor {
         }
     }
 
+    /// Delete the bay claim (`gate::DOCK_WAITING`) from every car in
+    /// `cars` that carries one and is not `settled` (`claims_to_withdraw`),
+    /// and say how many.
+    async fn withdraw_claims(&self, cars: &[Value], settled: &HashSet<String>) -> Result<usize> {
+        let ids = claims_to_withdraw(cars, settled);
+        for id in &ids {
+            log(format!(
+                "{}: waiting for no gate bay — withdrawing its claim",
+                id8(id)
+            ));
+            self.merge_job_metadata(id, vec![(crate::gate::DOCK_WAITING, Value::Null)])
+                .await?;
+        }
+        Ok(ids.len())
+    }
+
     /// Is the track held? The name of the pre-merge train holding it, or
     /// `None` when it is clear — one read for `board` and `refresh`, so
     /// the dock and a departure can never disagree about the track.
@@ -3793,11 +3848,32 @@ impl Conductor {
     /// Before this, re-gates launched only inside `board`, which fires at
     /// most once per cooldown after a departure: 42 of 58 left-behind rows
     /// over ten trains read "waiting for a gate slot".
+    ///
+    /// A HELD REFRESH WITHDRAWS THE DOCK'S CLAIMS (design 38f3a488 D3). A
+    /// claim on a bay counts while this rule fires, and a held pass still
+    /// fires with rc 0 — so without this, every claim would stand ahead
+    /// of every builder for the whole transit, for a re-gate that cannot
+    /// launch until the merge replaces its main. The next clear pass
+    /// writes the claim again on the new main: at most one delete and one
+    /// set per waiting car per departure.
     pub(super) async fn refresh(&self) -> Result<()> {
         if let Some(occupant) = self.track_occupant().await? {
+            let cars = list_all_pages(|offset| async move {
+                self.api(
+                    Method::GET,
+                    &format!(
+                        "/api/jobs?kind=ship-a-change&status=open&limit={PAGE_LIMIT}&offset={offset}"
+                    ),
+                    None,
+                )
+                .await
+            })
+            .await?;
+            let withdrawn = self.withdraw_claims(&cars, &HashSet::new()).await?;
             log(format!(
                 "REFRESH HELD — track occupied by {occupant}; a re-gate launched now would \
-                 test a main that train is about to replace"
+                 test a main that train is about to replace ({withdrawn} dock claim(s) on a \
+                 bay withdrawn)"
             ));
             return Ok(());
         }
@@ -5004,6 +5080,50 @@ mod tests {
         ));
     }
 
+    // -- the dock's claim on a bay is withdrawn, not aged out --------------
+
+    fn dock_car(id: &str, claim: Option<Value>) -> Value {
+        let mut md = json!({"branch": format!("feat/{id}")});
+        if let Some(c) = claim {
+            md[crate::gate::DOCK_WAITING] = c;
+        }
+        json!({"id": id, "metadata": md})
+    }
+
+    /// Design 38f3a488 D3 (backlog b15b0f4e). A claim is written once and
+    /// read alive off the refresh rule's last firing — and a refresh HELD
+    /// by a train on the track still fires with rc 0, so a claim left in
+    /// place would stand ahead of every builder through the whole transit,
+    /// for a re-gate that cannot launch until the merge replaces its main.
+    /// So the held pass withdraws every claim, and writes nothing to a car
+    /// that carries none. The same sweep closes a walk of the dock: a car
+    /// the walk held for any reason but a bay (two strikes, an edge, a
+    /// missing branch, a review hold) is not waiting for one either.
+    #[test]
+    fn a_held_refresh_withdraws_every_claim_and_touches_no_other_car() {
+        let now = Utc::now();
+        let cars = vec![
+            dock_car("waiting", Some(crate::gate::dock_waiting_stamp("m", now))),
+            dock_car("bare", None),
+            dock_car("cleared", Some(Value::Null)),
+            dock_car(
+                "heartbeat",
+                Some(json!({"main": "m", "at": "2026-09-25T22:28:00Z"})),
+            ),
+        ];
+        assert_eq!(
+            claims_to_withdraw(&cars, &HashSet::new()),
+            vec!["waiting".to_string(), "heartbeat".to_string()],
+            "held: every claim the dock carries goes, in any shape"
+        );
+        let settled: HashSet<String> = ["waiting".to_string()].into();
+        assert_eq!(
+            claims_to_withdraw(&cars, &settled),
+            vec!["heartbeat".to_string()],
+            "a car whose claim this walk already decided is not written twice"
+        );
+    }
+
     // -- the arrival branch cleanup ----------------------------------------
     //
     // Cancel has deleted its train's branch since the verb existed;
@@ -5242,13 +5362,14 @@ mod tests {
             "steps": [{"id":"c-rev","spec_slug":"review","title":"Open for review","status":"ready","metadata":{}}]
         });
 
-        // Every PUT the conductor makes; a release is a PUT /api/jobs/{car}.
+        // Every job write the conductor makes, through either door; a
+        // release is a metadata merge on /api/jobs/{car}/metadata.
         let puts: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
         let train_list = train.clone();
         let train_one = train.clone();
         let car_one = car.clone();
-        let puts_route = puts.clone();
+        let (puts_route, merges_route) = (puts.clone(), puts.clone());
         let app = Router::new()
             .route(
                 "/api/jobs",
@@ -5268,6 +5389,16 @@ mod tests {
                     async move {
                         puts.lock().unwrap().push(id);
                         Json(json!({}))
+                    }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                axum::routing::patch(move |Path(id): Path<String>, _b: Json<Value>| {
+                    let merges = merges_route.clone();
+                    async move {
+                        merges.lock().unwrap().push(id);
+                        axum::http::StatusCode::NO_CONTENT
                     }
                 }),
             );
@@ -5303,12 +5434,12 @@ mod tests {
     /// the yard drew a healthy train at CI for two hours. This drives
     /// `train_gate` against an in-process jobs server with a launch
     /// that fails before any cluster call (the runner manifest is
-    /// unreadable) and reads the train's PUT: the count AND the reason
-    /// land on the packet together.
+    /// unreadable) and reads the train's metadata merge: the count AND
+    /// the reason land on the packet together.
     #[tokio::test]
     async fn a_gate_that_cannot_be_filed_records_why_on_the_train() {
         use axum::extract::Path;
-        use axum::routing::get;
+        use axum::routing::{get, patch};
         use axum::{Json, Router};
         use std::sync::{Arc, Mutex};
 
@@ -5321,24 +5452,28 @@ mod tests {
                 {"id":"s-ci","spec_slug":"ci","title":"CI verdict","status":"ready","metadata":{}}
             ]
         });
-        // Every PUT body the conductor sends for the train.
-        let puts: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        // Every metadata merge the conductor sends for the train.
+        let patches: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
         let train_one = train.clone();
-        let puts_route = puts.clone();
-        let app = Router::new().route(
-            "/api/jobs/{id}",
-            get(move |Path(_id): Path<String>| {
-                let t = train_one.clone();
-                async move { Json(t) }
-            })
-            .put(move |Path(_id): Path<String>, Json(b): Json<Value>| {
-                let puts = puts_route.clone();
-                async move {
-                    puts.lock().unwrap().push(b);
-                    Json(json!({}))
-                }
-            }),
-        );
+        let patches_route = patches.clone();
+        let app = Router::new()
+            .route(
+                "/api/jobs/{id}",
+                get(move |Path(_id): Path<String>| {
+                    let t = train_one.clone();
+                    async move { Json(t) }
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                patch(move |Path(_id): Path<String>, Json(b): Json<Value>| {
+                    let patches = patches_route.clone();
+                    async move {
+                        patches.lock().unwrap().push(b);
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -5359,13 +5494,13 @@ mod tests {
             standing, None,
             "no gate-run was filed, so the train has no standing yet"
         );
-        let puts = puts.lock().unwrap();
-        let recorded = puts
+        let patches = patches.lock().unwrap();
+        let recorded = patches
             .iter()
-            .find(|b| b.pointer("/metadata/train_gate_launch_failures").is_some())
+            .find(|b| b.get("train_gate_launch_failures").is_some())
             .expect("the failed launch is recorded on the train");
-        assert_eq!(recorded["metadata"]["train_gate_launch_failures"], json!(1));
-        let why = recorded["metadata"][crate::train_gate::KEY_WAIT_REASON]
+        assert_eq!(recorded["train_gate_launch_failures"], json!(1));
+        let why = recorded[crate::train_gate::KEY_WAIT_REASON]
             .as_str()
             .expect("the reason rides with the count");
         assert!(
@@ -5373,7 +5508,9 @@ mod tests {
             "the reason is the launch error, verbatim: {why}"
         );
         assert!(
-            recorded["metadata"].get("train_gate_fallback").is_none(),
+            recorded
+                .get("train_gate_fallback")
+                .is_none_or(Value::is_null),
             "a REQUIRED gate never falls back to CI alone"
         );
     }
@@ -5539,7 +5676,7 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .retain(|s| s["spec_slug"] != "cancelled");
-        let (jobs, job_puts, step_puts, step_patches) =
+        let (jobs, job_merges, step_puts, step_patches) =
             cancel_request_jobs_api(train, struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
@@ -5569,7 +5706,7 @@ mod tests {
             !*close_called.lock().unwrap(),
             "refused BEFORE the forge write — the PR is still open"
         );
-        assert!(job_puts.lock().unwrap().is_empty(), "no car was released");
+        assert!(job_merges.lock().unwrap().is_empty(), "no car was released");
         assert!(
             step_puts.lock().unwrap().is_empty() && step_patches.lock().unwrap().is_empty(),
             "no step was completed"
@@ -5595,7 +5732,7 @@ mod tests {
                 s["metadata"] = json!({});
             }
         }
-        let (jobs, job_puts, step_puts, step_patches) =
+        let (jobs, job_merges, step_puts, step_patches) =
             cancel_request_jobs_api(train, struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
@@ -5616,7 +5753,7 @@ mod tests {
             !*close_called.lock().unwrap(),
             "refused BEFORE the forge write — the PR is still open"
         );
-        assert!(job_puts.lock().unwrap().is_empty(), "no car was released");
+        assert!(job_merges.lock().unwrap().is_empty(), "no car was released");
         assert!(
             step_puts.lock().unwrap().is_empty() && step_patches.lock().unwrap().is_empty(),
             "no step was completed"
@@ -5634,7 +5771,7 @@ mod tests {
                 s["metadata"] = json!({ "outcome_kind": "aborted" });
             }
         }
-        let (jobs, job_puts, step_puts, _) =
+        let (jobs, job_merges, step_puts, _) =
             cancel_request_jobs_api(train, struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
@@ -5643,7 +5780,7 @@ mod tests {
             .expect("an abort terminal completes from any open state");
         assert!(*close_called.lock().unwrap(), "the PR is closed");
         assert!(
-            job_puts.lock().unwrap().iter().any(|(id, _)| id == "c1"),
+            job_merges.lock().unwrap().iter().any(|(id, _)| id == "c1"),
             "the car was released"
         );
         assert!(
@@ -5726,7 +5863,7 @@ mod tests {
         })
     }
 
-    type JobPuts = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
+    type JobMerges = std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>>;
     type StepPuts = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>;
 
     /// The step PUT as David's decided end state has it (design
@@ -5750,17 +5887,17 @@ mod tests {
     async fn cancel_request_jobs_api(
         train: Value,
         car: Value,
-    ) -> (String, JobPuts, StepPuts, StepPatches) {
+    ) -> (String, JobMerges, StepPuts, StepPatches) {
         use axum::extract::{Path, RawQuery};
         use axum::routing::{get, patch, put};
         use axum::{Json, Router};
         use std::sync::{Arc, Mutex};
 
-        let job_puts: JobPuts = Arc::new(Mutex::new(Vec::new()));
+        let job_merges: JobMerges = Arc::new(Mutex::new(Vec::new()));
         let step_puts: StepPuts = Arc::new(Mutex::new(Vec::new()));
         let step_patches: StepPatches = Arc::new(Mutex::new(Vec::new()));
         let (train_list, train_one) = (train.clone(), train);
-        let (jp, sp, spp) = (job_puts.clone(), step_puts.clone(), step_patches.clone());
+        let (jp, sp, spp) = (job_merges.clone(), step_puts.clone(), step_patches.clone());
         let app = Router::new()
             .route(
                 "/api/jobs",
@@ -5779,12 +5916,15 @@ mod tests {
                 get(move |Path(id): Path<String>| {
                     let (t, c) = (train_one.clone(), car.clone());
                     async move { Json(if id == "t1" { t } else { c }) }
-                })
-                .put(move |Path(id): Path<String>, Json(body): Json<Value>| {
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                patch(move |Path(id): Path<String>, Json(body): Json<Value>| {
                     let jp = jp.clone();
                     async move {
                         jp.lock().unwrap().push((id, body));
-                        Json(json!({}))
+                        axum::http::StatusCode::NO_CONTENT
                     }
                 }),
             )
@@ -5818,7 +5958,12 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        (format!("http://{addr}"), job_puts, step_puts, step_patches)
+        (
+            format!("http://{addr}"),
+            job_merges,
+            step_puts,
+            step_patches,
+        )
     }
 
     fn cancel_request_conductor(
@@ -5844,7 +5989,7 @@ mod tests {
     /// reason — and the request claims the train's pass.
     #[tokio::test]
     async fn a_cancel_request_on_an_open_train_releases_its_cars_unstruck() {
-        let (jobs, job_puts, step_puts, step_patches) =
+        let (jobs, job_merges, step_puts, step_patches) =
             cancel_request_jobs_api(requested_open_train(), struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
@@ -5854,24 +5999,23 @@ mod tests {
         );
         assert!(*close_called.lock().unwrap(), "the PR is closed unmerged");
 
-        let puts = job_puts.lock().unwrap();
-        let (_, car) = puts
+        let merges = job_merges.lock().unwrap();
+        let (_, md) = merges
             .iter()
             .find(|(id, _)| id == "c1")
             .expect("the car was released");
-        let md = &car["metadata"];
-        assert!(
-            md.get("train").is_none(),
-            "released: the train stamp is gone"
+        assert_eq!(
+            md.get("train"),
+            Some(&Value::Null),
+            "released: the train stamp is deleted (a merge deletes a null)"
         );
         assert_eq!(
             md["skip_reason"].as_str().unwrap_or_default(),
             "returned to dock: train cancelled (operator cancel: bad consist (by emp-david))"
         );
-        assert_eq!(
-            md["red_trains"],
-            json!(1),
-            "an operator's cancel strikes no car"
+        assert!(
+            md.get("red_trains").is_none(),
+            "an operator's cancel strikes no car: the merge leaves its count alone"
         );
 
         // The reason lands through the merge door, and the flip that
@@ -5900,7 +6044,7 @@ mod tests {
     /// loop has nothing to `?` and the other trains continue.
     #[tokio::test]
     async fn a_forge_failure_leaves_the_train_intact_and_the_pass_alive() {
-        let (jobs, job_puts, step_puts, step_patches) =
+        let (jobs, job_merges, step_puts, step_patches) =
             cancel_request_jobs_api(requested_open_train(), struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, false);
 
@@ -5910,7 +6054,7 @@ mod tests {
         );
         assert!(*close_called.lock().unwrap(), "close_pr was attempted");
         assert!(
-            job_puts.lock().unwrap().is_empty(),
+            job_merges.lock().unwrap().is_empty(),
             "no car released, nothing stamped — a retry next pass is clean"
         );
         assert!(
@@ -5927,7 +6071,7 @@ mod tests {
         let mut train = requested_open_train();
         train["steps"][3]["status"] = json!("completed");
         train["steps"][3]["metadata"]["merge_ref"] = json!("abc1234def56");
-        let (jobs, job_puts, step_puts, step_patches) =
+        let (jobs, job_merges, step_puts, step_patches) =
             cancel_request_jobs_api(train.clone(), struck_boarded_car()).await;
         let (c, close_called) = cancel_request_conductor(jobs, true);
 
@@ -5937,12 +6081,16 @@ mod tests {
             step_puts.lock().unwrap().is_empty() && step_patches.lock().unwrap().is_empty(),
             "no terminal completed"
         );
-        let puts = job_puts.lock().unwrap();
-        assert_eq!(puts.len(), 1, "one stamp on the train, nothing on the car");
-        let (id, body) = &puts[0];
+        let merges = job_merges.lock().unwrap();
+        assert_eq!(
+            merges.len(),
+            1,
+            "one stamp on the train, nothing on the car"
+        );
+        let (id, body) = &merges[0];
         assert_eq!(id, "t1");
         assert_eq!(
-            body["metadata"]["cancel_refused"],
+            body["cancel_refused"],
             json!("already merged at abc1234def56")
         );
     }
@@ -5984,8 +6132,11 @@ mod tests {
                 get(move |Path(id): Path<String>| {
                     let cars = cars_get.clone();
                     async move { Json(cars.get(&id).cloned().unwrap_or(Value::Null)) }
-                })
-                .put(move |Path(id): Path<String>, _b: Json<Value>| {
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                patch(move |Path(id): Path<String>, _b: Json<Value>| {
                     let writes = writes_meta.clone();
                     async move {
                         // Car 2's metadata write is the one the SoR refuses
@@ -6117,8 +6268,11 @@ mod tests {
                                        "title": "Open for review", "status": status, "metadata": {}}]
                         }))
                     }
-                })
-                .put(move |Path(id): Path<String>, _b: Json<Value>| {
+                }),
+            )
+            .route(
+                "/api/jobs/{id}/metadata",
+                patch(move |Path(id): Path<String>, _b: Json<Value>| {
                     let (heal, writes) = (heal_step.clone(), writes_meta.clone());
                     async move {
                         if id == "c2" && !*heal.lock().unwrap() {
@@ -6481,8 +6635,10 @@ mod tests {
                     let by_id = by_id_get.clone();
                     async move { Json(by_id.get(&id).cloned().unwrap_or(json!({}))) }
                 })
-                // merge_job_metadata writes the WHOLE job back with a PUT;
-                // the stamp and the report both arrive through this door.
+                // The stamp and the report arrive through the merge door
+                // below (merge_job_metadata is a PATCH since design
+                // 38f3a488); a whole-job PUT is recorded too, so a write
+                // through either door is read.
                 .put(move |Path(id): Path<String>, Json(b): Json<Value>| {
                     let puts = puts_w.clone();
                     async move {
