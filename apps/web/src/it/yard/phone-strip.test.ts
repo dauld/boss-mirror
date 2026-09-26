@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseBorders, type Border, type Borders } from './borders';
 import { REGION_NAMES, parseRegions, type Region, type Regions } from './regions';
-import { BORDERS } from './world';
+import { BORDERS } from '../../../tests/fixtures/yard';
 import { PHONE_MAX_WIDTH, PHONE_QUERY, railLine, stripGroups, verdictOf } from './phone-strip';
 
 // THE PHONE STRIP MAP (design 62de32ae decision 12, car G): one row

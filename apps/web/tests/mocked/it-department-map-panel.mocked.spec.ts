@@ -12,14 +12,15 @@
 //  - a station's panel carries every field — rate, waiting by class,
 //    stuck, trend, the verdict and its why, machines, crossings — and the
 //    floor's cards, which used to be the region's own page;
-//  - a SECTION is a selection (`?at=dock->track`), reached by a click on
+//  - a SECTION is a selection (`?at=gates->dock`), reached by a click on
 //    the track, with the same fields for that one border;
 //  - what is selected is MARKED on the map, and only that;
 //  - the map itself writes none of it.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
 import { STATIONS } from '../../src/it/yard/transit';
-import { BORDERS, TERRITORIES } from '../../src/it/yard/world';
+import { TERRITORIES } from '../../src/it/yard/world';
+import { BORDERS } from '../fixtures/yard';
 import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 
 const FLIGHTS = /\/api\/flights\/mine(\?|$)/;
@@ -168,10 +169,10 @@ test('what is selected is marked on the map, and only that', async ({ page }) =>
   // The mark is apart from the state: the gates' own ring still reads its state.
   await expect(page.locator(`${SVG} [data-station="gates"]`)).toHaveAttribute('data-state', 'attention');
 
-  await page.goto('/it?at=dock-%3Etrack');
+  await page.goto('/it?at=gates-%3Edock');
   await expect(page.locator(`${SVG} [data-selected-mark]`)).toHaveCount(1);
-  await expect(page.locator(`${SVG} [data-selected-mark="dock→track"]`)).toHaveCount(1);
-  await expect(page.locator(`${SVG} [data-section-link="dock→track"]`)).toHaveAttribute('aria-current', 'true');
+  await expect(page.locator(`${SVG} [data-selected-mark="gates→dock"]`)).toHaveCount(1);
+  await expect(page.locator(`${SVG} [data-section-link="gates→dock"]`)).toHaveAttribute('aria-current', 'true');
   await expect(page.locator(`${SVG} [data-station] [data-selected-mark]`)).toHaveCount(0);
 
   // Nothing selected, nothing marked.

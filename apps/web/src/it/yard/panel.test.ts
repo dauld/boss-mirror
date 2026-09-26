@@ -7,7 +7,8 @@
 import { describe, expect, it } from 'bun:test';
 import type { Border, Borders } from './borders';
 import type { Region } from './regions';
-import { MOVES_NOT_KEPT, STATION_BOARDS, boardsOf, classesText, sectionCells, stationCells, type PanelCell, type PanelField, type StationBoard } from './panel';
+import type { Route } from './routes';
+import { MOVES_NOT_KEPT, NO_RATE_YET, STATION_BOARDS, boardsOf, classesText, sectionCells, stationCells, type PanelCell, type PanelField, type StationBoard } from './panel';
 
 const NOW = '2026-09-25T17:21:00Z';
 
@@ -175,6 +176,41 @@ describe('sectionCells — one section of track', () => {
     for (const c of sectionCells(null, NOW)) {
       expect(c.lines, c.field).toEqual(['no reading — the sections could not be read']);
     }
+  });
+
+  // WHAT DECLARES IT (car R3): a drawn section is a route the server
+  // serves, and its panel opens on the sources that put it on the map.
+  const route: Route = {
+    from: 'gates',
+    to: 'track',
+    declared: true,
+    sources: [
+      { source: 'workflow', workflow: 'pr-train', version: 3, step: 'merged', via: 'completed' },
+      { source: 'observed', moves: 9, last_at: NOW },
+    ],
+  };
+
+  it('a served route leads with what declares it: the protocol step, and the moves the record counted', () => {
+    const served = sectionCells(b, NOW, { route, windowHours: 24 });
+    expect(served[0]!.field).toBe('route');
+    expect(cell(served, 'route')).toEqual(['pr-train v3, step merged (completed)', '9 moves observed in 24h']);
+  });
+
+  it('a served route with no rate yet says so in every reading — never "could not be read", never 0', () => {
+    const served = sectionCells(null, NOW, { route, windowHours: 24 });
+    expect(served.map((c) => c.field)).toEqual(['route', 'crossing', 'rate', 'waiting', 'stuck', 'trend', 'verdict', 'machines', 'crossings']);
+    for (const c of served.slice(1)) expect(c.lines, c.field).toEqual([NO_RATE_YET]);
+  });
+
+  it('an undeclared route says it is a finding before its counts', () => {
+    const undeclared = sectionCells(null, NOW, {
+      route: { from: 'shed', to: 'arrivals', declared: false, sources: [{ source: 'observed', moves: 39, last_at: NOW }] },
+      windowHours: 24,
+    });
+    expect(cell(undeclared, 'route')).toEqual([
+      'observed, undeclared — no protocol or hand-off declares this route',
+      '39 moves observed in 24h',
+    ]);
   });
 });
 

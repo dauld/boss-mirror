@@ -2,17 +2,19 @@
 // answered by David 2026-09-25; backlog ced4ca8b). The layout and every
 // word are pinned in transit.test.ts; this pins the page: with the
 // flight OFF the world map is the map it was and no transit map is
-// drawn; ON, the same two reads are drawn as stations and sections — a
-// held section red (its held-since is its panel's, car N2 of design
-// e765b3fc: it-department-map-panel.mocked.spec.ts), blocks waiting on the approach
-// and a count past the cap, a moving block where the rate earns one,
-// the planned tenant branch dashed, a troubled station pulsing, the
-// alarms board carrying the server's why — and a station opens its
-// region page. Reduced motion moves nothing. A phone keeps its strip.
+// drawn; ON, the reads are drawn as stations and the sections the
+// routes read serves (car R3 of design e765b3fc:
+// it-map-routes.mocked.spec.ts) — a held section red (its held-since is
+// its panel's, car N2: it-department-map-panel.mocked.spec.ts), blocks
+// waiting on the approach and a count past the cap, a moving block where
+// the rate earns one, a troubled station pulsing, the alarms board
+// carrying the server's why — and a station opens its region page.
+// Reduced motion moves nothing. A phone keeps its strip.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
-import { SECTIONS, STATIONS, MAX_BLOCKS } from '../../src/it/yard/transit';
-import { BORDERS, TERRITORIES } from '../../src/it/yard/world';
+import { STATIONS, MAX_BLOCKS } from '../../src/it/yard/transit';
+import { TERRITORIES } from '../../src/it/yard/world';
+import { BORDERS, ROUTES } from '../fixtures/yard';
 import { YARD_BORDERS, YARD_REGIONS, installSmokeMocks } from './_smokeMocks';
 
 const FLIGHTS = /\/api\/flights\/mine(\?|$)/;
@@ -34,7 +36,7 @@ const regions = () => ({
   })),
 });
 
-/** Every section busy and flowing with 7 waiting, but dock→track held
+/** Every section busy and flowing with 7 waiting, but gates→dock held
  *  since 08:48 and receiving→marshalling unread. */
 const borders = () => ({
   window_hours: 24,
@@ -50,7 +52,7 @@ const borders = () => ({
       machine: { name: 'a rule', kind: 'dispatcher-rule', last_fired: null, silent_for_minutes: null,
         expected_every_minutes: null, silent: null, why: 'no firing recorded' },
     };
-    if (key === 'dock→track') {
+    if (key === 'gates→dock') {
       return { ...base, rate: { ...base.rate, current: 6 }, last_crossed: '2026-09-24T08:48:00Z', flowing: false,
         held_since: '2026-09-24T08:48:00Z', flowing_why: 'quiet 3h 12m > 4 mean gaps' };
     }
@@ -85,21 +87,22 @@ test('flight ON: the same reads drawn as a transit monitor', async ({ page }) =>
   // The world map is not ALSO mounted: one map, never two.
   await expect(page.locator('section.yard svg .territory')).toHaveCount(0);
 
-  // A station per region, a section per border.
+  // A station per region, a section per served route between two of them.
+  const sections = ROUTES.filter((r) => r.from !== null && r.to !== null).length;
   await expect(transit.locator('[data-station]')).toHaveCount(STATIONS.length);
-  await expect(transit.locator('path[data-section]')).toHaveCount(SECTIONS.length);
+  await expect(transit.locator('path.section[data-section]')).toHaveCount(sections);
   await expect(transit.locator('[data-station="gates"]')).toHaveAttribute('data-state', 'troubled');
   await expect(transit.locator('[data-station="receiving"]')).toHaveAttribute('data-state', 'attention');
 
   // The server's stillness, on the track itself.
-  await expect(transit.locator('[data-section="dock→track"]')).toHaveAttribute('data-ground', 'held');
+  await expect(transit.locator('[data-section="gates→dock"]')).toHaveAttribute('data-ground', 'held');
   await expect(transit.locator('[data-section="receiving→marshalling"]')).toHaveAttribute('data-ground', 'unknown');
   // The headway a dispatcher reads is the section's PANEL's since car N2
   // of design e765b3fc — written on no section of the map — and each
   // section is a door to it.
   await expect(transit.locator('[data-headway]')).toHaveCount(0);
-  await expect(transit.locator('[data-section-link]')).toHaveCount(SECTIONS.length);
-  await expect(transit.locator('[data-section-link="dock→track"]')).toHaveAttribute('href', '/it?at=dock-%3Etrack');
+  await expect(transit.locator('[data-section-link]')).toHaveCount(sections);
+  await expect(transit.locator('[data-section-link="gates→dock"]')).toHaveAttribute('href', '/it?at=gates-%3Edock');
 
   // Waiting blocks on the approach, the rest a count.
   await expect(transit.locator('[data-waiting="shop-floor→gates"]')).toHaveCount(MAX_BLOCKS);
@@ -110,11 +113,12 @@ test('flight ON: the same reads drawn as a transit monitor', async ({ page }) =>
   // A moving block where the rate earns one (480/d is one every 3 s at ×60), none on a held section.
   expect(await transit.locator('[data-train="shop-floor→gates"]').count()).toBeGreaterThan(0);
   await expect(transit.locator('[data-train="shop-floor→gates"] animateMotion').first()).toHaveAttribute('dur', '3.000s');
-  await expect(transit.locator('[data-train="dock→track"]')).toHaveCount(0);
+  await expect(transit.locator('[data-train="gates→dock"]')).toHaveCount(0);
   await expect(transit.locator('[data-replay]')).toContainText('replayed ×60');
 
-  // The planned tenant branch, and a troubled station pulsing.
-  await expect(transit.locator('[data-planned="tenant"] [data-owner="David"]')).toHaveCount(1);
+  // No planned tenant branch — no route serves it (car R3) — and a
+  // troubled station pulsing.
+  await expect(transit.locator('[data-planned]')).toHaveCount(0);
   await expect(transit.locator('[data-pulse="gates"]')).toHaveCount(1);
   await expect(transit.locator('[data-pulse]')).toHaveCount(1);
 
@@ -147,7 +151,7 @@ test('reduced motion: nothing moves and nothing pulses, and the stall still read
   await expect(transit.locator('[data-train]')).toHaveCount(0);
   await expect(transit.locator('animateMotion')).toHaveCount(0);
   await expect(transit.locator('[data-pulse]')).toHaveCount(0);
-  await expect(transit.locator('[data-section="dock→track"]')).toHaveAttribute('data-ground', 'held');
+  await expect(transit.locator('[data-section="gates→dock"]')).toHaveAttribute('data-ground', 'held');
   await expect(transit.locator('[data-replay]')).toContainText('Reduced motion is on');
 });
 

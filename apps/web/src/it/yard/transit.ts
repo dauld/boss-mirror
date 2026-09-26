@@ -4,33 +4,47 @@
 // like a transit monitoring map. I think that is a good way to think
 // about the network."
 //
-// THE DATA DOES NOT CHANGE. Every number here is read from the same two
-// endpoints the world map reads, /api/yard/regions and /api/yard/borders,
-// and nothing here derives a judgement: a section is held because the
-// server's `flowing` is false, a station is troubled because the
-// server's state says so, an alarm carries the server's own `why`. What
-// changes is the drawing grammar — stations on schematic lines at fixed
-// angles, sections of track between them in one colour per route, the
-// waiting packets as blocks on the approach, a moving block at the
-// section's real crossing rate, the headway a dispatcher reads, and an
-// alarms board in place of a verdict written inside a territory.
+// NOTHING HERE DERIVES A JUDGEMENT. Every number is read from the
+// server: a section is held because the server's `flowing` is false, a
+// station is troubled because the server's state says so, an alarm
+// carries the server's own `why`. What this owns is the drawing grammar
+// — stations on schematic lines at fixed angles, sections of track
+// between them in one colour per line, the waiting packets as blocks on
+// the approach, a moving block at the section's real crossing rate, the
+// headway a dispatcher reads, and an alarms board in place of a verdict
+// written inside a territory.
 //
-// The layout is the exhibit E1 reading's (the 22:15Z rendering of
-// 2026-09-24), and it is held to world.ts by transit.test.ts: one station
-// per territory and one section per border, so a region added to the
-// world without a station here fails a test rather than vanishing from
-// this map. Pure functions of the reading, so `bun test` pins every rule
-// without a DOM; TransitMap.svelte owns the strokes and the motion.
+// THE EDGES ARE SERVED, NOT DRAWN (design e765b3fc, car R3 on feedback
+// 84cba7e2). Until this car the sections were a hand-written list here
+// (PATHS: ten pairs, each with a hand-drawn SVG path), one of three
+// copies pinned equal to each other and to nothing else — and it drew
+// the train straight from the dock to the track, skipping the gates its
+// train gate runs in, the one route David named. The sections are now
+// exactly the routes `GET /api/yard/routes` serves (routes.ts): each is
+// laid out by `routePath`, a small octilinear router between the two
+// stations' positions, and each exit is an off-ramp. The planned tenant
+// branch (design fd8b5143) went with PATHS: no route serves it, and
+// nothing is drawn that the record cannot source.
+//
+// WHAT STAYS DATA HERE is the STATIONS: a layout is not a route. A
+// station's position is where the map stands it; which stations a line
+// joins is the server's answer. Pure functions of the reading, so `bun
+// test` pins every rule without a DOM; TransitMap.svelte owns the strokes
+// and the motion.
 
 import type { Border } from './borders';
 import type { Region, RegionState, Regions } from './regions';
+import type { Route, Routes } from './routes';
 import { type Point, type Walked, pathPoints, pointAt, walk } from './world-motion';
 
 /** The drawing's own coordinate space. */
 export const TRANSIT_VIEW = { width: 1000, height: 400 } as const;
 
-/** The routes, each one colour (Q1, decided 2026-09-25). The tenant
- *  branch is planned (design fd8b5143) and is drawn dashed. */
+/** The lines, each one colour (Q1, decided 2026-09-25). A route takes
+ *  the line of the station it serves off the main line — the garage's
+ *  sidings, the publish dock — and the delivery line otherwise. The
+ *  tenant line's token stays in styles.css for the branch design
+ *  fd8b5143 plans; nothing draws it until a route serves it. */
 export type TransitLine = 'delivery' | 'publish' | 'siding' | 'tenant';
 
 /** Each line's colour is a Design-department token in styles.css — never
@@ -53,80 +67,217 @@ export const LINE_LABEL: Readonly<Record<TransitLine, string>> = {
 };
 
 // ---------------------------------------------------------------------
-// The layout.
+// The layout: where each station stands. Data, not routes.
 // ---------------------------------------------------------------------
 
-/** A station: a region, where it stands, and whether its words go under
- *  it (the stations off the main line) or around it. */
-export type Station = Readonly<{ name: string; x: number; y: number; below: boolean }>;
+/** A station: a region, where it stands, whether its words go under it
+ *  (the stations off the main line) or around it, and the line it
+ *  stands on. */
+export type Station = Readonly<{ name: string; x: number; y: number; below: boolean; line: TransitLine }>;
 
 const MAIN_Y = 200;
 
 export const STATIONS: ReadonlyArray<Station> = [
-  { name: 'receiving', x: 60, y: MAIN_Y, below: false },
-  { name: 'marshalling', x: 180, y: MAIN_Y, below: false },
-  { name: 'shop-floor', x: 300, y: MAIN_Y, below: false },
-  { name: 'gates', x: 420, y: MAIN_Y, below: false },
-  { name: 'dock', x: 540, y: MAIN_Y, below: false },
-  { name: 'track', x: 660, y: MAIN_Y, below: false },
-  { name: 'arrivals', x: 780, y: MAIN_Y, below: false },
-  { name: 'shed', x: 930, y: MAIN_Y, below: false },
-  { name: 'garage', x: 540, y: 310, below: true },
-  { name: 'publish', x: 900, y: 320, below: true },
+  { name: 'receiving', x: 60, y: MAIN_Y, below: false, line: 'delivery' },
+  { name: 'marshalling', x: 180, y: MAIN_Y, below: false, line: 'delivery' },
+  { name: 'shop-floor', x: 300, y: MAIN_Y, below: false, line: 'delivery' },
+  { name: 'gates', x: 420, y: MAIN_Y, below: false, line: 'delivery' },
+  { name: 'dock', x: 540, y: MAIN_Y, below: false, line: 'delivery' },
+  { name: 'track', x: 660, y: MAIN_Y, below: false, line: 'delivery' },
+  { name: 'arrivals', x: 780, y: MAIN_Y, below: false, line: 'delivery' },
+  { name: 'shed', x: 900, y: MAIN_Y, below: false, line: 'delivery' },
+  { name: 'garage', x: 580, y: 320, below: true, line: 'siding' },
+  { name: 'publish', x: 860, y: 330, below: true, line: 'publish' },
 ];
 
 export const stationOf = (name: string): Station | undefined => STATIONS.find((s) => s.name === name);
 
-/** A section of track: a border, the line it belongs to, and its path. */
-export type Section = Readonly<{ key: string; from: string; to: string; line: TransitLine; d: string; walked: Walked }>;
+/** Where a main-line station writes its name, above its ring — high
+ *  enough that an entry's stub and the arcs over the line clear it. */
+export const NAME_ABOVE = 38;
 
-/** Every leg horizontal or at 45° — the schematic's fixed angles. */
-const PATHS: ReadonlyArray<Readonly<{ from: string; to: string; line: TransitLine; d: string }>> = [
-  { from: 'receiving', to: 'marshalling', line: 'delivery', d: 'M60 200 H180' },
-  { from: 'marshalling', to: 'shop-floor', line: 'delivery', d: 'M180 200 H300' },
-  { from: 'shop-floor', to: 'gates', line: 'delivery', d: 'M300 200 H420' },
-  { from: 'gates', to: 'dock', line: 'delivery', d: 'M420 200 H540' },
-  { from: 'dock', to: 'track', line: 'delivery', d: 'M540 200 H660' },
-  { from: 'track', to: 'arrivals', line: 'delivery', d: 'M660 200 H780' },
-  { from: 'arrivals', to: 'shed', line: 'delivery', d: 'M780 200 H930' },
-  { from: 'arrivals', to: 'publish', line: 'publish', d: 'M780 200 L900 320' },
-  { from: 'gates', to: 'garage', line: 'siding', d: 'M420 200 L530 310 H540' },
-  { from: 'track', to: 'garage', line: 'siding', d: 'M660 200 L550 310 H540' },
-];
+// ---------------------------------------------------------------------
+// The router: a served route onto the page, at fixed angles only.
+// ---------------------------------------------------------------------
 
-/** A border's key, in the arrow the world map and its specs use. */
-export const sectionKey = (from: string, to: string): string => `${from}→${to}`;
+/** How far an arc over (or under) the main line stands off it: past the
+ *  station names above, past the counts below, and a step further for
+ *  every station it passes, so two arcs over one stretch never share a
+ *  track. */
+export const ARC_ABOVE = 62;
+export const ARC_BELOW = 56;
+export const ARC_STEP = 14;
+/** How far apart the two directions of one straight run are drawn. */
+export const LANE = 5;
+/** An entry's stub and an exit's off-ramp: from outside the ring to
+ *  this far out. */
+const RING = 12;
+export const RAMP = 14;
 
-export const SECTIONS: ReadonlyArray<Section> = PATHS.map((p) => ({
-  ...p,
-  key: sectionKey(p.from, p.to),
-  walked: walk(pathPoints(p.d)),
-}));
+const fmt = (n: number): string => String(Math.round(n * 100) / 100);
+const pathOf = (pts: ReadonlyArray<Point>): string =>
+  pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${fmt(p.x)} ${fmt(p.y)}`).join(' ');
 
-/** THE PLANNED TENANT BRANCH (design fd8b5143): a tenant's change leaves
- *  the shop floor, is checked, waits on David's approval — a signed plan
- *  hash, so that station is marked as his — and joins at the shed. Drawn
- *  dashed and read from nothing: it is a plan, not a reading, and no
- *  endpoint serves it yet. */
-export type BranchStation = Readonly<{ name: string; x: number; y: number; owner: string | null }>;
+/** A polyline moved `by` units to the right of its own direction of
+ *  travel — the lane a straight run takes when the run back is served
+ *  too, as a double track keeps its directions apart. */
+function shifted(pts: ReadonlyArray<Point>, by: number): ReadonlyArray<Point> {
+  const a = pts[0]!;
+  const b = pts[pts.length - 1]!;
+  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  const nx = (-(b.y - a.y) / len) * by;
+  const ny = ((b.x - a.x) / len) * by;
+  return pts.map((p) => ({ x: p.x + nx, y: p.y + ny }));
+}
 
-const BRANCH_D = 'M300 200 L390 110 H810 L900 200 H930';
+/** THE OCTILINEAR ROUTER (design e765b3fc §2c: "each section's path is
+ *  computed by a small octilinear router between two station positions,
+ *  with parallel lines offset"). Every leg is horizontal, vertical or at
+ *  45°, and the path starts at `a`'s centre and ends at `b`'s:
+ *
+ *  - ON THE MAIN LINE, forward to the next station: straight along it.
+ *    Forward past a station, it rises over the line in an arc — 45° up,
+ *    along, 45° down — so it never runs through the station it skips.
+ *    Backward, it drops under the line the same way, so the two
+ *    directions between two stations never share a track (the train
+ *    made up at the dock runs BACK to the gates under the line, then
+ *    over the dock to the track).
+ *  - BETWEEN ROWS, a straight leg first and then the 45° into `b`, so
+ *    the run back — straight first from ITS end — draws the other half
+ *    of a parallelogram rather than over this one.
+ *  - A run that is one straight leg (vertical, or exactly 45°) is moved
+ *    LANE to the right of its travel when the run back is served too.
+ *
+ *  `stations` is the layout the arcs clear; `twoWay` whether `b → a` is
+ *  served as well. */
+export function routePath(a: Station, b: Station, stations: ReadonlyArray<Station>, twoWay: boolean): ReadonlyArray<Point> {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  if (dy === 0) {
+    const lo = Math.min(a.x, b.x);
+    const hi = Math.max(a.x, b.x);
+    const passed = stations.filter((s) => s.y === a.y && s.x > lo && s.x < hi).length;
+    const forward = dx > 0;
+    if (forward && passed === 0) return [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
+    const steps = forward ? passed - 1 : passed;
+    const want = (forward ? ARC_ABOVE : ARC_BELOW) + ARC_STEP * steps;
+    const lift = Math.min(want, Math.abs(dx) / 2);
+    const y = a.y + (forward ? -lift : lift);
+    const dir = Math.sign(dx);
+    return [
+      { x: a.x, y: a.y },
+      { x: a.x + dir * lift, y },
+      { x: b.x - dir * lift, y },
+      { x: b.x, y: b.y },
+    ];
+  }
+  const ax = Math.abs(dx);
+  const ay = Math.abs(dy);
+  if (dx === 0 || ax === ay) {
+    const pts = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
+    return twoWay ? shifted(pts, LANE) : pts;
+  }
+  const elbow =
+    ax > ay
+      ? { x: a.x + Math.sign(dx) * (ax - ay), y: a.y }
+      : { x: a.x, y: a.y + Math.sign(dy) * (ay - ax) };
+  return [{ x: a.x, y: a.y }, elbow, { x: b.x, y: b.y }];
+}
 
-export const TENANT_BRANCH: Readonly<{
+/** An exit's off-ramp: out of the ring and away from the line — down
+ *  from a main-line station (its name is above), right from a station
+ *  under the line (its name is below it) — ending at a buffer stop. */
+export function exitPath(s: Station): ReadonlyArray<Point> {
+  return s.below
+    ? [{ x: s.x + RING, y: s.y }, { x: s.x + RING + RAMP, y: s.y }]
+    : [{ x: s.x, y: s.y + RING }, { x: s.x, y: s.y + RING + RAMP }];
+}
+
+/** An entry's stub: into the ring from above a main-line station, from
+ *  the left of one under the line. */
+export function entryPath(s: Station): ReadonlyArray<Point> {
+  return s.below
+    ? [{ x: s.x - RING - RAMP, y: s.y }, { x: s.x - RING, y: s.y }]
+    : [{ x: s.x, y: s.y - RING - RAMP }, { x: s.x, y: s.y - RING }];
+}
+
+// ---------------------------------------------------------------------
+// The sections: every served route, laid out.
+// ---------------------------------------------------------------------
+
+/** A border's key, in the arrow the world map and its specs use — and
+ *  the key a drawn section answers to: `gates→track` for a section,
+ *  `dock→` for the dock's exit, `→receiving` for receiving's entry. The
+ *  moves feed (car M2) finds the path a move `(from, to)` travels by
+ *  this key. */
+export const sectionKey = (from: string | null, to: string | null): string => `${from ?? ''}→${to ?? ''}`;
+
+/** A section of track, an exit or an entry: the route it draws, its
+ *  line, and its path — `d` for the stroke, `walked` for anything that
+ *  travels it (the waiting blocks, the moving blocks, and the moves of
+ *  car M2, which call `pointAt(walked, t · walked.length)`). */
+export type Section = Readonly<{
+  key: string;
+  kind: 'section' | 'exit' | 'entry';
+  from: string | null;
+  to: string | null;
+  line: TransitLine;
+  /** False: only the moves record supports it — drawn dashed red. */
+  declared: boolean;
+  route: Route;
   d: string;
   walked: Walked;
-  stations: ReadonlyArray<BranchStation>;
-  note: Readonly<{ text: string; x: number; y: number }>;
-}> = {
-  d: BRANCH_D,
-  walked: walk(pathPoints(BRANCH_D)),
-  stations: [
-    { name: 'tenant check', x: 480, y: 110, owner: null },
-    { name: 'awaiting approval', x: 610, y: 110, owner: 'David' },
-    { name: 'tenant main', x: 740, y: 110, owner: null },
-  ],
-  note: { text: "David's station: a signed plan hash", x: 610, y: 138 },
-};
+}>;
+
+const lineOf = (a: Station | undefined, b: Station | undefined): TransitLine =>
+  [a, b].find((s) => s !== undefined && s.line !== 'delivery')?.line ?? 'delivery';
+
+/** EVERY SERVED ROUTE, LAID OUT — and the ones this layout cannot place,
+ *  said rather than dropped: a route to a region the map has no station
+ *  for is named at the foot of the map. */
+export function sectionsOf(
+  routes: Routes,
+  stations: ReadonlyArray<Station> = STATIONS,
+): Readonly<{ sections: ReadonlyArray<Section>; unplaced: ReadonlyArray<string> }> {
+  const at = (name: string | null): Station | undefined => (name === null ? undefined : stations.find((s) => s.name === name));
+  const served = new Set(routes.routes.map((r) => sectionKey(r.from, r.to)));
+  const placed = routes.routes.map((route): Section | string => {
+    const key = sectionKey(route.from, route.to);
+    const a = at(route.from);
+    const b = at(route.to);
+    const unplacedEnd = (route.from !== null && a === undefined) || (route.to !== null && b === undefined);
+    if (unplacedEnd) return key;
+    const pts =
+      a !== undefined && b !== undefined
+        ? routePath(a, b, stations, served.has(sectionKey(route.to, route.from)))
+        : a !== undefined
+          ? exitPath(a)
+          : entryPath(b!);
+    const d = pathOf(pts);
+    return {
+      key,
+      kind: a !== undefined && b !== undefined ? 'section' : a !== undefined ? 'exit' : 'entry',
+      from: route.from,
+      to: route.to,
+      line: lineOf(a, b),
+      declared: route.declared,
+      route,
+      d,
+      walked: walk(pathPoints(d)),
+    };
+  });
+  return {
+    sections: placed.filter((p): p is Section => typeof p !== 'string'),
+    unplaced: placed.filter((p): p is string => typeof p === 'string'),
+  };
+}
+
+/** The lines the served routes draw, in the key's order — the key names
+ *  only what is on the map. */
+export function linesOf(sections: ReadonlyArray<Section>): ReadonlyArray<TransitLine> {
+  const drawn = new Set(sections.map((s) => s.line));
+  return (Object.keys(LINE_TOKEN) as TransitLine[]).filter((l) => drawn.has(l));
+}
 
 // ---------------------------------------------------------------------
 // Stations: words.

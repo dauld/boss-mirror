@@ -1,21 +1,27 @@
 import { describe, expect, it } from 'bun:test';
+import { ROUTES, routesPayload, type FixtureRoute } from '../../../tests/fixtures/yard';
 import type { Border } from './borders';
 import { regionHref, type Region, type Regions } from './regions';
-import { BORDERS, TERRITORIES } from './world';
+import { parseRoutes } from './routes';
+import { TERRITORIES } from './world';
 import { pointAt } from './world-motion';
 import {
+  ARC_ABOVE,
+  ARC_BELOW,
   LINE_TOKEN,
   MAX_BLOCKS,
   MAX_PERIOD_S,
   MIN_TRAVEL_S,
-  SECTIONS,
   STATIONS,
-  TENANT_BRANCH,
   TRANSIT_VIEW,
   alarmsOf,
   gapText,
   headwayText,
+  linesOf,
+  routePath,
   sectionGround,
+  sectionKey,
+  sectionsOf,
   stationCount,
   stationLabel,
   trainsOf,
@@ -65,41 +71,19 @@ const read = (regions: ReadonlyArray<Region>): Regions => ({
   plant: [],
 });
 
-const key = (from: string, to: string) => `${from}→${to}`;
+/** The fixture's routes, as the page parses them off the wire. */
+const served = (routes: ReadonlyArray<FixtureRoute> = ROUTES) => parseRoutes(routesPayload(routes));
+const laid = (routes?: ReadonlyArray<FixtureRoute>) => sectionsOf(served(routes)).sections;
+const find = (key: string) => laid().find((s) => s.key === key)!;
+const station = (name: string) => STATIONS.find((s) => s.name === name)!;
 
-describe('the transit layout is the world layout, drawn as lines', () => {
+describe('the stations are the world layout, drawn as a line', () => {
   it('has one station per territory — a region the world draws is a station here', () => {
     expect(STATIONS.map((s) => s.name).sort()).toEqual(TERRITORIES.map((t) => t.name).sort());
   });
 
-  it('has one section per border, and none the world does not have', () => {
-    expect(SECTIONS.map((s) => s.key).sort()).toEqual(BORDERS.map((b) => key(b.from, b.to)).sort());
-  });
-
-  it('every section runs from its from-station to its to-station', () => {
-    for (const s of SECTIONS) {
-      const a = STATIONS.find((t) => t.name === s.from)!;
-      const b = STATIONS.find((t) => t.name === s.to)!;
-      const start = pointAt(s.walked, 0);
-      const end = pointAt(s.walked, s.walked.length);
-      expect([s.key, start.x, start.y]).toEqual([s.key, a.x, a.y]);
-      expect([s.key, end.x, end.y]).toEqual([s.key, b.x, b.y]);
-    }
-  });
-
-  it('draws at fixed angles only — every leg horizontal, vertical or 45°', () => {
-    const legs = [...SECTIONS.map((s) => s.walked.points), TENANT_BRANCH.walked.points];
-    for (const pts of legs) {
-      for (let i = 1; i < pts.length; i++) {
-        const dx = Math.abs(pts[i]!.x - pts[i - 1]!.x);
-        const dy = Math.abs(pts[i]!.y - pts[i - 1]!.y);
-        expect(dx === 0 || dy === 0 || dx === dy).toBe(true);
-      }
-    }
-  });
-
   it('keeps every station inside the view', () => {
-    for (const s of [...STATIONS, ...TENANT_BRANCH.stations]) {
+    for (const s of STATIONS) {
       expect(s.x).toBeGreaterThan(20);
       expect(s.x).toBeLessThan(TRANSIT_VIEW.width - 20);
       expect(s.y).toBeGreaterThan(40);
@@ -107,29 +91,125 @@ describe('the transit layout is the world layout, drawn as lines', () => {
     }
   });
 
-  it('puts the delivery line through the flow in order, and the publish and garage on their own lines', () => {
-    const line = (k: string) => SECTIONS.find((s) => s.key === k)?.line;
-    expect(line('receiving→marshalling')).toBe('delivery');
-    expect(line('arrivals→shed')).toBe('delivery');
-    expect(line('arrivals→publish')).toBe('publish');
-    expect(line('gates→garage')).toBe('siding');
-    expect(line('track→garage')).toBe('siding');
-  });
-
   it('names every line colour as a --map-line-* token, never a literal', () => {
     for (const t of Object.values(LINE_TOKEN)) expect(t).toMatch(/^--map-line-[a-z]+$/);
   });
+});
 
-  it('draws the planned tenant branch from the shop floor to the shed, with David\'s station on it', () => {
-    const pts = TENANT_BRANCH.walked.points;
-    const shop = STATIONS.find((s) => s.name === 'shop-floor')!;
-    const shed = STATIONS.find((s) => s.name === 'shed')!;
-    expect(pts[0]).toEqual({ x: shop.x, y: shop.y });
-    expect(pts[pts.length - 1]).toEqual({ x: shed.x, y: shed.y });
-    expect(TENANT_BRANCH.stations.map((s) => s.name)).toEqual(['tenant check', 'awaiting approval', 'tenant main']);
-    expect(TENANT_BRANCH.stations.filter((s) => s.owner !== null).map((s) => [s.name, s.owner])).toEqual([
-      ['awaiting approval', 'David'],
-    ]);
+// THE EDGES ARE SERVED (design e765b3fc, car R3): the map draws exactly
+// the routes /api/yard/routes answers — one drawn element per route,
+// no more and no fewer — laid out by the octilinear router.
+describe('the map draws exactly the routes the server serves', () => {
+  it('one drawn element per served route, keyed by its two ends', () => {
+    expect(laid().map((s) => s.key)).toEqual(ROUTES.map((r) => sectionKey(r.from, r.to)));
+  });
+
+  it('a route the server starts serving arrives on the map, and one it stops serving leaves it — no web change', () => {
+    const more = laid([...ROUTES, { from: 'track', to: 'garage', declared: true, sources: [{ source: 'observed', moves: 1, last_at: '' }] }]);
+    expect(more.map((s) => s.key)).toContain('track→garage');
+    const fewer = laid(ROUTES.filter((r) => !(r.from === 'gates' && r.to === 'track')));
+    expect(fewer.map((s) => s.key)).not.toContain('gates→track');
+    expect(fewer).toHaveLength(ROUTES.length - 1);
+  });
+
+  it('draws nothing it was not served: no routes, no sections', () => {
+    expect(laid([])).toEqual([]);
+  });
+
+  it('names a section, an exit and an entry by their ends, the key a move (car M2) finds its path by', () => {
+    expect(find('gates→track').kind).toBe('section');
+    expect(find('dock→').kind).toBe('exit');
+    expect(find('→receiving').kind).toBe('entry');
+    expect(sectionKey('dock', null)).toBe('dock→');
+    expect(sectionKey(null, 'receiving')).toBe('→receiving');
+  });
+
+  it('says, rather than drops, a route to a region this layout has no station for', () => {
+    const out = sectionsOf(served([...ROUTES, { from: 'gates', to: 'the-moon', declared: true, sources: [{ source: 'observed', moves: 1, last_at: '' }] }]));
+    expect(out.unplaced).toEqual(['gates→the-moon']);
+    expect(out.sections).toHaveLength(ROUTES.length);
+  });
+
+  it('carries whether a route is declared — observed-only routes are drawn apart (dashed red)', () => {
+    expect(find('shed→arrivals').declared).toBe(false);
+    expect(find('gates→track').declared).toBe(true);
+  });
+
+  it('puts a route on the line of the station it serves off the main line', () => {
+    expect(find('receiving→marshalling').line).toBe('delivery');
+    expect(find('gates→track').line).toBe('delivery');
+    expect(find('gates→garage').line).toBe('siding');
+    expect(find('garage→dock').line).toBe('siding');
+    expect(linesOf(laid())).toEqual(['delivery', 'siding']);
+  });
+});
+
+describe('the octilinear router', () => {
+  it('runs every section from its from-station to its to-station', () => {
+    for (const s of laid().filter((x) => x.kind === 'section')) {
+      const a = station(s.from!);
+      const b = station(s.to!);
+      const start = pointAt(s.walked, 0);
+      const end = pointAt(s.walked, s.walked.length);
+      expect([s.key, Math.round(start.x), Math.round(start.y)]).toEqual([s.key, a.x, a.y]);
+      expect([s.key, Math.round(end.x), Math.round(end.y)]).toEqual([s.key, b.x, b.y]);
+    }
+  });
+
+  it('draws at fixed angles only — every leg horizontal, vertical or 45°', () => {
+    for (const s of laid()) {
+      const pts = s.walked.points;
+      for (let i = 1; i < pts.length; i++) {
+        const dx = Math.abs(pts[i]!.x - pts[i - 1]!.x);
+        const dy = Math.abs(pts[i]!.y - pts[i - 1]!.y);
+        expect([s.key, dx === 0 || dy === 0 || Math.abs(dx - dy) < 0.01]).toEqual([s.key, true]);
+      }
+    }
+  });
+
+  it('runs straight to the next station on the line', () => {
+    expect(find('receiving→marshalling').walked.points).toHaveLength(2);
+  });
+
+  it('lifts a forward run over the station it passes — the train departs from the gates OVER the dock to the track', () => {
+    const pts = find('gates→track').walked.points;
+    const dock = station('dock');
+    expect(Math.min(...pts.map((p) => p.y))).toBe(dock.y - ARC_ABOVE);
+    // It never touches the dock's ring.
+    const nearest = Math.min(...pts.map((p) => Math.hypot(p.x - dock.x, p.y - dock.y)));
+    expect(nearest).toBeGreaterThan(20);
+  });
+
+  it('drops a backward run UNDER the line — the train made up at the dock runs back to the gates', () => {
+    const pts = find('dock→gates').walked.points;
+    expect(Math.max(...pts.map((p) => p.y))).toBe(station('dock').y + ARC_BELOW);
+    const back = find('shop-floor→marshalling').walked.points;
+    expect(Math.max(...back.map((p) => p.y))).toBeGreaterThan(station('shop-floor').y);
+  });
+
+  it('keeps the two directions of a two-way run apart — the garage and the dock, both ways', () => {
+    const out = find('dock→garage').walked;
+    const back = find('garage→dock').walked;
+    const mid = (w: typeof out) => pointAt(w, w.length / 2);
+    expect(Math.hypot(mid(out).x - mid(back).x, mid(out).y - mid(back).y)).toBeGreaterThan(8);
+  });
+
+  it('moves a straight two-way run a lane apart', () => {
+    const a = { name: 'a', x: 100, y: 100, below: false, line: 'delivery' as const };
+    const b = { name: 'b', x: 100, y: 300, below: true, line: 'siding' as const };
+    const there = routePath(a, b, [a, b], true);
+    const back = routePath(b, a, [a, b], true);
+    expect(there[0]!.x).not.toBe(back[1]!.x);
+    expect(routePath(a, b, [a, b], false)[0]).toEqual({ x: 100, y: 100 });
+  });
+
+  it('draws an exit away from the line, and an entry into its station', () => {
+    const exit = find('dock→').walked.points;
+    expect(exit[0]!.y).toBeGreaterThan(station('dock').y);
+    expect(exit[exit.length - 1]!.y).toBeGreaterThan(exit[0]!.y);
+    const entry = find('→receiving').walked.points;
+    expect(entry[0]!.y).toBeLessThan(entry[entry.length - 1]!.y);
+    expect(entry[entry.length - 1]!.y).toBeLessThan(station('receiving').y);
   });
 });
 
@@ -190,7 +270,7 @@ describe('a section', () => {
 });
 
 describe('waiting blocks stand on the approach to the station they wait to enter', () => {
-  const s = SECTIONS.find((x) => x.key === 'marshalling→shop-floor')!;
+  const s = find('marshalling→shop-floor');
 
   it('one block per waiting packet, up to the cap, nearest the destination first', () => {
     const w = waitingBlocks(s, border('marshalling', 'shop-floor', { waiting: 3 }));

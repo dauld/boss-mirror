@@ -13,11 +13,14 @@
 
 import type { Page, Route } from '@playwright/test';
 // The world's own layout, so the empty leg below cannot list a region
-// or a hop the map does not draw (backlog 94c6ffd0: both lists were
-// typed out here and went stale the day a ninth region landed).
-// world.ts is pinned to the server's REGIONS and BORDERS by
-// world.test.ts and borders.test.ts, so this is one definition deep.
-import { BORDERS, TERRITORIES } from '../../src/it/yard/world';
+// the map does not draw (backlog 94c6ffd0: the list was typed out here
+// and went stale the day a ninth region landed). world.ts is pinned to
+// the server's REGIONS by world.test.ts, so this is one definition deep.
+// The map draws no edge list of its own since car R3 of design e765b3fc,
+// so the borders and routes the empty leg answers are the shared test
+// fixture's — the borders pinned equal to the server's by borders.test.ts.
+import { TERRITORIES } from '../../src/it/yard/world';
+import { BORDERS, routesPayload } from '../fixtures/yard';
 import LIVE_RECORDING from './live-tenant-manifest.json' with { type: 'json' };
 
 const json = (r: Route, body: unknown, status = 200): Promise<void> =>
@@ -206,6 +209,7 @@ export const JOBS_SUMMARY = /\/api\/jobs\/summary(\?|$)/;
 export const YARD_STATUS = /\/api\/yard\/status$/;
 export const YARD_REGIONS = /\/api\/yard\/regions(\?|$)/;
 export const YARD_BORDERS = /\/api\/yard\/borders(\?|$)/;
+export const YARD_ROUTES = /\/api\/yard\/routes(\?|$)/;
 export const WORKFLOW_DETAIL = /\/api\/workflows\/[^/]+$/;
 export const DISPATCHER_RULES = /\/api\/dispatcher\/rules$/;
 export const GATEWAY_PERF = /\/api\/gateway\/perf$/;
@@ -334,7 +338,7 @@ export const AUDIT_STATS = {
   ],
 } as const;
 export const OBJECT_ENDPOINTS: ReadonlyArray<RegExp> = [
-  JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, YARD_REGIONS, YARD_BORDERS, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
+  JOBS_LIVE, JOBS_SUMMARY, YARD_STATUS, YARD_REGIONS, YARD_BORDERS, YARD_ROUTES, WORKFLOW_DETAIL, DISPATCHER_RULES, GATEWAY_PERF,
   MARKETING_ASSET_DETAIL, VIEW_RESULTS, SHIPMENT_DETAIL, EMPLOYEE_DETAIL, EVENTS_STATS, RISK_SCORES, EVENTS_STREAM,
   COMMERCE_SUMMARY, AP_AGING, LEDGER_STATEMENTS,
   STATIONS_LOAD, STATIONS_FLOW, QUEUE_AGE, DESIGN_STATION_QUEUES,
@@ -447,9 +451,8 @@ export async function installApiFloor(page: Page): Promise<void> {
     }),
   );
   // The map's RAILS (design d2154293, car 2), for the same reason: the
-  // empty leg is a quiet border per declared hop, not a failed read.
-  // The hops are world.ts's, which the server's table is pinned equal
-  // to.
+  // empty leg is a quiet border per hop the server answers, not a failed
+  // read.
   await page.route(YARD_BORDERS, (r) =>
     json(r, {
       window_hours: 24,
@@ -463,6 +466,11 @@ export async function installApiFloor(page: Page): Promise<void> {
       })),
     }),
   );
+
+  // The map's ROUTES (design e765b3fc, car R3): the transit map draws
+  // exactly what this read serves, so the empty leg answers the shared
+  // fixture's — the live shape of 2026-09-26 — rather than a failed read.
+  await page.route(YARD_ROUTES, (r) => json(r, routesPayload()));
 
   // The other object reads, empty; the detail reads, absent.
   await page.route(DISPATCHER_RULES, (r) => json(r, { rules: [], handler_emits: {}, system_edges: [] }));
