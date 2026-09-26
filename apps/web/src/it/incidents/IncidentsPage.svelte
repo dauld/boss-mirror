@@ -29,17 +29,21 @@
   import type { Step } from '../../jobs/types';
   import {
     closedOutcome,
-    durationText,
     holderOf,
     incidentAt,
     openedAtMs,
-    parseStepWaits,
     postMortemSections,
     severityOf,
     startedAt,
     type IncidentJob,
-    type StepWaits,
   } from './postMortemDoc';
+  import {
+    durationText,
+    lensNow,
+    loadStepWaits,
+    waitedText,
+    type StepWaits,
+  } from '../../jobs/queueAge';
 
   type LoadState =
     | { kind: 'loading' }
@@ -73,13 +77,8 @@
 
   async function fetchWaits(): Promise<void> {
     waits = { kind: 'loading' };
-    try {
-      const res = await fetch('/api/jobs/queue-age');
-      if (!res.ok) throw new Error(`queue-age: HTTP ${res.status}`);
-      waits = { kind: 'ready', waits: parseStepWaits(await res.json()) };
-    } catch {
-      waits = { kind: 'failed' };
-    }
+    const r = await loadStepWaits();
+    waits = r.kind === 'ready' ? { kind: 'ready', waits: r.data } : { kind: 'failed' };
   }
 
   function refresh(): void {
@@ -90,9 +89,7 @@
 
   /// Ages are measured against the server's clock when the lens sent
   /// one (the stack may run a simulated clock), else the browser's.
-  const now = $derived(
-    waits.kind === 'ready' && waits.waits.now !== null ? waits.waits.now : Date.now(),
-  );
+  const now = $derived(waits.kind === 'ready' ? lensNow(waits.waits, Date.now()) : Date.now());
 
   const timeOpen = (j: IncidentJob): string | null => {
     const at = openedAtMs(j);
@@ -105,7 +102,7 @@
     if (waits.kind === 'failed') return 'time at step unreadable';
     const w = waits.waits.byStep.get(s.id);
     if (!w) return 'time at step unknown';
-    return `at step ${w.exact ? '' : '≥'}${durationText(now - w.sinceMs)}`;
+    return `at step ${waitedText(w, now)}`;
   };
 
   const jobs = $derived(load.kind === 'ready' ? load.jobs : []);

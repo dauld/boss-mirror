@@ -197,16 +197,6 @@ export function openedAtMs(job: IncidentJob): number | null {
   return ms ?? null;
 }
 
-/// A span as the card reads it: `<1m`, `12m`, `5h 12m`, `3d 4h`.
-export function durationText(ms: number): string {
-  const min = Math.floor(Math.max(0, ms) / 60_000);
-  if (min < 1) return '<1m';
-  if (min < 60) return `${min}m`;
-  const h = Math.floor(min / 60);
-  if (h < 24) return `${h}h ${min % 60}m`;
-  return `${Math.floor(h / 24)}d ${h % 24}h`;
-}
-
 /// Who a step is waiting on: the assignee, else the role, station or
 /// department its audience names (the projected `authority_role` /
 /// `station` keys, and the `audience` block itself for a department,
@@ -225,31 +215,4 @@ export function holderOf(step: Step): string {
       ? text((audience as Record<string, unknown>)['department'])
       : null;
   return dept ? `department ${dept}` : 'unassigned';
-}
-
-/// How long a step has sat at ready/active, from the queue-age lens
-/// (`GET /api/jobs/queue-age`, 2a0b034e) — the projection's
-/// `became_ready_at`, which the Job read does not carry. `exact: false`
-/// means the stamp is an `updated_at` fallback: a LOWER bound.
-export type StepWait = Readonly<{ sinceMs: number; exact: boolean }>;
-export type StepWaits = Readonly<{ now: number | null; byStep: ReadonlyMap<string, StepWait> }>;
-
-/// Parse the lens's body. A body without a `data` list is a throw, so a
-/// wrong-shaped answer renders as unreadable, never as "no waits".
-export function parseStepWaits(raw: unknown): StepWaits {
-  const body = raw as { data?: unknown; now?: unknown } | null;
-  if (typeof body !== 'object' || body === null || !Array.isArray(body.data)) {
-    throw new Error('queue-age: the answer carries no data list');
-  }
-  const byStep = new Map<string, StepWait>(
-    (body.data as ReadonlyArray<Record<string, unknown>>).flatMap((r) => {
-      const id = text(r['step_id']);
-      const sinceMs = Date.parse(text(r['since']) ?? '');
-      return id === null || Number.isNaN(sinceMs)
-        ? []
-        : [[id, { sinceMs, exact: r['exact'] === true }] as const];
-    }),
-  );
-  const now = Date.parse(text(body.now) ?? '');
-  return { now: Number.isNaN(now) ? null : now, byStep };
 }

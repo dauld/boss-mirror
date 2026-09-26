@@ -10,8 +10,10 @@ import {
   parseJobsPage,
   thirdOf,
   thirds,
+  waitedFor,
   waitingAt,
 } from './department';
+import { parseStepWaits } from '../jobs/queueAge';
 
 function step(status: StepStatus): Step {
   return {
@@ -142,6 +144,62 @@ describe('waitingAt — the step a live packet stands at', () => {
   it('a live packet with no open step says nothing rather than guessing', () => {
     expect(waitingAt(at('open', [{ title: 'Later', status: 'pending', sort_order: 0 }]))).toBe('');
     expect(waitingAt({ status: 'open' })).toBe('');
+  });
+});
+
+describe('waitedFor — since when, from the queue-age lens (66a5d5be)', () => {
+  // The finance audit's own packet: a payout at `post`, ready since
+  // 2026-09-21T01:10Z, read 2.6 days later.
+  const at = (
+    status: Job['status'],
+    steps: ReadonlyArray<Readonly<{ id: string; status: StepStatus; sort_order: number }>>,
+  ): Job => ({
+    ...job('p', status, []),
+    steps: steps.map((s) => ({ ...step(s.status), id: s.id, title: s.id, sort_order: s.sort_order })),
+  });
+  const lens = {
+    kind: 'ready' as const,
+    data: parseStepWaits({
+      data: [
+        { step_id: 'post', since: '2026-09-21T01:10:00Z', exact: true },
+        { step_id: 'check', since: '2026-09-23T13:40:00Z', exact: false },
+      ],
+      now: '2026-09-23T15:40:00Z',
+    }),
+  };
+  const fallbackNow = Date.parse('2030-01-01T00:00:00Z');
+
+  it('prints how long the open step has waited, on the lens clock', () => {
+    const j = at('open', [
+      { id: 'record', status: 'completed', sort_order: 0 },
+      { id: 'post', status: 'ready', sort_order: 1 },
+    ]);
+    expect(waitedFor(j, lens, fallbackNow)).toBe('2d 14h');
+  });
+
+  it('a fallback stamp is a lower bound, and parallel steps read in workflow order', () => {
+    const j = at('open', [
+      { id: 'check', status: 'active', sort_order: 2 },
+      { id: 'post', status: 'ready', sort_order: 1 },
+    ]);
+    expect(waitedFor(j, lens, fallbackNow)).toBe('2d 14h · ≥2h 0m');
+  });
+
+  it('an open step the lens has no row for says unknown, never a made-up age', () => {
+    expect(waitedFor(at('open', [{ id: 'other', status: 'ready', sort_order: 0 }]), lens, fallbackNow)).toBe(
+      'unknown',
+    );
+  });
+
+  it('a terminal packet, or one with no open step, waits on nothing', () => {
+    expect(waitedFor(at('closed', [{ id: 'post', status: 'ready', sort_order: 0 }]), lens, fallbackNow)).toBe('');
+    expect(waitedFor(at('open', [{ id: 'post', status: 'pending', sort_order: 0 }]), lens, fallbackNow)).toBe('');
+  });
+
+  it('a lens still loading or failed says so in the cell, never an empty age', () => {
+    const j = at('open', [{ id: 'post', status: 'ready', sort_order: 0 }]);
+    expect(waitedFor(j, { kind: 'loading' }, fallbackNow)).toBe('…');
+    expect(waitedFor(j, { kind: 'failed', error: 'HTTP 500' }, fallbackNow)).toBe('unreadable');
   });
 });
 

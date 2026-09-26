@@ -26,18 +26,26 @@
     THIRD_LABEL,
     loadDepartment,
     thirds,
+    waitedFor,
     waitingAt,
     type JobsPage,
     type Third,
   } from './department';
+  import { loadStepWaits, type StepWaits } from '../jobs/queueAge';
 
   let { code } = $props<{ code: string }>();
 
   let page = $state<Remote<JobsPage>>({ kind: 'loading' });
+  // Since when each packet has waited: the queue-age lens, ONE read
+  // beside the department read, joined by step id (backlog 66a5d5be) —
+  // the listing carries no ready-since instant, by design.
+  let waits = $state<Remote<StepWaits>>({ kind: 'loading' });
 
   async function refresh(c: string): Promise<void> {
     page = { kind: 'loading' };
-    page = await loadDepartment(c);
+    const [p, w] = await Promise.all([loadDepartment(c), loadStepWaits()]);
+    page = p;
+    waits = w;
   }
 
   // Re-read when the tab changes department: the component is reused
@@ -82,6 +90,14 @@
       thirds below are of the page, not of the department.
     </p>
   {/if}
+  {#if waits.kind === 'failed'}
+    <!-- The ages are a second read; its failure is said once, here,
+         and never paints the thirds as having no wait. -->
+    <p class="empty load-failed">
+      The queue-age lens did not answer: {waits.error}. How long each packet has waited is not
+      shown.
+    </p>
+  {/if}
   {#each THIRDS as t (t.id)}
     {@const list = split[t.id]}
     <section class="list-section">
@@ -98,7 +114,8 @@
   <!-- The jobs list's own table, column for column, so a department
        reads its packets the way All jobs shows them — plus "Waiting
        at", the step a live packet stands at, because "open" alone let
-       a payout sit at its post step for 2.6 days unsaid (4d4dc204). -->
+       a payout sit at its post step for 2.6 days unsaid (4d4dc204),
+       and "Waiting for", how long it has stood there (66a5d5be). -->
   <table class="data-table data-table-striped">
     <thead>
       <tr>
@@ -108,6 +125,9 @@
         <th>Subject</th>
         <th>Status</th>
         <th>Waiting at</th>
+        <th title="Since the step became ready, from the queue-age lens; ≥ marks a lower bound">
+          Waiting for
+        </th>
         <th>Priority</th>
         <th>Opened</th>
         <th>Closed</th>
@@ -126,6 +146,7 @@
           </td>
           <td>{j.status}</td>
           <td class="waiting-at">{waitingAt(j)}</td>
+          <td class="waiting-for mono">{waitedFor(j, waits, Date.now())}</td>
           <td>{j.priority}</td>
           <td>{j.opened_on}</td>
           <td>{j.closed_on ?? ''}</td>

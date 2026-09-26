@@ -41,7 +41,8 @@ const job = (
   id, kind, title, status, priority: 'standard',
   subject: { subject_kind: 'custom', id: 'algedonic' }, owner_id: 'emp-1',
   opened_on: '2026-09-21', due_on: null, closed_on, metadata: {}, tags: [],
-  steps: steps.map((s, i) => ({ id: `s${i}`, kind: 'task', title: s.title, status: s.status, sort_order: i })),
+  // Step ids unique across packets: the queue-age lens joins by step id.
+  steps: steps.map((s, i) => ({ id: `${id.slice(0, 8)}-s${i}`, kind: 'task', title: s.title, status: s.status, sort_order: i })),
 });
 
 const PAYOUT = job(
@@ -95,6 +96,69 @@ test('mount reads the finance department once and draws In / Working / Out, nami
   expect(await settledReads(page, () => urls.length, 1)).toBe(1);
   const q = new URL(urls[0]!).searchParams;
   expect([q.get('department'), q.get('closed_within'), q.get('limit')]).toEqual(['finance', '30', '200']);
+});
+
+// ---------------------------------------------------------------------
+// Since when (backlog 66a5d5be). The finance audit asked for "2.6 days
+// at post"; the listing carries no ready-since instant (boss-jobs
+// port.rs: "A LENS, NOT A FIELD"), so the thirds read the queue-age
+// lens once and join it by step id. The fixture is the lens's real row
+// shape ({job_id, step_id, since, exact, waiting_seconds, waiting_days}
+// plus the server's `now`), with the audit's payout posted-ready at
+// 2026-09-21T01:10Z and a fallback (exact: false) row for the bill.
+const QUEUE_AGE = /\/api\/jobs\/queue-age$/;
+const LENS_NOW = '2026-09-23T15:40:00Z';
+const QUEUE_AGE_FIXTURE = {
+  data: [
+    {
+      job_id: PAYOUT.id, step_id: `${PAYOUT.id.slice(0, 8)}-s1`, since: '2026-09-21T01:10:00Z',
+      exact: true, waiting_seconds: 225_000, waiting_days: 2.6,
+    },
+    {
+      job_id: JOBS[1]!.id, step_id: `${JOBS[1]!.id.slice(0, 8)}-s0`, since: '2026-09-23T13:40:00Z',
+      exact: false, waiting_seconds: 7_200, waiting_days: 0.08,
+    },
+  ],
+  total: 2,
+  now: LENS_NOW,
+};
+
+test('each waiting packet says since when, from one queue-age read; a fallback stamp reads as a floor', async ({ page }) => {
+  await install(page, (r) => json(r, { data: JOBS, total: JOBS.length }));
+  const lensReads: string[] = [];
+  await page.route(QUEUE_AGE, (r) => {
+    lensReads.push(r.request().url());
+    return json(r, QUEUE_AGE_FIXTURE);
+  });
+  await mountPage(page, PATH);
+
+  const sections = panel(page).locator('section.list-section');
+  await expect(sections.nth(0).locator('thead th:nth-child(7)')).toHaveText('Waiting for');
+  // The bill's stamp is the fallback: at least two hours, not two hours.
+  await expect(sections.nth(0).locator('td.waiting-for')).toHaveText(['≥2h 0m']);
+  // The audit's payout: at post since 2026-09-21T01:10Z, on the lens's clock.
+  await expect(sections.nth(1).locator('td.waiting-at')).toHaveText(['Post the payout']);
+  await expect(sections.nth(1).locator('td.waiting-for')).toHaveText(['2d 14h']);
+  // A departed packet waits on nothing.
+  await expect(sections.nth(2).locator('td.waiting-for')).toHaveText(['']);
+  await expect(panel(page).locator(FAILURE_MARKER)).toHaveCount(0);
+
+  expect(await settledReads(page, () => lensReads.length, 1)).toBe(1);
+});
+
+test('a failed queue-age read is a failure line, the cells say unreadable, and the thirds still stand', async ({ page }) => {
+  await install(page, (r) => json(r, { data: JOBS, total: JOBS.length }));
+  await page.route(QUEUE_AGE, (r) => json(r, { error: 'down' }, 500));
+  await mountPage(page, PATH);
+
+  await expect(panel(page).locator('h3')).toHaveText(['In (1)', 'Working (1)', 'Out (1)']);
+  await expect(panel(page).locator(FAILURE_MARKER)).toHaveText(
+    'The queue-age lens did not answer: /api/jobs/queue-age: HTTP 500. How long each packet has waited is not shown.',
+  );
+  const sections = panel(page).locator('section.list-section');
+  await expect(sections.nth(0).locator('td.waiting-for')).toHaveText(['unreadable']);
+  await expect(sections.nth(1).locator('td.waiting-for')).toHaveText(['unreadable']);
+  await expect(sections.nth(2).locator('td.waiting-for')).toHaveText(['']);
 });
 
 test('the packets stand under every tab, and a tab click does not re-read them', async ({ page }) => {
