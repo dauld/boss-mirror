@@ -190,15 +190,12 @@ pub(super) async fn read_yard<R: JobsRepository + 'static, B: EventBus + 'static
             .map(str::to_string)
     };
     let car_branches: Vec<String> = cars.iter().filter_map(branch_of).collect();
-    // Branches whose car reached a terminal. The garage drops these: work
-    // that settled is not work awaiting rework, and its last gate-run
-    // under that branch name stays red forever. Derived from the read we
-    // already did rather than a second query.
-    let settled_car_branches: Vec<String> = cars
-        .iter()
-        .filter(|c| c.status == JobStatus::Closed)
-        .filter_map(branch_of)
-        .collect();
+    // Branches no car awaits: a closed car's own, and every name a car
+    // was re-railed off (its `rerail_origins`). The garage and limbo drop
+    // these: work that settled or moved is not work awaiting rework, and
+    // its last gate-run under that branch name stays red forever. Derived
+    // from the read we already did rather than a second query.
+    let settled_car_branches: Vec<String> = yard::settled_car_branches(&cars);
 
     // The dock, via the station registry — the one authoritative path,
     // the same one the departure board uses. `None` when the row cannot
