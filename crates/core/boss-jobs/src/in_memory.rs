@@ -9,7 +9,9 @@ use async_trait::async_trait;
 use boss_core::job::{Job, JobId, JobStatus, Step, StepId, StepStatus};
 use chrono::{DateTime, Utc};
 
-use crate::port::{Admission, JobFilter, JobScope, JobsError, JobsRepository, StepVersion};
+use crate::port::{
+    Admission, JobFilter, JobScope, JobsError, JobsRepository, StepVersion, spent_nonce,
+};
 
 #[derive(Default)]
 pub struct InMemoryJobs {
@@ -1288,6 +1290,14 @@ impl JobsRepository for InMemoryJobs {
                     id: *step_id,
                     signed: stamp.shape_hash.clone(),
                     current,
+                });
+            }
+            // A ticket stamps its step once (backlog 3977b3d2): its
+            // nonce on any stamp here, live or voided, is a replay.
+            if let Some(nonce) = spent_nonce(&existing.sign_offs, stamp) {
+                return Err(JobsError::NonceSpent {
+                    id: *step_id,
+                    nonce,
                 });
             }
             existing.sign_offs.push(stamp.clone());

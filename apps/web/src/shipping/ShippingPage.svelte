@@ -182,7 +182,7 @@
   <div class="catalog-layout" style="margin-top:16px">
     <aside class="catalog-filters">
       <FilterGroup label="Search">
-          <SearchInput bind:value={query} placeholder="ID, tracking, origin…" />
+          <SearchInput bind:value={query} placeholder="ID, tracking, origin…" label="Search shipments" />
       </FilterGroup>
       <FilterGroup label="Status">
           {@const undelivered = shipments.filter((s) =>

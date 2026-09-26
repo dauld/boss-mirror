@@ -2462,6 +2462,32 @@ pub fn limbo(gate_runs: &[(Job, Vec<Step>)], settled_branches: &[String]) -> Vec
     out
 }
 
+/// The branches [`garage`] and [`limbo`] drop because no car awaits
+/// them any longer: a CLOSED car's own branch, whose work settled, and
+/// every branch ANY car — open or closed — was re-railed off, named in
+/// the `rerail_origins` provenance `boss rerail` records on the car
+/// (`[{branch, head}]`, the shape boss-cli's train sweep already reads).
+/// A car that moved off a name leaves nothing awaiting rework under it
+/// the moment it moves. Until backlog 79d580a6 (2026-09-26) only
+/// `branch` was read, so every re-railed car left its pre-rerail red in
+/// the garage as a ghost — orient counted two reds awaiting rework when
+/// one was real.
+pub fn settled_car_branches(cars: &[Job]) -> Vec<String> {
+    let own = cars
+        .iter()
+        .filter(|c| c.status == JobStatus::Closed)
+        .filter_map(|c| meta_str(&c.metadata, "branch"));
+    let origins = cars
+        .iter()
+        .filter_map(|c| c.metadata.get("rerail_origins").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|o| meta_str(o, "branch"));
+    own.chain(origins)
+        .filter(|b| !b.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// The latest gate-run per branch, minus the branches whose car has
 /// settled — the one grouping [`garage`] and [`limbo`] both partition,
 /// so the two cannot disagree about which run is a branch's current
@@ -5953,6 +5979,79 @@ mod tests {
         // never parks, so a red branch with no car is the ordinary case
         // the garage exists to show.
         assert_eq!(garage(&runs, &[]).len(), 1);
+    }
+
+    /// Backlog 79d580a6, measured 2026-09-26: the garage held
+    /// fix/the-estate-alarm-reads-each-hosts-own-series (red since 04:13Z)
+    /// while its car had been repointed by `boss rerail` onto the
+    /// `-rerail` branch and had since merged and been proven. The car
+    /// records the name it left in `rerail_origins`; the settled set read
+    /// only `branch`. A car that moved off a name leaves its old red
+    /// awaiting nothing — the moment it moves, open or closed.
+    #[test]
+    fn a_branch_a_car_rerailed_off_leaves_the_garage_and_limbo() {
+        let red = |branch: &str| {
+            (
+                gate_run_on(branch, 4),
+                vec![verdict_step(
+                    "failed",
+                    json!([{"name": "test", "result": "fail"}]),
+                )],
+            )
+        };
+        let lost = |branch: &str| {
+            (
+                gate_run_on(branch, 4),
+                vec![verdict_step("lost", json!([]))],
+            )
+        };
+        let origins = |branch: &str| json!([{ "branch": branch, "head": "e16708f69bc5b0a0a3f4bd1572f9db6dec76e7c8" }]);
+        // An OPEN car, rerailed off fix/x onto fix/x-rerail.
+        let (mut open_car, _) = car("fix/x-rerail", review(json!({})));
+        open_car.metadata["rerail_origins"] = origins("fix/x");
+        // A CLOSED car, rerailed off fix/y, merged.
+        let (mut closed_car, _) = car("fix/y-rerail", review(json!({})));
+        closed_car.status = JobStatus::Closed;
+        closed_car.metadata["rerail_origins"] = origins("fix/y");
+        // An open car never rerailed: its own branch is NOT settled.
+        let (plain, _) = car("fix/z", review(json!({})));
+
+        let settled = settled_car_branches(&[open_car, closed_car, plain]);
+        let runs = vec![red("fix/x"), red("fix/y"), red("fix/z"), lost("fix/w")];
+        assert_eq!(
+            garage(&runs, &settled)
+                .iter()
+                .map(|c| c.branch.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fix/z"],
+            "a name a car moved off awaits nothing; an open car's own red still garages"
+        );
+        let lost_runs = vec![lost("fix/x"), lost("fix/y"), lost("fix/w")];
+        assert_eq!(
+            limbo(&lost_runs, &settled)
+                .iter()
+                .map(|c| c.branch.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fix/w"],
+            "nor does it stand at the gate exit"
+        );
+    }
+
+    /// The settled set's first half, unchanged: a CLOSED car's own branch
+    /// is settled, an open car's is not, and a car with no branch adds
+    /// nothing (never an empty string that would match nothing anyway).
+    #[test]
+    fn a_closed_cars_own_branch_is_settled_and_an_open_ones_is_not() {
+        let (mut closed, _) = car("fix/done", review(json!({})));
+        closed.status = JobStatus::Closed;
+        let (open, _) = car("fix/live", review(json!({})));
+        let (mut nameless, _) = car("", review(json!({})));
+        nameless.metadata = json!({});
+        nameless.status = JobStatus::Closed;
+        assert_eq!(
+            settled_car_branches(&[closed, open, nameless]),
+            vec!["fix/done".to_string()]
+        );
     }
 
     /// Train #198, 2026-09-04: merged and deployed at 17:10:17Z, still at
