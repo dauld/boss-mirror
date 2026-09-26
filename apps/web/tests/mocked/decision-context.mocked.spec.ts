@@ -74,6 +74,27 @@ test('a sign-off with step-level context renders the case above the stamp', asyn
   await expect(page.locator('.step-decision-context')).toBeVisible();
   await expect(page.locator('.sdc-body')).toContainText('62 commits');
   await expect(page.locator('.sdc-source')).toHaveText('written for this step');
+  // The step's own context is a key of the step, so a passkey that signs
+  // the step signs it: no "not signed" mark.
+  await expect(page.locator('.step-decision-context .sdc-unsigned')).toHaveCount(0);
+});
+
+// Backlog 7c53b1bf (review of car fcda5f8b, 2026-09-25): the panel is
+// drawn above every platform surface, ApprovalSurface included, and it
+// showed context read from the JOB — which no passkey on the step signs —
+// with nothing saying so, while the sign-off plugin marks the same
+// context "not signed". The two surfaces now agree.
+test('context read from the packet, above a sign-off, is marked not signed', async ({ page }) => {
+  const job = {
+    ...baseJob,
+    metadata: { context_md: 'Publish 62 commits; the secrets scan came back clean.' },
+  };
+  await mockApi(page, baseStep, job);
+  await mountPage(page, `/jobs/${JOB_ID}/steps/${STEP_ID}`, { root: '.step-focus' });
+
+  await expect(page.locator('.sdc-body')).toContainText('62 commits');
+  await expect(page.locator('.sdc-source')).toHaveText('the packet’s briefing');
+  await expect(page.locator('.step-decision-context .sdc-unsigned')).toHaveText('not signed');
 });
 
 test('a task with no context of its own surfaces the packet as filed', async ({
@@ -97,6 +118,7 @@ test('a task with no context of its own surfaces the packet as filed', async ({
   await expect(page.locator('.step-decision-context')).toBeVisible();
   await expect(page.locator('.sdc-body')).toContainText('My Day cannot say');
   await expect(page.locator('.sdc-source')).toHaveText('the packet as filed');
+  await expect(page.locator('.step-decision-context .sdc-unsigned')).toHaveText('not signed');
 });
 
 test('no context anywhere renders no panel, not an empty card', async ({ page }) => {

@@ -419,6 +419,145 @@ describe('a passkey signs only what the surface put on screen', () => {
   });
 });
 
+// Backlog 7c53b1bf (adversarial review of car fcda5f8b, 2026-09-25): the
+// ceremony read `onScreen()` once, before the begin. A rail switch or a
+// navigation during the begin round trip then let the prompt come up over
+// the step now shown and sign the one that was not — the plugin's copy
+// re-checks after the begin and after the credential, and this one did
+// not. It now reads the screen again at every await it crosses, hands the
+// prompt the caller's abort signal, and never returns a ticket for a step
+// that has left the screen, so no stamp is recorded for it.
+describe('a ceremony whose step leaves the screen mid-flight signs nothing', () => {
+  const OTHER = { title: 'Approve the hire', metadata: { plan: 'PLAN hire' } } as const;
+  const credential = () => {
+    const bytes = new Uint8Array([1, 2, 3]).buffer;
+    return {
+      id: 'AQID',
+      rawId: bytes,
+      type: 'public-key',
+      response: { authenticatorData: bytes, clientDataJSON: bytes, signature: bytes, userHandle: null },
+    };
+  };
+  /** Routes begin and finish; `during` runs inside the named one. */
+  const ceremonyServer = (during: Partial<Record<'begin' | 'finish', () => void>>) => {
+    const urls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.endsWith('/assert/begin')) {
+        during.begin?.();
+        return new Response(JSON.stringify(BEGIN), { status: 200 });
+      }
+      during.finish?.();
+      return new Response(JSON.stringify({ ticket: 'ticket-1' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    return urls;
+  };
+  const outcome = async (
+    onScreen: () => typeof SHOWN | typeof OTHER | null,
+    signal?: AbortSignal,
+  ): Promise<unknown> => {
+    try {
+      return await performPresenceCeremony('job-1', 'step-1', SHOWN, onScreen, signal);
+    } catch (e) {
+      return e;
+    }
+  };
+
+  test('control: the step stays on screen, and the ceremony returns its ticket', async () => {
+    const urls = ceremonyServer({});
+    stubBrowser(async () => credential());
+    expect(await outcome(() => SHOWN)).toBe('ticket-1');
+    expect(urls.map((u) => u.split('/').pop())).toEqual(['begin', 'finish']);
+  });
+
+  test('the rail moves on during the begin: the passkey is never asked', async () => {
+    let screen: typeof SHOWN | typeof OTHER = SHOWN;
+    const urls = ceremonyServer({ begin: () => (screen = OTHER) });
+    let asked = 0;
+    stubBrowser(async () => {
+      asked += 1;
+      return credential();
+    });
+    const result = await outcome(() => screen);
+    expect(result).toBeInstanceOf(NotShownRefusal);
+    expect(asked).toBe(0);
+    expect(urls.some((u) => u.endsWith('/assert/finish'))).toBe(false);
+  });
+
+  test('the surface unmounts during the begin: the passkey is never asked', async () => {
+    let screen: typeof SHOWN | null = SHOWN;
+    ceremonyServer({ begin: () => (screen = null) });
+    let asked = 0;
+    stubBrowser(async () => {
+      asked += 1;
+      return credential();
+    });
+    expect(await outcome(() => screen)).toBeInstanceOf(NotShownRefusal);
+    expect(asked).toBe(0);
+  });
+
+  test('the rail moves on while the prompt is up: its answer is never sent', async () => {
+    let screen: typeof SHOWN | typeof OTHER = SHOWN;
+    const urls = ceremonyServer({});
+    stubBrowser(async () => {
+      screen = OTHER;
+      return credential();
+    });
+    expect(await outcome(() => screen)).toBeInstanceOf(NotShownRefusal);
+    expect(urls.some((u) => u.endsWith('/assert/finish'))).toBe(false);
+  });
+
+  test('the rail moves on while the finish is in flight: no ticket comes back to be stamped', async () => {
+    let screen: typeof SHOWN | typeof OTHER = SHOWN;
+    ceremonyServer({ finish: () => (screen = OTHER) });
+    stubBrowser(async () => credential());
+    expect(await outcome(() => screen)).toBeInstanceOf(NotShownRefusal);
+  });
+
+  test('the prompt is handed the caller’s signal, and an abort reads as nothing signed', async () => {
+    let screen: typeof SHOWN | null = SHOWN;
+    ceremonyServer({});
+    const gesture = new AbortController();
+    let handed: AbortSignal | undefined;
+    stubBrowser((opts?: unknown) => {
+      handed = (opts as { signal?: AbortSignal } | undefined)?.signal;
+      // The surface goes away while the prompt is up; the browser rejects
+      // an aborted prompt with an AbortError.
+      screen = null;
+      gesture.abort();
+      return Promise.reject(domError('AbortError'));
+    });
+    const result = await outcome(() => screen, gesture.signal);
+    expect(handed).toBe(gesture.signal);
+    expect(result).toBeInstanceOf(NotShownRefusal);
+    expect((result as Error).message).toContain('Nothing was signed');
+  });
+
+  test('completeWithPresence hands its ceremony the same signal', async () => {
+    const gesture = new AbortController();
+    let handed: AbortSignal | undefined;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith('/assert/begin')) return new Response(JSON.stringify(BEGIN), { status: 200 });
+      if (url.endsWith('/assert/finish')) {
+        return new Response(JSON.stringify({ ticket: 'ticket-1' }), { status: 200 });
+      }
+      const ticket = new Headers(init?.headers).get('x-presence-ticket');
+      return ticket
+        ? new Response(JSON.stringify({ status: 'completed' }), { status: 200 })
+        : new Response(JSON.stringify({ required: 'presence' }), { status: 422 });
+    }) as unknown as typeof fetch;
+    stubBrowser((opts?: unknown) => {
+      handed = (opts as { signal?: AbortSignal } | undefined)?.signal;
+      return Promise.resolve(credential());
+    });
+    const res = await completeWithPresence('job-1', 'step-1', SHOWN, ON_SCREEN, undefined, gesture.signal);
+    expect(res.kind).toBe('ok');
+    expect(handed).toBe(gesture.signal);
+  });
+});
+
 // Backlog 6093cf13 (adversarial review of car 30674304, 2026-09-25): the
 // check above compares BYTES to the bytes the surface rendered from, and
 // the rendering drew a string byte for byte — so '42' and 42 drew alike, a

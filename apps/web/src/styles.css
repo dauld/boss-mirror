@@ -2735,11 +2735,17 @@ button.manual-tree-node {
 .step-signed-keys-head { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); }
 .step-signed-keys-note { margin: 4px 0 8px; font-size: 12px; color: var(--text-dim); }
 .step-signed-keys dl { margin: 0; }
-.step-signed-key { font-family: var(--mono, monospace); font-size: 12px; font-weight: 600; margin-top: 6px; }
+/* A key name and a value keep every space they sign — break-spaces, so
+   even a trailing space at a wrap takes room. With no rule on the key,
+   'plan b' and 'plan  b' were laid out alike (backlog 7c53b1bf). */
+.step-signed-key {
+  font-family: var(--mono, monospace); font-size: 12px; font-weight: 600; margin-top: 6px;
+  white-space: break-spaces; overflow-wrap: anywhere;
+}
 .step-signed-keys dd { margin: 2px 0 0; }
 .step-signed-value {
   margin: 0; padding: 6px 8px; max-height: 18em; overflow: auto;
-  font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 12px; white-space: break-spaces; overflow-wrap: anywhere;
   background: var(--bg); border-radius: var(--radius);
 }
 /* The title and each value are drawn as their bytes (backlog 6093cf13):

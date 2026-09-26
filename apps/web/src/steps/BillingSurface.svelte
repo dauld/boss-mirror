@@ -1,17 +1,19 @@
 <script lang="ts">
   // Billing step — orchestrates invoice creation AND step completion
-  // atomically from the surface (no cross-domain call inside boss-jobs).
+  // from the surface (no cross-domain call inside boss-jobs).
   //
-  // Flow on click:
+  // Flow on click (`billing.ts`):
   //   1. POST /api/commerce/invoices/create — commerce emits the
   //      finance.invoice.issued fact; ledger projects a balanced
-  //      journal entry in the same tx.
-  //   2. PUT /api/jobs/{jobId}/steps/{step.id} — mark done + stash
-  //      `invoice_id` in metadata so the audit chain is click-
-  //      through-able.
+  //      journal entry in the same tx. The invoice id is the step's,
+  //      and an invoice already posted is not posted again, so a
+  //      second click after a refused step write bills once (558396ff).
+  //   2. The step completes with `invoice_id` in metadata so the audit
+  //      chain is click-through-able.
   // If #1 fails the step stays put and we render the error.
 
   import { isPending, isTerminal as _isTerminal, type StepStatus } from '../jobs/types';
+  import { postInvoiceAndComplete as postAndComplete } from './billing';
   import EntityLink from '@boss/web-kit/ui/EntityLink.svelte';
   import { formatMoney } from '@boss/web-kit/ui/money';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
@@ -93,60 +95,24 @@
     saving = true;
     errorMsg = null;
     try {
-      const invoiceId = `INV-${step.id.replace(/-/g, '').slice(0, 8)}-${Date.now().toString(36)}`;
-      const today = appToday();
       const dueOn = new Date(appNow().getTime() + 30 * 24 * 60 * 60 * 1000)
         .toISOString()
         .slice(0, 10);
-      const invoicePayload = {
-        id: invoiceId,
-        account_id: accountId,
-        issued_on: today,
-        due_on: dueOn,
-        paid_on: null,
-        status: 'outstanding',
-        amount_cents: amountCents,
+      const result = await postAndComplete({
+        jobId,
+        stepId: step.id,
+        accountId,
+        amountCents,
         currency,
-        line_items: [
-          {
-            id: `${invoiceId}-L1`,
-            invoice_id: invoiceId,
-            revenue_category: revenueCategory,
-            amount_cents: amountCents,
-            currency,
-            description,
-            ref_id: jobId,
-          },
-        ],
-      };
-
-      const invoiceResp = await fetch('/api/commerce/invoices/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(invoicePayload),
+        revenueCategory,
+        description,
+        issuedOn: appToday(),
+        dueOn,
       });
-      if (!invoiceResp.ok) {
-        throw new Error(
-          `invoice create failed: ${invoiceResp.status} ${await invoiceResp.text()}`,
-        );
+      if (result.kind === 'failed') {
+        errorMsg = result.error;
+        return;
       }
-
-      const stepResp = await fetch(`/api/jobs/${jobId}/steps/${step.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...step,
-          job_id: jobId,
-          status: 'completed',
-          metadata: { ...step.metadata, invoice_id: invoiceId },
-        }),
-      });
-      if (!stepResp.ok) {
-        throw new Error(
-          `step update failed: ${stepResp.status} ${await stepResp.text()}`,
-        );
-      }
-
       onUpdate();
     } catch (e) {
       errorMsg = e instanceof Error ? e.message : String(e);

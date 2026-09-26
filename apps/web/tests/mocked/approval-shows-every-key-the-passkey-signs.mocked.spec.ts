@@ -213,6 +213,30 @@ test('a hostile step is drawn as its bytes: title, key names and values', async 
   );
 });
 
+// Backlog 7c53b1bf (review of car fcda5f8b): the key column had no
+// white-space rule, so two keys the passkey signs apart — 'plan b' and
+// 'plan  b' — were laid out alike, and the toHaveText above could not
+// see it, because a string toHaveText normalises whitespace. innerText
+// follows the laid-out text, so it reads what the approver reads.
+test('two key names that differ only in spaces are laid out apart', async ({ page }) => {
+  const metadata = { ...METADATA, 'plan b': 'one', 'plan  b': 'two' };
+  await opsApproval(page, { metadata });
+  await page.goto(`/ux/jobs/${JOB_ID}`);
+  const surface = page.locator('.sg-detail');
+  const keys = Object.keys(metadata).sort();
+  await expect(surface.locator('.step-signed-key')).toHaveCount(keys.length);
+  const laidOut = await surface
+    .locator('.step-signed-key')
+    .evaluateAll((els) => els.map((e) => (e as HTMLElement).innerText));
+  expect(laidOut).toEqual(keys.map(signedText));
+  expect(laidOut).toContain('plan  b');
+  // A value keeps its inner spaces the same way.
+  const values = await surface
+    .locator('.step-signed-value')
+    .evaluateAll((els) => els.map((e) => (e as HTMLElement).innerText));
+  expect(values[keys.indexOf('plan')]).toBe(signedText(METADATA.plan));
+});
+
 test('a value that scrolls in its box says so; one that fits does not', async ({ page }) => {
   const plan = Array.from({ length: 80 }, (_, i) => `  line ${i} of the plan`).join('\n');
   await opsApproval(page, { metadata: { ...METADATA, plan } });

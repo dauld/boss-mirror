@@ -236,6 +236,123 @@ async fn done_dispatches_publish_authored_and_emits_kind_published_event() {
 }
 
 #[tokio::test]
+async fn a_publish_refused_as_stale_publishes_once_when_it_is_sent_again() {
+    // Backlog 558396ff, from the review of car 88123ae0. The registry
+    // write runs BEFORE the step write (so a refused publish never
+    // records a completed step), and since 88123ae0 the step write can
+    // be refused — 409, "nothing was written; send the same request
+    // again". The registry row HAD been written: each re-send published
+    // the same spec as one more version, retiring the one before it.
+    let kinds = Arc::new(InMemoryWorkflows::new());
+    let (app, jobs, _bus) = build_app(kinds.clone());
+    let spec = valid_spec("morning-brew");
+    let metadata = json!({ "workflow_spec": serde_json::to_value(&spec).unwrap() });
+    let (job_id, step_id) = seed_publish_step(jobs.as_ref(), metadata).await;
+
+    // A reviewer's note lands between the handler's read and its write.
+    let mut note = serde_json::Map::new();
+    note.insert("review_note".into(), json!("ship it"));
+    jobs.merge_after_next_read(&step_id, note);
+    let resp = put_step_done(&app, job_id, step_id, &user_header(&cto())).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "precondition");
+
+    let resp = put_step_done(&app, job_id, step_id, &user_header(&cto())).await;
+    assert!(
+        resp.status().is_success(),
+        "the re-send completes the step, got {}",
+        resp.status()
+    );
+
+    let live = kinds.get_active("morning-brew").await.expect("active");
+    assert_eq!(
+        live.version, 1,
+        "one publish step, one published version — not one per attempt"
+    );
+    let published = kinds
+        .recorded_events()
+        .iter()
+        .filter(|e| e.kind == WORKFLOW_PUBLISHED)
+        .count();
+    assert_eq!(published, 1, "and one jobs.kind.published");
+    let step = jobs.get_step(&step_id).await.unwrap().unwrap();
+    assert_eq!(step.status, StepStatus::Completed);
+}
+
+#[tokio::test]
+async fn a_resend_after_the_spec_was_edited_publishes_the_edited_spec() {
+    // The round-2 review of car 983696b5 (SF3): the re-send answer was
+    // keyed on the authoring packet alone. A publish refused as stale
+    // had written v1; the spec on the step was then edited; the re-send
+    // found v1 authored by this packet, answered it, and completed the
+    // step recording a spec the registry never published. Only the SAME
+    // spec is answered with the earlier publish.
+    let kinds = Arc::new(InMemoryWorkflows::new());
+    let (app, jobs, _bus) = build_app(kinds.clone());
+    let spec = valid_spec("morning-brew");
+    let metadata = json!({ "workflow_spec": serde_json::to_value(&spec).unwrap() });
+    let (job_id, step_id) = seed_publish_step(jobs.as_ref(), metadata).await;
+
+    let mut note = serde_json::Map::new();
+    note.insert("review_note".into(), json!("one more change"));
+    jobs.merge_after_next_read(&step_id, note);
+    let resp = put_step_done(&app, job_id, step_id, &user_header(&cto())).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "precondition");
+    assert_eq!(
+        kinds
+            .get_active("morning-brew")
+            .await
+            .expect("active")
+            .label,
+        "Morning Brew",
+        "precondition: the refused attempt's publish stands"
+    );
+
+    let mut edited = spec.clone();
+    edited.label = "Morning Brew, revised".into();
+    let mut step = jobs.get_step(&step_id).await.unwrap().unwrap();
+    step.metadata["workflow_spec"] = serde_json::to_value(&edited).unwrap();
+    jobs.update_step(&step).await.unwrap();
+
+    let resp = put_step_done(&app, job_id, step_id, &user_header(&cto())).await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let live = kinds.get_active("morning-brew").await.expect("active");
+    assert_eq!(
+        live.label, "Morning Brew, revised",
+        "the registry holds the spec the completed step records"
+    );
+    assert_eq!(live.version, 2, "published as a new version, not answered");
+}
+
+#[tokio::test]
+async fn an_earlier_version_by_another_packet_is_not_mistaken_for_this_publish() {
+    // The idempotence key is the AUTHORING PACKET, not the kind: a kind
+    // already active from someone else's design is published over, as
+    // it always was.
+    let kinds = Arc::new(InMemoryWorkflows::new());
+    let other = boss_core::job::JobId::new();
+    kinds
+        .publish_authored(
+            valid_spec("morning-brew"),
+            other,
+            &boss_core::actor::ActorId::Human("emp-other".into()),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("an earlier publish by another packet");
+    let (app, jobs, _bus) = build_app(kinds.clone());
+    let metadata = json!({
+        "workflow_spec": serde_json::to_value(valid_spec("morning-brew")).unwrap(),
+    });
+    let (job_id, step_id) = seed_publish_step(jobs.as_ref(), metadata).await;
+
+    let resp = put_step_done(&app, job_id, step_id, &user_header(&cto())).await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let live = kinds.get_active("morning-brew").await.expect("active");
+    assert_eq!(live.version, 2);
+    assert_eq!(live.authoring_job_id, Some(*job_id.inner().as_uuid()));
+}
+
+#[tokio::test]
 async fn missing_workflow_spec_metadata_returns_400_no_publish() {
     let kinds = Arc::new(InMemoryWorkflows::new());
     let (app, jobs, _bus) = build_app(kinds.clone());

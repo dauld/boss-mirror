@@ -11,6 +11,8 @@
   import StatusChip from '@boss/web-kit/ui/StatusChip.svelte';
   import FileAttachments from '../content/FileAttachments.svelte';
   import CalendarFeedSection from './CalendarFeedSection.svelte';
+  import { calendarFeedAccess } from './calendarFeedAccess';
+  import { session } from '@boss/web-kit/session/session.svelte';
   import { classLabel, employeeRecordRead, employmentTone, type Employee } from './types';
   import { directReports, tenureYears } from './utils';
   import { href } from '../router';
@@ -121,6 +123,12 @@
   function certLabel(s: CertState): string {
     return s === 'critical' ? '< 30d' : s === 'expiring' ? '< 90d' : 'valid';
   }
+
+  // The feed URL is the employee's alone; an operator gets a revoke
+  // control and everyone else nothing (backlog 7ae9ccec).
+  let feedAccess = $derived(
+    calendarFeedAccess(session.value.kind === 'ready' ? session.value.user : null, empId),
+  );
 
   function isFieldServiceRole(role: Employee['role']): boolean {
     return role === 'service-tech' || role === 'service-mgr';
@@ -293,8 +301,8 @@
           </p>
       </Section>
 
-      {#if isFieldServiceRole(e.role)}
-        <CalendarFeedSection empId={e.id} />
+      {#if isFieldServiceRole(e.role) && feedAccess !== 'none'}
+        <CalendarFeedSection empId={e.id} access={feedAccess} />
       {/if}
 
       <Section title="Attachments" wide>

@@ -11,12 +11,21 @@
 //! Behaviour intentionally narrow:
 //!
 //! - `pending/ready → active` with all three fields present →
-//!   `calendar.reserve(...)`. Conflict surfaces to the caller as
+//!   `calendar.reserve(...)`, BEFORE the step write
+//!   ([`apply_step_transition`]). Conflict surfaces to the caller as
 //!   409 in the HTTP layer; this module returns the error so the
 //!   handler can decide.
-//! - `active → skipped` → `calendar.cancel_by_reason(...)`.
-//!   Errors logged but not surfaced — cancellation should never
-//!   block a step transition (the cleanup is best-effort).
+//! - `active → skipped` → `calendar.cancel_by_reason(...)`, AFTER the
+//!   step write landed ([`after_step_written`]). Errors logged but not
+//!   surfaced — cancellation should never block a step transition (the
+//!   cleanup is best-effort).
+//!
+//! Every undo here undoes only what its OWN attempt did (the review of
+//! car 983696b5, backlog 558396ff, 2026-09-25). A refused write hands
+//! back the one reservation it made, by that reservation's id — never
+//! every hold keyed on the step, which includes the hold of a start
+//! that raced it and landed. A release that runs before its write runs
+//! for a write that may never land, so the skip's release runs after.
 //! - Calendar client `None` → no-op. Lets boss-jobs-api deploy
 //!   independently of the calendar service rollout.
 //!
@@ -30,7 +39,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use boss_calendar_client::{CalendarClient, CalendarClientError};
-use boss_core::calendar::{ReservationRequest, ReservationStrength, TimeWindow, reason};
+use boss_core::calendar::{
+    Reservation, ReservationId, ReservationRequest, ReservationStrength, TimeWindow, reason,
+};
 use boss_core::job::{Step, StepStatus, Subject};
 
 /// What the hook decided to do given (old, new) statuses + step
@@ -42,8 +53,18 @@ pub enum HookOutcome {
     /// the transition isn't one we hook on, or the step lacks the
     /// required scheduling fields.
     NoOp,
-    /// A reservation was successfully created on the calendar.
-    Reserved,
+    /// A reservation was successfully created on the calendar — this
+    /// one, which is the only hold a refused write may hand back.
+    Reserved(ReservationId),
+    /// The step's own hold on exactly this subject and window already
+    /// stands: left by a start that landed, or by an attempt that died
+    /// between its reservation and its write — or placed by a start
+    /// racing this one, whose write may yet be refused and hand it back.
+    /// Nothing was created, so nothing is owned and nothing is handed
+    /// back (558396ff); a write that LANDS on it re-asserts it
+    /// ([`hold_for_landed_start`]), because the hold it counted on is
+    /// not its own to keep.
+    AlreadyHeld,
     /// The hook attempted a reservation but the calendar said
     /// there's a conflict. The handler should translate this to
     /// 409 with the existing rows from the error payload.
@@ -54,10 +75,12 @@ pub enum HookOutcome {
     Cancelled { count: usize },
 }
 
-/// Apply the calendar hook for a single step transition.
+/// Apply the calendar hook for a single step transition, BEFORE the
+/// step write: the reservation, so a hard conflict refuses the write
+/// with nothing stored. The release on a skip is not here — it runs
+/// once the write has landed ([`after_step_written`]).
 ///
-/// `actor` is recorded as `created_by` on a reservation creation
-/// or surfaces as the cancellation actor.
+/// `actor` is recorded as `created_by` on a reservation creation.
 pub async fn apply_step_transition(
     calendar: Option<&Arc<dyn CalendarClient>>,
     old: &Step,
@@ -68,70 +91,241 @@ pub async fn apply_step_transition(
         return Ok(HookOutcome::NoOp);
     };
 
-    let entering_progress = old.status != StepStatus::Active && new.status == StepStatus::Active;
-    // A reservation only exists when the step has been Active (made
-    // by the entering_progress branch above). Cancel it when an
-    // Active step is Skipped (an abandoned branch). Completed
-    // deliberately retains the reservation as a historical record of
-    // past work (see done_does_not_cancel test below). v2 has no
-    // Blocked state, so there's no pause/re-reserve arc — a step
-    // waiting on a dependency is simply Pending and never held a
-    // reservation in the first place.
-    let leaving_active = old.status == StepStatus::Active && new.status == StepStatus::Skipped;
-
-    if entering_progress {
-        let Some((scheduled_at, duration_minutes, assignee_id)) = scheduling_fields(new) else {
-            return Ok(HookOutcome::NoOp);
-        };
-        let end =
-            scheduled_at + chrono::Duration::milliseconds((duration_minutes * 60_000.0) as i64);
-        let window = match TimeWindow::new(scheduled_at, end) {
-            Ok(w) => w,
-            Err(msg) => {
-                return Err(CalendarClientError::Invalid(msg.to_string()));
-            }
-        };
-        let req = ReservationRequest {
-            subject: Subject::new("employee", assignee_id),
-            window,
-            reason_kind: reason::JOB_STEP.to_string(),
-            reason_ref_id: new.id.to_string(),
-            strength: ReservationStrength::Hard,
-            notes: None,
-            created_by: actor.to_string(),
-        };
-        match calendar.reserve(req).await {
-            Ok(_) => return Ok(HookOutcome::Reserved),
-            Err(CalendarClientError::Conflict { existing }) => {
-                return Ok(HookOutcome::Conflict {
-                    existing_rows: existing,
-                });
-            }
-            Err(other) => return Err(other),
-        }
+    // From an OPEN status only. A terminal step never enters progress —
+    // the handler refuses the write that would move it — and this hook
+    // runs before that refusal, so reserving for it left a hold behind
+    // a write that never happened (backlog 558396ff).
+    let entering_progress = matches!(old.status, StepStatus::Pending | StepStatus::Ready)
+        && new.status == StepStatus::Active;
+    if !entering_progress {
+        return Ok(HookOutcome::NoOp);
     }
+    match start_request(new, actor)? {
+        Some(req) => reserve_as_the_step(calendar, req).await,
+        None => Ok(HookOutcome::NoOp),
+    }
+}
 
-    if leaving_active {
-        // Best-effort cancellation. Never surface errors here —
-        // the caller has already decided to waive/block; we don't
-        // want a flaky calendar to wedge that.
-        match calendar
-            .cancel_by_reason(reason::JOB_STEP, &new.id.to_string(), actor)
-            .await
+/// The hold a start of `step` asks for: its assignee, over its window,
+/// keyed on the step. `None` when the step lacks a complete schedule.
+fn start_request(
+    step: &Step,
+    actor: &str,
+) -> Result<Option<ReservationRequest>, CalendarClientError> {
+    let Some((scheduled_at, duration_minutes, assignee_id)) = scheduling_fields(step) else {
+        return Ok(None);
+    };
+    let end = scheduled_at + chrono::Duration::milliseconds((duration_minutes * 60_000.0) as i64);
+    let window = TimeWindow::new(scheduled_at, end)
+        .map_err(|msg| CalendarClientError::Invalid(msg.to_string()))?;
+    Ok(Some(ReservationRequest {
+        subject: Subject::new("employee", assignee_id),
+        window,
+        reason_kind: reason::JOB_STEP.to_string(),
+        reason_ref_id: step.id.to_string(),
+        strength: ReservationStrength::Hard,
+        notes: None,
+        created_by: actor.to_string(),
+    }))
+}
+
+/// Reserve `req` for its step, taking the step's own hold on exactly
+/// that time as held rather than as a conflict.
+async fn reserve_as_the_step(
+    calendar: &Arc<dyn CalendarClient>,
+    req: ReservationRequest,
+) -> Result<HookOutcome, CalendarClientError> {
+    match calendar.reserve(req.clone()).await {
+        Ok(id) => Ok(HookOutcome::Reserved(id)),
+        // THE STEP'S OWN HOLD ON THIS TIME IS NOT A CONFLICT (backlog
+        // 558396ff). A start refused as stale (car 88123ae0 made that an
+        // ordinary answer — "send it again") or cut off between its
+        // reservation and its write can leave this exact hold behind,
+        // and a re-send refused against it could never start the step.
+        // It is taken as the step's hold, and NOTHING is released: a
+        // start that raced this one and landed left the same hold, and
+        // the review of car 983696b5 found the earlier fix — release
+        // every hold keyed on the step, then reserve — erasing it, so a
+        // refused racer left the landed start's Active step holding
+        // nothing. A hold on other time, or anyone else's, still refuses.
+        Err(CalendarClientError::Conflict { existing })
+            if !existing.is_empty() && existing.iter().all(|r| is_this_hold(r, &req)) =>
         {
-            Ok(count) => return Ok(HookOutcome::Cancelled { count }),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    step_id = %new.id,
-                    "calendar cancel-by-reason failed; ignoring"
-                );
-                return Ok(HookOutcome::Cancelled { count: 0 });
-            }
+            Ok(HookOutcome::AlreadyHeld)
+        }
+        Err(CalendarClientError::Conflict { existing }) => Ok(HookOutcome::Conflict {
+            existing_rows: existing,
+        }),
+        Err(other) => Err(other),
+    }
+}
+
+/// Whether `held` is the very hold `req` asks for: the same step, the
+/// same person, the same window.
+fn is_this_hold(held: &Reservation, req: &ReservationRequest) -> bool {
+    held.reason_kind == req.reason_kind
+        && held.reason_ref_id == req.reason_ref_id
+        && held.subject == req.subject
+        && held.window == req.window
+}
+
+/// The calendar half of a step write that LANDED: `stored` is the row
+/// as that write stored it. The handler's write is judged on the row
+/// version its read saw (backlog 6ec22d71), so a write that answered Ok
+/// stored exactly the row it computed.
+///
+/// A reservation only exists when the step has been Active. Cancel it
+/// when an Active step is Skipped (an abandoned branch). Completed
+/// deliberately retains the reservation as a historical record of past
+/// work (see `done_does_not_cancel` below). v2 has no Blocked state, so
+/// there's no pause/re-reserve arc — a step waiting on a dependency is
+/// simply Pending and never held a reservation in the first place.
+///
+/// AFTER THE WRITE (backlog 558396ff). This ran before the write, so a
+/// skip refused as stale released the hold of a step that stayed
+/// Active, and a skip that a completion overtook released the hold that
+/// is the completed step's record.
+///
+/// Best-effort: never surfaces an error — the step has already moved,
+/// and a flaky calendar must not wedge that.
+pub async fn after_step_written(
+    calendar: Option<&Arc<dyn CalendarClient>>,
+    old: &Step,
+    stored: &Step,
+    actor: &str,
+) -> HookOutcome {
+    let Some(calendar) = calendar else {
+        return HookOutcome::NoOp;
+    };
+    if !(old.status == StepStatus::Active && stored.status == StepStatus::Skipped) {
+        return HookOutcome::NoOp;
+    }
+    match calendar
+        .cancel_by_reason(reason::JOB_STEP, &stored.id.to_string(), actor)
+        .await
+    {
+        Ok(count) => HookOutcome::Cancelled { count },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                step_id = %stored.id,
+                "calendar cancel-by-reason failed; ignoring"
+            );
+            HookOutcome::Cancelled { count: 0 }
         }
     }
+}
 
-    Ok(HookOutcome::NoOp)
+/// Undo a [`HookOutcome::Reserved`] whose step write was then refused
+/// (backlog 558396ff). The hook reserves BEFORE the write so a conflict
+/// refuses with nothing stored; the price is that a write refused after
+/// it — the stale-read 409, a storage error — must hand the hold back,
+/// or the refusal's "nothing was written" is untrue of the calendar.
+///
+/// BY ITS ID, NEVER BY THE STEP. Every hold on this step carries the
+/// same reason key, including one a racing start placed and whose write
+/// landed; a release by reason erased that one too (the review of car
+/// 983696b5). The id is the hold this attempt made and nothing else.
+///
+/// THE LANDED ROW DECIDES (the round-2 review of car 983696b5). The
+/// write that refused this one may be the start this attempt's own
+/// reservation let through: a racing start found that reservation on
+/// the same step, person and window, took it as the step's hold
+/// ([`HookOutcome::AlreadyHeld`]), placed nothing, and landed. Handing
+/// it back then left an Active step holding no time. So `read_stored`
+/// — the step as the store holds it now — is consulted twice:
+///
+/// - BEFORE the release: a step that is Active over exactly the time
+///   this attempt reserved keeps the reservation; it is that step's
+///   hold now, and nothing is cancelled.
+/// - AFTER it: a start that landed between that read and the cancel is
+///   re-held ([`hold_for_landed_start`]). With the landed start's own
+///   re-assertion that closes the race in either order — whichever of
+///   the two runs last finds the step Active and no hold, and places one.
+///
+/// Best-effort like the skip's release: the refusal is already the
+/// answer, and a hold this misses is the step's own — its re-send takes
+/// it as [`HookOutcome::AlreadyHeld`] rather than refusing against it.
+pub async fn release_after_refused_write<F, Fut>(
+    calendar: Option<&Arc<dyn CalendarClient>>,
+    reservation: ReservationId,
+    attempted: &Step,
+    actor: &str,
+    read_stored: F,
+) where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Option<Step>>,
+{
+    let Some(calendar) = calendar else {
+        return;
+    };
+    let holds_this_time = |stored: &Step| {
+        stored.status == StepStatus::Active
+            && scheduling_fields(stored).is_some()
+            && scheduling_fields(stored) == scheduling_fields(attempted)
+    };
+    if read_stored().await.is_some_and(|s| holds_this_time(&s)) {
+        return;
+    }
+    if let Err(e) = calendar.cancel(reservation, actor).await {
+        tracing::warn!(
+            error = %e,
+            step_id = %attempted.id,
+            "calendar: could not release the reservation of a refused step write"
+        );
+    }
+    if let Some(stored) = read_stored().await {
+        hold_for_landed_start(Some(calendar), &stored, actor).await;
+    }
+}
+
+/// Re-assert the hold of a step that is Active as stored: reserve its
+/// time, taking its own hold on exactly that time as already held.
+///
+/// For a start that LANDED without a reservation of its own — its hook
+/// answered [`HookOutcome::AlreadyHeld`], on a hold a racing start had
+/// placed — and for a refused racer that finds such a start landed
+/// after it handed its reservation back (backlog 558396ff, the round-2
+/// review of car 983696b5). Either way the step is Active and the hold
+/// it counted on belonged to an attempt that may have released it.
+///
+/// Best-effort: the step has already moved; a failure is logged. A
+/// step not Active, or without a complete schedule, holds nothing.
+pub async fn hold_for_landed_start(
+    calendar: Option<&Arc<dyn CalendarClient>>,
+    stored: &Step,
+    actor: &str,
+) -> HookOutcome {
+    let Some(calendar) = calendar else {
+        return HookOutcome::NoOp;
+    };
+    if stored.status != StepStatus::Active {
+        return HookOutcome::NoOp;
+    }
+    let outcome = match start_request(stored, actor) {
+        Ok(Some(req)) => reserve_as_the_step(calendar, req).await,
+        Ok(None) => return HookOutcome::NoOp,
+        Err(e) => Err(e),
+    };
+    match outcome {
+        Ok(HookOutcome::Conflict { existing_rows }) => {
+            tracing::warn!(
+                step_id = %stored.id,
+                existing = existing_rows.len(),
+                "calendar: an Active step's time is held by another reservation"
+            );
+            HookOutcome::Conflict { existing_rows }
+        }
+        Ok(held) => held,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                step_id = %stored.id,
+                "calendar: could not re-assert the hold of an Active step"
+            );
+            HookOutcome::NoOp
+        }
+    }
 }
 
 /// Pull (scheduled_at, duration_minutes, assignee_id) out of step
@@ -249,7 +443,7 @@ mod tests {
         let out = apply_step_transition(Some(&cal), &old, &new, "svc-mgr")
             .await
             .unwrap();
-        assert_eq!(out, HookOutcome::Reserved);
+        assert!(matches!(out, HookOutcome::Reserved(_)), "{out:?}");
     }
 
     #[tokio::test]
@@ -277,7 +471,7 @@ mod tests {
         let out = apply_step_transition(Some(&cal), &old, &new, "emp-1")
             .await
             .unwrap();
-        assert_eq!(out, HookOutcome::Reserved);
+        assert!(matches!(out, HookOutcome::Reserved(_)), "{out:?}");
 
         let calls = fake.calls();
         let Some(FakeCall::Reserve(req)) = calls.last() else {
@@ -381,9 +575,15 @@ mod tests {
         );
         let mut new = old.clone();
         new.status = StepStatus::Skipped;
+        // Nothing before the write: a skip that is then refused must
+        // not have released the hold of a step that stays Active.
         let out = apply_step_transition(Some(&cal), &old, &new, "test")
             .await
             .unwrap();
+        assert_eq!(out, HookOutcome::NoOp);
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+
+        let out = after_step_written(Some(&cal), &old, &new, "test").await;
         assert_eq!(out, HookOutcome::Cancelled { count: 2 });
 
         let calls = fake.calls();
@@ -391,6 +591,25 @@ mod tests {
             calls.last(),
             Some(FakeCall::CancelByReason(kind, _, _)) if kind.as_str() == reason::JOB_STEP
         ));
+    }
+
+    #[tokio::test]
+    async fn a_skip_whose_row_stayed_completed_releases_nothing() {
+        // The skip read the step Active; a completion landed first, and
+        // a terminal row does not move. The stored row decides.
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let old = step_with(
+            StepStatus::Active,
+            Some("emp-1"),
+            Some("2026-04-27T10:00:00Z"),
+            Some(120.0),
+        );
+        let mut stored = old.clone();
+        stored.status = StepStatus::Completed;
+        let out = after_step_written(Some(&cal), &old, &stored, "test").await;
+        assert_eq!(out, HookOutcome::NoOp);
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
     }
 
     #[tokio::test]
@@ -411,7 +630,217 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out, HookOutcome::NoOp);
+        assert_eq!(
+            after_step_written(Some(&cal), &old, &new, "test").await,
+            HookOutcome::NoOp
+        );
         assert!(fake.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_terminal_step_asked_to_start_reserves_nothing() {
+        // The handler refuses to move a terminal step, but only AFTER
+        // this hook runs — so a reservation made here would outlive the
+        // refused write (backlog 558396ff). And a Completed step's own
+        // reservation is its record of past work: the residue release
+        // must never reach it.
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        for terminal in [StepStatus::Completed, StepStatus::Skipped] {
+            let old = step_with(
+                terminal,
+                Some("emp-1"),
+                Some("2026-04-27T10:00:00Z"),
+                Some(120.0),
+            );
+            let mut new = old.clone();
+            new.status = StepStatus::Active;
+            let out = apply_step_transition(Some(&cal), &old, &new, "test")
+                .await
+                .unwrap();
+            assert_eq!(out, HookOutcome::NoOp);
+        }
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+    }
+
+    /// A start of `step` from Ready, and the hold such a start places —
+    /// as a row the calendar would hand back in a conflict.
+    fn a_start_and_its_hold(step_id_owner: Option<&str>) -> (Step, Step, Reservation) {
+        let old = step_with(
+            StepStatus::Ready,
+            Some("emp-1"),
+            Some("2026-04-27T10:00:00Z"),
+            Some(120.0),
+        );
+        let mut new = old.clone();
+        new.status = StepStatus::Active;
+        let start = DateTime::parse_from_rfc3339("2026-04-27T10:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let held = Reservation {
+            id: ReservationId::new(),
+            subject: Subject::new("employee", "emp-1"),
+            window: TimeWindow::new(start, start + chrono::Duration::minutes(120)).unwrap(),
+            reason_kind: reason::JOB_STEP.to_string(),
+            reason_ref_id: step_id_owner
+                .map(String::from)
+                .unwrap_or_else(|| new.id.to_string()),
+            strength: ReservationStrength::Hard,
+            notes: None,
+            created_by: "emp-1".into(),
+            created_at: start,
+            cancelled_at: None,
+        };
+        (old, new, held)
+    }
+
+    #[tokio::test]
+    async fn a_start_releases_nothing_before_it_reserves() {
+        // The review of car 983696b5 (backlog 558396ff): a start that
+        // released every hold keyed on its step before reserving erased
+        // the hold of a racing start that had LANDED. It reserves, only.
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let (old, new, _) = a_start_and_its_hold(None);
+        let out = apply_step_transition(Some(&cal), &old, &new, "emp-1")
+            .await
+            .unwrap();
+        assert!(matches!(out, HookOutcome::Reserved(_)), "{out:?}");
+        let calls = fake.calls();
+        assert!(
+            matches!(
+                calls.as_slice(),
+                [FakeCall::Reserve(req)] if req.reason_ref_id == new.id.to_string()
+            ),
+            "one reserve and no cancel: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_steps_own_hold_on_the_same_time_is_already_held() {
+        let fake = Arc::new(FakeCalendarClient::new());
+        let (old, new, held) = a_start_and_its_hold(None);
+        fake.stage_conflict(vec![held]);
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let out = apply_step_transition(Some(&cal), &old, &new, "emp-1")
+            .await
+            .unwrap();
+        assert_eq!(out, HookOutcome::AlreadyHeld);
+        assert!(
+            fake.calls()
+                .iter()
+                .all(|c| matches!(c, FakeCall::Reserve(_))),
+            "taken as held, nothing released: {:?}",
+            fake.calls()
+        );
+    }
+
+    #[tokio::test]
+    async fn another_steps_hold_or_other_time_still_conflicts() {
+        let (old, new, anothers) = a_start_and_its_hold(Some("another-step"));
+        let (_, _, mut own_elsewhere) = a_start_and_its_hold(None);
+        own_elsewhere.reason_ref_id = new.id.to_string();
+        own_elsewhere.window = TimeWindow::new(
+            own_elsewhere.window.start + chrono::Duration::minutes(30),
+            own_elsewhere.window.end + chrono::Duration::minutes(30),
+        )
+        .unwrap();
+        for staged in [vec![anothers], vec![own_elsewhere], vec![]] {
+            let fake = Arc::new(FakeCalendarClient::new());
+            fake.stage_conflict(staged.clone());
+            let cal: Arc<dyn CalendarClient> = fake;
+            let out = apply_step_transition(Some(&cal), &old, &new, "emp-1")
+                .await
+                .unwrap();
+            assert!(
+                matches!(out, HookOutcome::Conflict { .. }),
+                "{staged:?} -> {out:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_write_hands_back_its_own_reservation_by_id() {
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let (old, new, _) = a_start_and_its_hold(None);
+        let mine = ReservationId::new();
+        // The row stayed Ready: whatever refused the write, no start landed.
+        let reads = stored_reads([Some(old.clone()), Some(old)]);
+        release_after_refused_write(Some(&cal), mine, &new, "emp-1", reads).await;
+        let calls = fake.calls();
+        assert!(
+            matches!(calls.as_slice(), [FakeCall::Cancel(id, _)] if *id == mine),
+            "by id, never by the step's reason key: {calls:?}"
+        );
+    }
+
+    /// A `read_stored` that answers `rows` in order, then nothing.
+    fn stored_reads<const N: usize>(
+        rows: [Option<Step>; N],
+    ) -> impl Fn() -> std::future::Ready<Option<Step>> {
+        let rows = std::sync::Mutex::new(std::collections::VecDeque::from(rows));
+        move || std::future::ready(rows.lock().unwrap().pop_front().flatten())
+    }
+
+    #[tokio::test]
+    async fn a_refused_start_keeps_its_reservation_for_the_start_it_let_through() {
+        // The round-2 review of car 983696b5 (backlog 558396ff): the
+        // write that refused this start was a racing start that took this
+        // one's reservation as the step's hold and landed. The step is
+        // Active over exactly that time: the reservation is its hold now.
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let (_, new, _) = a_start_and_its_hold(None);
+        let reads = stored_reads([Some(new.clone())]);
+        release_after_refused_write(Some(&cal), ReservationId::new(), &new, "emp-1", reads).await;
+        assert!(fake.calls().is_empty(), "kept: {:?}", fake.calls());
+    }
+
+    #[tokio::test]
+    async fn a_start_landing_after_the_refused_one_read_the_row_is_held_again() {
+        // The racing start landed between the refused write's read and
+        // its cancel: the cancel removed the only hold, so the second
+        // read finds the step Active and holds its time again.
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let (old, new, _) = a_start_and_its_hold(None);
+        let mine = ReservationId::new();
+        let reads = stored_reads([Some(old), Some(new.clone())]);
+        release_after_refused_write(Some(&cal), mine, &new, "emp-1", reads).await;
+        let calls = fake.calls();
+        assert!(
+            matches!(
+                calls.as_slice(),
+                [FakeCall::Cancel(id, _), FakeCall::Reserve(req)]
+                    if *id == mine && req.reason_ref_id == new.id.to_string()
+            ),
+            "{calls:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_landed_start_re_asserts_only_an_active_steps_hold() {
+        let fake = Arc::new(FakeCalendarClient::new());
+        let cal: Arc<dyn CalendarClient> = fake.clone();
+        let (old, new, held) = a_start_and_its_hold(None);
+        // Ready: nothing to hold.
+        assert_eq!(
+            hold_for_landed_start(Some(&cal), &old, "emp-1").await,
+            HookOutcome::NoOp
+        );
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+        // Active, its hold gone: placed again.
+        assert!(matches!(
+            hold_for_landed_start(Some(&cal), &new, "emp-1").await,
+            HookOutcome::Reserved(_)
+        ));
+        // Active, its hold standing: taken as held, nothing doubled.
+        fake.stage_conflict(vec![held]);
+        assert_eq!(
+            hold_for_landed_start(Some(&cal), &new, "emp-1").await,
+            HookOutcome::AlreadyHeld
+        );
     }
 
     #[tokio::test]

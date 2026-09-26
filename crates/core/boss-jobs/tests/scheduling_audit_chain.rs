@@ -128,6 +128,7 @@ async fn scheduling_writes_survive_rebuild() {
 
     // 4. Calendar token rotation.
     TestRequest::post("/api/scheduling/techs/emp-tech-001/calendar-token")
+        .as_user("emp-tech-001", "service-tech")
         .json(&json!({}))
         .send(&app)
         .await
@@ -282,6 +283,7 @@ async fn scheduling_rebuild_is_byte_identical() {
     // Calendar token minted (the mint used to stamp NOW() into
     // created_at on both the live insert and the replay).
     TestRequest::post("/api/scheduling/techs/emp-tech-002/calendar-token")
+        .as_user("emp-tech-002", "service-tech")
         .json(&json!({}))
         .send(&app)
         .await

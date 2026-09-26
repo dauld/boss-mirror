@@ -359,6 +359,24 @@ pub(super) async fn add_step<R: JobsRepository + 'static, B: EventBus + 'static>
 /// on its own (a pre-check in one caller protects only that caller).
 /// A refusal arrives as `WorkflowError::Unviable` and leaves as 422
 /// with the problem list, matching `POST /api/workflows/{kind}/publish`.
+/// `spec` as the registry would hold it had it been published as
+/// `row`: the fields the registry writes on a publish (`version`,
+/// `status`, `created_at`, `authoring_job_id`) taken from `row`, every
+/// authored field from `spec` — so `row == published_as(spec, row)`
+/// says `row` IS the publish of `spec` (backlog 558396ff, SF3).
+fn published_as(
+    spec: &crate::registry::WorkflowSpec,
+    row: &crate::registry::WorkflowSpec,
+) -> crate::registry::WorkflowSpec {
+    crate::registry::WorkflowSpec {
+        version: row.version,
+        status: row.status,
+        created_at: row.created_at,
+        authoring_job_id: row.authoring_job_id,
+        ..spec.clone()
+    }
+}
+
 async fn dispatch_workflow_publish(
     registry: &dyn crate::registry::WorkflowRegistry,
     step: &boss_core::job::Step,
@@ -378,6 +396,25 @@ async fn dispatch_workflow_publish(
                 format!("`workflow_spec` did not deserialize as WorkflowSpec: {e}"),
             )
         })?;
+
+    // PUBLISHED ONCE PER AUTHORING PACKET (backlog 558396ff). This runs
+    // before the step write, and since car 88123ae0 that write can be
+    // refused as stale — "nothing was written; send the same request
+    // again" — AFTER this registry row was written. Each re-send then
+    // published the same spec as one more version, retiring the last.
+    // The row carries the packet that authored it, so a re-send finds
+    // its own publish active and answers it instead of writing another —
+    // but only a re-send of the SAME spec (the round-2 review of car
+    // 983696b5, SF3). Keyed on the packet alone, a spec edited between
+    // the refused attempt and its re-send was answered with the earlier
+    // publish, and the step completed recording a spec the registry
+    // never published. A different spec is a new publish.
+    if let Ok(active) = registry.get_active(&spec.kind).await
+        && active.authoring_job_id == Some(*job_id.inner().as_uuid())
+        && active == published_as(&spec, &active)
+    {
+        return Ok(active);
+    }
 
     registry
         .publish_authored(spec, job_id, actor, now)
@@ -1562,7 +1599,14 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // write so a hard-conflict 409 doesn't leave the step in the
     // new in-progress state without a reservation. The hook is a
     // no-op when calendar isn't configured or the step lacks the
-    // scheduling metadata.
+    // scheduling metadata. A reservation it makes is handed back, by
+    // its id, if the write below is refused (`reserved`, backlog
+    // 558396ff); the skip's release runs after the write lands. A hold
+    // it found already standing (`took_held`) is not this write's, so a
+    // write that lands on it re-asserts it (the round-2 review of car
+    // 983696b5).
+    let mut reserved = None;
+    let mut took_held = false;
     match crate::calendar_hook::apply_step_transition(
         state.calendar.as_ref(),
         &old,
@@ -1571,6 +1615,8 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     )
     .await
     {
+        Ok(crate::calendar_hook::HookOutcome::Reserved(id)) => reserved = Some(id),
+        Ok(crate::calendar_hook::HookOutcome::AlreadyHeld) => took_held = true,
         Ok(crate::calendar_hook::HookOutcome::Conflict { existing_rows }) => {
             return (
                 StatusCode::CONFLICT,
@@ -1859,12 +1905,53 @@ pub(super) async fn update_step<R: JobsRepository + 'static, B: EventBus + 'stat
     // Judged on the row's VERSION, not its metadata (backlog 6ec22d71):
     // a claim moves status and holder and no metadata, and this write
     // computed before it wrote `ready` and its own holder back over it.
-    match state
+    let written = state
         .jobs
         .update_step_if_unchanged_at(&step, old_version, stamp.timestamp, &step_events)
-        .await
-    {
-        Ok(()) => {}
+        .await;
+    // "Nothing was written" must be true of the calendar too: a
+    // reservation made above for a write that did not land is handed
+    // back, or the re-send the 409 asks for collides with it (558396ff).
+    // That reservation and no other: a racing start that landed holds
+    // the same step's time, and its hold is not this refusal's to undo.
+    // And not even that one when the start that refused this write is
+    // Active on it — the row as stored decides (round-2 review, 983696b5).
+    if let (Err(_), Some(id)) = (&written, reserved) {
+        let jobs = &state.jobs;
+        let sid = step.id;
+        crate::calendar_hook::release_after_refused_write(
+            state.calendar.as_ref(),
+            id,
+            &step,
+            &user.id,
+            move || async move { jobs.get_step(&sid).await.ok().flatten() },
+        )
+        .await;
+    }
+    match written {
+        // Landed over the very row `old` was read as, so `step` is what
+        // is stored: a skip releases the step's hold only now (558396ff).
+        // Before the write, a skip then refused — stale, or a completion
+        // landed under it — released the hold of a step it never moved.
+        // A start that landed on a hold it did not place re-asserts it:
+        // the racer that placed it may be refused and hand it back.
+        Ok(()) => {
+            if took_held {
+                crate::calendar_hook::hold_for_landed_start(
+                    state.calendar.as_ref(),
+                    &step,
+                    &user.id,
+                )
+                .await;
+            }
+            crate::calendar_hook::after_step_written(
+                state.calendar.as_ref(),
+                &old,
+                &step,
+                &user.id,
+            )
+            .await;
+        }
         Err(crate::port::JobsError::StepChanged { .. }) => {
             return (
                 StatusCode::CONFLICT,

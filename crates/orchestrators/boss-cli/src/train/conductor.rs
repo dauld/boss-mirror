@@ -22,6 +22,16 @@ pub(super) struct Conductor {
     policy: DeliveryPolicy,
 }
 
+/// The conductor as a car writer's door: `boss car unland`'s writer runs
+/// under the merge-lost arm through the conductor's own blip-guarded
+/// client, signed as the conductor (backlog f9256445).
+#[async_trait]
+impl crate::car_retire::Door for Conductor {
+    async fn send(&self, method: Method, path: &str, body: Option<Value>) -> Result<Option<Value>> {
+        self.api(method, path, body).await
+    }
+}
+
 /// What one walk of the dock found (`Conductor::candidates`).
 pub(super) struct DockPass {
     /// Cars that may board now, with their branch.
@@ -564,13 +574,66 @@ impl Conductor {
             }
             _ => None,
         };
-        match convergence_verdict(
+        let base = convergence_verdict(
             &merge_ref,
             cluster_commit.as_deref(),
             ancestor,
             mins_since_merge,
             self.cfg.converge_alarm_mins,
-        ) {
+        );
+        // THE MERGE-LOST ARM (backlog f9256445, design d812f1b7 D1). A
+        // cluster that has not taken the merge may never take it: on
+        // 2026-09-25 forge main moved back off train 20:04's merge within
+        // 32 seconds, and this step waited for ever. So before the train
+        // is left Waiting or Overdue, forge main itself is read — and a
+        // reading git cannot make is a refusal to judge, never a verdict.
+        let prior = first_lost_reading(train).cloned();
+        let (main_read, reading) = if base == ConvergenceVerdict::Converged {
+            (MainRead::Unread, None)
+        } else {
+            self.read_forge_main(train, &merge_ref, now).await
+        };
+        if main_read == MainRead::Carries && prior.is_some() && !self.cfg.dry {
+            // Two NOT readings must be consecutive: main carrying the
+            // merge again clears the first.
+            self.api(
+                Method::PATCH,
+                &format!("/api/jobs/{tid}/metadata"),
+                Some(json!({ MERGE_LOST_FIRST_READ: Value::Null })),
+            )
+            .await?;
+        }
+        match with_forge_main(base, main_read, prior.is_some()) {
+            ConvergenceVerdict::MainLostOnce => {
+                let Some(r) = reading else {
+                    return Ok(());
+                };
+                log(format!(
+                    "train {}: forge main {} does NOT carry the merge {} (read {}) — one \
+                     reading; a second on a later pass ends the train on merge-lost",
+                    id8(&tid),
+                    id8(&r.main),
+                    id8(&merge_ref),
+                    r.read_at
+                ));
+                if self.cfg.dry {
+                    return Ok(());
+                }
+                self.api(
+                    Method::PATCH,
+                    &format!("/api/jobs/{tid}/metadata"),
+                    Some(json!({ MERGE_LOST_FIRST_READ: first_reading_record(&r) })),
+                )
+                .await?;
+                Ok(())
+            }
+            ConvergenceVerdict::MergeLost => {
+                let (Some(first), Some(r)) = (prior, reading) else {
+                    return Ok(());
+                };
+                self.end_on_merge_lost(train, &merge_ref, &first, &r, now)
+                    .await
+            }
             ConvergenceVerdict::Converged => {
                 let commit = cluster_commit.unwrap_or_default();
                 self.complete_step(
@@ -637,6 +700,296 @@ impl Conductor {
                 Ok(())
             }
         }
+    }
+
+    /// Read whether forge main carries this train's merge, from the
+    /// conductor clone — `car_unland::read_main`, the reading `boss car
+    /// unland` makes, so the arm and the writer cannot disagree about
+    /// what "lost" means. The clone may never have fetched a merge main
+    /// lost inside one pass, and `merge_ref` is the forge's 12-character
+    /// answer, which cannot be fetched; so a first refusal asks the forge
+    /// for the PR's full merge sha and reads again by it. Anything that
+    /// still fails is `Unread`, logged.
+    async fn read_forge_main(
+        &self,
+        train: &Value,
+        merge_ref: &str,
+        now: DateTime<Utc>,
+    ) -> (MainRead, Option<crate::car_unland::MainReading>) {
+        let clone = Path::new(&self.cfg.clone);
+        let judged = |r: crate::car_unland::MainReading| {
+            let read = if r.carries {
+                MainRead::Carries
+            } else {
+                MainRead::NotCarried
+            };
+            (read, Some(r))
+        };
+        let refused = match crate::car_unland::read_main(clone, merge_ref, now) {
+            Ok(r) => return judged(r),
+            Err(e) => e,
+        };
+        let full = match self.pr_merge(train).await {
+            Some((full, _)) if full != merge_ref => full,
+            _ => {
+                log(format!(
+                    "train {}: forge main unread this pass ({refused}) — no verdict",
+                    id8(job_id(train).unwrap_or("?"))
+                ));
+                return (MainRead::Unread, None);
+            }
+        };
+        match crate::car_unland::read_main(clone, &full, now) {
+            Ok(r) => judged(r),
+            Err(e) => {
+                log(format!(
+                    "train {}: forge main unread this pass ({e}) — no verdict",
+                    id8(job_id(train).unwrap_or("?"))
+                ));
+                (MainRead::Unread, None)
+            }
+        }
+    }
+
+    /// The PR's full merge sha and its merged_at, as the forge answers
+    /// them now — `None` when the train names no PR or the forge cannot
+    /// be read.
+    async fn pr_merge(&self, train: &Value) -> Option<(String, Option<String>)> {
+        let pr_url = find_step(train, "pr", "Open the batched PR")
+            .and_then(|s| s.pointer("/metadata/pr_url"))
+            .and_then(Value::as_str)?;
+        let info = self.forge.pr_info(pr_url).await.ok()?;
+        let oid = info
+            .pointer("/mergeCommit/oid")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())?
+            .to_string();
+        let at = info
+            .get("mergedAt")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        Some((oid, at))
+    }
+
+    /// END THE TRAIN ON `merge-lost` (design d812f1b7 D1), in the order
+    /// the design fixes: the four fields and the marker first — the
+    /// train closes, which releases the track — then the follow-up that
+    /// unlands its cars and files the one item. The terminal does not
+    /// wait on the follow-up: a follow-up that fails is left `owed` and
+    /// the sweep retries it next pass (observability writes are not
+    /// fatal to the loop).
+    async fn end_on_merge_lost(
+        &self,
+        train: &Value,
+        merge_ref: &str,
+        first: &Value,
+        r: &crate::car_unland::MainReading,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let tid = job_id(train)?.to_string();
+        let Some(step) = find_step(train, MERGE_LOST_SLUG, MERGE_LOST_TITLE) else {
+            log(format!(
+                "train {}: forge main has not carried its merge {merge_ref} on two readings, \
+                 but the train is pinned to pr-train v{} with no `{MERGE_LOST_SLUG}` terminal \
+                 — `boss job convert {}` moves it; waiting",
+                id8(&tid),
+                train
+                    .get("workflow_version")
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "?".into()),
+                id8(&tid)
+            ));
+            return Ok(());
+        };
+        let pr_url = find_step(train, "pr", "Open the batched PR")
+            .and_then(|s| s.pointer("/metadata/pr_url"))
+            .and_then(Value::as_str)
+            .unwrap_or("(no PR recorded)")
+            .to_string();
+        let merged_at = self.pr_merge(train).await.and_then(|(_, at)| at);
+        let fields = merge_lost_fields(merge_ref, first, r, &pr_url, merged_at.as_deref());
+        log(format!(
+            "train {}: forge main {} does NOT carry the merge {merge_ref} — the second \
+             reading ({}); ending the train on merge-lost",
+            id8(&tid),
+            id8(&r.main),
+            r.read_at
+        ));
+        if self.cfg.dry {
+            return Ok(());
+        }
+        let sid = step
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("the merge-lost step has no id on train {}", id8(&tid)))?;
+        // The evidence onto the step FIRST (it is pending, so the merge
+        // door takes it), then the marker that readies it, then the
+        // status — a terminal nobody reaches without the reading.
+        let evidence: Map<String, Value> = fields
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), json!(v)))
+            .collect();
+        self.api(
+            Method::PATCH,
+            &format!("/api/jobs/{tid}/steps/{sid}/metadata"),
+            Some(Value::Object(evidence)),
+        )
+        .await?;
+        self.api(
+            Method::PATCH,
+            &format!("/api/jobs/{tid}/metadata"),
+            Some(json!({
+                MERGE_LOST_MARKER: "true",
+                MERGE_LOST_MERGE: r.merge,
+                MERGE_LOST_FOLLOWUP: "owed",
+            })),
+        )
+        .await?;
+        let marked = self.get_job(&tid).await?;
+        let step = find_step(&marked, MERGE_LOST_SLUG, MERGE_LOST_TITLE);
+        self.complete_step(&marked, step, &[]).await?;
+        let closed = self.get_job(&tid).await?;
+        if let Err(e) = self.merge_lost_followup(&closed, now).await {
+            log(format!(
+                "train {}: ended merge-lost, but its follow-up failed this pass (left owed; \
+                 the sweep retries it): {e}",
+                id8(&tid)
+            ));
+        }
+        Ok(())
+    }
+
+    /// Unland every car of a merge-lost train through `boss car
+    /// unland`'s writer, then file the ONE item and mark the follow-up
+    /// done. Each unlanding is idempotent, so a retry after a failed
+    /// filing re-reads each car and writes nothing twice; a car that
+    /// cannot be unlanded is named in the item with the command that
+    /// finishes it, rather than holding the item back.
+    async fn merge_lost_followup(&self, train: &Value, now: DateTime<Utc>) -> Result<()> {
+        let tid = job_id(train)?.to_string();
+        let md = |k: &str| {
+            train
+                .pointer(&format!("/metadata/{k}"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let merge = md(MERGE_LOST_MERGE);
+        let step = find_step(train, MERGE_LOST_SLUG, MERGE_LOST_TITLE);
+        let field = |k: &str| {
+            step.and_then(|s| s.pointer(&format!("/metadata/{k}")))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        if merge.is_empty() {
+            bail!(
+                "train {} owes a merge-lost follow-up but records no merge",
+                id8(&tid)
+            );
+        }
+        let boarded: Vec<String> = train
+            .pointer("/metadata/boarded_jobs")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let clone = Path::new(&self.cfg.clone);
+        let mut cars = Vec::new();
+        for cid in &boarded {
+            match crate::car_unland::unland_car(self, clone, cid, &merge, self.cfg.dry, now).await {
+                Ok(u) => cars.push(format!(
+                    "car {} unlanded; successor car {} rides again from `gate`",
+                    id8(cid),
+                    id8(&u.successor)
+                )),
+                Err(e) => cars.push(format!(
+                    "car {} NOT unlanded: {e} — finish it with `boss car unland {} \
+                     --merge-ref {merge}`",
+                    id8(cid),
+                    id8(cid)
+                )),
+            }
+        }
+        for line in &cars {
+            log(format!("train {}: {line}", id8(&tid)));
+        }
+        if self.cfg.dry {
+            return Ok(());
+        }
+        let first_read_at = train
+            .pointer(&format!("/metadata/{MERGE_LOST_FIRST_READ}/read_at"))
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+        let pr_url = find_step(train, "pr", "Open the batched PR")
+            .and_then(|s| s.pointer("/metadata/pr_url"))
+            .and_then(Value::as_str)
+            .unwrap_or("(no PR recorded)")
+            .to_string();
+        let owner = self.owner_for_filing().await;
+        let filed = self
+            .api(
+                Method::POST,
+                "/api/jobs",
+                Some(merge_lost_item_body(
+                    &tid,
+                    &pr_url,
+                    &field("merge_ref"),
+                    &field("main_at_read"),
+                    &first_read_at,
+                    &field("read_at"),
+                    &cars,
+                    &owner,
+                )),
+            )
+            .await?
+            .ok_or_else(|| anyhow!("filing the merge-lost item answered no body"))?;
+        let item = job_id(&filed)?.to_string();
+        self.api(
+            Method::PATCH,
+            &format!("/api/jobs/{tid}/metadata"),
+            Some(json!({ MERGE_LOST_FOLLOWUP: "done", MERGE_LOST_ITEM: item })),
+        )
+        .await?;
+        log(format!(
+            "train {}: merge-lost follow-up done — item {} filed",
+            id8(&tid),
+            id8(&item)
+        ));
+        Ok(())
+    }
+
+    /// The sweep behind the follow-up: every CLOSED train still owing
+    /// one (the terminal was written, the filing failed), read by the
+    /// marker itself — a containment filter, not a page of trains that
+    /// may or may not hold it.
+    async fn follow_up_merge_lost(&self, now: DateTime<Utc>) -> Result<()> {
+        let filter = json!({ MERGE_LOST_FOLLOWUP: "owed" }).to_string();
+        let owed = rows(
+            self.api(
+                Method::GET,
+                &format!(
+                    "/api/jobs?kind=pr-train&status=closed&limit=20&metadata={}",
+                    percent_encoding::utf8_percent_encode(&filter, crate::job::QUERY_VALUE)
+                ),
+                None,
+            )
+            .await?,
+        )?;
+        for t in owed {
+            if let Err(e) = self.merge_lost_followup(&t, now).await {
+                log(format!(
+                    "reconcile: merge-lost follow-up for train {} failed (left owed): {e}",
+                    id8(job_id(&t).unwrap_or("?"))
+                ));
+            }
+        }
+        Ok(())
     }
 
     // `record_abandon_reason` lived here: it wrote the machine's reason
@@ -1613,6 +1966,11 @@ impl Conductor {
         if let Err(e) = self.bury_landed_verdicts(now).await {
             log(format!(
                 "reconcile: burying landed verdicts failed this pass (retries next): {e}"
+            ));
+        }
+        if let Err(e) = self.follow_up_merge_lost(now).await {
+            log(format!(
+                "reconcile: the merge-lost follow-up sweep failed this pass (retries next): {e}"
             ));
         }
         let trains = rows(
@@ -6671,5 +7029,168 @@ mod tests {
             None
         );
         assert_eq!(forge_branch(&clone, "feat/far"), far);
+    }
+
+    // -- the merge-lost arm, end to end (backlog f9256445) --------------
+    //
+    // The real jobs router with the real platform bundle, a real forge
+    // whose main lost the train's merge, and the conductor's own reads
+    // and writes: what the arm did is read back off the packets.
+
+    /// The forge as the arm reads it: the PR merged, with the merge's
+    /// full sha and the forge's merged_at. Nothing else is exercised.
+    struct LostMergeForge {
+        oid: String,
+    }
+
+    #[async_trait]
+    impl Forge for LostMergeForge {
+        async fn pr_info(&self, _url: &str) -> Result<Value> {
+            Ok(json!({
+                "state": "MERGED",
+                "mergeCommit": {"oid": self.oid},
+                "mergedAt": "2026-09-25T20:10:41Z",
+                "statusCheckRollup": [],
+            }))
+        }
+        async fn pr_create(&self, _: &str, _: &str, _: &str, _: &str) -> Result<String> {
+            bail!("not exercised")
+        }
+        async fn merge(&self, _url: &str, _message: &str) -> Result<()> {
+            bail!("not exercised")
+        }
+        async fn close_pr(&self, _url: &str) -> Result<()> {
+            bail!("not exercised")
+        }
+        async fn delete_branch(&self, _branch: &str) -> Result<bool> {
+            bail!("not exercised")
+        }
+        async fn branch_head(&self, _branch: &str) -> Result<Option<String>> {
+            bail!("not exercised")
+        }
+        async fn cancel_ci_runs(&self, _pr_index: &str, _head_sha: &str) -> Result<usize> {
+            bail!("not exercised")
+        }
+    }
+
+    /// Train 2026-09-25 20:04's shape: one car landed as the merge, the
+    /// train through `deployed`, and forge main rewound to the commit
+    /// before the merge. The first pass records one NOT reading and ends
+    /// nothing; the second ends the train on `merge-lost` with its four
+    /// fields, unlands the car (a successor at `gate`), and files the one
+    /// item — the train no longer waits at `converged` for ever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_train_whose_merge_main_lost_ends_merge_lost_on_the_second_reading() {
+        use crate::car_unland::tests as fx;
+        let (clone, base, merge) = fx::forge_that_lost_a_merge("merge-lost-arm");
+        let work = clone.parent().unwrap().join("work");
+        fx::git_in(
+            &work,
+            &[
+                "push",
+                "-q",
+                "-f",
+                "origin",
+                &format!("{base}:refs/heads/main"),
+            ],
+        );
+        let mut c = cleanup_conductor("forgejo", Box::new(LostMergeForge { oid: merge.clone() }));
+        c.cfg.jobs = fx::serve().await;
+        c.cfg.clone = clone.display().to_string();
+
+        let car = fx::landed(&c, "fix/a-stamp-cannot-land", &merge).await;
+        let made = c
+            .api(
+                Method::POST,
+                "/api/jobs",
+                Some(json!({
+                    "kind": "pr-train",
+                    "subject": {"subject_kind": "custom", "id": "train/20260925-2004"},
+                    "title": "PR train 2026-09-25 20:04",
+                    "owner_id": "emp-bootstrap-admin",
+                    "priority": "standard",
+                    "status": "open",
+                    "tags": [],
+                    "metadata": {"boarded_jobs": [car]},
+                })),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let tid = made["id"].as_str().unwrap().to_string();
+        for (slug, key, value) in [
+            ("collect", "boarded", "1".to_string()),
+            (
+                "assemble",
+                "train_ref",
+                "train/20260925-2004@c85941b4".to_string(),
+            ),
+            ("pr", "pr_url", "http://forge/boss/pulls/687".to_string()),
+            ("merged", "merge_ref", merge[..12].to_string()),
+            (
+                "deployed",
+                "deployed",
+                NO_PLAYGROUND_DEPLOY_EVIDENCE.to_string(),
+            ),
+        ] {
+            let t = c.get_job(&tid).await.unwrap();
+            c.complete_step(&t, find_step(&t, slug, ""), &[(key, Some(value))])
+                .await
+                .unwrap();
+        }
+
+        // PASS ONE: one NOT reading, recorded; the train stands.
+        let t = c.get_job(&tid).await.unwrap();
+        assert_eq!(find_step(&t, "converged", "").unwrap()["status"], "ready");
+        c.verify_convergence(&t, crate::car_unland::tests::now())
+            .await
+            .unwrap();
+        let t = c.get_job(&tid).await.unwrap();
+        assert_eq!(t["status"], "open", "one reading ends nothing: {t:#}");
+        let first = first_lost_reading(&t).expect("the first reading rides the train");
+        assert_eq!(first["main"], base.as_str());
+
+        // PASS TWO: the second NOT reading ends it.
+        c.verify_convergence(&t, crate::car_unland::tests::now())
+            .await
+            .unwrap();
+        let t = c.get_job(&tid).await.unwrap();
+        assert_eq!(t["status"], "closed", "{t:#}");
+        assert_eq!(t["metadata"]["outcome"], MERGE_LOST_SLUG);
+        let lost = find_step(&t, MERGE_LOST_SLUG, "").unwrap();
+        assert_eq!(lost["metadata"]["merge_ref"], &merge[..12]);
+        assert_eq!(lost["metadata"]["main_at_read"], base.as_str());
+        let evidence = lost["metadata"]["evidence"].as_str().unwrap();
+        assert!(evidence.contains("two readings"), "{evidence}");
+        assert!(evidence.contains("2026-09-25T20:10:41Z"), "{evidence}");
+        assert_eq!(
+            find_step(&t, "cancelled", "").unwrap()["status"],
+            "skipped",
+            "never recorded as closed unmerged"
+        );
+
+        // The car rides again; the one item is filed and named.
+        let car_after = c.get_job(&car).await.unwrap();
+        assert_eq!(
+            car_after["metadata"]["outcome"], "unlanded",
+            "{car_after:#}"
+        );
+        let successor = car_after["metadata"]["superseded_by"].as_str().unwrap();
+        let next = c.get_job(successor).await.unwrap();
+        assert_eq!(find_step(&next, "gate", "").unwrap()["status"], "ready");
+        assert_eq!(t["metadata"][MERGE_LOST_FOLLOWUP], "done");
+        let item = c
+            .get_job(t["metadata"][MERGE_LOST_ITEM].as_str().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(item["kind"], "backlog-item");
+        assert_eq!(item["metadata"]["input_channel"], "pipeline-failure");
+        assert!(
+            item["metadata"]["description"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("car {} unlanded", id8(&car))),
+            "{item:#}"
+        );
     }
 }

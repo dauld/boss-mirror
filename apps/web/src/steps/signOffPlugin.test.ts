@@ -1625,6 +1625,88 @@ describe('sign-off — a gesture that outlives its mount signs nothing', () => {
     expect(server.srv.stamps.length).toBe(0);
     expect(allText(c)).toContain('Nothing was signed');
   });
+
+  // Backlog 7c53b1bf (review of car fcda5f8b): the check between the
+  // begin's answer and the prompt had no test — the two above dispose
+  // before the begin and during the prompt, so deleting it left every
+  // test green. This one disposes INSIDE the begin round trip.
+  test('the rail moves on while the begin is in flight: the passkey is never asked', async () => {
+    const step = presenceOnly();
+    const server = gatedServer(step);
+    let dispose = () => {};
+    const routes = (url: string, init?: RequestInit) => {
+      if (url === server.BEGIN) dispose();
+      return server.routes(url, init);
+    };
+    const { mount, calls } = loadBundle(routes);
+    let asked = 0;
+    passkeyAnswers(() => {
+      asked += 1;
+      return aCredential();
+    });
+    const c = new FakeNode();
+    dispose = mount(c, { step, jobId: 'job-1', onUpdate() {} }) as () => void;
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+    expect(calls.some((x) => x.url === server.BEGIN)).toBe(true);
+    expect(asked).toBe(0);
+    expect(calls.some((x) => x.url === server.FINISH)).toBe(false);
+    expect(server.srv.stamps.length).toBe(0);
+    expect(allText(c)).toContain('Nothing was signed');
+  });
+
+  test('a prompt still up when the mount goes is aborted, and reads as nothing signed', async () => {
+    const step = presenceOnly();
+    const server = gatedServer(step);
+    const { mount, calls } = loadBundle(server.routes);
+    let dispose = () => {};
+    let handed: AbortSignal | undefined;
+    (globalThis as unknown as Record<string, unknown>).navigator = {
+      credentials: {
+        // A browser's prompt: it stays up until answered or aborted.
+        get: (opts: { signal?: AbortSignal }) => {
+          handed = opts.signal;
+          const up = new Promise((_, reject) => {
+            opts.signal?.addEventListener('abort', () => {
+              const e = new Error('The operation was aborted.');
+              e.name = 'AbortError';
+              reject(e);
+            });
+          });
+          dispose();
+          return up;
+        },
+      },
+    };
+    const c = new FakeNode();
+    dispose = mount(c, { step, jobId: 'job-1', onUpdate() {} }) as () => void;
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+    expect(handed?.aborted).toBe(true);
+    expect(calls.some((x) => x.url === server.FINISH)).toBe(false);
+    expect(server.srv.stamps.length).toBe(0);
+    expect(allText(c)).toContain('Nothing was signed');
+    expect(allText(c)).not.toContain('AbortError');
+  });
+
+  test('the rail moves on while the finish is in flight: its ticket is never stamped with', async () => {
+    const step = presenceOnly();
+    const server = gatedServer(step);
+    let dispose = () => {};
+    const routes = (url: string, init?: RequestInit) => {
+      if (url === server.FINISH) dispose();
+      return server.routes(url, init);
+    };
+    const { mount, calls } = loadBundle(routes);
+    passkeyAnswers(aCredential);
+    const c = new FakeNode();
+    dispose = mount(c, { step, jobId: 'job-1', onUpdate() {} }) as () => void;
+    buttonNamed(c, 'Approve')!.fire('click');
+    await settled();
+    expect(calls.some((x) => x.url === server.FINISH)).toBe(true);
+    expect(server.srv.stamps.length).toBe(0);
+    expect(allText(c)).toContain('Nothing was signed');
+  });
 });
 
 // The rendering the plugin draws and the refusal it runs are copies of
@@ -1714,6 +1796,11 @@ describe('sign-off — the plugin draws and refuses exactly as the app does', ()
       css.match(new RegExp(`${sel.replace('.', '\\.')}\\s*\\{[^}]*\\}`))?.[0] ?? '';
     expect(rule('.step-signed-title')).toContain('white-space: pre-wrap');
     expect(rule('.step-signed-value')).toContain('overflow: auto');
+    // A key name and a value keep every space they sign, trailing ones at
+    // a wrap included: with no rule, 'plan b' and 'plan  b' drew alike
+    // (backlog 7c53b1bf, review of car fcda5f8b).
+    expect(rule('.step-signed-key')).toContain('white-space: break-spaces');
+    expect(rule('.step-signed-value')).toContain('white-space: break-spaces');
   });
 });
 

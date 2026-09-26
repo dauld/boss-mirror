@@ -245,7 +245,7 @@ pub(crate) fn commits_match(a: &str, b: &str) -> bool {
 }
 
 /// What the `converged` step should do this reconcile pass.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConvergenceVerdict {
     /// The running cluster binary self-reports the merge commit —
     /// complete the step with that evidence.
@@ -257,6 +257,60 @@ pub(crate) enum ConvergenceVerdict {
     /// Waiting silently is the defect this verdict exists to end:
     /// measured at six unnoticed hours on 2026-08-19.
     Overdue,
+    /// Forge main does NOT carry the merge — the first such reading.
+    /// Record it on the train and look again next pass; one reading
+    /// ends nothing (backlog f9256445).
+    MainLostOnce,
+    /// The second NOT reading, on a later pass: main lost the merge, so
+    /// no cluster commit will ever descend from it. End the train on
+    /// `merge-lost` instead of waiting for ever.
+    MergeLost,
+}
+
+/// What git read about forge main and a train's merge, this pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MainRead {
+    /// `merge-base --is-ancestor <merge> <forge main>` exited 0.
+    Carries,
+    /// It exited 1 — the only NOT.
+    NotCarried,
+    /// Git could not answer (no forge, an unreadable object, a crash).
+    /// A refusal to judge, never a verdict.
+    Unread,
+}
+
+/// The train's record of its first NOT reading, carried to the next
+/// pass: `{main, merge, read_at, evidence}`.
+pub(crate) const MERGE_LOST_FIRST_READ: &str = "merge_lost_first_read";
+
+/// The first NOT reading this train carries, if any (a cleared `null`
+/// is none).
+pub(crate) fn first_lost_reading(train: &Value) -> Option<&Value> {
+    train
+        .pointer(&format!("/metadata/{MERGE_LOST_FIRST_READ}"))
+        .filter(|v| v.is_object())
+}
+
+/// THE MERGE-LOST ARM, pure (backlog f9256445, design d812f1b7 D1).
+/// A merged train either converges by ancestry or ends on evidence: the
+/// forge-main reading is asked BEFORE the train is left Waiting or
+/// Overdue, and it takes TWO NOT readings on two passes to end one —
+/// `prior_not` is the first, recorded on an earlier pass. A reading git
+/// could not make (`Unread`) changes nothing, and a cluster already
+/// serving the merge converges whatever main is read as.
+pub(crate) fn with_forge_main(
+    base: ConvergenceVerdict,
+    main: MainRead,
+    prior_not: bool,
+) -> ConvergenceVerdict {
+    if base == ConvergenceVerdict::Converged {
+        return base;
+    }
+    match (main, prior_not) {
+        (MainRead::NotCarried, true) => ConvergenceVerdict::MergeLost,
+        (MainRead::NotCarried, false) => ConvergenceVerdict::MainLostOnce,
+        _ => base,
+    }
 }
 
 /// The convergence decision, pure. `cluster_commit` is what the
@@ -1221,6 +1275,64 @@ mod tests {
     /// self-reports a LATER commit that contains this train's merge.
     /// Equality misses; ancestry converges. And git's inability to
     /// answer (None) must never converge — absence of evidence.
+    /// A MERGE MAIN LOST ENDS THE WAIT (backlog f9256445). Train
+    /// 2026-09-25 20:04 merged as c85941b4 and main was back at 777a5888
+    /// by 20:11:14Z: no cluster commit could ever descend from the merge,
+    /// so the verdict was Waiting, then Overdue, for ever. The forge-main
+    /// reading is asked BEFORE Waiting, needs two NOT readings on two
+    /// passes, and a reading git could not make changes nothing.
+    #[test]
+    fn two_readings_that_main_lost_the_merge_end_the_train_and_one_records_itself() {
+        use ConvergenceVerdict::*;
+        for base in [Waiting, Overdue] {
+            assert_eq!(
+                with_forge_main(base, MainRead::NotCarried, false),
+                MainLostOnce,
+                "the first NOT is recorded, and ends nothing"
+            );
+            assert_eq!(
+                with_forge_main(base, MainRead::NotCarried, true),
+                MergeLost,
+                "the second NOT, on a later pass, ends the train"
+            );
+            for prior in [false, true] {
+                assert_eq!(
+                    with_forge_main(base, MainRead::Unread, prior),
+                    base,
+                    "a git failure is a refusal to judge, never a verdict"
+                );
+                assert_eq!(with_forge_main(base, MainRead::Carries, prior), base);
+            }
+        }
+        // A cluster serving the merge converges whatever main is read as.
+        assert_eq!(
+            with_forge_main(Converged, MainRead::NotCarried, true),
+            Converged
+        );
+    }
+
+    /// The first NOT reading is the train's own record, carried to the
+    /// next pass; a reading that main CARRIES the merge clears it, so two
+    /// NOT readings must be consecutive.
+    #[test]
+    fn the_first_lost_reading_rides_the_train_until_main_carries_the_merge() {
+        let mut train = json!({"metadata": {}});
+        assert_eq!(first_lost_reading(&train), None);
+        train["metadata"][MERGE_LOST_FIRST_READ] = json!({
+            "main": "777a5888504f6f80958ec445284c7a28b4faad14",
+            "read_at": "2026-09-25T21:19:00Z",
+            "evidence": "git merge-base --is-ancestor … exited 1",
+        });
+        assert_eq!(
+            first_lost_reading(&train)
+                .and_then(|r| r.get("read_at"))
+                .and_then(Value::as_str),
+            Some("2026-09-25T21:19:00Z")
+        );
+        train["metadata"][MERGE_LOST_FIRST_READ] = Value::Null;
+        assert_eq!(first_lost_reading(&train), None, "cleared is absent");
+    }
+
     #[test]
     fn a_cluster_rolled_past_the_merge_still_converges_by_ancestry() {
         assert_eq!(

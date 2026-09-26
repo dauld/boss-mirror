@@ -225,6 +225,10 @@
     // this step is on screen, so nothing is drawn as signed and any
     // ceremony still in flight refuses.
     let disposed = false;
+    // Aborted by the same cleanup, so a passkey prompt still up when the
+    // rail moves on comes down with the surface rather than waiting over
+    // the next step (backlog 7c53b1bf, review of car fcda5f8b).
+    const unmounted = new AbortController();
     const signedVisible = () =>
       !disposed && !isDone && (step.assurance_required === 'presence' || revealed);
     // The overflow checks of the rows as last drawn, and the observers
@@ -641,18 +645,27 @@
       }
       const opts = await begin.json();
       if (disposed) throw offScreen();
-      const cred = await navigator.credentials.get({
-        publicKey: {
-          challenge: b64uBytes(opts.publicKey.challenge).buffer,
-          rpId: opts.publicKey.rpId || undefined,
-          allowCredentials: (opts.publicKey.allowCredentials || []).map((c) => ({
-            type: c.type,
-            id: b64uBytes(c.id).buffer,
-          })),
-          userVerification: opts.publicKey.userVerification,
-          timeout: opts.publicKey.timeout,
-        },
-      });
+      let cred;
+      try {
+        cred = await navigator.credentials.get({
+          signal: unmounted.signal,
+          publicKey: {
+            challenge: b64uBytes(opts.publicKey.challenge).buffer,
+            rpId: opts.publicKey.rpId || undefined,
+            allowCredentials: (opts.publicKey.allowCredentials || []).map((c) => ({
+              type: c.type,
+              id: b64uBytes(c.id).buffer,
+            })),
+            userVerification: opts.publicKey.userVerification,
+            timeout: opts.publicKey.timeout,
+          },
+        });
+      } catch (err) {
+        // A prompt the cleanup aborted is the refusal it is, not the
+        // browser's AbortError.
+        if (disposed) throw offScreen();
+        throw err;
+      }
       if (!cred) throw new Error('Passkey prompt returned no credential.');
       if (disposed) throw offScreen();
       const a = cred.response;
@@ -680,7 +693,12 @@
         const text = await finish.text().catch(() => '');
         throw new Error(`assertion rejected (${finish.status}): ${text}`);
       }
-      return (await finish.json()).ticket;
+      const { ticket } = await finish.json();
+      // Unmounted while the finish was in flight: the ticket is never
+      // stamped with, so no stamp lands for a step no longer on screen;
+      // unspent, it lapses in its two minutes (7c53b1bf).
+      if (disposed) throw offScreen();
+      return ticket;
     }
 
     // A begin refused 412 says the step no longer matches what this
@@ -967,6 +985,7 @@
 
     return () => {
       disposed = true;
+      unmounted.abort();
       overflowObservers.forEach((o) => o.disconnect());
       overflowObservers = [];
       root.remove();

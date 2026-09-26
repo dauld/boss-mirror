@@ -13,7 +13,7 @@ use super::*;
 /// The code host as the conductor sees it: five verbs.
 #[async_trait]
 pub(super) trait Forge: Send + Sync {
-    /// -> {state, mergeCommit, statusCheckRollup} for a PR url.
+    /// -> {state, mergeCommit, mergedAt, statusCheckRollup} for a PR url.
     async fn pr_info(&self, url: &str) -> Result<Value>;
     /// Open a PR head->main on repo; return its url.
     async fn pr_create(
@@ -90,7 +90,7 @@ impl Forge for GitHubForge {
             "view",
             url,
             "--json",
-            "state,mergeCommit,statusCheckRollup",
+            "state,mergeCommit,mergedAt,statusCheckRollup",
         ])?;
         serde_json::from_str(&stdout_str(&r)).context("parsing gh pr view output")
     }
@@ -469,6 +469,9 @@ impl Forge for ForgejoForge {
             "mergeCommit": {
                 "oid": pr.get("merge_commit_sha").and_then(Value::as_str).unwrap_or_default()
             },
+            // When the forge says the PR merged — the merge-lost arm's
+            // evidence names it beside its own two readings (f9256445).
+            "mergedAt": pr.get("merged_at").cloned().unwrap_or(Value::Null),
             "statusCheckRollup": rollup,
         }))
     }

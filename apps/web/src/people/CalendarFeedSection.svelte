@@ -1,16 +1,28 @@
 <script lang="ts">
   // ICS calendar-feed management for a tech. Port of
   // apps/web/src/people/CalendarFeedSection.tsx.
+  //
+  // `access` decides what renders (backlog 7ae9ccec): the employee
+  // sees their feed URL; an operator on someone else's page gets only
+  // a revoke, whose response carries no token — so the page never
+  // fetches the token for anyone but its owner. The parent renders
+  // nothing for everyone else.
 
   import Section from '@boss/web-kit/ui/Section.svelte';
+  import type { CalendarFeedAccess } from './calendarFeedAccess';
 
-  let { empId } = $props<{ empId: string }>();
+  let { empId, access } = $props<{
+    empId: string;
+    access: Exclude<CalendarFeedAccess, 'none'>;
+  }>();
 
   type State =
     | { kind: 'loading' }
     | { kind: 'none' }
     | { kind: 'error'; message: string }
-    | { kind: 'ready'; token: string; url: string };
+    | { kind: 'ready'; token: string; url: string }
+    | { kind: 'revocable' }
+    | { kind: 'revoked' };
 
   let feedState: State = $state<State>({ kind: 'loading' });
   let busy = $state(false);
@@ -40,7 +52,11 @@
 
   $effect(() => {
     void empId;
-    void load();
+    if (access === 'owner') {
+      void load();
+    } else {
+      feedState = { kind: 'revocable' };
+    }
   });
 
   async function rotate(): Promise<void> {
@@ -51,6 +67,12 @@
         { method: 'POST' },
       );
       if (!resp.ok) throw new Error(`${resp.status}`);
+      if (access !== 'owner') {
+        // An operator's rotate is a revocation; the server hands the
+        // new feed only to its employee.
+        feedState = { kind: 'revoked' };
+        return;
+      }
       const body = (await resp.json()) as { token: string; ics_url: string };
       feedState = { kind: 'ready', token: body.token, url: body.ics_url };
     } catch (e) {
@@ -68,14 +90,36 @@
 </script>
 
 <Section title="Calendar feed" wide>
+  {#if access === 'owner'}
     <p class="prose">
       Subscribe your personal calendar (Apple, Google, Outlook) to this URL.
       BOSS assignments, PTO, sick days, and training blocks will appear in
       your calendar. The URL is the authentication — keep it private;
       rotating invalidates the old link.
     </p>
+  {:else}
+    <p class="prose">
+      This employee's calendar feed URL is theirs alone. Revoking it stops
+      the current link working at once; they read the new one on their own
+      page.
+    </p>
+  {/if}
 
-    {#if feedState.kind === 'loading'}
+    {#if feedState.kind === 'revocable'}
+      <button
+        class="btn"
+        disabled={busy}
+        onclick={() => {
+          if (confirm("Revoke this employee's calendar feed? Their current URL will stop working immediately.")) {
+            void rotate();
+          }
+        }}
+      >
+        Revoke calendar URL
+      </button>
+    {:else if feedState.kind === 'revoked'}
+      <p class="empty">Revoked. The old URL no longer works.</p>
+    {:else if feedState.kind === 'loading'}
       <p class="empty">Loading…</p>
     {:else if feedState.kind === 'error'}
       <p class="empty load-failed" role="alert">Couldn't load token ({feedState.message}).</p>

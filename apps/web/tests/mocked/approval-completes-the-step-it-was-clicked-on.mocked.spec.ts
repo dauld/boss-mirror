@@ -13,6 +13,7 @@
 // must receive none.
 
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { answerRead, recordPageRequests } from './_helpers';
 
 const JOB_ID = 'job-apsw-1';
 
@@ -24,23 +25,48 @@ const json = (r: Route, b: unknown, status = 200) =>
   r.fulfill({ status, contentType: 'application/json', body: JSON.stringify(b) });
 
 type Write = { method: string; step: string; path: string; ticket?: string };
-type Seen = { writes: Write[]; begins: unknown[]; release: () => void };
+type Seen = { writes: Write[]; begins: unknown[]; finishes: number; release: () => void };
 
-async function twoApprovals(page: Page, presence: boolean): Promise<Seen> {
-  await page.addInitScript(() => {
+/** Where the gesture is held until the test lets it go: its first write
+ *  (the decision's metadata merge), or the passkey begin (7c53b1bf). With
+ *  `promptWaits`, the passkey prompt stays up until its signal aborts it,
+ *  the way a browser's does. */
+type Hold = { at?: 'metadata' | 'begin'; promptWaits?: boolean };
+
+/** How many times the page asked the passkey, and whether a prompt was aborted. */
+const passkey = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __passkey: { asked: number; aborted: boolean } }).__passkey);
+
+async function twoApprovals(page: Page, presence: boolean, hold: Hold = {}): Promise<Seen> {
+  const holdAt = hold.at ?? 'metadata';
+  await recordPageRequests(page);
+  await page.addInitScript((promptWaits: boolean) => {
     setInterval(() => document.querySelector('bun-hmr')?.remove(), 200);
     const buf = () => new Uint8Array([1, 2, 3]).buffer;
+    const record = { asked: 0, aborted: false };
+    (window as unknown as { __passkey: typeof record }).__passkey = record;
     Object.defineProperty(navigator, 'credentials', {
       configurable: true,
       value: {
-        get: async () => ({
-          id: 'cred-1', rawId: buf(), type: 'public-key',
-          response: { authenticatorData: buf(), clientDataJSON: buf(), signature: buf(),
-            userHandle: null },
-        }),
+        get: (opts?: { signal?: AbortSignal }) => {
+          record.asked += 1;
+          if (promptWaits) {
+            return new Promise((_, reject) => {
+              opts?.signal?.addEventListener('abort', () => {
+                record.aborted = true;
+                reject(new DOMException('The operation was aborted.', 'AbortError'));
+              });
+            });
+          }
+          return Promise.resolve({
+            id: 'cred-1', rawId: buf(), type: 'public-key',
+            response: { authenticatorData: buf(), clientDataJSON: buf(), signature: buf(),
+              userHandle: null },
+          });
+        },
       },
     });
-  });
+  }, hold.promptWaits ?? false);
   const mk = (id: string, title: string, order: number, plan: string) => ({
     id, job_id: JOB_ID, title, kind: 'sign-off', status: 'ready', assignee_id: null,
     sort_order: order, blocked_by: [],
@@ -62,7 +88,7 @@ async function twoApprovals(page: Page, presence: boolean): Promise<Seen> {
   const held = new Promise<void>((r) => {
     release = r;
   });
-  const seen: Seen = { writes: [], begins: [], release: () => release() };
+  const seen: Seen = { writes: [], begins: [], finishes: 0, release: () => release() };
 
   await page.route('**/api/**', (r) => json(r, []));
   await page.route(/\/api\/people$/, (r) => json(r, [EMP]));
@@ -75,8 +101,9 @@ async function twoApprovals(page: Page, presence: boolean): Promise<Seen> {
       description: '', surface: 'approval' },
   ]));
   await page.route(new RegExp(`/api/jobs/${JOB_ID}$`), (r) => json(r, { ...job, steps }));
-  await page.route(/\/api\/auth\/passkey\/assert\/begin$/, (r) => {
+  await page.route(/\/api\/auth\/passkey\/assert\/begin$/, async (r) => {
     seen.begins.push(JSON.parse(r.request().postData() ?? '{}'));
+    if (holdAt === 'begin') await held;
     return json(r, {
       challenge_id: 'chal-1',
       publicKey: { challenge: 'AAAA', rpId: 'localhost',
@@ -84,7 +111,10 @@ async function twoApprovals(page: Page, presence: boolean): Promise<Seen> {
         userVerification: 'required', timeout: 60000 },
     });
   });
-  await page.route(/\/api\/auth\/passkey\/assert\/finish$/, (r) => json(r, { ticket: 'ticket-1' }));
+  await page.route(/\/api\/auth\/passkey\/assert\/finish$/, (r) => {
+    seen.finishes += 1;
+    return json(r, { ticket: 'ticket-1' });
+  });
   await page.route(new RegExp(`/api/jobs/${JOB_ID}/steps/(s1|s2)(/.*)?$`), async (r) => {
     const m = new RegExp(`/steps/(s1|s2)(/.*)?$`).exec(r.request().url());
     const id = m?.[1] ?? '?';
@@ -94,7 +124,7 @@ async function twoApprovals(page: Page, presence: boolean): Promise<Seen> {
     seen.writes.push({ method, step: id, path, ticket });
     const step = steps.find((s) => s.id === id)!;
     // The gesture's first write is held until the test has switched steps.
-    if (id === 's1' && path === '/metadata') await held;
+    if (holdAt === 'metadata' && id === 's1' && path === '/metadata') await held;
     if (path === '/metadata') {
       Object.assign(step.metadata, JSON.parse(r.request().postData() ?? '{}'));
       return json(r, step);
@@ -162,4 +192,92 @@ test('a presence step switched mid-gesture: nothing is signed, and nothing reach
     'POST s1/sign-offs',
   ]);
   expect(seen.begins).toEqual([]);
+});
+
+// Backlog 7c53b1bf (adversarial review of car fcda5f8b, 2026-09-25): the
+// ceremony read what was on screen ONCE, before the begin. The switch
+// above lands before that read, so it refused; a switch or a navigation
+// DURING the begin round trip did not, and the passkey prompt came up
+// over the step now shown to sign the one that was not. The ceremony now
+// reads the screen again after the begin, after the prompt and after the
+// finish; a surface that is destroyed answers that nothing of it is on
+// screen; and a prompt still up when its step leaves is aborted.
+
+const BEGIN = /\/api\/auth\/passkey\/assert\/begin$/;
+
+async function approveHeldAtBegin(page: Page, seen: Seen): Promise<void> {
+  await page.goto(`/ux/jobs/${JOB_ID}`);
+  const surface = page.locator('.sg-detail');
+  await expect(surface.locator('h3')).toHaveText('Approve the budget');
+  await surface.getByRole('button', { name: 'Approve' }).click();
+  await expect.poll(() => seen.begins.length).toBe(1);
+}
+
+test('control: a begin held and let go with the step still shown asks the passkey and completes', async ({ page }) => {
+  const seen = await twoApprovals(page, true, { at: 'begin' });
+  await approveHeldAtBegin(page, seen);
+  seen.release();
+  // The completion is the last write; the page then moves to the next step.
+  await expect.poll(() => seen.writes.filter((w) => w.method === 'PUT').length).toBe(1);
+  expect((await passkey(page)).asked).toBe(1);
+  expect(seen.writes.map((w) => `${w.method} ${w.step}${w.path} ${w.ticket ?? '-'}`)).toEqual([
+    'PATCH s1/metadata -', 'POST s1/sign-offs -', 'POST s1/sign-offs ticket-1', 'PUT s1 ticket-1',
+  ]);
+});
+
+test('the rail moves on while the begin is in flight: the passkey is never asked', async ({ page }) => {
+  const seen = await twoApprovals(page, true, { at: 'begin' });
+  await approveHeldAtBegin(page, seen);
+  const surface = page.locator('.sg-detail');
+  await page.locator('.sg-rail .rail-row', { hasText: 'Approve the hire' }).click();
+  await expect(surface.locator('h3')).toHaveText('Approve the hire');
+  seen.release();
+
+  await expect(surface.locator('.step-write-error')).toContainText('Nothing was signed');
+  expect((await passkey(page)).asked).toBe(0);
+  expect(seen.finishes).toBe(0);
+  expect(seen.writes.map((w) => `${w.method} ${w.step}${w.path}`)).toEqual([
+    'PATCH s1/metadata',
+    'POST s1/sign-offs',
+  ]);
+});
+
+test('the page moves on while the begin is in flight: the passkey is never asked', async ({ page }) => {
+  const seen = await twoApprovals(page, true, { at: 'begin' });
+  await approveHeldAtBegin(page, seen);
+  // The app's own navigate(): pushState, then popstate — the surface is
+  // destroyed while the gesture it started still awaits the begin.
+  await page.evaluate(() => {
+    window.history.pushState({}, '', '/ux/jobs');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+  await expect(page.locator('.sg-detail')).toHaveCount(0);
+  seen.release();
+  // The page has read the begin's answer and run what follows it — which
+  // is where the prompt would be asked.
+  await answerRead(page, BEGIN);
+
+  expect((await passkey(page)).asked).toBe(0);
+  expect(seen.finishes).toBe(0);
+  expect(seen.writes.filter((w) => w.ticket)).toEqual([]);
+});
+
+test('the rail moves on while the passkey prompt is up: the prompt is aborted and nothing is sent', async ({ page }) => {
+  const seen = await twoApprovals(page, true, { at: 'begin', promptWaits: true });
+  seen.release();
+  await page.goto(`/ux/jobs/${JOB_ID}`);
+  const surface = page.locator('.sg-detail');
+  await expect(surface.locator('h3')).toHaveText('Approve the budget');
+  await surface.getByRole('button', { name: 'Approve' }).click();
+  await expect.poll(async () => (await passkey(page)).asked).toBe(1);
+  await page.locator('.sg-rail .rail-row', { hasText: 'Approve the hire' }).click();
+  await expect(surface.locator('h3')).toHaveText('Approve the hire');
+
+  await expect.poll(async () => (await passkey(page)).aborted).toBe(true);
+  await expect(surface.locator('.step-write-error')).toContainText('Nothing was signed');
+  expect(seen.finishes).toBe(0);
+  expect(seen.writes.map((w) => `${w.method} ${w.step}${w.path}`)).toEqual([
+    'PATCH s1/metadata',
+    'POST s1/sign-offs',
+  ]);
 });

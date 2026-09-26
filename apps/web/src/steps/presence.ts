@@ -238,15 +238,28 @@ export class NotShownRefusal extends Error {
  * saying what is on screen, and it is read at the instant before the
  * begin: a key of `shown` it does not show as signed is refused with a
  * {@link NotShownRefusal} and no request is made (design f623e425 D3).
+ *
+ * It is read again after every await the ceremony crosses — the begin,
+ * the prompt, the finish — because the approver can switch steps or
+ * leave the page during any of them (backlog 7c53b1bf, review of car
+ * fcda5f8b: read once, a switch during the begin brought the prompt up
+ * over the step now shown to sign the one that was not). A surface that
+ * is gone answers null. `signal` is handed to the passkey prompt, so a
+ * surface that goes away takes its prompt with it; an aborted prompt
+ * reads as the refusal it is, not as a browser error.
  */
 export async function performPresenceCeremony(
   jobId: string,
   stepId: string,
   shown: ShownStep,
   onScreen: () => ShownStep | null,
+  signal?: AbortSignal,
 ): Promise<string> {
-  const unseen = notShown(shown, onScreen());
-  if (unseen.length > 0) throw new NotShownRefusal(unseen);
+  const stillShown = (): void => {
+    const unseen = notShown(shown, onScreen());
+    if (unseen.length > 0) throw new NotShownRefusal(unseen);
+  };
+  stillShown();
   const begin = await fetch('/api/auth/passkey/assert/begin', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -274,9 +287,11 @@ export async function performPresenceCeremony(
       timeout: number;
     };
   };
+  stillShown();
   let credential: PublicKeyCredential | null = null;
   try {
     credential = (await navigator.credentials.get({
+      signal,
       publicKey: {
         challenge: b64urlToBytes(opts.publicKey.challenge).buffer as ArrayBuffer,
         rpId: opts.publicKey.rpId,
@@ -293,11 +308,15 @@ export async function performPresenceCeremony(
     // a bare `catch` here said 'declined or timed out' for an origin
     // mismatch and an empty allow-list too (backlog 2e893e27 — the
     // enrolment half of this defect was f1fd9168).
+    // A prompt that ended because its step left the screen (the surface
+    // aborted it) is that refusal, not the browser's AbortError.
+    stillShown();
     throw new Error(
       assertionFailure(err, opts.publicKey.allowCredentials.length),
     );
   }
   if (!credential) throw new Error('Passkey prompt returned no credential.');
+  stillShown();
   const assertion = credential.response as AuthenticatorAssertionResponse;
   const finish = await fetch('/api/auth/passkey/assert/finish', {
     method: 'POST',
@@ -327,6 +346,9 @@ export async function performPresenceCeremony(
     throw new Error(`assertion rejected (${finish.status}): ${text}`);
   }
   const { ticket } = (await finish.json()) as { ticket: string };
+  // A ticket for a step no longer on screen is never handed back to be
+  // stamped with; unspent, it lapses in its two minutes.
+  stillShown();
   return ticket;
 }
 
@@ -356,13 +378,14 @@ export async function completeWithPresence(
   shown: ShownStep,
   onScreen: () => ShownStep | null,
   heldTicket?: string,
+  signal?: AbortSignal,
 ): Promise<StepWriteResult> {
   const body = { status: 'completed' };
   const first = await putStep(jobId, stepId, body, heldTicket);
   if (first.kind === 'ok' || !first.presenceRequired) return first;
   let ticket: string;
   try {
-    ticket = await performPresenceCeremony(jobId, stepId, shown, onScreen);
+    ticket = await performPresenceCeremony(jobId, stepId, shown, onScreen, signal);
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
     return { kind: 'failed', error: `Completing needs your passkey, and the ceremony failed: ${why}` };

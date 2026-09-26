@@ -750,6 +750,51 @@ fn job_body_rejection(raw: &serde_json::Value, serde_err: &str) -> String {
     )
 }
 
+/// Every field of `sent` — a create body under an id `existing` already
+/// holds — that does not read the same on that packet (backlog
+/// 558396ff; the round-2 review of car 983696b5, SF2). Empty means the
+/// body describes the packet that exists, and a re-send of it is
+/// answered rather than admitted twice.
+///
+/// What is compared is what the CALLER decides at admission. Left out,
+/// each because the server writes it and a re-send cannot be expected
+/// to match it: `workflow_version` (the pin), `opened_at`, an
+/// automation-shaped `owner_id` (resolved to a person —
+/// [`crate::owner_resolution`]; a human owner is kept as sent, so it is
+/// compared), `opened_on` when the clock supplied it, the metadata keys
+/// the server stamps beside the caller's (only the keys SENT are
+/// compared), and `status`, which the packet's protocol moves after
+/// admission. A field an edit has moved since then differs too, and is
+/// refused: the packet under that id no longer reads as the body.
+fn admission_differences(sent: &Job, dated_by_caller: bool, existing: &Job) -> Vec<&'static str> {
+    let metadata_differs = match sent.metadata.as_object() {
+        Some(keys) => keys
+            .iter()
+            .any(|(k, v)| existing.metadata.get(k) != Some(v)),
+        None => !sent.metadata.is_null() && sent.metadata != existing.metadata,
+    };
+    let owner_differs = !crate::owner_resolution::is_automation_shaped(&sent.owner_id)
+        && sent.owner_id != existing.owner_id;
+    [
+        ("kind", sent.kind != existing.kind),
+        ("subject", sent.subject != existing.subject),
+        ("partition", sent.partition != existing.partition),
+        ("title", sent.title != existing.title),
+        ("owner_id", owner_differs),
+        ("priority", sent.priority != existing.priority),
+        (
+            "opened_on",
+            dated_by_caller && sent.opened_on != existing.opened_on,
+        ),
+        ("due_on", sent.due_on != existing.due_on),
+        ("tags", sent.tags != existing.tags),
+        ("metadata", metadata_differs),
+    ]
+    .into_iter()
+    .filter_map(|(field, differs)| differs.then_some(field))
+    .collect()
+}
+
 pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'static>(
     State(state): State<Arc<JobsApiState<R, B>>>,
     CurrentUser(user): CurrentUser,
@@ -826,6 +871,82 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
             .into_response();
     }
 
+    // Admission decides the partition ONCE, here, and it never moves
+    // again (03-jobs.sql: the epoch trim leans on a Job's rows all
+    // sharing one fate). Two admissible sources, OR-ed: an explicit
+    // `partition` / `simulated: true` on the body (demo seeding,
+    // tests), or the request arriving on a sim chain (`x-sim-origin`
+    // — how every sim-engine create presents). The OR means a sim
+    // chain can never mint real work, even with a body that claims
+    // otherwise. Decided BEFORE the already-admitted answer below, so a
+    // re-sent body is compared under the partition it would be
+    // admitted under (558396ff).
+    //
+    // NOTHING ADMITS A SHADOW PACKET YET. Shadow admission mirrors a
+    // real packet's trigger into a candidate protocol (design
+    // network-experiments.md Tier 3, car 3 of packet 508cc38c); it is
+    // not a body flag, and a body that claims it is refused so the
+    // shadow lane cannot be populated before its side-effect skip
+    // (car 2) exists. The sim never participates (Q5), so a sim chain
+    // carrying the claim is refused the same way.
+    if job.partition == Partition::Shadow {
+        return (
+            StatusCode::BAD_REQUEST,
+            "partition=shadow is not admitted here: shadow packets are minted by the \
+             experiment lane (docs/design/network-experiments.md, Tier 3), not by a body value",
+        )
+            .into_response();
+    }
+    if boss_core::sim_origin::is_in_sim_chain() {
+        job.partition = Partition::Simulated;
+    }
+
+    // AN ID THAT ALREADY NAMES A PACKET IS ADMITTED ONCE (backlog
+    // 558396ff). A caller that derives the id from what it is reacting
+    // to — `jobs.spawn` keys a delegate-subjob's child on the parent
+    // step, so a redelivered `step.ready` re-sends the same id — must be
+    // able to send it twice and get one packet. The adapters' `ON
+    // CONFLICT (id) DO NOTHING` guards the job row only; the steps below
+    // are materialized with fresh ids every time, so a second admission
+    // hung a second copy of every step on the existing packet and
+    // recorded a `step.ready` for each. Checked before anything is
+    // materialized or written: the same packet is answered (200, not
+    // 201 — nothing was created); a body that differs from it in any
+    // field the caller sent is refused, naming the fields, rather than
+    // answered as though the packet that exists were the one it
+    // described (the round-2 review of car 983696b5 found kind and
+    // subject compared, and nothing else).
+    match state.jobs.get_job(&job.id).await {
+        Ok(Some(existing)) => {
+            let differing = admission_differences(&job, !opened_by_clock, &existing);
+            return if differing.is_empty() {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "id": existing.id.to_string(),
+                        "already_admitted": true,
+                    })),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::CONFLICT,
+                    // The field NAMES only: what that packet holds is a
+                    // read, and a read has its own policy; a create names
+                    // nothing of another packet but where it collides.
+                    Json(serde_json::json!({
+                        "error": "this id already names a packet that differs from this body",
+                        "id": existing.id.to_string(),
+                        "differing_fields": differing,
+                    })),
+                )
+                    .into_response()
+            };
+        }
+        Ok(None) => {}
+        Err(e) => return persist_error_response(e),
+    }
+
     // THE ADMISSION INSTANT, server-owned (backlog 6c2eba00, design
     // f2cdff23). Stamped here and only here: the adapters keep the
     // column out of every UPDATE, so a later PUT cannot move when the
@@ -859,34 +980,6 @@ pub(super) async fn create_job<R: JobsRepository + 'static, B: EventBus + 'stati
         } else if job.metadata.is_null() {
             job.metadata = serde_json::json!({ "opened_at": now.to_rfc3339() });
         }
-    }
-
-    // Admission decides the partition ONCE, here, and it never moves
-    // again (03-jobs.sql: the epoch trim leans on a Job's rows all
-    // sharing one fate). Two admissible sources, OR-ed: an explicit
-    // `partition` / `simulated: true` on the body (demo seeding,
-    // tests), or the request arriving on a sim chain (`x-sim-origin`
-    // — how every sim-engine create presents). The OR means a sim
-    // chain can never mint real work, even with a body that claims
-    // otherwise.
-    //
-    // NOTHING ADMITS A SHADOW PACKET YET. Shadow admission mirrors a
-    // real packet's trigger into a candidate protocol (design
-    // network-experiments.md Tier 3, car 3 of packet 508cc38c); it is
-    // not a body flag, and a body that claims it is refused so the
-    // shadow lane cannot be populated before its side-effect skip
-    // (car 2) exists. The sim never participates (Q5), so a sim chain
-    // carrying the claim is refused the same way.
-    if job.partition == Partition::Shadow {
-        return (
-            StatusCode::BAD_REQUEST,
-            "partition=shadow is not admitted here: shadow packets are minted by the \
-             experiment lane (docs/design/network-experiments.md, Tier 3), not by a body value",
-        )
-            .into_response();
-    }
-    if boss_core::sim_origin::is_in_sim_chain() {
-        job.partition = Partition::Simulated;
     }
 
     // Validate the kind against the Workflow registry. When no registry

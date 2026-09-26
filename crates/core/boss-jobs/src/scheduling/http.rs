@@ -9,6 +9,8 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use boss_clock_client::ClockClient;
 use boss_core::publisher::DomainPublisher;
+use boss_core::roles::{ANONYMOUS_VISITOR_IDS, PLATFORM_ADMIN_ROLE, is_anonymous_visitor_role};
+use boss_policy_client::{CurrentUser, User};
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -92,7 +94,8 @@ fn resolve_range(q: &RangeQuery) -> (DateTime<Utc>, DateTime<Utc>) {
 }
 
 /// Resolve the outbox event stamp for this request. Scheduling
-/// handlers carry no CurrentUser extractor; the publisher's
+/// write handlers carry no CurrentUser extractor (only the two
+/// calendar-token handlers do, to authorize); the publisher's
 /// `default_actor` resolves the request identity from the task-local
 /// context, and its clock probe settles `_simulated` — the same
 /// envelope the retired post-commit emits carried (outbox phase 2).
@@ -337,10 +340,53 @@ struct WeekGridQuery {
 const ICS_PAST_DAYS: i64 = 90;
 const ICS_FUTURE_DAYS: i64 = 180;
 
+// WHO MAY TOUCH A CALENDAR TOKEN (backlog 7ae9ccec, 2026-09-25). The
+// token is the whole authentication of the sessionless feed above, so
+// holding it IS reading the employee's schedule. Both handlers took no
+// caller until this car: a guest session (audit-readonly, which passes
+// has_global_read) could GET any employee's token through the gateway's
+// /api/scheduling/* proxy, and any signed-in employee could read or
+// rotate anyone's. Global READ is not this token's grant — the token is
+// the employee's own, like a password.
+//
+// - A read answers only the employee themself. Nobody else, operator
+//   included, gets 403.
+// - A rotate is the employee, or a platform-admin revoking a leaked
+//   feed; the operator's response carries no token, so revoking a feed
+//   never hands the operator the new one.
+// - An anonymous visitor's id — the CurrentUser fallback for a request
+//   with no x-boss-user (`anonymous`), or the guest session's fixed
+//   address — owns nothing, whatever the path says, and neither a
+//   read-only-floor role nor the headerless `guest` ever mints a token.
+//   Both are asked of boss_core::roles rather than spelled here: the
+//   first version of this car named `audit-readonly` alone, and the
+//   `visitor` role joined the floor the same day (design 2830b6b7).
+
+fn is_the_employee(user: &User, emp_id: &str) -> bool {
+    !ANONYMOUS_VISITOR_IDS.contains(&user.id.as_str()) && user.id == emp_id
+}
+
+fn may_rotate(user: &User, emp_id: &str) -> bool {
+    user.role == PLATFORM_ADMIN_ROLE
+        || (is_the_employee(user, emp_id) && !is_anonymous_visitor_role(&user.role))
+}
+
+fn not_yours(emp_id: &str, verb: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        format!("a calendar token is its employee's alone: only {emp_id} may {verb} it"),
+    )
+        .into_response()
+}
+
 async fn get_calendar_token(
     State(state): State<Arc<SchedulingApiState>>,
+    CurrentUser(user): CurrentUser,
     Path(emp_id): Path<String>,
 ) -> Response {
+    if !is_the_employee(&user, &emp_id) {
+        return not_yours(&emp_id, "read");
+    }
     match state.repo.calendar_token_for(&emp_id).await {
         Ok(Some(t)) => Json(serde_json::json!({
             "employee_id": emp_id,
@@ -359,8 +405,12 @@ async fn get_calendar_token(
 
 async fn rotate_calendar_token(
     State(state): State<Arc<SchedulingApiState>>,
+    CurrentUser(user): CurrentUser,
     Path(emp_id): Path<String>,
 ) -> Response {
+    if !may_rotate(&user, &emp_id) {
+        return not_yours(&emp_id, "rotate");
+    }
     // Two v4 UUIDs concatenated = 256 bits of randomness. `simple()`
     // format emits 32 hex chars per UUID, so the token is a 64-char
     // URL-safe string.
@@ -372,12 +422,23 @@ async fn rotate_calendar_token(
         .rotate_calendar_token(&emp_id, &token, now, &stamp)
         .await
     {
-        Ok(()) => (
+        // Only the employee is handed the new feed. An operator's
+        // rotate is a revocation: the old URL stops working, and the
+        // employee reads the new one themself.
+        Ok(()) if is_the_employee(&user, &emp_id) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "employee_id": emp_id,
                 "token": token,
                 "ics_url": format!("/ics/{token}/calendar.ics"),
+            })),
+        )
+            .into_response(),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "employee_id": emp_id,
+                "rotated": true,
             })),
         )
             .into_response(),

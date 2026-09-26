@@ -2,7 +2,7 @@
   // Approval / sign-off surface — port of
   // apps/web-legacy/src/steps/ApprovalSurface.tsx.
 
-  import { tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import { session } from '@boss/web-kit/session/session.svelte';
   import { appNow, appToday } from '@boss/web-kit/sim-clock';
   import {
@@ -75,8 +75,23 @@
     pending !== null || (step.status !== 'completed' && step.status !== 'skipped'),
   );
   let signed = $derived(signedRows(onScreen));
-  // Read at the instant a ceremony begins — never a copy taken earlier.
-  const shownNow = (): ShownStep | null => (signedVisible ? onScreen : null);
+  // A destroyed surface shows nothing, whatever its last state says: a
+  // navigation away mid-gesture left `onScreen` answering the step it
+  // last drew, so a ceremony still in flight read it as on screen and
+  // asked the passkey over a page that no longer showed it (backlog
+  // 7c53b1bf, review of car fcda5f8b). Plain variables, not $state —
+  // nothing is drawn from them.
+  let destroyed = false;
+  // The prompt of the gesture in flight, taken down when its step leaves
+  // the screen — by a rail switch (the effect below) or by destruction.
+  let gesture: AbortController | null = null;
+  onDestroy(() => {
+    destroyed = true;
+    gesture?.abort();
+  });
+  // Read at every await of a ceremony (presence.ts) — never a copy taken
+  // earlier.
+  const shownNow = (): ShownStep | null => (!destroyed && signedVisible ? onScreen : null);
 
   // The rows whose value box scrolls, by key: rendered is not read, so a
   // box that scrolls says so under it (backlog 6093cf13). Measured off
@@ -109,8 +124,11 @@
     // an error from step A must not render under step B, nor A's
     // in-flight decision be drawn into B's signed content. A gesture
     // still running for A then finds A's content off screen, and its
-    // ceremony refuses rather than sign what is no longer shown.
+    // ceremony refuses rather than sign what is no longer shown, and a
+    // passkey prompt it already has up is taken down (7c53b1bf).
     void stepId;
+    gesture?.abort();
+    gesture = null;
     signError = '';
     pending = null;
     scrolling = {};
@@ -132,6 +150,8 @@
     };
     const job = jobId;
     const role = userRole;
+    const controller = new AbortController();
+    gesture = controller;
     saving = true;
     signError = '';
     try {
@@ -189,6 +209,7 @@
               target.id,
               { title: target.title, metadata: shownAfter(target.metadata, body.metadata) },
               shownNow,
+              controller.signal,
             );
             stamp = await fetch(`/api/jobs/${job}/steps/${target.id}/sign-offs`, {
               method: 'POST',
@@ -227,6 +248,7 @@
           { title: target.title, metadata: shownAfter(target.metadata, body.metadata) },
           shownNow,
           presenceTicket,
+          controller.signal,
         );
         // 409 (stamps missing or stale) renders as the same
         // "sign-offs outstanding: …" line as before — describeWriteFailure
@@ -237,6 +259,7 @@
     } finally {
       saving = false;
       pending = null;
+      if (gesture === controller) gesture = null;
     }
   }
 </script>
