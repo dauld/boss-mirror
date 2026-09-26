@@ -25,6 +25,10 @@
 //! while the tenant's `tax_kinds` rows carried `liability_account` per
 //! kind; the bundle had no reader, so it is gone too and the posting
 //! path reads the row. The pins below cover both names.
+//!
+//! tree-wide pin — it scans a tree no changed-file map can attribute
+//! to this crate, so every scoped gate runs it whatever its scope
+//! (`tree_wide_pins` in infra/gate.sh; backlog c87ad472).
 
 use boss_testing::repo_root;
 use std::path::{Path, PathBuf};

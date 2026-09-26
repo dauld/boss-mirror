@@ -23,6 +23,10 @@
 //! refuses the way real curl does (exit 7, `000` on stdout) and a stub
 //! `sleep` that records the wait and returns at once, so the backoff is
 //! read without being spent.
+//!
+//! tree-wide pin — it scans a tree no changed-file map can attribute
+//! to this crate, so every scoped gate runs it whatever its scope
+//! (`tree_wide_pins` in infra/gate.sh; backlog c87ad472).
 
 use boss_testing::{create_dir, repo_root, scratch_dir, write_exec};
 use std::path::{Path, PathBuf};

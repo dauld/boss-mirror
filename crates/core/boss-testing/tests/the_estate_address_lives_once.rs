@@ -42,6 +42,10 @@
 //!     converges that render it — and carries no inline pin;
 //!   * the lint `infra/lint/the-estate-address-lives-once.sh` is red on
 //!     a planted literal, red on a stale allowance, green on the tree.
+//!
+//! tree-wide pin — it scans a tree no changed-file map can attribute
+//! to this crate, so every scoped gate runs it whatever its scope
+//! (`tree_wide_pins` in infra/gate.sh; backlog c87ad472).
 
 use boss_testing::{create_dir, repo_root, scratch_dir, write_exec, write_file};
 use std::path::{Path, PathBuf};

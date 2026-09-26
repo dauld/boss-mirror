@@ -1002,6 +1002,31 @@ path_shapes() {
            -e 's|^examples/\([^/]*\)/seeds/.*|boss-\1-engine|p'
 }
 
+# ---------------------------------------------------------------------
+# Tree-wide pins: run on EVERY scoped gate, whatever the scope
+# ---------------------------------------------------------------------
+# Everything above maps a changed FILE to the crates that read it. A pin
+# that scans a whole TREE — `the_public_mirror_url_lives_once` walks
+# infra/ and apps/web/src/, the lives-once and one-door pins walk
+# crates/ — reads paths no file-level map can attribute to it, because
+# no literal names them. On 2026-09-23 car 622c6944 changed one Svelte
+# page, `--auto` derived web + dispatcher, and the page's hard-coded
+# mirror URL was first seen by the TRAIN's gate, which ran the whole
+# workspace and struck ~16 cars (train 11bda216; backlog c87ad472).
+#
+# Running boss-testing's whole suite on every car would close it at
+# 6-10 minutes a car (measured off the gate receipts of 2026-09-26). The
+# pins themselves are read-only scans that take seconds, so each one
+# DECLARES itself — a `//! tree-wide pin` line in its own header, the
+# one place a reader of the pin sees it — and every scoped gate runs
+# the declared set. Derived from the files, never listed here (§9a). A
+# pin whose crate is already in the scope rides that crate's own test
+# run and is not named twice. Prints `<crate> <test>` per line.
+tree_wide_pins() {
+    grep -l '^//! tree-wide pin' crates/*/*/tests/*.rs 2>/dev/null \
+        | sed -n 's|^crates/[^/]*/\([^/]*\)/tests/\([^/]*\)\.rs$|\1 \2|p' | sort
+}
+
 
 scope_self_test() {
     local fails=0 label want got seeds tenant bundle_dir
@@ -1411,6 +1436,26 @@ if [ "$AUTO" -eq 1 ]; then
         fi
         echo "gate: --auto — nothing changed implies a crate; lints + fmt only"
         echo "gate: (changed: ${local_changed})"
+    fi
+fi
+
+# The tree-wide pins this scoped gate owes (see `tree_wide_pins`), as
+# cargo arguments, minus any whose crate the scope already tests. Empty
+# in full mode, which tests the workspace and so runs every one.
+TREE_WIDE=()
+if [ "$AUTO" -eq 1 ] || [ "${#SCOPE[@]}" -gt 0 ]; then
+    tw_crates=""
+    tw_tests=""
+    while read -r tw_crate tw_test; do
+        [ -n "$tw_crate" ] || continue
+        case " ${NAMED[*]:-} " in *" ${tw_crate} "*) continue ;; esac
+        case " ${tw_crates} " in *" ${tw_crate} "*) ;; *) tw_crates="${tw_crates} ${tw_crate}" ;; esac
+        tw_tests="${tw_tests} ${tw_test}"
+    done < <(tree_wide_pins)
+    for c in $tw_crates; do TREE_WIDE+=(-p "$c"); done
+    for t in $tw_tests; do TREE_WIDE+=(--test "$t"); done
+    if [ -n "$tw_tests" ]; then
+        echo "gate: tree-wide pins, run whatever the scope:${tw_tests}"
     fi
 fi
 
@@ -2445,6 +2490,11 @@ else
         check "build boss-cli" cargo build -p boss-cli
         check "an-image-sourced-tenant-passes-its-check" infra/lint/an-image-sourced-tenant-passes-its-check.sh
     fi
+fi
+# Outside the branches above ON PURPOSE: a lints-only car is the one
+# that needs it most — car 622c6944 was web-only (backlog c87ad472).
+if [ "${#TREE_WIDE[@]}" -gt 0 ]; then
+    check "tree-wide pins" cargo test "${TREE_WIDE[@]}" --all-features
 fi
 
 # THE WEB SUITE. CI's web job runs typecheck + unit + build + the

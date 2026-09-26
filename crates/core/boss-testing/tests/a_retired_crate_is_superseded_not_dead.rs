@@ -22,6 +22,10 @@
 //! container launcher's roster and the config generator: the launcher
 //! pin in boss-ports holds the first two equal, and this file holds the
 //! row gone.
+//!
+//! tree-wide pin — it scans a tree no changed-file map can attribute
+//! to this crate, so every scoped gate runs it whatever its scope
+//! (`tree_wide_pins` in infra/gate.sh; backlog c87ad472).
 
 use boss_testing::repo_root;
 use std::path::Path;
