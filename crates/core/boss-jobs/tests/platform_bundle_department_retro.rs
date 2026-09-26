@@ -133,3 +133,67 @@ fn the_sign_off_is_fed_by_the_report_step() {
         assert!(procedure.contains(door), "collect names `{door}`");
     }
 }
+
+/// THE IT RETRO READS THE AGENT WORK PROFILE (backlog 2f23f4c6). The
+/// 2026-09-24 builder analysis — where 96 runs' tool time and context
+/// went — was an afternoon's hand work that nothing repeated. The meter
+/// now records a profile per run and `GET /api/agent-runs/profiles`
+/// answers the week's rollup; this pins that the IT retro reads it in
+/// `collect`, ranks the four readings the packet named in `analyze`
+/// (by the rollup's own key names, so a reader can find each one in
+/// the answer), records the ranking in a field of its own, and that
+/// `gaps` files the top one. Enhancing the existing retro rather than
+/// adding a protocol was the packet's instruction.
+#[test]
+fn the_it_retro_collects_ranks_and_files_the_agent_work_profile() {
+    let wf = bundled("department-retro");
+    let step = |title: &str| {
+        wf.steps
+            .iter()
+            .find(|s| s.title == title)
+            .unwrap_or_else(|| panic!("department-retro has no `{title}` step"))
+    };
+    let procedure = |title: &str| {
+        step(title).metadata_defaults["procedure"]
+            .as_str()
+            .unwrap_or_else(|| panic!("`{title}` carries a procedure"))
+            .to_string()
+    };
+
+    let collect = procedure("collect");
+    assert!(
+        collect.contains("/api/agent-runs/profiles?since="),
+        "collect reads the week's work profiles"
+    );
+    assert!(
+        collect.contains("department is `it`"),
+        "the profile is IT's reading: agents are the IT department's CPUs"
+    );
+
+    let analyze = procedure("analyze");
+    for key in [
+        "largest_time_share",
+        "largest_context_share",
+        "top_files_read",
+        "runs_that_edited_nothing",
+    ] {
+        assert!(analyze.contains(key), "analyze ranks `{key}`");
+    }
+    assert!(
+        step("analyze")
+            .fields
+            .iter()
+            .any(|f| f.name == "work_profile" && !f.required),
+        "the ranking has a field of its own, optional because only IT fills it"
+    );
+
+    let gaps = procedure("gaps");
+    assert!(
+        gaps.contains("work_profile"),
+        "gaps reads the ranking analyze recorded"
+    );
+    assert!(
+        gaps.contains("FILE THE TOP ONE"),
+        "gaps files the top of the ranking"
+    );
+}
