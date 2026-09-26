@@ -28,7 +28,7 @@ impl MessageRepository for PgMessages {
     ) -> Result<Vec<Message>, MessageError> {
         let rows: Vec<MessageRow> = sqlx::query_as(
             "SELECT * FROM messages \
-             WHERE recipient_id = $1 AND ($2 OR kind <> 'archived') \
+             WHERE recipient_id = $1 AND ($2 OR archived_at IS NULL) \
              ORDER BY sent_at DESC",
         )
         .bind(recipient_id)
@@ -47,12 +47,15 @@ impl MessageRepository for PgMessages {
     ) -> Result<u32, MessageError> {
         // One statement with a NULL-tolerant clause rather than two
         // query strings: `$2 IS NULL OR kind = $2` keeps the filtered
-        // and unfiltered counts provably the same query. Unfiltered
-        // leaves out `archived`, the rows the inbox read leaves out.
+        // and unfiltered counts provably the same query. Either way it
+        // leaves out the archived rows the inbox read leaves out — by
+        // `archived_at`, since archiving keeps the kind (backlog
+        // 9bda9726), so `?kind=direct` must not count them back in.
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM messages \
              WHERE recipient_id = $1 AND read_at IS NULL \
-               AND (($2::text IS NULL AND kind <> 'archived') OR kind = $2)",
+               AND archived_at IS NULL \
+               AND ($2::text IS NULL OR kind = $2)",
         )
         .bind(recipient_id)
         .bind(kind)
@@ -250,13 +253,15 @@ impl MessageRepository for PgMessages {
         // `/jobs/{id}` from job-level notifications and
         // `/jobs/{id}/steps/{step}` from the step notifier.
         let ids: Vec<(String,)> = sqlx::query_as(
-            "UPDATE messages SET kind = 'archived' \
+            "UPDATE messages SET archived_at = $2 \
              WHERE entity_path LIKE $1 || '%' \
                AND kind = 'signal' \
+               AND archived_at IS NULL \
                AND read_at IS NULL \
              RETURNING id",
         )
         .bind(path_prefix)
+        .bind(now)
         .fetch_all(&mut *tx)
         .await
         .map_err(|e| MessageError::Storage(e.to_string()))?;
@@ -294,18 +299,20 @@ impl MessageRepository for PgMessages {
         // row moved gets its own event. `starts_with` rather than LIKE
         // for the id — a notice id is `notify:{uuid}:{recipient}`, and a
         // recipient id may carry `_`, which LIKE would read as a
-        // wildcard. Any kind but `archived`: an assignee's notice is a
-        // `direct`, which is the whole point (backlog 0b2bac00).
+        // wildcard. Any kind: an assignee's notice is a `direct`, which
+        // is the whole point (backlog 0b2bac00). Not yet archived, so a
+        // second pass moves nothing and records nothing.
         let ids: Vec<(String,)> = sqlx::query_as(
-            "UPDATE messages SET kind = 'archived' \
+            "UPDATE messages SET archived_at = $3 \
              WHERE entity_path LIKE $1 || '%' \
                AND starts_with(id, $2) \
-               AND kind <> 'archived' \
+               AND archived_at IS NULL \
                AND read_at IS NULL \
              RETURNING id",
         )
         .bind(path_prefix)
         .bind(id_prefix)
+        .bind(now)
         .fetch_all(&mut *tx)
         .await
         .map_err(|e| MessageError::Storage(e.to_string()))?;
@@ -337,14 +344,34 @@ impl MessageRepository for PgMessages {
             .begin()
             .await
             .map_err(|e| MessageError::Storage(e.to_string()))?;
-        let result = sqlx::query("UPDATE messages SET kind = 'archived' WHERE id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| MessageError::Storage(e.to_string()))?;
+        // Backlog 9bda9726: `archived_at IS NULL` is the idempotency
+        // guard the bulk doors already had, and it is the event gate —
+        // a repeat archive updates no row, so it records no second
+        // `messages.message.archived`. The time is set BESIDE `kind`,
+        // which keeps what the message was sent as.
+        let result = sqlx::query(
+            "UPDATE messages SET archived_at = $2 WHERE id = $1 AND archived_at IS NULL",
+        )
+        .bind(id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MessageError::Storage(e.to_string()))?;
 
         if result.rows_affected() == 0 {
-            return Err(MessageError::NotFound(format!("no message with ID {id}")));
+            // No row moved: either it is already archived (a no-op, Ok,
+            // nothing recorded) or there is no such message (NotFound).
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM messages WHERE id = $1)")
+                    .bind(id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|e| MessageError::Storage(e.to_string()))?;
+            return if exists {
+                Ok(())
+            } else {
+                Err(MessageError::NotFound(format!("no message with ID {id}")))
+            };
         }
         // OUTBOX (phase 2): the archived event records only after the
         // row actually updated.
@@ -380,6 +407,7 @@ struct MessageRow {
     sent_at: DateTime<Utc>,
     read_at: Option<DateTime<Utc>>,
     reply_to: Option<String>,
+    archived_at: Option<DateTime<Utc>>,
 }
 
 impl MessageRow {
@@ -405,6 +433,7 @@ impl MessageRow {
             sent_at: self.sent_at,
             read_at: self.read_at,
             reply_to: self.reply_to,
+            archived_at: self.archived_at,
         }
     }
 }
@@ -423,11 +452,7 @@ mod tests {
     fn kind_round_trips_through_serde() {
         // Transparent newtype serializes to the bare kebab code the
         // column stores and round-trips back.
-        for code in [
-            MessageKind::DIRECT,
-            MessageKind::SIGNAL,
-            MessageKind::ARCHIVED,
-        ] {
+        for code in [MessageKind::DIRECT, MessageKind::SIGNAL] {
             let k = MessageKind::new(code);
             assert_eq!(k.as_str(), code);
             let json = serde_json::to_string(&k).unwrap();

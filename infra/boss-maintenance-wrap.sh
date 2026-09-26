@@ -69,6 +69,30 @@ BOSS_USER='{"id":"automation:maintenance-timer","role":"platform-admin","access_
 API_CURL="$(dirname "$0")/boss-api-curl.sh"
 [ -x "$API_CURL" ] || API_CURL=boss-api-curl.sh
 
+# WHICH HOST THIS RUN IS — and so which packet is its own (backlog
+# 79f7678b, 2026-09-26). One kind can run on more than one host:
+# maintenance-estate-observe-host runs on the forge every 15 minutes and
+# on boss-gcp daily. This looked the open packet up by KIND alone and
+# stamped no host, so boss-gcp's run found an open forge packet, took it
+# as "recovery", and its ExecStopPost completed the forge's run step;
+# and on /it/estate, which reads `metadata.host`, one host's observer
+# could hide the other's silence. So the host is stamped on the packet
+# and the lookup is kind + host.
+#
+# The host is the unit's HOST_ID, else the BOSS_NODE_ID a converge unit
+# declares, else the machine's own name. In a Kubernetes pod with
+# neither, NO host: a pod's name is new on every CronJob run, and keying
+# on it would orphan the failed run's packet the next run is meant to
+# recover, so those chores keep the kind-only key they had. A packet
+# with no host — every packet filed before this — still matches, so an
+# open one is recovered rather than left open forever under a key it
+# never carried. boss-step.sh derives the host the same way, pinned by
+# crates/core/boss-testing/tests/a_loop_packet_names_its_host.rs.
+HOST="${HOST_ID:-${BOSS_NODE_ID:-}}"
+if [ -z "$HOST" ] && [ -z "${KUBERNETES_SERVICE_HOST:-}" ]; then
+    HOST=$(uname -n)
+fi
+
 # THE EXECUTOR NEVER WAITS ON ITS VISIBILITY. If the jobs API cannot
 # be reached at all past the transport deadline, this run has no
 # packet — and it still RUNS. On 2026-09-05 the cluster's system of
@@ -85,7 +109,7 @@ transport_unreachable() {  # $1 = curl exit code
 }
 reply=""; rc=0
 reply=$("$API_CURL" -fsS -H "x-boss-user: $BOSS_USER" \
-    "$BASE/api/jobs?kind=$KIND&status=open&limit=2") || rc=$?
+    "$BASE/api/jobs?kind=$KIND&status=open&limit=50") || rc=$?
 if [ "$rc" -ne 0 ]; then
     if transport_unreachable "$rc"; then
         echo "boss-maintenance-wrap: the jobs API at $BASE is UNREACHABLE (curl exit $rc, past the transport deadline) — running $KIND WITHOUT its packet; the work goes on, only this run's visibility is lost" >&2
@@ -96,12 +120,15 @@ if [ "$rc" -ne 0 ]; then
 fi
 # `.data` missing from the reply means the jobs API changed shape —
 # error out (aborting the timer run) rather than reading it as zero
-# open Jobs and spawning a duplicate.
-open_count=$(printf '%s' "$reply" \
-    | jq '.data | if . == null then error("jobs reply has no .data") else length end')
+# open Jobs and spawning a duplicate. Only this host's packets, and
+# hostless ones, are this run's (see WHICH HOST above).
+open_count=$(printf '%s' "$reply" | jq --arg host "$HOST" '
+    .data | if . == null then error("jobs reply has no .data") else
+        map(select((.metadata.host // "") as $h | $h == $host or $h == "")) | length
+    end')
 
 if [ "$open_count" != "0" ]; then
-    echo "boss-maintenance-wrap: open $KIND Job exists — this run will complete it (recovery)"
+    echo "boss-maintenance-wrap: open $KIND Job exists${HOST:+ for $HOST} — this run will complete it (recovery)"
     exit 0
 fi
 
@@ -109,14 +136,14 @@ rc=0
 "$API_CURL" -fsS -X POST "$BASE/api/jobs" \
     -H "x-boss-user: $BOSS_USER" -H "content-type: application/json" \
     ${BOSS_MACHINE_TOKEN:+-H "x-boss-machine-token: $BOSS_MACHINE_TOKEN"} \
-    -d "$(jq -n --arg kind "$KIND" --arg title "$LABEL — $(date +%F)" '{
+    -d "$(jq -n --arg kind "$KIND" --arg host "$HOST" --arg title "$LABEL — $(date +%F)" '{
         kind: $kind,
         subject: {subject_kind: "custom", id: ("infra/" + $kind)},
         title: $title,
         owner_id: "emp-bootstrap-admin",
         priority: "standard",
         status: "open",
-        metadata: {chore: $kind},
+        metadata: ({chore: $kind} + (if $host == "" then {} else {host: $host} end)),
         tags: ["maintenance"]
     }')" >/dev/null || rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -127,4 +154,4 @@ if [ "$rc" -ne 0 ]; then
     echo "boss-maintenance-wrap: spawning today's $KIND Job failed (curl exit $rc) — aborting the run" >&2
     exit "$rc"
 fi
-echo "boss-maintenance-wrap: spawned today's $KIND Job"
+echo "boss-maintenance-wrap: spawned today's $KIND Job${HOST:+ for $HOST}"

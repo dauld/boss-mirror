@@ -2536,11 +2536,14 @@ states, bands, hysteresis and units (`region_states.rs`, #629), C the
 order and the drawn borders (#630), F the HUD frame and the server's
 `thirds` (#632), E the actors, the plant strip and the rest of (5)
 (#634, with the region pages of (7)), and G the phone strip
-(`PhoneStrip.svelte`, #637). Not built: the second half of receiving's
-KPI, the share whose channel is unrecorded — the channel rule lives
-only in the client (`receiving.ts::channelOf`), and a server copy
-needs its own equality pin (CLAUDE.md §9a), so it stays named residue on
-`c3105b2a` rather than a copy ported unpinned.
+(`PhoneStrip.svelte`, #637). The second half of receiving's KPI, the
+share whose channel is unrecorded, waited as residue on `c3105b2a`
+while the channel rule lived only in the client; backlog `1eea4554`
+moved the rule to the server (`boss_jobs::channels::lane_of`: the
+filer's `input_channel`, or `unclassified`), where the region measures
+the share over what stands and the jobs list hands each row its lane on
+`lane=true`, so the receiving board draws the server's reading and
+keeps no vocabulary of its own.
 
 **The map moves only where the record says work is moving, so
 stillness is the stall signal** (design `31bade8f`, "The IT map moves",

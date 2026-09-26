@@ -4,9 +4,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// How a message is routed / surfaced. Free-text wrapper around a
-/// kebab-case string; the three platform kinds are seeded as Class rows
-/// under `(subject_kind='message', member_attribute='kind')` and a
-/// tenant adds its own routing kind by seeding a row, not forking core.
+/// kebab-case string; the platform kinds (`direct`, `signal`) are seeded
+/// as Class rows under `(subject_kind='message', member_attribute='kind')`
+/// and a tenant adds its own routing kind by seeding a row, not forking
+/// core. `archived` was a third until backlog 9bda9726: archiving is
+/// the message's `archived_at`, beside its kind, and that Class row is
+/// retired.
 /// The messages API validates an incoming kind against the active Class
 /// set at the send boundary (fail-loud → 400). Serializes transparently
 /// to the bare string; the `messages.kind` column stores it directly.
@@ -18,7 +21,6 @@ pub struct MessageKind(pub String);
 impl MessageKind {
     pub const DIRECT: &'static str = "direct";
     pub const SIGNAL: &'static str = "signal";
-    pub const ARCHIVED: &'static str = "archived";
 
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
@@ -79,4 +81,12 @@ pub struct Message {
     /// ID of the message this is replying to (thread parent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
+    /// When the message left the inbox. A state BESIDE `kind`, not a
+    /// value of it (backlog 9bda9726): archiving used to overwrite
+    /// `kind` with `archived`, so the projection forgot whether the
+    /// message had been a direct or a signal, and only the sent event
+    /// in the log still knew. Skipped when absent, so a sent event's
+    /// payload — the full row at send time — is unchanged by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<DateTime<Utc>>,
 }

@@ -4,6 +4,7 @@
 //! pinned against the TypeScript.
 
 use super::*;
+use crate::channels::{LaneBasis, lane_of};
 
 /// The delivery pipeline's kinds — a packet of these is a car in
 /// transit or the machinery moving it, never a request, so the
@@ -123,22 +124,54 @@ pub(super) fn receiving(inputs: &RegionInputs<'_>, w: &Windows) -> Region {
         format!("{} standing", plural(n, "packet", "packets")),
         inputs.now,
     );
-    // THE KPI (decision 9). Its second half — the share whose channel is
-    // unrecorded — is not measured here yet: the channel rule is the
-    // client's (`receiving.ts::channelOf`), and a second copy of it needs
-    // its own equality pin (CLAUDE.md §9a), so it is left as named residue
-    // on backlog c3105b2a rather than ported unpinned.
+    // THE KPI (decision 9): the oldest untriaged, and the share of what
+    // stands whose filer recorded no lane.
     #[allow(clippy::cast_precision_loss)]
-    let kpi = vec![match oldest_day {
-        Some(_) => measure("oldest untriaged", Some(oldest as f64), "days"),
-        None => measure_said(
-            "oldest untriaged",
-            None,
-            "days",
-            "nothing untriaged".to_string(),
-        ),
-    }];
+    let kpi = vec![
+        match oldest_day {
+            Some(_) => measure("oldest untriaged", Some(oldest as f64), "days"),
+            None => measure_said(
+                "oldest untriaged",
+                None,
+                "days",
+                "nothing untriaged".to_string(),
+            ),
+        },
+        unrecorded_share(&open),
+    ];
     region("receiving", Some(n), None, UNIT, settled, trend, kpi)
+}
+
+/// THE SHARE WHOSE CHANNEL IS UNRECORDED — decision 9's second half,
+/// named residue on backlog c3105b2a until the lane rule moved to the
+/// server (backlog 1eea4554): it was the client's (`receiving.ts::
+/// channelOf`), in a six-lane vocabulary of its own, so porting it would
+/// have been a second copy to pin. Now both read [`lane_of`], the one
+/// rule, and the board draws the lane the jobs list classified.
+/// Measured over what STANDS, the region's own count, as a whole percent.
+/// Nothing standing is no reading, never a 0% that says every filer
+/// named their lane.
+fn unrecorded_share(standing: &[&Job]) -> Measure {
+    const NAME: &str = "channel unrecorded";
+    let of = standing.len();
+    if of == 0 {
+        return measure_said(NAME, None, "%", format!("{NAME}: nothing standing"));
+    }
+    let unrecorded = standing
+        .iter()
+        .filter(|j| lane_of(&j.metadata).basis == LaneBasis::Unclassified)
+        .count();
+    #[allow(clippy::cast_precision_loss)]
+    let pct = (unrecorded as f64 * 100.0 / of as f64).round();
+    measure_said(
+        NAME,
+        Some(pct),
+        "%",
+        format!(
+            "{NAME} {}% ({unrecorded} of {of} standing)",
+            number_text(pct)
+        ),
+    )
 }
 
 #[cfg(test)]
@@ -212,6 +245,68 @@ mod tests {
         assert_eq!(r.trend.previous, Some(1.0));
     }
 
+    /// THE KPI's SECOND HALF (design 62de32ae decision 9, ported by
+    /// backlog 1eea4554): of the packets standing, the share whose filer
+    /// recorded no lane — read through `channels::lane_of`, the one rule
+    /// the board's rows are classified by too, so the region and the
+    /// board cannot count two different things.
+    #[test]
+    fn receiving_measures_the_share_of_standing_packets_with_no_recorded_lane() {
+        let recorded = job(
+            "backlog-item",
+            "said",
+            JobStatus::Open,
+            json!({ "input_channel": "review-finding" }),
+        );
+        // A key no filer writes, and a near miss: neither is a lane.
+        let old_key = job(
+            "backlog-item",
+            "old key",
+            JobStatus::Open,
+            json!({ "channel": "monitoring" }),
+        );
+        let near_miss = job(
+            "user-feedback",
+            "near miss",
+            JobStatus::Open,
+            json!({ "input_channel": "telemetry" }),
+        );
+        let silent = job("design-doc", "silent", JobStatus::Open, json!({}));
+        let status = empty_status();
+        let inbound = untaken(vec![recorded, old_key, near_miss, silent]);
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &[],
+            &[],
+            Some(&inbound),
+            Some(&[]),
+        ));
+        let r = by_name(&out, "receiving");
+        assert_eq!(r.kpi.len(), 2, "{:?}", r.kpi);
+        let share = &r.kpi[1];
+        assert_eq!(share.name, "channel unrecorded");
+        assert_eq!(share.unit, "%");
+        assert_eq!(share.value, Some(75.0));
+        assert_eq!(share.text, "channel unrecorded 75% (3 of 4 standing)");
+
+        // Nothing standing: no share, said so — never a 0% that reads
+        // as every filer saying where their work came from.
+        let out = regions(&inputs(
+            &status,
+            &[],
+            &[],
+            &[],
+            &[],
+            Some(&untaken(vec![])),
+            Some(&[]),
+        ));
+        let share = &by_name(&out, "receiving").kpi[1];
+        assert_eq!(share.value, None);
+        assert_eq!(share.text, "channel unrecorded: nothing standing");
+    }
+
     /// The two facts ported from the receiving yard's TypeScript live
     /// twice; this holds them equal (CLAUDE.md §9a). Reads the source
     /// the client is built from, so a kind added to one side and not
@@ -250,6 +345,48 @@ mod tests {
             assert!(
                 yard.contains(&format!("md.{key}")),
                 "yard.ts no longer reads {key}"
+            );
+        }
+    }
+
+    /// THE BOARD DRAWS THE SERVER'S LANE (backlog 1eea4554): the rule is
+    /// [`lane_of`] alone, so the receiving yard's TypeScript asks the
+    /// list for it (`lane=true`) and keeps no rule of its own — no read
+    /// of the recorded key, none of the key no filer writes, no kind
+    /// lists. A client that grows its own classification again names
+    /// itself here, the way the pipeline kinds above do (CLAUDE.md §9a).
+    #[test]
+    fn the_receiving_yard_draws_the_lane_the_server_read() {
+        let src = std::fs::read_to_string(
+            boss_testing::repo_root().join("apps/web/src/it/receiving/receiving.ts"),
+        )
+        .expect("receiving.ts is in the tree");
+        assert!(
+            src.contains("&lane=true"),
+            "receiving.ts must ask the jobs list for the server's lane"
+        );
+        for (word, why) in [
+            (
+                crate::channels::RECORDED_KEY,
+                "reads the recorded key itself",
+            ),
+            ("md.channel", "reads a key no filer writes"),
+            ("DESIGN_KINDS", "keeps a kind list"),
+            ("PROTOCOL_KINDS", "keeps a kind list"),
+            ("MONITORING_KINDS", "keeps a kind list"),
+        ] {
+            assert!(
+                !src.contains(word),
+                "receiving.ts {why} ({word}); the lane is the server's (channels::lane_of)"
+            );
+        }
+        // The two bases a reading can have, spelled as the server spells them.
+        for basis in [LaneBasis::Recorded, LaneBasis::Unclassified] {
+            let word = serde_json::to_value(basis).unwrap();
+            let word = word.as_str().unwrap();
+            assert!(
+                src.contains(&format!("'{word}'")),
+                "receiving.ts no longer parses the basis '{word}'"
             );
         }
     }

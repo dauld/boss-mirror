@@ -39,10 +39,11 @@ pub trait MessageRepository: Send + Sync {
     /// badge: an inbox holding 1,980 unread `signal` rows against 3
     /// unread `direct` ones renders the noise as a number unless the
     /// caller can ask the question the reader actually has, which is
-    /// "is anything addressed to me?". `None` counts every kind but
-    /// `archived` — the same inbox `inbox` returns, since the expire
-    /// rule archives a signal without reading it; `Some("archived")`
-    /// still counts those by name.
+    /// "is anything addressed to me?". Archived rows never count — the
+    /// same inbox `inbox` returns, since the expire rule archives a
+    /// signal without reading it — and that holds under a kind too:
+    /// archiving keeps the kind (backlog 9bda9726), so an archived
+    /// direct must not reach the `Some("direct")` badge.
     async fn unread_count(
         &self,
         recipient_id: &str,
@@ -75,7 +76,8 @@ pub trait MessageRepository: Send + Sync {
         stamp: &EventStamp,
     ) -> Result<(), MessageError>;
     /// Records `messages.message.archived` (`{id, archived_at}`)
-    /// in-tx after the row actually updated.
+    /// in-tx for each row that actually moved; a signal already
+    /// archived does not move again.
     /// Archive every UNREAD `signal` whose `entity_path` starts with
     /// `path_prefix`, returning how many moved. The expiry path for
     /// notifications about work that has finished (David, 2026-08-14:
@@ -123,6 +125,11 @@ pub trait MessageRepository: Send + Sync {
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<u32, MessageError>;
 
+    /// Take one message out of the inbox by setting its `archived_at`
+    /// BESIDE its kind, and record `messages.message.archived`
+    /// (`{id, archived_at}`) in-tx. Idempotent (backlog 9bda9726): a
+    /// message already archived is left as it is — Ok, no event, the
+    /// first archive's time standing. NotFound only for a missing id.
     async fn archive_message(
         &self,
         id: &str,

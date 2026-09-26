@@ -482,6 +482,7 @@ async fn send_message<R: MessageRepository + 'static>(
         sent_at: boss_clock_client::now_from(&state.clock).await,
         read_at: None,
         reply_to: body.reply_to,
+        archived_at: None,
     };
 
     // OUTBOX (phase 2): the adapter records MESSAGE_SENT (full row
@@ -521,6 +522,7 @@ mod tests {
             sent_at: Utc::now(),
             read_at: if read { Some(Utc::now()) } else { None },
             reply_to: None,
+            archived_at: None,
         }
     }
 
@@ -1002,7 +1004,7 @@ mod tests {
             .unwrap();
         let msg: Message = serde_json::from_slice(&body).unwrap();
         assert!(msg.read_at.is_none(), "a refused mark-read marked it");
-        assert_eq!(msg.kind.as_str(), MessageKind::DIRECT, "a refused archive");
+        assert!(msg.archived_at.is_none(), "a refused archive archived it");
     }
 
     /// A caller that is not trusted cannot show it owns a message that

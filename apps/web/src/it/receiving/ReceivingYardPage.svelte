@@ -6,21 +6,22 @@
   // David, 2026-09-12, approving the prototype this ports: "each
   // department will have a view of jobs flowing in, jobs getting worked
   // within the department, and jobs flowing out" — this is IT's IN. It
-  // keeps the floor's grammar: a packet is a car, a channel is a track,
+  // keeps the floor's grammar: a packet is a car, a lane is a track,
   // the car carries its days waiting and a mark for who holds it, and
   // the same car is meant to be recognisable when it reaches the Crew
   // Board and then the Train Yard.
   //
   // WHAT IS SHOWN, in reading order: the week's flow (in, out, standing);
   // what the snapshot says — three readings that were the reason the
-  // prototype existed; arrivals per day by channel; the inbound tracks;
+  // prototype existed; arrivals per day by lane; the inbound tracks;
   // then the manifest, every standing packet oldest first, each a link
   // to the packet itself.
   //
   // NO NUMBER THIS SURFACE MAKES UP. Kinds come from the registry, not a
-  // list here; a channel is a recorded fact where the packet carries
-  // one and a derived reading (said so) otherwise; a kind whose page
-  // truncated is named; a failed read is a failure, never a clear track.
+  // list here; a lane is the server's reading of what the filer
+  // recorded, and `unclassified` where the filer named none (backlog
+  // 1eea4554); a kind whose page truncated is named; a failed read is a
+  // failure, never a clear track.
   import { onMount } from 'svelte';
   import PageHeader from '@boss/web-kit/ui/PageHeader.svelte';
   import { href, navigate } from '../../router';
@@ -28,17 +29,17 @@
   import { failedVerbPhrase } from '../../steps/failedVerb';
   import {
     AGE_THRESHOLDS,
-    CHANNELS,
-    CHANNEL_LABEL,
+    UNCLASSIFIED,
     arrivalsByDay,
     daysEndingOn,
     failedStep,
     inboundKinds,
+    laneColor,
+    lanesOf,
     loadEveryPage,
     loadWorkflows,
     readings,
     waiting,
-    type Channel,
     type InboundRow,
     type WaitingRow,
   } from './receiving';
@@ -116,7 +117,6 @@
     human: standing.filter((r) => r.holder.who === 'human').length,
     nobody: standing.filter((r) => r.holder.who === 'nobody').length,
   });
-  const derivedShare = $derived(all.filter((r) => r.channelBasis === 'derived').length);
 
   // The chart: one scale for every bar, ticks at round numbers the
   // tallest day reaches, departures as a dashed level on each day.
@@ -135,29 +135,32 @@
   const yOf = (v: number): number => CH_H - PAD_B - (v / scaleMax) * (CH_H - PAD_B - 24);
   const xOf = (i: number): number => PAD_L + gapX + i * (BAR_W + gapX);
 
-  type Segment = Readonly<{ channel: Channel; n: number; y: number; h: number }>;
-  function segments(byChannel: Readonly<Partial<Record<Channel, number>>>): ReadonlyArray<Segment> {
-    return CHANNELS.reduce<{ y: number; out: Segment[] }>(
-      (acc, c) => {
-        const n = byChannel[c] ?? 0;
+  // The lanes this read carries, in the server's spelling, and one hue
+  // each for the chart, the tracks and the manifest.
+  const lanes = $derived(lanesOf(all));
+  const hue = (lane: string): string => laneColor(lane, lanes);
+
+  type Segment = Readonly<{ lane: string; n: number; y: number; h: number }>;
+  function segments(byLane: Readonly<Record<string, number>>): ReadonlyArray<Segment> {
+    return lanes.reduce<{ y: number; out: Segment[] }>(
+      (acc, lane) => {
+        const n = byLane[lane] ?? 0;
         if (n === 0) return acc;
         const h = yOf(0) - yOf(n);
         const y = acc.y - h;
-        return { y, out: [...acc.out, { channel: c, n, y, h }] };
+        return { y, out: [...acc.out, { lane, n, y, h }] };
       },
       { y: yOf(0), out: [] },
     ).out;
   }
 
-  const byChannel = $derived(
-    CHANNELS.map((c) => ({
-      channel: c,
-      arrived: flow.reduce((n, d) => n + (d.byChannel[c] ?? 0), 0),
-      cars: standing.filter((r) => r.channel === c),
+  const byLane = $derived(
+    lanes.map((lane) => ({
+      lane,
+      arrived: flow.reduce((n, d) => n + (d.byLane[lane] ?? 0), 0),
+      cars: standing.filter((r) => r.lane === lane),
     })),
   );
-
-  const shortLabel = (c: Channel): string => CHANNEL_LABEL[c].split(' ·')[0] ?? c;
   const openPacket = (jobId: string) => navigate(`/jobs/${jobId}`);
   // A car whose ready step's verb FAILED says so in its title, and the
   // manifest prints the verb's line with the alert it filed (backlog
@@ -168,7 +171,7 @@
     return `${r.title} — ${r.age} d, on ${r.holder.label}${f ? ` — ${failedVerbPhrase(f)}` : ''}`;
   };
 
-  // What the zoomed territory draws: a platform per inbound channel,
+  // What the zoomed territory draws: a platform per inbound lane,
   // or the honest reason there is none. The registry read decides
   // which kinds are inbound, so a registry that did not answer is an
   // unavailable deck rather than an empty one.
@@ -248,7 +251,7 @@
             the oldest {said.feedbackStanding.oldestDays} days.
           {/if}
         </b>
-        <span class="why">Feedback is the one channel where a person wrote the packet.</span>
+        <span class="why">A <span class="mono">user-feedback</span> packet is one a person wrote through the feedback door.</span>
       </div>
       <div class="ry-finding" class:ok={said.onOneActor.of === 0}>
         <b>{said.onOneActor.count} of {said.onOneActor.of} standing packets are on one actor — {said.onOneActor.actor}.</b>
@@ -258,16 +261,16 @@
         </span>
       </div>
       <div class="ry-finding" class:ok={said.unrecorded.count === 0}>
-        <b>{said.unrecorded.count} of {said.unrecorded.of} arrivals record no channel.</b>
+        <b>{said.unrecorded.count} of {said.unrecorded.of} arrivals record no lane.</b>
         <span class="why">
-          {derivedShare} of {all.length} channels on this page are derived from the kind or the
-          reporter rather than read off the packet. A <span class="mono">channel</span> key at
-          filing makes this row a fact.
+          A lane is what the filer recorded (<span class="mono">boss job file --channel</span>),
+          read by the server; a packet that names none is {UNCLASSIFIED.lane}, never guessed
+          from its kind or its reporter.
         </span>
       </div>
     </div>
 
-    <div class="ry-section">01 — ARRIVALS PER DAY, BY CHANNEL</div>
+    <div class="ry-section">01 — ARRIVALS PER DAY, BY LANE</div>
     <div class="ry-panel">
       <svg viewBox="0 0 {CH_W} {CH_H}" class="ry-chart" role="img" aria-label="inbound packets per day">
         {#each ticks as v (v)}
@@ -275,9 +278,9 @@
           <text x={PAD_L - 6} y={yOf(v) + 4} text-anchor="end" class="cl">{v}</text>
         {/each}
         {#each flow as d, i (d.day)}
-          {#each segments(d.byChannel) as s (s.channel)}
-            <rect x={xOf(i)} y={s.y} width={BAR_W} height={s.h} class="bar {s.channel}">
-              <title>{d.day} · {s.n} {shortLabel(s.channel)}</title>
+          {#each segments(d.byLane) as s (s.lane)}
+            <rect x={xOf(i)} y={s.y} width={BAR_W} height={s.h} style:fill={hue(s.lane)}>
+              <title>{d.day} · {s.n} {s.lane}</title>
             </rect>
           {/each}
           <text x={xOf(i) + BAR_W / 2} y={yOf(d.arrived) - 5} text-anchor="middle" class="cv">{d.arrived}</text>
@@ -288,8 +291,8 @@
         {/each}
       </svg>
       <div class="ry-legend">
-        {#each CHANNELS as c (c)}
-          <span><i class={c}></i>{CHANNEL_LABEL[c]}</span>
+        {#each lanes as lane (lane)}
+          <span><i style:background={hue(lane)}></i>{lane}</span>
         {/each}
         <span><span class="dash"></span>left (closed that day)</span>
       </div>
@@ -297,9 +300,9 @@
 
     <div class="ry-section">02 — INBOUND TRACKS, WHAT IS STANDING</div>
     <div class="ry-tracks">
-      {#each byChannel as t (t.channel)}
+      {#each byLane as t (t.lane)}
         <div class="ry-track">
-          <div class="tk-name"><i class={t.channel}></i>{CHANNEL_LABEL[t.channel]}</div>
+          <div class="tk-name"><i style:background={hue(t.lane)}></i>{t.lane}</div>
           <div class="tk-num">{t.arrived} in · {t.cars.length} standing</div>
           <div class="tk-cars">
             {#if t.cars.length === 0}
@@ -337,7 +340,7 @@
           <thead>
             <tr>
               <th class="num">Waiting</th>
-              <th>Channel</th>
+              <th>Lane</th>
               <th>Kind</th>
               <th>Packet</th>
               <th>Ready step</th>
@@ -350,9 +353,11 @@
               <tr>
                 <td class="num {r.band}">{r.age} d</td>
                 <td>
-                  <span class="pill {r.channel}" title={r.channelBasis === 'recorded' ? 'recorded on the packet' : 'derived from the kind or reporter'}>
-                    {shortLabel(r.channel)}{#if r.channelBasis === 'derived'}<span class="dim"> ?</span>{/if}
-                  </span>
+                  <span
+                    class="pill"
+                    style:border-color={hue(r.lane)}
+                    title={r.laneBasis === 'recorded' ? 'recorded by its filer' : 'its filer recorded no lane'}
+                  >{r.lane}</span>
                 </td>
                 <td class="mono dim">{r.kind}</td>
                 <td class="ttl">
@@ -403,7 +408,8 @@
       <span class="mono">simulated=false&amp;closed_within={WINDOW_DAYS}</span>, so every open packet
       is here and departures are counted from <span class="mono">closed_on</span>. Ages count from
       <span class="mono">opened_on</span>. Thresholds are the Marshalling Yard's proposal until the
-      packet carries its own. A channel marked <span class="mono">?</span> was derived, not recorded.
+      packet carries its own. Lanes are the server's reading of what each filer recorded, in its
+      own vocabulary; <span class="mono">{UNCLASSIFIED.lane}</span> is a filer who named none.
     </p>
   {/if}
 </div>
@@ -460,17 +466,9 @@
   .ry-legend i, .tk-name i { display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; }
   .ry-legend .dash { display: inline-block; width: 18px; border-top: 1.5px dashed var(--fog); vertical-align: 3px; margin-right: 6px; }
 
-  /* One hue per channel, used by the bars, the track marks and the pills. */
-  .bar.feedback, i.feedback { fill: var(--signal); background: var(--signal); }
-  .bar.monitoring, i.monitoring { fill: var(--err); background: var(--err); }
-  .bar.session, i.session { fill: var(--brew-amber-soft); background: var(--brew-amber-soft); }
-  .bar.design, i.design { fill: var(--warn); background: var(--warn); }
-  .bar.protocol, i.protocol { fill: var(--border-strong); background: var(--border-strong); }
-  .bar.unrecorded, i.unrecorded { fill: var(--text-faint); background: var(--text-faint); }
+  /* One hue per lane (receiving.ts::laneColor), set inline on the bars,
+     the track marks and the pills. */
   .pill { display: inline-block; border: 1px solid var(--hairline); padding: 1px 7px; font: 11px var(--font-mono); white-space: nowrap; }
-  .pill.feedback { border-color: var(--signal); }
-  .pill.monitoring { border-color: var(--err); }
-  .pill.design { border-color: var(--warn); }
 
   .ry-tracks { border: 1px solid var(--hairline); }
   .ry-track {

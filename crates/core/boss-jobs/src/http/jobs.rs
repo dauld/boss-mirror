@@ -98,6 +98,13 @@ pub(super) struct ListJobsQuery {
     /// parameter (backlog cc76f755). Needs the registry; without one it
     /// is a 503, not an answer.
     department: Option<String>,
+    /// `lane=true` adds `lane: {lane, basis}` to each row — the input
+    /// lane the SERVER read off it (`crate::channels::lane_of`), so a
+    /// board draws the one rule rather than keeping its own (backlog
+    /// 1eea4554; held by tests/a_listed_packet_reads_its_lane_when_asked.rs).
+    /// Opt-in: no other reader meets a field it did not ask for.
+    #[serde(default)]
+    lane: bool,
 }
 
 /// Resolve `department=<code>` to the filter the port narrows on: the
@@ -278,6 +285,10 @@ pub(super) async fn list_jobs<R: JobsRepository + 'static, B: EventBus + 'static
         };
         let mut j = serde_json::to_value(job).unwrap_or_default();
         j["steps"] = serde_json::to_value(&steps).unwrap_or_default();
+        if q.lane {
+            j["lane"] =
+                serde_json::to_value(crate::channels::lane_of(&job.metadata)).unwrap_or_default();
+        }
         enriched.push(j);
     }
     // THE ENVELOPE IS A WIRE CONTRACT TOO (backlog 10eecbbc): shell,

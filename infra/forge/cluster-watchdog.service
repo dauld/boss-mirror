@@ -18,6 +18,10 @@ Environment=KUBECONFIG_PATH=/home/david/kc.yaml
 Environment=BOSS_FORGE_LAST_BUILT=/home/david/.boss-last-built
 Environment=WATCHDOG_STATE=/home/david/.boss-watchdog-dark
 Environment=WATCHDOG_DARK_LIMIT=3
+# The estate id the wrap stamps on the packet and boss-step records on
+# the run step, rather than whatever the machine calls itself (backlog
+# 79f7678b, 2026-09-26).
+Environment=HOST_ID=forge
 ExecStartPre=-/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-cluster-watchdog "Cluster watchdog"
 ExecStart=/home/david/boss/infra/forge/cluster-watchdog.sh
 # The dev pod's ssh doors, probed from here — outside the pod they open

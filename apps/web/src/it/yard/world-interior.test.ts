@@ -40,8 +40,8 @@ const inbound = (over: Partial<InboundRow> & Pick<InboundRow, 'id' | 'openedOn'>
   status: 'open',
   closedOn: null,
   priority: 'standard',
-  channel: 'feedback',
-  channelBasis: 'recorded',
+  lane: 'user-feedback',
+  laneBasis: 'recorded',
   ready: [],
   takenIn: false,
   ...over,
@@ -118,21 +118,21 @@ describe('the marshalling interior — one platform per station', () => {
   });
 });
 
-describe('the receiving interior — one platform per channel', () => {
+describe('the receiving interior — one platform per lane the server read', () => {
   const today = '2026-09-20';
   const days = ['2026-09-19', '2026-09-20'];
 
-  it('stands the open packets of each channel and counts what left in the window', () => {
+  it('stands the open packets of each lane and counts what left in the window', () => {
     const p = receivingPlatforms(
       [
-        inbound({ id: 'a', openedOn: '2026-09-19', channel: 'feedback' }),
-        inbound({ id: 'b', openedOn: '2026-09-20', channel: 'feedback' }),
-        inbound({ id: 'c', openedOn: '2026-09-01', channel: 'feedback', status: 'closed', closedOn: '2026-09-20' }),
+        inbound({ id: 'a', openedOn: '2026-09-19', lane: 'user-feedback' }),
+        inbound({ id: 'b', openedOn: '2026-09-20', lane: 'user-feedback' }),
+        inbound({ id: 'c', openedOn: '2026-09-01', lane: 'user-feedback', status: 'closed', closedOn: '2026-09-20' }),
       ],
       today,
       days,
     );
-    const feedback = byName(p, 'feedback');
+    const feedback = byName(p, 'user-feedback');
     expect(feedback.standing).toBe(2);
     expect(feedback.rate).toBe(1);
     expect(feedback.bound).toBeNull();
@@ -145,13 +145,13 @@ describe('the receiving interior — one platform per channel', () => {
   it('stands nothing an actor has taken in, open or not', () => {
     const p = receivingPlatforms(
       [
-        inbound({ id: 'untriaged', openedOn: '2026-09-19', channel: 'session' }),
-        inbound({ id: 'triaged', openedOn: '2026-08-01', channel: 'session', takenIn: true }),
+        inbound({ id: 'untriaged', openedOn: '2026-09-19', lane: 'discovery-while-working' }),
+        inbound({ id: 'triaged', openedOn: '2026-08-01', lane: 'discovery-while-working', takenIn: true }),
       ],
       today,
       days,
     );
-    const session = byName(p, 'session');
+    const session = byName(p, 'discovery-while-working');
     expect(session.standing).toBe(1);
     expect(session.flag).toEqual({ from: 'head', n: 0 });
   });
@@ -159,35 +159,49 @@ describe('the receiving interior — one platform per channel', () => {
   it('flags the packets past the stale band, from the head — the oldest stand at the front', () => {
     const p = receivingPlatforms(
       [
-        inbound({ id: 'old', openedOn: '2026-08-01', channel: 'design' }),
-        inbound({ id: 'new', openedOn: '2026-09-20', channel: 'design' }),
+        inbound({ id: 'old', openedOn: '2026-08-01', lane: 'design-resolution' }),
+        inbound({ id: 'new', openedOn: '2026-09-20', lane: 'design-resolution' }),
       ],
       today,
       days,
     );
-    const design = byName(p, 'design');
+    const design = byName(p, 'design-resolution');
     expect(design.standing).toBe(2);
     expect(design.flag).toEqual({ from: 'head', n: 1 });
   });
 
-  it('names every channel, even an empty one — a track nothing stands on is an answer', () => {
+  it('always names the unclassified lane, even empty — a track nothing stands on is an answer', () => {
     const p = receivingPlatforms([], today, days);
-    expect(p.map((x) => x.name)).toContain('unrecorded');
+    expect(p.map((x) => x.name)).toEqual(['unclassified']);
     expect(p.every((x) => x.standing === 0)).toBe(true);
   });
 
-  it('puts the channels holding flagged work first, then the deepest', () => {
+  // Backlog 1eea4554: the page's own six channels put 61 of 64 standing
+  // cars on one platform. A lane is the server's reading, in its spelling.
+  it('draws a platform per lane the rows carry, and nothing the rows do not', () => {
     const p = receivingPlatforms(
       [
-        inbound({ id: 'a', openedOn: '2026-09-20', channel: 'session' }),
-        inbound({ id: 'b', openedOn: '2026-09-20', channel: 'session' }),
-        inbound({ id: 'c', openedOn: '2026-08-01', channel: 'monitoring' }),
+        inbound({ id: 'a', openedOn: '2026-09-20', lane: 'review-finding' }),
+        inbound({ id: 'b', openedOn: '2026-09-20', lane: 'unclassified', laneBasis: 'unclassified' }),
       ],
       today,
       days,
     );
-    expect(p[0]!.name).toBe('monitoring');
-    expect(p[1]!.name).toBe('session');
+    expect(p.map((x) => x.name).sort()).toEqual(['review-finding', 'unclassified']);
+  });
+
+  it('puts the lanes holding flagged work first, then the deepest', () => {
+    const p = receivingPlatforms(
+      [
+        inbound({ id: 'a', openedOn: '2026-09-20', lane: 'discovery-while-working' }),
+        inbound({ id: 'b', openedOn: '2026-09-20', lane: 'discovery-while-working' }),
+        inbound({ id: 'c', openedOn: '2026-08-01', lane: 'telemetry/monitoring' }),
+      ],
+      today,
+      days,
+    );
+    expect(p[0]!.name).toBe('telemetry/monitoring');
+    expect(p[1]!.name).toBe('discovery-while-working');
   });
 });
 

@@ -21,6 +21,10 @@ TimeoutStartSec=90min
 # david and /run is root's; one path, declared once, inherited by both
 # Exec lines (CLAUDE.md §9a).
 Environment=BOSS_RUN_SUMMARY_FILE=/home/david/.boss-cluster-converge.summary.json
+# The estate id the wrap stamps on the packet and boss-step records on
+# the run step, rather than whatever the machine calls itself (backlog
+# 79f7678b, 2026-09-26).
+Environment=HOST_ID=forge
 ExecStartPre=/home/david/boss/infra/boss-maintenance-wrap.sh maintenance-cluster-converge "Cluster converge on forge main"
 ExecStart=/home/david/boss/infra/forge/cluster-deploy-runner.sh
 ExecStopPost=-/home/david/boss/infra/boss-step.sh maintenance-cluster-converge run

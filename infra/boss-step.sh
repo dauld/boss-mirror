@@ -113,6 +113,26 @@ if [ -n "${BOSS_RUN_SUMMARY_FILE:-}" ]; then
     rm -f "$BOSS_RUN_SUMMARY_FILE" 2>/dev/null || true
 fi
 
+# WHICH HOST RAN IT — recorded on the step, and the key of the one-open
+# check below (backlog 79f7678b, 2026-09-26). The same derivation as
+# boss-maintenance-wrap.sh, which says why: HOST_ID, else a converge
+# unit's BOSS_NODE_ID, else the machine's own name; none in a pod, whose
+# name is new every run. maintenance-estate-observe-host runs on the
+# forge AND boss-gcp, and this counted and completed by kind alone — so
+# one host's close could land on the other's packet, and two open made
+# it refuse. An explicit host= pair still wins, as every explicit pair
+# does. Pinned by a_loop_packet_names_its_host.rs.
+HOST="${HOST_ID:-${BOSS_NODE_ID:-}}"
+if [ -z "$HOST" ] && [ -z "${KUBERNETES_SERVICE_HOST:-}" ]; then
+    HOST=$(uname -n)
+fi
+for pair in "$@"; do
+    case "$pair" in host=*) HOST="${pair#host=}" ;; esac
+done
+if [ -n "$HOST" ] && ! grep -q '^host=' <<< "$(printf '%s\n' "$@")"; then
+    set -- "$@" "host=$HOST"
+fi
+
 # The lint's self-test reads the pairs this run would record, and stops.
 if [ -n "${BOSS_STEP_DRY_RUN:-}" ]; then
     [ -n "$SUMMARY_JSON" ] && printf 'run-summary=%s\n' "$SUMMARY_JSON"
@@ -169,10 +189,12 @@ if ! jobs_json=$("$API_CURL" -fsS -H "x-boss-user: $BOSS_USER" \
 fi
 
 # The reply may be enveloped ({"data": [...]}) or a bare array; keep
-# only the open rows either way.
-open_jobs=$(printf '%s' "$jobs_json" | jq '
+# only the open rows either way — and only this host's, or a hostless
+# one filed before hosts were named (see WHICH HOST above).
+open_jobs=$(printf '%s' "$jobs_json" | jq --arg host "$HOST" '
     (if type == "object" and has("data") then .data else . end)
-    | map(select(.status == "open"))')
+    | map(select(.status == "open"))
+    | map(select((.metadata.host // "") as $h | $h == $host or $h == ""))')
 open_count=$(printf '%s' "$open_jobs" | jq 'length')
 
 if [ "$open_count" -eq 0 ]; then

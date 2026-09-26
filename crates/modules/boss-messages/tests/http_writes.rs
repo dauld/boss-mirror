@@ -355,7 +355,7 @@ fn archived_and_kept(recipient: &str) -> Vec<Message> {
     kept.recipient_id = recipient.to_string();
     let mut archived = message_fixture("msg-archived");
     archived.recipient_id = recipient.to_string();
-    archived.kind = MessageKind::ARCHIVED.into();
+    archived.archived_at = Some(chrono::Utc::now());
     vec![kept, archived]
 }
 
@@ -416,9 +416,13 @@ async fn an_archived_message_leaves_the_inbox_read_and_records_its_event() {
 
 /// The unread count is a question about the same inbox, so an unread
 /// row the expire rule archived (it leaves `read_at` NULL) is not
-/// counted in it either. `?kind=archived` still asks for them by name.
+/// counted in it either — and not when the count is narrowed to the
+/// kind the archived row still carries (backlog 9bda9726: archive is a
+/// state beside kind, so `?kind=direct` must not count an archived
+/// direct back into the badge). `archived` is no longer a kind to ask
+/// for; the inbox read's `include_archived` is where archived rows are.
 #[tokio::test]
-async fn get_unread_leaves_out_archived_rows_unless_asked_by_kind() {
+async fn get_unread_leaves_out_archived_rows_whatever_the_kind() {
     let app = MessageTestApp::with_messages(archived_and_kept("emp-42"));
 
     let count = |uri: &'static str, router: axum::Router| async move {
@@ -436,12 +440,31 @@ async fn get_unread_leaves_out_archived_rows_unless_asked_by_kind() {
     );
     assert_eq!(
         count(
-            "/api/messages/unread/emp-42?kind=archived",
+            "/api/messages/unread/emp-42?kind=direct",
             app.router.clone()
         )
         .await,
-        1
+        1,
+        "the archived direct is not counted back in by its kind"
     );
+}
+
+/// Backlog 9bda9726 (idempotence): the Archive control pressed twice —
+/// or a retried request — answers 204 both times and records ONE
+/// `messages.message.archived`. The second archive used to update the
+/// row again and record a second event.
+#[tokio::test]
+async fn archiving_twice_records_one_event() {
+    let app = MessageTestApp::with_messages(vec![message_fixture("msg-twice")]);
+
+    for _ in 0..2 {
+        TestRequest::post("/api/messages/msg-twice/archive")
+            .header("x-boss-user", common::signed_in("emp-recipient"))
+            .send(&app.router)
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+    }
+    app.assert_recorded("messages.message.archived");
 }
 
 // Silence unused warnings for MessageKind when only used in fixture.

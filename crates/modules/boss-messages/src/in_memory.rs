@@ -44,7 +44,7 @@ impl MessageRepository for InMemoryMessages {
         let mut msgs: Vec<Message> = guard
             .iter()
             .filter(|m| m.recipient_id == recipient_id)
-            .filter(|m| include_archived || m.kind.0 != MessageKind::ARCHIVED)
+            .filter(|m| include_archived || m.archived_at.is_none())
             .cloned()
             .collect();
         msgs.sort_by_key(|m| std::cmp::Reverse(m.sent_at));
@@ -59,11 +59,10 @@ impl MessageRepository for InMemoryMessages {
         let guard = self.messages.read().await;
         let count = guard
             .iter()
-            .filter(|m| m.recipient_id == recipient_id && m.read_at.is_none())
-            .filter(|m| match kind {
-                Some(k) => m.kind.0 == k,
-                None => m.kind.0 != MessageKind::ARCHIVED,
+            .filter(|m| {
+                m.recipient_id == recipient_id && m.read_at.is_none() && m.archived_at.is_none()
             })
+            .filter(|m| kind.is_none_or(|k| m.kind.0 == k))
             .count();
         Ok(count as u32)
     }
@@ -160,8 +159,12 @@ impl MessageRepository for InMemoryMessages {
                         .as_deref()
                         .is_some_and(|p| p.starts_with(path_prefix))
                 });
-                if matches && m.kind.0 == MessageKind::SIGNAL && m.read_at.is_none() {
-                    m.kind = MessageKind::ARCHIVED.into();
+                if matches
+                    && m.kind.0 == MessageKind::SIGNAL
+                    && m.archived_at.is_none()
+                    && m.read_at.is_none()
+                {
+                    m.archived_at = Some(now);
                     hit.push(m.id.clone());
                 }
             }
@@ -197,10 +200,10 @@ impl MessageRepository for InMemoryMessages {
                 });
                 if under
                     && m.id.starts_with(id_prefix)
-                    && m.kind.0 != MessageKind::ARCHIVED
+                    && m.archived_at.is_none()
                     && m.read_at.is_none()
                 {
-                    m.kind = MessageKind::ARCHIVED.into();
+                    m.archived_at = Some(now);
                     hit.push(m.id.clone());
                 }
             }
@@ -221,10 +224,13 @@ impl MessageRepository for InMemoryMessages {
         now: DateTime<Utc>,
         stamp: &boss_core::publisher::EventStamp,
     ) -> Result<(), MessageError> {
+        // Mirrors the Pg `archived_at IS NULL` guard (backlog 9bda9726):
+        // a repeat archive is Ok and records nothing, and `kind` stays.
         {
             let mut guard = self.messages.write().await;
             match guard.iter_mut().find(|m| m.id == id) {
-                Some(msg) => msg.kind = MessageKind::ARCHIVED.into(),
+                Some(msg) if msg.archived_at.is_some() => return Ok(()),
+                Some(msg) => msg.archived_at = Some(now),
                 None => return Err(MessageError::NotFound(format!("no message with ID {id}"))),
             }
         }
@@ -265,6 +271,7 @@ mod tests {
             sent_at,
             read_at: if read { Some(Utc::now()) } else { None },
             reply_to: None,
+            archived_at: None,
         }
     }
 
@@ -378,14 +385,47 @@ mod tests {
         assert!(matches!(err, MessageError::NotFound(_)));
     }
 
+    /// Backlog 9bda9726: archiving is a state beside `kind`, not a
+    /// value of it. It used to overwrite `kind` with `archived`, so the
+    /// projection forgot the direct-vs-signal fact the needs-you filter
+    /// is built on.
     #[tokio::test]
-    async fn archive_message_sets_kind() {
+    async fn an_archived_direct_still_reads_as_direct() {
         let repo = test_repo();
-        repo.archive_message("msg-001", Utc::now(), &test_stamp())
+        let at = Utc::now();
+        repo.archive_message("msg-001", at, &test_stamp())
             .await
             .unwrap();
         let msg = repo.message_by_id("msg-001").await.unwrap().unwrap();
-        assert_eq!(msg.kind.as_str(), MessageKind::ARCHIVED);
+        assert_eq!(msg.kind.as_str(), MessageKind::DIRECT);
+        assert_eq!(msg.archived_at, Some(at));
+    }
+
+    /// Backlog 9bda9726 (idempotence): a second archive of an archived
+    /// message is a no-op — it answers Ok, records no second event, and
+    /// leaves the first archive's time standing.
+    #[tokio::test]
+    async fn archiving_twice_records_one_event() {
+        let repo = test_repo();
+        let first = Utc::now();
+        repo.archive_message("msg-001", first, &test_stamp())
+            .await
+            .unwrap();
+        repo.archive_message(
+            "msg-001",
+            first + chrono::Duration::minutes(5),
+            &test_stamp(),
+        )
+        .await
+        .unwrap();
+        let archived = repo
+            .recorded_events()
+            .into_iter()
+            .filter(|e| e.kind == crate::events::MESSAGE_ARCHIVED)
+            .count();
+        assert_eq!(archived, 1, "a repeat archive records nothing");
+        let msg = repo.message_by_id("msg-001").await.unwrap().unwrap();
+        assert_eq!(msg.archived_at, Some(first), "the first archive stands");
     }
 
     #[tokio::test]
@@ -420,6 +460,7 @@ mod expiry_tests {
             sent_at: Utc::now(),
             read_at: if read { Some(Utc::now()) } else { None },
             reply_to: None,
+            archived_at: None,
         }
     }
 
@@ -428,6 +469,19 @@ mod expiry_tests {
             "messages",
             boss_core::actor::ActorId::Automation("test".into()),
         )
+    }
+
+    async fn kind_of(repo: &InMemoryMessages, id: &str) -> String {
+        repo.message_by_id(id).await.unwrap().unwrap().kind.0
+    }
+
+    async fn archived(repo: &InMemoryMessages, id: &str) -> bool {
+        repo.message_by_id(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .archived_at
+            .is_some()
     }
 
     /// The three narrowings the port doc promises, asserted together
@@ -461,29 +515,26 @@ mod expiry_tests {
             .unwrap();
         assert_eq!(n, 2, "both shapes under the prefix, and nothing else");
 
-        async fn kind_of(repo: &InMemoryMessages, id: &str) -> String {
-            repo.message_by_id(id).await.unwrap().unwrap().kind.0
+        // Archived is a state beside kind (backlog 9bda9726): the two
+        // that moved keep reading as signals.
+        for id in ["stale-job", "stale-step"] {
+            assert!(archived(&repo, id).await, "{id} expired");
+            assert_eq!(kind_of(&repo, id).await, MessageKind::SIGNAL, "{id}");
         }
-        assert_eq!(kind_of(&repo, "stale-job").await, MessageKind::ARCHIVED);
-        assert_eq!(kind_of(&repo, "stale-step").await, MessageKind::ARCHIVED);
-        assert_eq!(
-            kind_of(&repo, "a-direct").await,
-            MessageKind::DIRECT,
+        assert!(
+            !archived(&repo, "a-direct").await,
             "a direct is addressed to a person and does not expire with the job"
         );
-        assert_eq!(
-            kind_of(&repo, "already-read").await,
-            MessageKind::SIGNAL,
+        assert!(
+            !archived(&repo, "already-read").await,
             "a read message already did its job"
         );
-        assert_eq!(
-            kind_of(&repo, "other-job").await,
-            MessageKind::SIGNAL,
+        assert!(
+            !archived(&repo, "other-job").await,
             "the prefix must not leak across jobs"
         );
-        assert_eq!(
-            kind_of(&repo, "no-entity").await,
-            MessageKind::SIGNAL,
+        assert!(
+            !archived(&repo, "no-entity").await,
             "a message about nothing cannot be past relevancy"
         );
     }
@@ -539,35 +590,31 @@ mod expiry_tests {
             .unwrap();
         assert_eq!(n, 2, "the step's two unread notices, and nothing else");
 
-        async fn kind_of(repo: &InMemoryMessages, id: &str) -> String {
-            repo.message_by_id(id).await.unwrap().unwrap().kind.0
-        }
+        assert!(archived(&repo, "notify:s1:emp-001").await);
         assert_eq!(
             kind_of(&repo, "notify:s1:emp-001").await,
-            MessageKind::ARCHIVED
+            MessageKind::DIRECT,
+            "a retired notice still reads as the direct it was sent as"
         );
+        assert!(archived(&repo, "notify:s1:emp-002").await);
         assert_eq!(
             kind_of(&repo, "notify:s1:emp-002").await,
-            MessageKind::ARCHIVED
+            MessageKind::SIGNAL
         );
-        assert_eq!(
-            kind_of(&repo, "msg-human").await,
-            MessageKind::DIRECT,
+        assert!(
+            !archived(&repo, "msg-human").await,
             "a person asking about the step does not stop asking because it ended"
         );
-        assert_eq!(
-            kind_of(&repo, "done:s1:emp-001").await,
-            MessageKind::DIRECT,
+        assert!(
+            !archived(&repo, "done:s1:emp-001").await,
             "the announcement that the step ended is not a notice that it is waiting"
         );
-        assert_eq!(
-            kind_of(&repo, "notify:s1:emp-003").await,
-            MessageKind::DIRECT,
+        assert!(
+            !archived(&repo, "notify:s1:emp-003").await,
             "a read message already did its job"
         );
-        assert_eq!(
-            kind_of(&repo, "notify:s2:emp-001").await,
-            MessageKind::DIRECT,
+        assert!(
+            !archived(&repo, "notify:s2:emp-001").await,
             "the prefix must not leak across steps"
         );
         assert_eq!(

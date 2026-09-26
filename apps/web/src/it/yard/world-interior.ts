@@ -4,7 +4,7 @@
 // inside it — the wagons the floor's Scene stands at that region's
 // stations. These two regions hold no rolling stock in transit: they
 // hold QUEUES. So their interior is a PLATFORM PER QUEUE — a station
-// for marshalling, a channel for receiving — with the packets standing
+// for marshalling, an input lane for receiving — with the packets standing
 // on it as marks, the queue's bound drawn on the track, and the
 // packets past that bound flagged. Until this car both said "this
 // region's floor is a page of its own", which was an apology printed
@@ -33,10 +33,9 @@
 
 import {
   AGE_THRESHOLDS,
-  CHANNELS,
   ageDays,
+  lanesOf,
   standsHere,
-  type Channel,
   type InboundRow,
 } from '../receiving/receiving';
 import type { Place } from './regions';
@@ -56,10 +55,10 @@ export type Platform = Readonly<{
    *  keys it on. Apart from `name` since backlog 846ab934: the shop
    *  floor named its crews by actor and keyed them on that name, and
    *  live every crew is the same actor, so the keyed each threw and
-   *  the region never drew. A station and a channel are their own key;
+   *  the region never drew. A station and a lane are their own key;
    *  a crew is `session:<id>`, the spelling the server's machines use. */
   key: string;
-  /** The queue's own name — a station, or an inbound channel. The
+  /** The queue's own name — a station, or an inbound lane. The
    *  label, which need not be unique. */
   name: string;
   /** Packets standing on it. `null` is a count nobody could take. */
@@ -163,18 +162,21 @@ export function withPlaces(
   });
 }
 
-/** Receiving: a platform per channel, the channels holding flagged
- *  work first, then the deepest. `rows` is every inbound packet the
- *  page read — open ones nothing has taken in stand, ones that closed
- *  inside the window are what left. */
+/** Receiving: a platform per input lane the server read ([`lanesOf`]:
+ *  every recorded lane the rows carry, and `unclassified` always), the
+ *  lanes holding flagged work first, then the deepest. `rows` is every
+ *  inbound packet the page read — open ones nothing has taken in stand,
+ *  ones that closed inside the window are what left. Until backlog
+ *  1eea4554 these were the page's own six channels, and 61 of 64
+ *  standing cars stood on one of them. */
 export function receivingPlatforms(
   rows: ReadonlyArray<InboundRow>,
   today: string,
   days: ReadonlyArray<string>,
 ): ReadonlyArray<Platform> {
   const window = new Set(days);
-  const platforms = CHANNELS.map((channel: Channel): Platform => {
-    const mine = rows.filter((r) => r.channel === channel);
+  const platforms = lanesOf(rows).map((lane): Platform => {
+    const mine = rows.filter((r) => r.lane === lane);
     // Standing = open AND not yet taken in: a triaged packet waiting on
     // its build is marshalling's (design 62de32ae decision 4).
     const ages = mine
@@ -184,10 +186,10 @@ export function receivingPlatforms(
     const stale = ages.filter((d) => d > AGE_THRESHOLDS.stale).length;
     const oldest = ages[0];
     return {
-      key: channel,
-      name: channel,
+      key: lane,
+      name: lane,
       standing: ages.length,
-      // A channel has no WIP bound — what it is read against is the
+      // A lane has no WIP bound — what it is read against is the
       // age band, which the flag carries.
       bound: null,
       rate: mine.filter((r) => r.closedOn !== null && window.has(r.closedOn)).length,

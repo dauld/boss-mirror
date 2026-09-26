@@ -106,5 +106,6 @@ pub fn message_fixture(id: &str) -> Message {
         sent_at: Utc::now(),
         read_at: None,
         reply_to: None,
+        archived_at: None,
     }
 }

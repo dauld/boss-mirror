@@ -15,7 +15,9 @@
 //! - `messages.message.sent` — full Message row state (id, sender_id,
 //!   recipient_id, subject, body, entity_ref, kind, sent_at, reply_to)
 //! - `messages.message.read` — `{id, read_at}`
-//! - `messages.message.archived` — `{id, archived_at}` (flips kind to "archived")
+//! - `messages.message.archived` — `{id, archived_at}` (sets `archived_at`
+//!   once, beside `kind`; a repeat archive the old door recorded is
+//!   skipped, so the first archive's time stands — backlog 9bda9726)
 //! - `messages.message.deleted` — `{id, deleted_at}` (DELETE row)
 //!
 //! Rebuilds that hit a payload missing required fields (older events
@@ -80,6 +82,16 @@ struct ReadPayload {
 #[derive(Debug, Deserialize)]
 struct IdOnlyPayload {
     id: String,
+}
+
+/// Every archive door writes `archived_at`; a bare `{id}` from an older
+/// writer falls back to the log row's own time, as the backfill
+/// migration (20260926061106) does.
+#[derive(Debug, Deserialize)]
+struct ArchivedPayload {
+    id: String,
+    #[serde(default)]
+    archived_at: Option<DateTime<Utc>>,
 }
 
 /// Drop every row in `messages` and replay every `messages.message.*`
@@ -177,18 +189,24 @@ pub async fn rebuild_messages(pool: &PgPool) -> Result<RebuildReport, RebuildErr
                     }
                 }
                 "messages.message.archived" => {
-                    let p: IdOnlyPayload = serde_json::from_value(ev.payload).map_err(|e| {
+                    let p: ArchivedPayload = serde_json::from_value(ev.payload).map_err(|e| {
                         format!(
                             "invalid payload for event id {} kind {}: {e}",
                             ev.audit_id, ev.kind
                         )
                     })?;
-                    let n = sqlx::query("UPDATE messages SET kind = 'archived' WHERE id = $1")
-                        .bind(&p.id)
-                        .execute(&mut *conn)
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .rows_affected();
+                    // The live doors' guard, replayed: only a row not
+                    // yet archived moves, and `kind` is left as sent.
+                    let n = sqlx::query(
+                        "UPDATE messages SET archived_at = $2 \
+                         WHERE id = $1 AND archived_at IS NULL",
+                    )
+                    .bind(&p.id)
+                    .bind(p.archived_at.unwrap_or(ev.ts))
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .rows_affected();
                     if n == 0 {
                         Ok(Applied::Skipped)
                     } else {
