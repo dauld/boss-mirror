@@ -195,6 +195,13 @@ export const SHIPMENT_DETAIL = /\/api\/shipping\/shipments\/[^/]+$/;
 /// at /ux/people/emp-001 (backlog 1a83fe98). Spelled with the id rather
 /// than `[^/]+`, because /api/people/accounts is a list, not a person.
 export const EMPLOYEE_DETAIL = /\/api\/people\/emp-001$/;
+/// ANY one person, for the floor's 404 (backlog d50e5828): one path
+/// segment under /api/people. `accounts` is excluded because it is the
+/// one list at that depth the SPA reads; every other single segment the
+/// SPA asks for there is a person id (ownerNames.ts, EmployeePage.svelte).
+/// A future read of a list at that depth 404s under the floor — loud, and
+/// fixed by mocking it — where a person read used to get 200 [] quietly.
+export const PERSON_DETAIL = /\/api\/people\/(?!accounts(\?|$))[^/?]+(\?|$)/;
 /// The audit log's size-and-growth read (boss-events AuditStats). The
 /// fixture /it/operate/audit sat in DEFERRED waiting for ("snapshot .length
 /// needs a faithful fixture"; page audit 65a273d5, gap 0398c4d0): a `[]`
@@ -316,10 +323,18 @@ export const OBJECT_ENDPOINTS: ReadonlyArray<RegExp> = [
 /// answers 401 — the gateway's answer for that session, and what
 /// SignInControl reads as "Sign in". A spec that needs a persona mocks
 /// `/api/people` + `/api/session` itself (installSmokeMocks does). A
-/// detail read for an id nothing seeded answers 404, the registry's
-/// own answer for a kind it does not hold; a spec that relies on a 404
-/// for its error-state rendering now gets it from here rather than
-/// from the dev-server's miss.
+/// detail read for an id nothing seeded answers 404 — the server's own
+/// answer for an id it does not hold — but ONLY for the detail paths
+/// named in the loop at the end (a workflow, a marketing asset, a
+/// shipment, a view's results, a person); every other single-resource
+/// path still falls to the `[]` catch-all. People joined the loop on
+/// 2026-09-26 (backlog d50e5828): until then an unseeded
+/// /api/people/{id} answered 200 [] while this comment said 404. There
+/// is no general "unknown id" 404, because a path's shape does not say
+/// whether it is a detail or a list (/api/people/accounts is a list at
+/// the depth a person sits). A spec that relies on a 404 for its
+/// error-state rendering gets it from here rather than from the
+/// dev-server's miss.
 export async function installApiFloor(page: Page): Promise<void> {
   await page.route('**/api/**', (r) => json(r, []));
 
@@ -432,7 +447,7 @@ export async function installApiFloor(page: Page): Promise<void> {
     const station = /design-(review|decided)/.exec(r.request().url())?.[0] ?? 'design-review';
     return json(r, { station, kind: 'batch', discipline: [], total: 0, data: [], steps: {} });
   });
-  for (const detail of [WORKFLOW_DETAIL, MARKETING_ASSET_DETAIL, SHIPMENT_DETAIL, VIEW_RESULTS]) {
+  for (const detail of [WORKFLOW_DETAIL, MARKETING_ASSET_DETAIL, SHIPMENT_DETAIL, VIEW_RESULTS, PERSON_DETAIL]) {
     await page.route(detail, (r) => json(r, 'not found', 404));
   }
 }
