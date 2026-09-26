@@ -75,6 +75,7 @@ fn a_directory_the_reader_cannot_search_is_unmeasured_not_absent() {
     let dir = scratch_dir("ops-creds-sealed");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).expect("chmod");
     let (rc, out) = state(dir.to_str().expect("utf8"));
+    // mode-bits-ok: a directory given its search bit back; nothing execs it
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod");
     assert_eq!(rc, 0, "{out}");
     assert!(out.starts_with("unmeasured: "), "{out}");
