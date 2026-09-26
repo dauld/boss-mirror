@@ -48,6 +48,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 use crate::car_retire::{Door, Http, apply_via, read_via};
+use crate::git_auth::ForgeAuth;
 
 /// What git read about forge main and one merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,10 +79,20 @@ impl MainReading {
     }
 }
 
+/// The git every read here runs: the forge credential on it the way
+/// `sh_in` puts it on the conductor's clone, fetch and push. Bare, the
+/// conductor pod's `ls-remote origin` asked for a username and the
+/// merge-lost arm never judged (backlog cb3d8952, 2026-09-26). With no
+/// token file — `boss car unland` on the dev pod — it is a plain git and
+/// the clone's own credential helper answers, as before.
+fn git_command(repo: &Path, auth: Option<&ForgeAuth>) -> Command {
+    let mut cmd = crate::git_auth::command_with(auth);
+    cmd.arg("-C").arg(repo);
+    cmd
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<Output, String> {
-    Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    git_command(repo, crate::git_auth::forge_auth().as_ref())
         .args(args)
         .output()
         .map_err(|e| format!("git {} could not run: {e}", args.join(" ")))
@@ -487,6 +498,64 @@ pub(crate) mod tests {
         DateTime::parse_from_rfc3339("2026-09-25T21:19:00Z")
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    /// The git the merge-lost arm reads forge main with carries the
+    /// conductor's forge credential. Backlog cb3d8952, measured
+    /// 2026-09-26 01:10Z: `fn git` was a bare `git`, so inside the
+    /// conductor pod — which has only the token file git_auth reads —
+    /// every `ls-remote origin` exited 128 "could not read Username",
+    /// the arm never judged, and train c94d5d39 could not close. The
+    /// same pass's `fetch origin` succeeded through `sh_in`, which builds
+    /// on git_auth: the credential is host-scoped, so the remote's name
+    /// was never the fault. The tests above use a local bare forge that
+    /// asks no credential, which is why they could not see it.
+    #[test]
+    fn the_merge_lost_arm_reads_forge_main_with_the_forge_credential() {
+        let root = boss_testing::scratch::scratch_dir("unland-auth");
+        git_in(&root, &["init", "-q"]);
+        let auth = crate::git_auth::ForgeAuth {
+            key: "http.http://forge.test/.extraHeader".to_string(),
+            value: "Authorization: token t".to_string(),
+        };
+        let out = git_command(&root, Some(&auth))
+            .args(["config", "--get", &auth.key])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "the credential is not on the arm's git: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "Authorization: token t"
+        );
+        // And `-C <repo>` still lands it in the clone it was given.
+        let top = git_command(&root, None)
+            .args(["rev-parse", "--absolute-git-dir"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            std::path::PathBuf::from(String::from_utf8_lossy(&top.stdout).trim()),
+            root.canonicalize().unwrap().join(".git")
+        );
+    }
+
+    /// The pin for the half the test above cannot reach (CLAUDE.md 9a):
+    /// every git this module runs outside its tests is built by
+    /// `git_command`, so no second, bare spawner can come back.
+    #[test]
+    fn no_git_in_this_module_is_spawned_bare() {
+        let src = include_str!("car_unland.rs");
+        let live = src.split("#[cfg(test)]").next().unwrap();
+        let bare = format!("Command::new({:?})", "git");
+        assert!(
+            !live.contains(&bare),
+            "car_unland.rs spawns a bare git outside its tests — build it with git_command, \
+             which carries the forge credential (backlog cb3d8952)"
+        );
+        assert!(live.contains("crate::git_auth::command_with("));
     }
 
     /// While main carries the merge the reading says so; after the

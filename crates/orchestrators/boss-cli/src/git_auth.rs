@@ -69,13 +69,20 @@ pub(crate) fn forge_auth_from(token_file: &str, forge_url: &str) -> Option<Forge
 
 /// A `git` command carrying the forge credential, if there is one.
 pub(crate) fn command() -> Command {
+    command_with(forge_auth().as_ref())
+}
+
+/// A `git` command carrying `auth`, if given — [`command`] with the
+/// credential passed in, so a caller can pin that its git carries one
+/// without writing the process environment (backlog cb3d8952).
+pub(crate) fn command_with(auth: Option<&ForgeAuth>) -> Command {
     let mut cmd = Command::new("git");
-    if let Some(auth) = forge_auth() {
+    if let Some(auth) = auth {
         let base = std::env::var("GIT_CONFIG_COUNT")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0);
-        apply_at(&mut cmd, &auth, base);
+        apply_at(&mut cmd, auth, base);
     }
     cmd
 }
