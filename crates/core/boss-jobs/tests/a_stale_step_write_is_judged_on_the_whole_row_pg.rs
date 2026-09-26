@@ -238,7 +238,7 @@ async fn a_read_does_not_move_the_version_and_a_list_read_answers_the_same_one()
             voided_at: None,
             voided_by_event: None,
         },
-        chrono::Utc::now(),
+        &stamp(),
         &[],
     )
     .await

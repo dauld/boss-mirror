@@ -2014,7 +2014,7 @@ impl JobsRepository for PgJobs {
         &self,
         step_id: &StepId,
         stamp: &boss_core::job::SignOffStamp,
-        now: chrono::DateTime<chrono::Utc>,
+        event_stamp: &boss_core::publisher::EventStamp,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError> {
         let mut tx = self
@@ -2039,22 +2039,40 @@ impl JobsRepository for PgJobs {
                 current,
             });
         }
-        let result = sqlx::query(
-            "UPDATE steps SET sign_offs = sign_offs || $2::jsonb, updated_at = $3 \
-             WHERE id = $1",
+        let row = sqlx::query_as::<_, StepRow>(
+            r#"
+            UPDATE steps SET sign_offs = sign_offs || $2::jsonb, updated_at = $3
+            WHERE id = $1
+            RETURNING id, job_id, kind, title, spec_slug, assignee_id, status, sort_order,
+                      blocked_by, sign_offs_required, assurance_required, sign_offs, fields,
+                      completed_on, metadata, notes, step_plugin_version, embedded_job,
+                      completed_by, completed_at
+            "#,
         )
         .bind(*step_id.inner().as_uuid())
         .bind(serde_json::to_value(stamp).map_err(|e| JobsError::Storage(e.to_string()))?)
-        .bind(now)
-        .execute(&mut *tx)
+        .bind(event_stamp.timestamp)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| JobsError::Storage(e.to_string()))?;
-        if result.rows_affected() == 0 {
+        let Some(row) = row else {
             return Err(JobsError::StepNotFound(*step_id));
-        }
+        };
+        // THE LOG CARRIES THE STAMP (backlog f146a13a). The rebuild
+        // replays state events and skips markers, and this path recorded
+        // only the door's STEP_SIGNED_OFF marker — so a stamp no later
+        // edit or completion carried was dropped by every replay. The
+        // STEP_UPDATED is built from the row THIS UPDATE returned, under
+        // its lock, and records first, the caller's marker after it: the
+        // merge door's rule.
+        let written = row_to_step(row)?;
+        let updated = event_stamp.event(
+            crate::events::STEP_UPDATED,
+            crate::events::step_state_payload(&written),
+        );
         // OUTBOX (phase 2): the caller's STEP_SIGNED_OFF marker
         // records with the stamp append.
-        for event in events {
+        for event in std::iter::once(&updated).chain(events) {
             boss_events::outbox::record_event_in_tx(&mut tx, event)
                 .await
                 .map_err(JobsError::Storage)?;

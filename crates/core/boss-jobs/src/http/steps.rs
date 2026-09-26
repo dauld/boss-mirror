@@ -3084,7 +3084,8 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
         voided_by_event: None,
     };
     // OUTBOX (phase 2): the signed-off marker records in the SAME
-    // transaction as the stamp append.
+    // transaction as the stamp append, after the STEP_UPDATED the
+    // append builds from the row it wrote (backlog f146a13a).
     let actor = boss_core::actor::ActorId::human(&user.id);
     let mut event_stamp = state.publisher.stamp_with_actor(actor).await;
     // The signed-off marker inherits the packet's admission-fixed
@@ -3106,7 +3107,7 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
     );
     match state
         .jobs
-        .append_sign_off(&step_id, &stamp, event_stamp.timestamp, &[signed_off_event])
+        .append_sign_off(&step_id, &stamp, &event_stamp, &[signed_off_event])
         .await
     {
         Ok(()) => {}

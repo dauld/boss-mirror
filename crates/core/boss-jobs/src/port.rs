@@ -1336,11 +1336,20 @@ pub trait JobsRepository: Send + Sync {
     /// is written (backlog 4174c4a9). The sign-off door builds the stamp
     /// from an earlier read, and this is the one place a write between
     /// the two can be seen.
+    ///
+    /// THE LOG REPRODUCES THE STAMP (backlog f146a13a). The append
+    /// records a `jobs.step.updated` built from the row as its own
+    /// UPDATE left it, from `event_stamp`, in the same write and BEFORE
+    /// the caller's `events` — the rule `merge_step_metadata_at` and the
+    /// re-pin already follow. The signed-off marker the door passes is
+    /// the fact of the signing; the rebuild replays the state event, so
+    /// a stamp no later edit carried is no longer lost by a replay.
+    /// `event_stamp.timestamp` is the write's instant (`updated_at`).
     async fn append_sign_off(
         &self,
         step_id: &StepId,
         stamp: &boss_core::job::SignOffStamp,
-        now: DateTime<Utc>,
+        event_stamp: &boss_core::publisher::EventStamp,
         events: &[boss_core::event::Event],
     ) -> Result<(), JobsError>;
 
