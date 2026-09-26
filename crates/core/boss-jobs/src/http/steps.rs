@@ -3127,6 +3127,22 @@ pub(super) async fn post_step_sign_off<R: JobsRepository + 'static, B: EventBus 
             )
                 .into_response();
         }
+        // The ticket already stamped this step (backlog 3977b3d2): the
+        // stamp it wrote was voided by an edit, and the content came
+        // back to the shape the ticket was minted over. Presence is a
+        // passkey touching THIS stamp, so the answer is a fresh
+        // ceremony — `required` says so, the way a missing ticket does.
+        Err(crate::port::JobsError::NonceSpent { .. }) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": "this presence ticket has already stamped this step — sign again with a fresh passkey ceremony",
+                    "required": boss_core::job::Assurance::Presence,
+                    "produced": produced,
+                })),
+            )
+                .into_response();
+        }
         Err(crate::port::JobsError::StepNotFound(_)) => {
             return (StatusCode::NOT_FOUND, "no such step").into_response();
         }

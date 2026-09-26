@@ -297,6 +297,10 @@ name = "a_stamp_dies_when_the_shape_it_signed_leaves_the_step_pg"
 required-features = ["postgres"]
 
 [[test]]
+name = "a_presence_ticket_stamps_its_step_once_pg"
+required-features = ["postgres"]
+
+[[test]]
 name = "no_orphan_steps_pg"
 required-features = ["postgres"]
 

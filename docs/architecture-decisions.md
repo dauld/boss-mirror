@@ -1125,6 +1125,20 @@ ticket's life (`3977b3d2`) and a per-key writer rule for the runner's
 own keys (`6c9183de`), which would not cover `decision`, a key the
 human's surface writes.
 
+**A presence ticket stamps its step once** (`3977b3d2`, 2026-09-26).
+The void above left one replay: stamp on A, the content moves to B
+(the stamp dies), the content returns to A, and the original ticket —
+same step, person and shape, still inside its 120 s — wrote a fresh
+live stamp no passkey touched. `append_sign_off` now refuses, 422 at the
+sign-off door, a stamp whose `presence_nonce` is already on ANY stamp
+of the step, live or voided, judged under the row lock it already takes
+for the shape check. The step's own stamps are the consumed-nonce
+record, because a ticket is bound to one step: no table, no expiry
+sweep. The completion PUT still carries the ticket its sign-off was
+granted on (`completeWithPresence`): the completion judges assurance
+and writes no stamp, and a completed step is frozen, so it consumes
+nothing.
+
 The v1 step-type catalog derives from the traditional software
 stack BOSS replaces (CRM/ITSM/ERP/HR/comms); the canonical source
 is data (`crates/core/boss-jobs/seeds/step_types.toml`), loaded by

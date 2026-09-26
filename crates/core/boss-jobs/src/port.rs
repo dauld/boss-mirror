@@ -74,6 +74,32 @@ pub enum JobsError {
         signed: String,
         current: String,
     },
+    /// A presence stamp carries a ticket nonce already on a stamp of
+    /// this step, live or voided (backlog 3977b3d2). A ticket is bound
+    /// to one step and one shape and lives 120 s; the sign-off door
+    /// answers a re-send idempotently only while its stamp is LIVE, so
+    /// an A-B-A edit inside those 120 s let a captured ticket write a
+    /// fresh live stamp no passkey touched. The step's own stamps are
+    /// the record of the tickets it consumed — refused under the row
+    /// lock with the shape check, and nothing is written.
+    #[error("step {id} has already been stamped with presence ticket nonce {nonce}")]
+    NonceSpent { id: StepId, nonce: String },
+}
+
+/// The nonce `stamp` would spend, if a stamp already on the step spent
+/// it — live or voided, since a void kills the signature and not the
+/// ticket (backlog 3977b3d2). `None` for a stamp with no nonce (session
+/// assurance): there is no ticket to spend. The one judgement both
+/// adapters' `append_sign_off` make under their lock.
+pub(crate) fn spent_nonce(
+    on_step: &[boss_core::job::SignOffStamp],
+    stamp: &boss_core::job::SignOffStamp,
+) -> Option<String> {
+    let nonce = stamp.presence_nonce.as_ref()?;
+    on_step
+        .iter()
+        .any(|s| s.presence_nonce.as_ref() == Some(nonce))
+        .then(|| nonce.clone())
 }
 
 /// The version a step row was at when it was read — the judgement a
@@ -1336,6 +1362,11 @@ pub trait JobsRepository: Send + Sync {
     /// is written (backlog 4174c4a9). The sign-off door builds the stamp
     /// from an earlier read, and this is the one place a write between
     /// the two can be seen.
+    ///
+    /// A stamp carrying a `presence_nonce` already on ANY stamp of the
+    /// step — live or voided — refuses with [`JobsError::NonceSpent`],
+    /// judged under the same lock (backlog 3977b3d2): a ticket stamps its
+    /// step once.
     async fn append_sign_off(
         &self,
         step_id: &StepId,

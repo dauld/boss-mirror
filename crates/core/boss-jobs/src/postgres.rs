@@ -6,7 +6,9 @@ use boss_core::partition::Partition;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::port::{AssignmentRow, JobFilter, JobScope, JobsError, JobsRepository, StepVersion};
+use crate::port::{
+    AssignmentRow, JobFilter, JobScope, JobsError, JobsRepository, StepVersion, spent_nonce,
+};
 
 pub struct PgJobs {
     pool: PgPool,
@@ -2038,6 +2040,26 @@ impl JobsRepository for PgJobs {
                 signed: stamp.shape_hash.clone(),
                 current,
             });
+        }
+        // A TICKET STAMPS ITS STEP ONCE (backlog 3977b3d2). The row is
+        // locked above, in this transaction, so the stamps read here are
+        // the ones the append lands beside: a concurrent replay waits on
+        // the lock and then sees this stamp's nonce.
+        if stamp.presence_nonce.is_some() {
+            let (on_step,): (serde_json::Value,) =
+                sqlx::query_as("SELECT sign_offs FROM steps WHERE id = $1")
+                    .bind(*step_id.inner().as_uuid())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|e| JobsError::Storage(e.to_string()))?;
+            let on_step: Vec<boss_core::job::SignOffStamp> =
+                serde_json::from_value(on_step).map_err(|e| JobsError::Storage(e.to_string()))?;
+            if let Some(nonce) = spent_nonce(&on_step, stamp) {
+                return Err(JobsError::NonceSpent {
+                    id: *step_id,
+                    nonce,
+                });
+            }
         }
         let result = sqlx::query(
             "UPDATE steps SET sign_offs = sign_offs || $2::jsonb, updated_at = $3 \
