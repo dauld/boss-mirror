@@ -385,8 +385,9 @@ fn stale_series(rows: &[Value], per_host: bool, scope: &str, now: DateTime<Utc>)
 const SETTLED_DAYS: i64 = 7;
 
 /// The dedup read's page size. One bounded read (`closed_within`, so
-/// open packets plus only the last [`SETTLED_DAYS`] of closed ones)
-/// stays well under this in steady state; a `total` past it trips the
+/// open packets plus only the last [`SETTLED_DAYS`] of closed ones, and
+/// only those carrying `estate_finding`, dde64482) stays well under
+/// this in steady state; a `total` past it trips the
 /// truncation HOLD in [`dedup_page_complete`] rather than raising blind.
 /// This is the jobs API's own `MAX_LIMIT`, the largest page it serves.
 pub(super) const DEDUP_PAGE: usize = 1000;
@@ -790,11 +791,19 @@ impl Handler for EstateAlarm {
         // flood). Bounding the read to the recency window keeps it a
         // page or two; a genuine overflow past DEDUP_PAGE trips the
         // truncation HOLD below rather than re-raising blind.
+        //
+        // `metadata_has=estate_finding` narrows it to the only packets
+        // either question reads (backlog dde64482). Without it every
+        // backlog-item of the week counted toward the page: on 2026-09-26
+        // that was 1049 rows, 14 of them estate packets, so the HOLD
+        // engaged on every pass and no alarm could be filed at all. The
+        // HOLD stays as the fail-safe; it now needs a thousand estate
+        // packets in a week to engage.
         if !to_raise.is_empty() {
             let listing = get_json(
                 &self.client,
                 &format!(
-                    "{}/api/jobs?kind=backlog-item&closed_within={SETTLED_DAYS}&limit={DEDUP_PAGE}",
+                    "{}/api/jobs?kind=backlog-item&closed_within={SETTLED_DAYS}&metadata_has=estate_finding&limit={DEDUP_PAGE}",
                     self.base()
                 ),
                 &ctx.rule_name,
@@ -1507,6 +1516,11 @@ mod no_data_array_tests {
         assert_refused_by_name, empty_listing, no_data_array, serve,
     };
 
+    /// The dedup read as the stub matches it: only a request that carries
+    /// the `estate_finding` filter is answered (dde64482), so a read that
+    /// drops it 404s and the pass holds, failing the test that relied on it.
+    const DEDUP_ROUTE: &str = "/api/jobs?kind=backlog-item&metadata_has=estate_finding";
+
     fn firing(comparison: Value) -> InvocationContext {
         InvocationContext {
             rule_name: "estate-alarm".into(),
@@ -1531,7 +1545,7 @@ mod no_data_array_tests {
         let stub = serve(vec![
             ("/api/estate/comparisons", no_data_array()),
             ("/api/estate/observations", empty_listing()),
-            ("/api/jobs", empty_listing()),
+            (DEDUP_ROUTE, empty_listing()),
         ])
         .await;
         // A hard finding, so the persistence half fetches its series.
@@ -1547,7 +1561,7 @@ mod no_data_array_tests {
     async fn an_observations_read_with_no_data_array_refuses_by_name() {
         let stub = serve(vec![
             ("/api/estate/observations", no_data_array()),
-            ("/api/jobs", empty_listing()),
+            (DEDUP_ROUTE, empty_listing()),
         ])
         .await;
         // No findings: only the silence half runs, on every firing.
@@ -1575,7 +1589,7 @@ mod no_data_array_tests {
         // pass would fail. The band is the persistence, so none is made.
         let stub = serve(vec![
             ("/api/estate/observations", empty_listing()),
-            ("/api/jobs", empty_listing()),
+            (DEDUP_ROUTE, empty_listing()),
         ])
         .await;
         let res = handler(stub.base.clone())
@@ -1603,7 +1617,7 @@ mod no_data_array_tests {
         });
         let stub = serve(vec![
             ("/api/estate/observations", empty_listing()),
-            ("/api/jobs", open),
+            (DEDUP_ROUTE, open),
         ])
         .await;
         let res = handler(stub.base.clone())
@@ -1611,5 +1625,63 @@ mod no_data_array_tests {
             .await;
         assert!(res.is_ok(), "{res:?}");
         assert!(stub.writes().is_empty(), "{:?}", stub.writes());
+    }
+
+    /// THE DEDUP READS ONLY ESTATE PACKETS (backlog dde64482). Unfiltered,
+    /// the read counted every backlog-item open or closed this week; on
+    /// 2026-09-26 that was 1049 against a 1000-row page, so the truncation
+    /// HOLD engaged on every pass and no ESTATE ALARM of any kind could be
+    /// filed — forge sat below its disk floor for 35 comparisons unalarmed.
+    /// The stub answers as the jobs API does: the `metadata_has` read
+    /// returns only the packets carrying the key, the unfiltered one a
+    /// truncated page of unrelated items. The dedup must still see the
+    /// estate packet it holds, and raise the finding no packet carries.
+    #[tokio::test]
+    async fn a_backlog_past_one_page_does_not_hold_a_new_estate_finding() {
+        let unrelated: Vec<Value> = (0..DEDUP_PAGE)
+            .map(|i| {
+                json!({"id": format!("b{i}"), "status": "closed",
+                            "closed_on": "2026-09-25", "metadata": {"description": "unrelated"}})
+            })
+            .collect();
+        let wide = json!({ "data": unrelated, "total": DEDUP_PAGE + 49 });
+        let narrow = json!({
+            "data": [{"id": "a1", "status": "open",
+                      "metadata": {"estate_finding": "door_dark:dev-ssh/lan", "scope": "door"}}],
+            "total": 1,
+        });
+        let stub = serve(vec![
+            ("/api/estate/observations", empty_listing()),
+            (DEDUP_ROUTE, narrow),
+            ("/api/jobs", wide),
+        ])
+        .await;
+        let mut comparison = door_dark_comparison();
+        comparison["findings"]["door_dark"]
+            .as_array_mut()
+            .unwrap()
+            .push(
+                json!({"id": "forge-ssh/lan", "door": "forge-ssh", "half": "lan",
+                         "target": "192.0.2.15:22", "reason": "connection refused",
+                         "dark_since": "2026-09-24T11:40:00Z",
+                         "dark_for_s": 1200, "band_s": 900}),
+            );
+        let res = handler(stub.base.clone())
+            .invoke(&[], &firing(comparison))
+            .await;
+        assert!(
+            res.is_ok(),
+            "a new finding must raise, not be held: {res:?}"
+        );
+        let posts: Vec<(String, Value)> = stub
+            .sent()
+            .into_iter()
+            .filter(|(w, _)| w == "POST /api/jobs")
+            .collect();
+        assert_eq!(posts.len(), 1, "{posts:?}");
+        assert_eq!(
+            posts[0].1["metadata"]["estate_finding"], "door_dark:forge-ssh/lan",
+            "the already-raised door is deduped; only the new one files"
+        );
     }
 }

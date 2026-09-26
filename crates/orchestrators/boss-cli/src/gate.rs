@@ -8081,6 +8081,7 @@ kind: Job\n\
                 is_transient(&rendered),
                 crate::train::retryable(
                     &reqwest::Method::GET,
+                    "/api/jobs/x",
                     &crate::train::http_failure(403, body)
                 ),
                 "the two classifiers disagree on: {body}"

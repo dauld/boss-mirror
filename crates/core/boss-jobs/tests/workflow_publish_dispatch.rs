@@ -324,6 +324,74 @@ async fn a_resend_after_the_spec_was_edited_publishes_the_edited_spec() {
 }
 
 #[tokio::test]
+async fn a_resend_after_another_packet_published_answers_its_own_row_and_keeps_theirs() {
+    // Backlog 4bdb8150 (the round-3 review of car 983696b5). The re-send
+    // answer consulted only the ACTIVE row. Packet A publishes and its
+    // step write is refused as stale; packet B then publishes the same
+    // kind; A re-sends. The active row is B's, so A's check failed and A
+    // published its spec AGAIN — one more version, retiring B's newer
+    // publish: last writer wins, and B's design silently stopped being
+    // the protocol. A's publish happened once; its re-send is answered
+    // with the row A authored, active or retired.
+    let kinds = Arc::new(InMemoryWorkflows::new());
+    let (app, jobs, _bus) = build_app(kinds.clone());
+    let spec = valid_spec("morning-brew");
+    let metadata = json!({ "workflow_spec": serde_json::to_value(&spec).unwrap() });
+    let (job_a, step_a) = seed_publish_step(jobs.as_ref(), metadata).await;
+
+    let mut note = serde_json::Map::new();
+    note.insert("review_note".into(), json!("ship it"));
+    jobs.merge_after_next_read(&step_a, note);
+    let resp = put_step_done(&app, job_a, step_a, &user_header(&cto())).await;
+    assert_eq!(resp.status(), StatusCode::CONFLICT, "precondition");
+
+    let job_b = JobId::new();
+    let mut theirs = valid_spec("morning-brew");
+    theirs.label = "Morning Brew, B's design".into();
+    kinds
+        .publish_authored(
+            theirs,
+            job_b,
+            &boss_core::actor::ActorId::Human("emp-other".into()),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("B publishes between A's refusal and A's re-send");
+
+    let resp = put_step_done(&app, job_a, step_a, &user_header(&cto())).await;
+    assert!(
+        resp.status().is_success(),
+        "A's re-send completes its step: {}",
+        resp.status()
+    );
+
+    let live = kinds.get_active("morning-brew").await.expect("active");
+    assert_eq!(
+        live.authoring_job_id,
+        Some(*job_b.inner().as_uuid()),
+        "B's newer publish stays the active version"
+    );
+    assert_eq!(live.label, "Morning Brew, B's design");
+    let by_a: Vec<_> = kinds
+        .list_versions("morning-brew")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|v| v.authoring_job_id == Some(*job_a.inner().as_uuid()))
+        .collect();
+    assert_eq!(
+        by_a.len(),
+        1,
+        "one version authored by A, not one per attempt: {by_a:?}"
+    );
+    assert_eq!(by_a[0].status, WorkflowStatus::Retired);
+    assert_eq!(
+        jobs.get_step(&step_a).await.unwrap().unwrap().status,
+        StepStatus::Completed
+    );
+}
+
+#[tokio::test]
 async fn an_earlier_version_by_another_packet_is_not_mistaken_for_this_publish() {
     // The idempotence key is the AUTHORING PACKET, not the kind: a kind
     // already active from someone else's design is published over, as

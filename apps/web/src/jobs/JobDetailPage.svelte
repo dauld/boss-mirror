@@ -8,6 +8,7 @@
   import { navigate, href } from '../router';
   import { shortId } from '../data/ids';
   import {
+    parseJob,
     subjectLabel,
     subjectPath,
     type Job,
@@ -117,9 +118,13 @@
       loading = true;
     }
     try {
-      const resp = await fetch(`/api/jobs/${encodeURIComponent(id)}`);
+      const url = `/api/jobs/${encodeURIComponent(id)}`;
+      const resp = await fetch(url);
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-      const detail = (await resp.json()) as Job;
+      // A body that is not a Job throws here, naming what it lacks, and
+      // lands on the failure line below — never in the Subject section
+      // as a render throw (backlog c2e18fdd).
+      const detail = parseJob(url, await resp.json());
       // The ticket check: a newer question has been asked, or the
       // page has moved to a different packet. Either way this answer
       // is history — drop it entirely.
@@ -155,18 +160,24 @@
     refreshing = false;
 
     try {
-      es = new EventSource(`/api/jobs/${encodeURIComponent(id)}/stream`);
+      const streamUrl = `/api/jobs/${encodeURIComponent(id)}/stream`;
+      es = new EventSource(streamUrl);
       es.onmessage = (ev) => {
         if (cancelled) return;
         try {
-          const detail = JSON.parse(ev.data) as Job;
+          const detail = parseJob(streamUrl, JSON.parse(ev.data));
           job = detail;
           firstAnswered = true;
           loading = false;
           refreshing = false;
           error = null;
-        } catch {
-          // Drop malformed frame; next push will fix it.
+        } catch (e) {
+          // A frame that is not a Job never replaces the one rendered;
+          // the next push corrects it. But it is said, not dropped: with
+          // nothing rendered yet the failure line names it, where a
+          // silent drop left "Loading…" up (backlog c2e18fdd).
+          error = e instanceof Error ? e.message : String(e);
+          loading = false;
         }
       };
       es.addEventListener('error', () => {

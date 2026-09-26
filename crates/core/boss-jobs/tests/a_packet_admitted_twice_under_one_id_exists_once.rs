@@ -200,6 +200,54 @@ async fn a_second_admission_under_the_same_id_answers_the_packet_and_writes_noth
     );
 }
 
+/// The body `jobs.spawn` sends for the child, as one delivery of one
+/// `step.ready` event stamps it: the delivery-scoped provenance keys
+/// beside the parent link (`jobs_spawn.rs`).
+fn spawn_body_for_delivery(event_id: &str) -> String {
+    let mut body: serde_json::Value = serde_json::from_str(&spawn_body("/system/flow")).unwrap();
+    body["metadata"]["spawned_by_rule"] = "spawn-subjob-on-delegate-subjob-step-ready".into();
+    body["metadata"]["triggered_by_event_id"] = event_id.into();
+    body["metadata"]["triggered_by_topic"] = "step.ready.delegate-subjob".into();
+    body.to_string()
+}
+
+#[tokio::test]
+async fn a_second_step_ready_for_one_step_is_answered_its_child() {
+    // Backlog 4bdb8150 (the round-3 review of car 983696b5). The child's
+    // id is derived from the parent STEP, so a step that becomes Ready a
+    // second time — a new `step.ready`, a new event id — re-sends the
+    // same id. `triggered_by_event_id` names the delivery, not the
+    // packet, and was compared like every other key sent: the re-send
+    // was refused 409 `metadata`, `jobs.spawn` maps any non-2xx to a
+    // downstream error, and the rule erred on every delivery of that
+    // event. One step, one child, answered however often it is read.
+    let (app, jobs) = harness();
+
+    let (status, first) = post(&app, spawn_body_for_delivery("evt-ready-1")).await;
+    assert_eq!(status, StatusCode::CREATED, "first admission: {first}");
+    let events_once = jobs.recorded_events().len();
+
+    let (status, second) = post(&app, spawn_body_for_delivery("evt-ready-2")).await;
+    assert!(
+        status.is_success(),
+        "the second step.ready's re-send is answered, not refused: {status} {second}"
+    );
+    assert_eq!(second["id"], CHILD_ID, "{second}");
+    assert_eq!(second["already_admitted"], true, "{second}");
+
+    let child = jobs.get_job(&child_id()).await.unwrap().unwrap();
+    assert_eq!(
+        child.metadata["triggered_by_event_id"], "evt-ready-1",
+        "the provenance is the FIRST admission's: the re-send writes nothing"
+    );
+    assert_eq!(jobs.list_steps(&child_id()).await.unwrap().len(), 2);
+    assert_eq!(
+        jobs.recorded_events().len(),
+        events_once,
+        "nothing recorded"
+    );
+}
+
 #[tokio::test]
 async fn an_id_that_names_a_different_packet_is_refused() {
     let (app, jobs) = harness();

@@ -84,8 +84,12 @@ pub(crate) fn http_failure(status: u16, body: &str) -> Failure {
 ///     one blip becomes two train Jobs. A refused connection is not
 ///     ambiguous — nothing was received — so anything may go again,
 ///     which is exactly the production case this exists for.
-pub(crate) fn retryable(method: &Method, failure: &Failure) -> bool {
-    let idempotent = idempotent(method);
+///
+/// Idempotence is judged per CALL, not per method, so the path rides
+/// along: a PATCH through one of the two merge doors is re-sent like a
+/// PUT ([`a_merge_door_patch`]), and every other PATCH is not.
+pub(crate) fn retryable(method: &Method, path: &str, failure: &Failure) -> bool {
+    let idempotent = idempotent(method) || a_merge_door_patch(method, path);
     match failure {
         Failure::Connect => true,
         Failure::Ambiguous => idempotent,
@@ -107,6 +111,37 @@ fn idempotent(method: &Method) -> bool {
         *method,
         Method::GET | Method::PUT | Method::DELETE | Method::HEAD
     )
+}
+
+/// Is this a PATCH through a metadata merge door —
+/// `/api/jobs/{id}/metadata` or `/api/jobs/{id}/steps/{sid}/metadata`?
+/// Backlog 5e8b3f26: b15b0f4e moved the conductor's metadata merge off
+/// a full job PUT onto the job's merge door, and the method-grained
+/// classifier stopped retrying it — a 5xx or a timeout on a merge
+/// failed at once where the PUT had been re-sent.
+///
+/// PATCH is not idempotent in general (RFC 5789), which is why this is
+/// a path and not a method, and why [`idempotent`] — the set the
+/// operator verbs' roll wait also reads (f13c719e) — does not change.
+/// These two doors are idempotent by their contract: the body names
+/// the keys it sets and the keys it deletes (a `null`), and the server
+/// merges that into the row as it stands, so a repeat lands the same
+/// metadata. Not the same log: each send appends one `JOB_UPDATED`
+/// (the Pg `merge_job_metadata_at` records one per merge, with no
+/// no-op check) — exactly what a re-sent PUT does today, and replay
+/// reaches the same row either way. A re-sent step merge on a terminal
+/// step is answered 204 without a write.
+fn a_merge_door_patch(method: &Method, path: &str) -> bool {
+    if *method != Method::PATCH {
+        return false;
+    }
+    let path = path.split('?').next().unwrap_or_default();
+    let named = |s: &str| !s.is_empty();
+    match path.split('/').collect::<Vec<_>>().as_slice() {
+        ["", "api", "jobs", job, "metadata"] => named(job),
+        ["", "api", "jobs", job, "steps", step, "metadata"] => named(job) && named(step),
+        _ => false,
+    }
 }
 
 /// A reqwest error, classified. Connect / timeout / mid-flight body
@@ -202,6 +237,7 @@ pub(crate) fn short_cause(err: &anyhow::Error, budget: usize) -> String {
 pub(crate) async fn retrying<T, F, Fut>(
     policy: &RetryPolicy,
     method: &Method,
+    path: &str,
     cause_budget: usize,
     journal: &(dyn Fn(&str) + Sync),
     mut op: F,
@@ -216,7 +252,7 @@ where
             Ok(v) => return Ok(v),
             Err(f) => f,
         };
-        if attempt >= policy.attempts || !retryable(method, &failure.kind) {
+        if attempt >= policy.attempts || !retryable(method, path, &failure.kind) {
             return Err(failure.cause);
         }
         journal(&format!(
@@ -1619,6 +1655,96 @@ mod tests {
         assert_eq!(body, json!({"skip_reason": "x"}));
     }
 
+    /// Backlog 5e8b3f26: moving the merge from a full PUT to the merge
+    /// door took it out of the retry, because the classifier judged by
+    /// METHOD and PATCH is not idempotent in general. The two merge
+    /// doors are, by their contract — setting a key twice, or deleting
+    /// it twice, lands the same row — so a blip on one is re-sent
+    /// exactly as the PUT it replaced was. Any other PATCH is not.
+    #[test]
+    fn a_merge_door_patch_is_retried_on_a_blip_and_no_other_patch_is() {
+        let (method, job_door, _) = job_metadata_patch("j-1", vec![("skip_reason", Value::Null)]);
+        let step_door = "/api/jobs/j-1/steps/s-1/metadata";
+        let blips = [
+            Failure::Ambiguous,
+            Failure::Http(500),
+            Failure::Http(503),
+            Failure::PolicyOutage,
+        ];
+        for failure in &blips {
+            assert!(retryable(&method, &job_door, failure), "{failure:?}");
+            assert!(retryable(&method, step_door, failure), "{failure:?}");
+            for other in [
+                "/api/jobs/j-1",
+                "/api/jobs/j-1/steps/s-1",
+                "/api/jobs/j-1/metadata/extra",
+                "/api/jobs/j-1/steps/s-1/metadata/extra",
+                "/api/jobs//metadata",
+                "/api/jobs/j-1/steps//metadata",
+                "/api/jobs/j-1/other/s-1/metadata",
+                "/api/stations/x/metadata",
+                "/api/v1/repos/o/r/pulls/7",
+            ] {
+                assert!(
+                    !retryable(&Method::PATCH, other, failure),
+                    "PATCH {other} is not a merge door: {failure:?}"
+                );
+            }
+            // The door is idempotent to a merge, not to every method.
+            assert!(!retryable(&Method::POST, &job_door, failure), "{failure:?}");
+        }
+        // An answer stays an answer at the merge door too.
+        for failure in [Failure::Http(409), Failure::Http(422), Failure::Malformed] {
+            assert!(!retryable(&method, &job_door, &failure), "{failure:?}");
+        }
+        // A query string does not hide the door.
+        assert!(retryable(
+            &method,
+            "/api/jobs/j-1/metadata?x=1",
+            &Failure::Ambiguous
+        ));
+    }
+
+    /// The same decision end to end through the conductor's driver: a
+    /// merge-door PATCH that times out is sent again and lands; a PATCH
+    /// anywhere else is surfaced on its first attempt.
+    #[tokio::test]
+    async fn the_retry_driver_resends_a_merge_door_patch_and_no_other() {
+        async fn drive(path: &str) -> (Result<u8>, u32) {
+            let mut calls = 0u32;
+            let lines = AtomicU32::new(0);
+            let out = retrying(
+                &RetryPolicy::immediate(3),
+                &Method::PATCH,
+                path,
+                policy().blip_cause_budget,
+                &counting_journal(&lines),
+                || {
+                    calls += 1;
+                    let attempt = calls;
+                    async move {
+                        if attempt == 1 {
+                            Err(blip(Failure::Ambiguous))
+                        } else {
+                            Ok(7)
+                        }
+                    }
+                },
+            )
+            .await;
+            (out, calls)
+        }
+        let (out, calls) = drive("/api/jobs/j-1/metadata").await;
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(calls, 2, "the job merge door is re-sent once and lands");
+        let (out, calls) = drive("/api/jobs/j-1/steps/s-1/metadata").await;
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(calls, 2, "the step merge door is re-sent once and lands");
+        let (out, calls) = drive("/api/jobs/j-1/steps/s-1").await;
+        assert!(out.is_err(), "an ambiguous PATCH elsewhere is surfaced");
+        assert_eq!(calls, 1, "and sent once");
+    }
+
     #[test]
     fn a_metadata_merge_names_only_the_keys_it_changes() {
         // Boarding stamps `train` and sheds the stale skip note in one
@@ -1687,29 +1813,41 @@ mod tests {
     fn a_refused_connection_is_a_blip_under_any_method() {
         // Nothing was received, so nothing was done: even a create may
         // go again.
-        assert!(retryable(&Method::GET, &Failure::Connect));
-        assert!(retryable(&Method::PUT, &Failure::Connect));
-        assert!(retryable(&Method::POST, &Failure::Connect));
+        assert!(retryable(&Method::GET, "/api/jobs/j-1", &Failure::Connect));
+        assert!(retryable(&Method::PUT, "/api/jobs/j-1", &Failure::Connect));
+        assert!(retryable(&Method::POST, "/api/jobs/j-1", &Failure::Connect));
     }
 
     #[test]
     fn an_ambiguous_blip_only_retries_an_idempotent_call() {
         // A timeout leaves the write UNKNOWN — re-POSTing an ambiguous
         // create is how one blip becomes two train Jobs.
-        assert!(retryable(&Method::GET, &Failure::Ambiguous));
-        assert!(retryable(&Method::PUT, &Failure::Ambiguous));
-        assert!(!retryable(&Method::POST, &Failure::Ambiguous));
+        assert!(retryable(
+            &Method::GET,
+            "/api/jobs/j-1",
+            &Failure::Ambiguous
+        ));
+        assert!(retryable(
+            &Method::PUT,
+            "/api/jobs/j-1",
+            &Failure::Ambiguous
+        ));
+        assert!(!retryable(
+            &Method::POST,
+            "/api/jobs/j-1",
+            &Failure::Ambiguous
+        ));
     }
 
     #[test]
     fn a_5xx_is_a_blip_and_a_4xx_is_an_answer() {
         for status in [500, 502, 503, 504] {
             assert!(
-                retryable(&Method::GET, &Failure::Http(status)),
+                retryable(&Method::GET, "/api/jobs/j-1", &Failure::Http(status)),
                 "{status} is the SoR failing to answer"
             );
             assert!(
-                !retryable(&Method::POST, &Failure::Http(status)),
+                !retryable(&Method::POST, "/api/jobs/j-1", &Failure::Http(status)),
                 "{status} leaves a create ambiguous"
             );
         }
@@ -1717,12 +1855,26 @@ mod tests {
         // answer just asks the same question three times — including
         // 429, which is an answer about rate, not a transport blip.
         for status in [400, 404, 409, 422, 429] {
-            assert!(!retryable(&Method::GET, &Failure::Http(status)), "{status}");
-            assert!(!retryable(&Method::PUT, &Failure::Http(status)), "{status}");
+            assert!(
+                !retryable(&Method::GET, "/api/jobs/j-1", &Failure::Http(status)),
+                "{status}"
+            );
+            assert!(
+                !retryable(&Method::PUT, "/api/jobs/j-1", &Failure::Http(status)),
+                "{status}"
+            );
         }
         // 2xx/3xx never reach the classifier, and are not blips either.
-        assert!(!retryable(&Method::GET, &Failure::Http(200)));
-        assert!(!retryable(&Method::GET, &Failure::Http(301)));
+        assert!(!retryable(
+            &Method::GET,
+            "/api/jobs/j-1",
+            &Failure::Http(200)
+        ));
+        assert!(!retryable(
+            &Method::GET,
+            "/api/jobs/j-1",
+            &Failure::Http(301)
+        ));
     }
 
     /// Backlog 5d4ad086, 2026-09-25 ~21:35Z, the rollout of train #689:
@@ -1740,10 +1892,10 @@ mod tests {
         ] {
             let kind = http_failure(403, body);
             assert_eq!(kind, Failure::PolicyOutage, "{body}");
-            assert!(retryable(&Method::GET, &kind), "{body}");
-            assert!(retryable(&Method::PUT, &kind), "{body}");
+            assert!(retryable(&Method::GET, "/api/jobs/j-1", &kind), "{body}");
+            assert!(retryable(&Method::PUT, "/api/jobs/j-1", &kind), "{body}");
             assert!(
-                !retryable(&Method::POST, &kind),
+                !retryable(&Method::POST, "/api/jobs/j-1", &kind),
                 "a create stays unretried on anything but a refused connect: {body}"
             );
         }
@@ -1757,7 +1909,7 @@ mod tests {
         ] {
             let kind = http_failure(403, body);
             assert_eq!(kind, Failure::Http(403), "{body}");
-            assert!(!retryable(&Method::GET, &kind), "{body}");
+            assert!(!retryable(&Method::GET, "/api/jobs/j-1", &kind), "{body}");
         }
         // Only a 403 is the deny's rendering; any other status keeps
         // its own meaning whatever its body quotes.
@@ -1789,8 +1941,16 @@ mod tests {
     fn an_unusable_answer_is_never_a_blip() {
         // The SoR answered; the body was garbage. Retrying re-reads
         // the same garbage.
-        assert!(!retryable(&Method::GET, &Failure::Malformed));
-        assert!(!retryable(&Method::POST, &Failure::Malformed));
+        assert!(!retryable(
+            &Method::GET,
+            "/api/jobs/j-1",
+            &Failure::Malformed
+        ));
+        assert!(!retryable(
+            &Method::POST,
+            "/api/jobs/j-1",
+            &Failure::Malformed
+        ));
     }
 
     #[test]
@@ -1851,7 +2011,7 @@ mod tests {
             matches!(kind, Failure::Connect | Failure::Ambiguous),
             "a refused/timed-out connect must be a transport failure, got {kind:?}"
         );
-        assert!(retryable(&Method::GET, &kind));
+        assert!(retryable(&Method::GET, "/api/jobs/j-1", &kind));
     }
 
     // -- the retry driver --------------------------------------------------
@@ -1880,6 +2040,7 @@ mod tests {
         let out: Result<()> = retrying(
             &RetryPolicy::immediate(3),
             &Method::GET,
+            "/api/jobs/j-1",
             policy().blip_cause_budget,
             &counting_journal(&lines),
             || {
@@ -1904,6 +2065,7 @@ mod tests {
         let out: Result<u8> = retrying(
             &RetryPolicy::immediate(3),
             &Method::PUT,
+            "/api/jobs/j-1",
             policy().blip_cause_budget,
             &counting_journal(&lines),
             || {
@@ -1931,6 +2093,7 @@ mod tests {
         let out: Result<()> = retrying(
             &RetryPolicy::immediate(3),
             &Method::PUT,
+            "/api/jobs/j-1",
             policy().blip_cause_budget,
             &counting_journal(&lines),
             || {

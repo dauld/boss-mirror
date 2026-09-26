@@ -956,6 +956,7 @@ async fn api(
     train::retrying(
         &train::JOBS_API_RETRY,
         &method,
+        path,
         // The cadence loop is not a train and resolves no delivery
         // policy — it decides only WHEN to spawn a verb. Its journal
         // keeps the compiled cause budget, which is the same number the

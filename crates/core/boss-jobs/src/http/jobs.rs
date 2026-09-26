@@ -746,6 +746,21 @@ fn job_body_rejection(raw: &serde_json::Value, serde_err: &str) -> String {
     )
 }
 
+/// Metadata keys that describe the DELIVERY a create body arrived on,
+/// not the packet it describes: which event a rule reacted to, on which
+/// topic. Stamped at the first admission and never compared against a
+/// re-send (backlog 4bdb8150, the round-3 review of car 983696b5).
+///
+/// `jobs.spawn` keys a delegate-subjob's child on its parent STEP, so a
+/// step that becomes Ready a second time emits a new `step.ready` — a
+/// new event id — and re-sends the same child id. Compared, the event id
+/// refused that re-send 409 `metadata`; the handler maps any non-2xx to
+/// a downstream error, so the rule erred on every delivery of the event
+/// while the one child it owns stood. The packet keeps the provenance
+/// of the delivery that admitted it; a later one is answered, not
+/// recorded.
+const DELIVERY_SCOPED_KEYS: [&str; 2] = ["triggered_by_event_id", "triggered_by_topic"];
+
 /// Every field of `sent` — a create body under an id `existing` already
 /// holds — that does not read the same on that packet (backlog
 /// 558396ff; the round-2 review of car 983696b5, SF2). Empty means the
@@ -770,6 +785,10 @@ fn job_body_rejection(raw: &serde_json::Value, serde_err: &str) -> String {
 /// resolves to is a hash over the role's CURRENT holders, so a holder
 /// joining or leaving between the two sends would move it and refuse
 /// the re-send again.
+///
+/// The keys in [`DELIVERY_SCOPED_KEYS`] are not compared either
+/// (backlog 4bdb8150): they name the delivery that sent the body, and
+/// the first admission's value is the one the packet keeps.
 fn admission_differences(
     sent: &Job,
     dated_by_caller: bool,
@@ -779,6 +798,7 @@ fn admission_differences(
     let metadata_differs = match sent.metadata.as_object() {
         Some(keys) => keys
             .iter()
+            .filter(|(k, _)| !DELIVERY_SCOPED_KEYS.contains(&k.as_str()))
             .any(|(k, v)| existing.metadata.get(k) != Some(v)),
         None => !sent.metadata.is_null() && sent.metadata != existing.metadata,
     };

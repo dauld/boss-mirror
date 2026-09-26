@@ -146,6 +146,38 @@ export type Job = {
   steps?: Step[];
 };
 
+/// The body of a Job read from `url`, or a throw naming what it lacks.
+///
+/// Only what JobDetailPage dereferences is checked: an object carrying
+/// an `id`, a `subject` object (subjectPath reads `s.id` off it), and
+/// `steps` that are a list when present. Every other field renders as
+/// it comes. Backlog c2e18fdd (2026-09-26): the page cast any 2xx body
+/// to Job, the mocked api floor's `[]` among them, and the Subject
+/// section threw "Cannot read properties of undefined (reading 'id')"
+/// under a passing spec. The real jobs API always sends `subject`, so
+/// production meets this only on a wrong-shaped 200 — and that is a
+/// failed read, said on the failure line, as the employee page's is
+/// (548a1e8d), never a render throw.
+export function parseJob(url: string, raw: unknown): Job {
+  if (
+    typeof raw !== 'object' ||
+    raw === null ||
+    Array.isArray(raw) ||
+    typeof (raw as { id?: unknown }).id !== 'string'
+  ) {
+    throw new Error(`${url}: the answer is not a Job`);
+  }
+  const row = raw as Record<string, unknown>;
+  const subject = row['subject'];
+  if (typeof subject !== 'object' || subject === null || Array.isArray(subject)) {
+    throw new Error(`${url}: the Job carries no subject`);
+  }
+  if (row['steps'] !== undefined && !Array.isArray(row['steps'])) {
+    throw new Error(`${url}: the Job's steps are not a list`);
+  }
+  return raw as Job;
+}
+
 /// Pick the human-readable identifier for a Subject — the value
 /// most useful in a table row or a hero header.
 export function subjectLabel(s: Subject): string {

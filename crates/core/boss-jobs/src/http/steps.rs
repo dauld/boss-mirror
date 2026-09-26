@@ -405,11 +405,24 @@ async fn dispatch_workflow_publish(
     // the refused attempt and its re-send was answered with the earlier
     // publish, and the step completed recording a spec the registry
     // never published. A different spec is a new publish.
-    if let Ok(active) = registry.get_active(&spec.kind).await
-        && active.authoring_job_id == Some(*job_id.inner().as_uuid())
-        && active == published_as(&spec, &active)
+    //
+    // ITS OWN ROW, ACTIVE OR RETIRED (backlog 4bdb8150, the round-3
+    // review of car 983696b5). Consulting only the ACTIVE row made a
+    // concurrent publish last-writer-wins: another packet publishing the
+    // same kind between this one's refused attempt and its re-send left
+    // an active row that was not this packet's, so the re-send published
+    // this spec again and retired the other packet's newer version. This
+    // packet's publish happened once, and a later one superseding it does
+    // not undo that; the re-send is answered with the row it wrote.
+    let authored_here = Some(*job_id.inner().as_uuid());
+    if let Ok(versions) = registry.list_versions(&spec.kind).await
+        && let Some(own) = versions.into_iter().rev().find(|row| {
+            row.authoring_job_id == authored_here
+                && row.status != crate::registry::WorkflowStatus::Draft
+                && *row == published_as(&spec, row)
+        })
     {
-        return Ok(active);
+        return Ok(own);
     }
 
     registry
