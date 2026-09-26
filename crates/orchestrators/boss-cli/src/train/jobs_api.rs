@@ -31,11 +31,15 @@ pub(crate) enum Failure {
     Http(u16),
     /// The answer arrived and was unusable — an unparseable body.
     Malformed,
-    /// A 403 whose reason is the policy service FAILING, not deciding:
-    /// the jobs API's policy client fails closed when the service is
-    /// dark (`policy-unreachable`) or answers 5xx, and the jobs API
-    /// renders that deny as a 403 like any other. A blip wearing an
-    /// answer's status (backlog 5d4ad086).
+    /// A refusal whose reason is the policy service FAILING, not
+    /// deciding. Since 45553536 (2026-09-26) the jobs API answers that
+    /// as 503 + Retry-After with the body `policy-unreachable`, which
+    /// [`http_failure`] leaves as `Http(503)` — retried the same way —
+    /// and only the roll wait ([`unless_a_policy_outage`]) names as
+    /// this. Before it, the policy client's fail-closed deny was
+    /// rendered as a 403 like any other: a blip wearing an answer's
+    /// status (backlog 5d4ad086). A 403 carrying the word is still
+    /// read as this, for a server built before that change.
     PolicyOutage,
 }
 
@@ -45,11 +49,12 @@ pub(crate) enum Failure {
 /// gate --wait`'s `is_transient` reads the rendered message through it
 /// directly (CLAUDE.md §9a — two classifiers, one fact).
 ///
-/// Keyed on the REASON the deny carries, never on the 403: a scope
-/// refusal is the same status and is a real answer. The two reasons
-/// are `boss-policy-client`'s own fail-closed denies — `policy-
-/// unreachable` for a transport failure, `policy service returned
-/// <status>` for a non-2xx — and only a 5xx of the second is an
+/// Keyed on the REASON the refusal carries, never on the status: a
+/// scope refusal is a 403 too and is a real answer. Today every door
+/// answers an outage with the one body `policy-unreachable` (a 503;
+/// backlog fe9d212c). A server built before 45553536 denied instead,
+/// with `policy-unreachable` for a transport failure or `policy service
+/// returned <status>` for a non-2xx, and only a 5xx of the second is an
 /// outage; a 4xx there is the jobs API asking wrongly, which asking
 /// again does not fix.
 pub(crate) fn names_a_policy_outage(text: &str) -> bool {
@@ -77,8 +82,9 @@ pub(crate) fn http_failure(status: u16, body: &str) -> Failure {
 ///
 ///   - a 4xx is an ANSWER (a 422 is the SoR saying no, and asking the
 ///     same question three times does not change it); only transport
-///     failures, 5xx, and a 403 that is the policy service failing
-///     closed ([`Failure::PolicyOutage`]) are blips;
+///     failures, 5xx (a policy outage's 503 among them), and a 403
+///     naming a policy outage ([`Failure::PolicyOutage`], from a server
+///     built before 45553536) are blips;
 ///   - a blip that leaves the write AMBIGUOUS may only be re-sent when
 ///     the call is idempotent. Re-POSTing an ambiguous create is how
 ///     one blip becomes two train Jobs. A refused connection is not
@@ -445,9 +451,9 @@ async fn send_through(
 /// API's fail-closed 403 `policy-unreachable`, but this wait returned
 /// it, so `boss rerail --finish` (the chain that broke at ~21:35Z on
 /// 2026-09-25), `boss job file` and `boss hold` still died on the first
-/// one. Read on a 403 — how the jobs API renders the deny today — and
-/// on a 503, which is how the server half (45553536) renders it once it
-/// lands, so each side works without the other. Idempotent calls only,
+/// one. Read on a 503 — how the jobs API answers an outage since the
+/// server half (45553536) landed on 2026-09-26 — and on a 403, how a
+/// server built before it still does. Idempotent calls only,
 /// the bound [`retryable`] keeps: a POST or PATCH that met it stays an
 /// answer. Any other status is never read here, and a 403/503 that is
 /// an answer goes back rebuilt from the bytes read to classify it.

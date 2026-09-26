@@ -240,6 +240,10 @@ fn err_to_response(e: ViewsError) -> Response {
             .into_response(),
         ViewsError::Invalid(s) => (StatusCode::BAD_REQUEST, s).into_response(),
         ViewsError::Storage(s) => (StatusCode::INTERNAL_SERVER_ERROR, s).into_response(),
+        ViewsError::Policy(e) => {
+            tracing::warn!(error = %e, "views: caller's policy scope could not be decided");
+            e.into_response()
+        }
     }
 }
 
