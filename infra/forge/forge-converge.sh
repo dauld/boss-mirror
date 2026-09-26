@@ -104,5 +104,40 @@ run_summary_field node_roles "${BOSS_NODE_ROLES:-}"
 
 # install.sh needs root (writes /etc/systemd/system). This script runs
 # as root; git already finished above, so install.sh's bytes are stable
-# for the duration of its run and it needs no snapshot of its own.
-"$REPO/infra/forge/install.sh"
+# for the duration of its run and it needs no snapshot of its own. Its
+# exit is carried rather than fatal, so main's protection below is
+# converged on every tick even when a unit or the CLI step reds it.
+install_rc=0
+"$REPO/infra/forge/install.sh" || install_rc=$?
+
+# MAIN'S PROTECTION, as the tree declares it (backlog f9256445, car 4 of
+# design d812f1b7; David answered Q2 "yes" on 2026-09-25: direct push and
+# force push off, so only a PR merge moves forge main — declared here,
+# applied by this converge, never set by hand in the Forgejo UI).
+# infra/forge/protect-main.sh is the one definition and carries the
+# reasoning, including the writer this rule CANNOT stop: the rewind of
+# 2026-09-25 was Forgejo's own push-mirror sync (`update by push` as
+# Gitea <gitea@fake.local>), which never passes the pre-receive hook
+# where protection lives, so the conductor's ancestry arm is the only
+# guard against it.
+#
+# THE CREDENTIAL IS THE CHECKOUT'S OWN, read as its owner through git's
+# credential helper (the same one the fetch above used) into a root-only
+# header file, and deleted on exit. It never reaches an argv or the
+# journal. Whether it may administer the repository is MEASURED by the
+# first write — a 401/403 is named on this run's packet — rather than
+# assumed; nothing here mints or places a credential (CLAUDE.md §Doors,
+# the credential broker). Run after install.sh, which renders the
+# /etc/boss/sor.env that carries BOSS_FORGE_URL.
+protect_rc=0
+auth_hdr="$(mktemp -t forge-auth.XXXXXX)"
+chmod 600 "$auth_hdr"
+trap 'rm -f "$BOSS_CONVERGE_SNAPSHOT" "$auth_hdr"' EXIT
+runuser -l "$OWNER" -c "cd '$REPO' && printf 'url=%s\n\n' \"\$(git remote get-url forgejo)\" | GIT_TERMINAL_PROMPT=0 git credential fill" \
+    | sed -n 's/^password=\(.*\)$/Authorization: token \1/p' >"$auth_hdr" || true
+BOSS_FORGE_AUTH_HEADER_FILE="$auth_hdr" "$REPO/infra/forge/protect-main.sh" || protect_rc=$?
+
+# install.sh's verdict first (it is the older and wider one), then the
+# protection's: either reds this run and puts the packet on `failed`.
+[ "$install_rc" -eq 0 ] || exit "$install_rc"
+exit "$protect_rc"
